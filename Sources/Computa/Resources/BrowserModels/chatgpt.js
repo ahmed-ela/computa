@@ -2028,8 +2028,57 @@ function chatGPTQuietCompletionPrecheck(request) {
     && !!current.answer && current.answer.isConnected && !!current.footer && current.footer.isConnected
     && current.copies.some(copy => copy.enabled);
 }
+// The main-world decoder supplies only a terminal candidate. It cannot bypass
+// the isolated adapter's current submission, physical answer, footer or model
+// proof. In particular the terminal event can precede an empty DIL render.
+function chatGPTTerminalCompletionMatches(observed) {
+  const candidate = input.terminalCompletionCandidate;
+  const keys = ['correlationID', 'sequence', 'inputSHA256', 'inputMessageID', 'conversationID', 'messageID', 'text'];
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+    || Object.keys(candidate).length !== keys.length || !keys.every(key => Object.hasOwn(candidate, key))
+    || !['correlationID', 'inputMessageID', 'conversationID', 'messageID'].every(key => typeof candidate[key] === 'string' && uuid.test(candidate[key]))
+    || typeof candidate.inputSHA256 !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.inputSHA256)
+    || !Number.isSafeInteger(candidate.sequence) || candidate.sequence < 1 || candidate.sequence > 16
+    || typeof candidate.text !== 'string' || candidate.text.length === 0 || new TextEncoder().encode(candidate.text).length > 220_000
+    || input.provider !== 'chatgpt' || input.action !== 'inspect' || input.submissionSequence !== candidate.sequence
+    || !Array.isArray(input.expectedUserCounts) || ![1, 2].includes(input.expectedUserCounts.length)
+    || !input.expectedUserCounts.includes(candidate.sequence)
+    || !input.expectedUserCounts.every(count => count === candidate.sequence || count === candidate.sequence - 1)
+    || window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+    || location.pathname !== '/c/' + candidate.conversationID
+    || globalThis.__computaModelOwner !== input.ownerToken
+    || observed.error || observed.busy !== false || observed.answerComplete !== true
+    || observed.userCount !== candidate.sequence || observed.text !== candidate.text) return false;
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  if (!record || state.pending != null || !chatGPTSubmissionContext(state)
+    || record.phase !== 'verified' || record.sequence !== candidate.sequence || !chatGPTSubmissionPins(record)) return false;
+  const current = chatGPTResponseReadSnapshot();
+  if (current.busy !== false || !current.answer?.isConnected || !current.footer?.isConnected
+    || current.text !== candidate.text || current.answers.length !== observed.responseCount
+    || current.users.length !== candidate.sequence || !current.copies.some(copy => copy.enabled)
+    || !chatGPTSubmissionBodyIntact(record, current.users.map(user => user.root))) return false;
+  // This attribute was observed on the final assistant's containing element,
+  // after the decoded terminal event. Never borrow an ID from another turn.
+  let scope = current.answer;
+  for (let depth = 0; scope && depth < 5; depth++, scope = scope.parentElement) {
+    if (scope.getAttribute('data-chatgpt-selection-message-id') !== null) {
+      return scope.isConnected && scope.getAttribute('data-chatgpt-selection-message-id') === candidate.messageID
+        && current.answers.filter(answer => answer === scope || scope.contains(answer)).length === 1
+        && !current.users.some(user => user.root === scope || scope.contains(user.root));
+    }
+  }
+  return false;
+}
 function chatGPTFinalizeResponseRead(observed) {
-  if (observed.error || !chatGPTFinalResponseSnapshot) return observed;
+  if (observed.error) return observed;
+  const terminalChecked = () => {
+    // Never retain a positive bit from an earlier read or across an await.
+    delete observed.terminalCompletionMatched;
+    if (chatGPTTerminalCompletionMatches(observed)) observed.terminalCompletionMatched = true;
+    return observed;
+  };
+  if (!chatGPTFinalResponseSnapshot) return terminalChecked();
   if (!websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
     || websiteChatInvocationLease.document !== document || window !== window.top
     || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
@@ -2052,7 +2101,7 @@ function chatGPTFinalizeResponseRead(observed) {
     || input.expectedFirstUserFingerprint != null && input.expectedFirstUserFingerprint !== proof.fingerprint))
     return { error: 'conversation_changed', detail: 'first_user_message' };
   return chatGPTResponseSnapshotMatches(chatGPTFinalResponseSnapshot, observed)
-    ? observed : { error: 'conversation_changed', detail: 'response_changed' };
+    ? terminalChecked() : { error: 'conversation_changed', detail: 'response_changed' };
 }
 // ChatGPT alone can defer in-flight reads. Keep the shared full-proof control
 // layer byte-identical; every nondeferred read still executes that original path.

@@ -10619,6 +10619,273 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testChatGPTTerminalCompletionPublishesBeforeQuietOnlyAfterFreshOwnedFullProofAcrossRounds() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        for sequence in 1...2 {
+            if sequence > 1 {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "A distinct owned terminal round \(sequence)"])
+            }
+            let arm = try await evaluate(view, "return {sequence:window.fixtureCompletion.arm.sequence,sha:window.fixtureCompletion.arm.inputSHA256,bytes:window.fixtureCompletion.arm.inputUTF8Bytes,prompt:window.fixturePrompts.at(-1)};")
+            let armFields = try XCTUnwrap(arm as? [String: Any])
+            XCTAssertEqual(armFields["sequence"] as? Int, sequence)
+            let renderedPrompt = try XCTUnwrap(armFields["prompt"] as? String)
+            let markerPrefix = "\n\nComputa session marker: "
+            let markerRange = try XCTUnwrap(renderedPrompt.range(of: markerPrefix, options: .backwards))
+            let renderedMarker = String(renderedPrompt[markerRange.upperBound...])
+            // This fixture reads contenteditable.innerText, which can contribute
+            // one presentation LF after its final paragraph. Native arms bind
+            // the exact outbound string before that DOM presentation, not the LF.
+            let marker = renderedMarker.hasSuffix("\n") ? String(renderedMarker.dropLast()) : renderedMarker
+            XCTAssertEqual(UUID(uuidString: marker)?.uuidString.lowercased(), marker.lowercased())
+            let userPrompt = sequence == 1 ? "A synthetic owned decoded-terminal response"
+                : "A distinct owned terminal round \(sequence)"
+            let exactOutbound = userPrompt + markerPrefix + marker
+            XCTAssertTrue(renderedPrompt.utf8.elementsEqual(exactOutbound.utf8)
+                || renderedPrompt.utf8.elementsEqual((exactOutbound + "\n").utf8),
+                "Only the known one terminal presentation LF may differ; no broad trim or prefix reconstruction")
+            XCTAssertEqual(armFields["sha"] as? String, EmbeddedWebModelTransport.promptFingerprint(exactOutbound))
+            XCTAssertEqual(armFields["bytes"] as? Int, exactOutbound.utf8.count)
+            let began = ContinuousClock.now
+            try await postTerminalCompletion(in: fixture, view: view, token: token)
+            let complete = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(complete["state"] as? String, "complete")
+            XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(1_500),
+                              "A matching decoded terminal must use fresh proof without waiting the 1600ms quiet guard")
+            XCTAssertEqual(complete["text"] as? String, "HI")
+            try assertChoiceEvidence(complete, choice: choice)
+            XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+            let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(context["sequence"] as? Int, sequence)
+            XCTAssertEqual(context["responseCount"] as? Int, sequence)
+            XCTAssertNil(try terminalReceipt(in: fixture, view: view, token: token, sequence: sequence),
+                         "Publication consumes the optional candidate rather than retaining completion authority")
+        }
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalCompletionBeforeDOMCannotPublishUntilExactNonemptyAnswerAndFooter() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"] > div').textContent=''; document.querySelector('button[aria-label=\"Copy\"]').disabled=true; return true;")
+        try await postTerminalCompletion(in: fixture, view: view, token: token)
+        let empty = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(empty["state"] as? String, "running")
+        XCTAssertEqual(empty["text"] as? String, "")
+        try assertRunningOrVerifiedChoice(empty, choice: Self.fixtureChoice(.chatgpt))
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"] > div').textContent='HI'; return true;")
+        let noFooter = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(noFooter["state"] as? String, "running", "Terminal evidence cannot replace a currently enabled scoped footer")
+        _ = try await evaluate(view, "document.querySelector('button[aria-label=\"Copy\"]').disabled=false; return true;")
+        let began = ContinuousClock.now
+        let complete = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(complete["state"] as? String, "complete")
+        XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(1_500))
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalCompletionAbsentStaleWrongMessageOrDifferentBytesRetainsQuietFallback() async throws {
+        for mismatch in ["absent", "sequence", "message", "text"] {
+            let (fixture, token, view) = try await terminalCompletionFixture()
+            defer { fixture.shutdown() }
+            if mismatch != "absent" {
+                let overrides: [String: Any] = mismatch == "sequence" ? ["sequence": 2]
+                    : mismatch == "message" ? ["messageID": UUID().uuidString.lowercased()]
+                    : ["text": "HI\n"]
+                try await postTerminalCompletion(in: fixture, view: view, token: token,
+                    overrides: overrides, expectsReceipt: mismatch != "sequence")
+            }
+            let began = ContinuousClock.now
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "running", mismatch)
+            try assertRunningOrVerifiedChoice(pending, choice: Self.fixtureChoice(.chatgpt))
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertGreaterThanOrEqual(ContinuousClock.now - began, .milliseconds(1_500), mismatch)
+            XCTAssertEqual(complete["text"] as? String, "HI", "The observed answer is never replaced by candidate text")
+            try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testChatGPTTerminalCompletionChangedFinalDOMCannotUseOldTerminalBytes() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        try await postTerminalCompletion(in: fixture, view: view, token: token)
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"] > div').textContent='Changed final text'; return true;")
+        let began = ContinuousClock.now
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - began, .milliseconds(1_500))
+        XCTAssertEqual(complete["text"] as? String, "Changed final text")
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalCompletionAnswerMutationDuringFinalPickerProofCannotPublish() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        try await postTerminalCompletion(in: fixture, view: view, token: token)
+        _ = try await evaluate(view, """
+            window.fixtureTerminalProofOpens=0; window.fixtureTerminalMutated=false;
+            document.getElementById('fixture-model-trigger').addEventListener('click', event => {
+              if (event.currentTarget.getAttribute('aria-expanded') !== 'true') return;
+              if (++window.fixtureTerminalProofOpens !== 2) return;
+              document.querySelector('[data-markdown-text-style="assistant-message"] > div').textContent='Changed across final proof';
+              window.fixtureTerminalMutated=true;
+            }); return true;
+            """)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A terminal cannot release bytes changed during the final full picker proof")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
+        let mutated = try await evaluate(view, "return window.fixtureTerminalMutated;") as? Bool
+        XCTAssertEqual(mutated, true)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalCompletionRevokedDuringFinalAwaitCannotPublish() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        try await postTerminalCompletion(in: fixture, view: view, token: token)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        var inspections = 0
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            inspections += 1
+            if inspections == 2 { fixture.browser.revokeChatGPTResponseCompletion(tabID: tabID, ownerToken: token) }
+        }
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(inspections, 2, "Exercise revocation after the full proof's WebKit await, not before candidate admission")
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertNil(try terminalReceipt(in: fixture, view: view, token: token))
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["state"] as? String, "complete", "Revocation retains ordinary quiet completion")
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalCompletionCancellationDuringFinalAwaitCannotPublish() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        try await postTerminalCompletion(in: fixture, view: view, token: token)
+        var inspections = 0, blocked = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            inspections += 1
+            guard inspections == 2 else { return }
+            blocked = true
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        let polling = Task<Void, Error> { _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+        let until = ContinuousClock.now + .seconds(10)
+        while !blocked && ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(5)) }
+        polling.cancel()
+        do { try await polling.value; XCTFail("A cancelled final proof cannot publish decoded terminal completion") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertTrue(blocked)
+        XCTAssertEqual(inspections, 2)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    /// This source substitutes only the website stream decoder. Arming and all
+    /// callbacks still cross the actual main-world WK handler, native lease,
+    /// transport, isolated adapter, and current picker/product/answer proof.
+    private static let terminalCompletionFixtureSource = #"""
+    (() => {
+      const config=__COMPUTA_COMPLETION_CONFIG__;
+      window.fixtureCompletion={arm:null,posts:0,stops:0};
+      const api=Object.freeze({arm(arm){ window.fixtureCompletion.arm=Object.freeze({...arm}); return {armed:true}; },
+        stop(correlationID){ if(window.fixtureCompletion.arm?.correlationID===correlationID) {
+          window.fixtureCompletion.stops++; window.fixtureCompletion.arm=null;
+        } }});
+      Object.defineProperty(window,config.key,{value:api,configurable:false,writable:false});
+      window.fixturePostTerminal=overrides => {
+        const arm=window.fixtureCompletion.arm;
+        if(!arm) throw new Error('fixture has no native completion arm');
+        const sequence=window.fixturePrompts.length;
+        const id=n=>'00000000-0000-0000-0000-'+String(n).padStart(12,'0');
+        const packet={version:1,kind:'terminal',correlationID:arm.correlationID,sequence:arm.sequence,
+          inputSHA256:arm.inputSHA256,inputMessageID:id(sequence*2+1),
+          conversationID:'00000000-0000-0000-0000-000000000100',messageID:id(sequence*2+2),text:'HI',...overrides};
+        window.webkit.messageHandlers[config.handlerName].postMessage(packet);
+        window.fixtureCompletion.posts++; return true;
+      };
+    })();
+    """#
+
+    private func terminalCompletionFixture() async throws -> (Fixture, String, WKWebView) {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        browser.setChatGPTResponseCompletionSourceForTesting(Self.terminalCompletionFixtureSource)
+        let page = Self.page
+            .replacingOccurrences(of: "const prompt = composer.innerText;", with: """
+                const prompt = composer.innerText;
+                history.pushState({},'', '/c/00000000-0000-0000-0000-000000000100?temporary-chat=true');
+                """)
+            .replacingOccurrences(of: "answer.setAttribute('data-chatgpt-selection-conversation-id', 'fixture-conversation');", with: """
+                answer.setAttribute('data-chatgpt-selection-conversation-id', '00000000-0000-0000-0000-000000000100');
+                answer.setAttribute('data-chatgpt-selection-message-id', '00000000-0000-0000-0000-'+String(window.fixturePrompts.length*2+2).padStart(12,'0'));
+                """)
+            .replacingOccurrences(of: "answerBody.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';", with: "answerBody.textContent = 'HI';")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, basePage: page), browser: browser)
+        do {
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "A synthetic owned decoded-terminal response"])
+            let armed = try await evaluate(view, "return window.fixtureCompletion?.arm?.sequence === 1;") as? Bool
+            XCTAssertEqual(armed, true, "The local observer must be armed by the actual native Send preparation")
+            return (fixture, token, view)
+        } catch { fixture.shutdown(); throw error }
+    }
+
+    private func terminalReceipt(in fixture: Fixture, view: WKWebView, token: String, sequence: Int = 1) throws -> ChatGPTResponseCompletion.Receipt? {
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        return fixture.browser.chatGPTResponseCompletionReceipt(tabID: tabID, view: view, ownerToken: token,
+            generation: try XCTUnwrap(fixture.browser.documentGeneration(for: tabID)), sequence: sequence)
+    }
+
+    private func postTerminalCompletion(in fixture: Fixture, view: WKWebView, token: String,
+                                        overrides: [String: Any] = [:], expectsReceipt: Bool = true) async throws {
+        let data = try JSONSerialization.data(withJSONObject: overrides, options: [.sortedKeys])
+        let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+        _ = try await evaluate(view, "return window.fixturePostTerminal(\(json));")
+        // WKScriptMessage dispatch is asynchronous relative to JS evaluation.
+        // Wait for the real receipt, not an arbitrary sleep or a test injection.
+        let sequenceValue = try await evaluate(view, "return window.fixturePrompts.length;")
+        let sequence = try XCTUnwrap(sequenceValue as? Int)
+        if expectsReceipt {
+            let until = ContinuousClock.now + .seconds(2)
+            while try terminalReceipt(in: fixture, view: view, token: token, sequence: sequence) == nil,
+                  ContinuousClock.now < until { await Task.yield() }
+            XCTAssertNotNil(try terminalReceipt(in: fixture, view: view, token: token, sequence: sequence))
+        } else {
+            // A foreign packet must produce no current candidate even after a
+            // subsequent main-world round trip has drained its actual handler.
+            _ = try await evaluate(view, "return window.fixtureCompletion.posts;")
+            XCTAssertNil(try terminalReceipt(in: fixture, view: view, token: token, sequence: sequence))
+        }
+    }
+
+    private func finishTerminalFixture(_ fixture: Fixture, token: String) async throws {
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertNotEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
     private func startChoice(_ choice: WebsiteModelChoice, in fixture: Fixture) async throws -> [String: Any] {
         try await call(fixture.transport, "webProviderStart", ["provider": choice.provider,
             "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])

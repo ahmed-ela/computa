@@ -203,6 +203,8 @@ final class EmbeddedBrowserSession {
                                             expiry: Task<Void, Never>)?
         #endif
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
+        var responseCompletionObserver: ResponseCompletionObserver?
+        var responseCompletion: ChatGPTResponseCompletion?
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
@@ -620,6 +622,7 @@ final class EmbeddedBrowserSession {
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
@@ -704,6 +707,7 @@ final class EmbeddedBrowserSession {
 
     func stop(tabID: UUID) {
         guard let entry = entries[tabID] else { return }
+        revokeResponseCompletion(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
@@ -922,6 +926,176 @@ final class EmbeddedBrowserSession {
             if let url = bundle.url(forResource: "chatgpt-request-metadata", withExtension: "js", subdirectory: "BrowserModels"),
                let source = try? String(contentsOf: url, encoding: .utf8),
                source.components(separatedBy: "__COMPUTA_REQUEST_METADATA_CONFIG__").count == 2 { return source }
+        }
+        return nil
+    }
+
+    static let responseCompletionName = "computaChatGPTCompletion"
+
+    private static func responseCompletionURLAllowed(_ url: URL?) -> Bool {
+        guard inspectorOriginAllowed(url), let url else { return false }
+        return url.path.isEmpty || url.path == "/" || ChatGPTTemporaryConversationRoutes.id(from: url) != nil
+    }
+
+    private final class ResponseCompletionObserver {
+        let key: String
+        let script: WKUserScript
+        init(key: String, script: WKUserScript) { self.key = key; self.script = script }
+    }
+
+    /// The main-world API is inert until a native current submission arms it.
+    /// Install before any model navigation, including prompt-free prewarming.
+    private func installResponseCompletionObserver(_ entry: Entry) {
+        guard entry.isModelOwned, !entry.isToolOwned, entry.responseCompletionObserver == nil,
+              entry.view.url == nil, !entry.view.isLoading,
+              let source = responseCompletionSource(), source.utf8.count <= 65_536,
+              source.components(separatedBy: "__COMPUTA_COMPLETION_CONFIG__").count == 2 else { return }
+        let key = "__computaCompletion_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        guard let data = try? JSONSerialization.data(withJSONObject: ["key": key, "handlerName": Self.responseCompletionName]),
+              let config = String(data: data, encoding: .utf8) else { return }
+        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_COMPLETION_CONFIG__", with: config),
+            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        entry.responseCompletionObserver = ResponseCompletionObserver(key: key, script: script)
+        let controller = entry.view.configuration.userContentController
+        controller.add(EmbeddedResponseCompletionHandler(session: self, tabID: entry.tab.id),
+            contentWorld: .page, name: Self.responseCompletionName)
+        controller.addUserScript(script)
+    }
+
+    /// Arming is a bounded preparation, never a Send or a response proof. A
+    /// missing/changed decoder simply leaves the ordinary completion fallback.
+    func prepareChatGPTResponseCompletion(tabID: UUID, view: WKWebView, ownerToken: String, generation: UUID,
+                                         sequence: Int, outboundSHA256: String, outboundUTF8Bytes: Int,
+                                         deadline: ContinuousClock.Instant) async -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == generation,
+              Self.responseCompletionURLAllowed(view.url), let expectedURL = view.url?.absoluteString,
+              let observer = entry.responseCompletionObserver else { return false }
+        revokeResponseCompletion(entry)
+        guard let lease = ChatGPTResponseCompletion(view: ObjectIdentifier(view), ownerToken: ownerToken,
+            generation: generation, sequence: sequence, inputSHA256: outboundSHA256,
+            inputUTF8Bytes: outboundUTF8Bytes, deadline: deadline) else { return false }
+        let parts = (deadline - .now).components
+        let duration = Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+        guard duration > 0 else { return false }
+        entry.responseCompletion = lease
+        let evaluationDeadline = min(deadline, ContinuousClock.now + .seconds(1))
+        let result = EmbeddedScriptResult()
+        let reply: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                let timeout = Task {
+                    do { try await Task.sleep(until: evaluationDeadline, clock: .continuous) }
+                    catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                }
+                result.setTimeout(timeout)
+                guard result.isPending, !Task.isCancelled else { return }
+                view.callAsyncJavaScript("""
+                    if (document.URL !== expectedURL || window !== window.top || location.origin !== 'https://chatgpt.com') return false;
+                    const api = window[key];
+                    if (!api || typeof api.arm !== 'function' || typeof api.stop !== 'function') return false;
+                    const reply = await api.arm(arm);
+                    const valid = !!reply && typeof reply === 'object' && !Array.isArray(reply)
+                      && Object.keys(reply).length === 1 && reply.armed === true;
+                    return valid && window[key] === api && document.URL === expectedURL && window === window.top
+                      && location.origin === 'https://chatgpt.com';
+                    """, arguments: ["key": observer.key, "expectedURL": expectedURL,
+                        "arm": ["correlationID": lease.correlationID.uuidString.lowercased(), "sequence": sequence,
+                            "inputSHA256": outboundSHA256, "inputUTF8Bytes": outboundUTF8Bytes, "durationMs": duration]],
+                    in: nil, in: .page) { value in
+                    switch value {
+                    case .success(let value): result.complete(.success(Data([value as? Bool == true ? 1 : 0])))
+                    case .failure: result.complete(.failure(Failure.tabClosed))
+                    }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        let current = !isShutdown && !Task.isCancelled && ContinuousClock.now < evaluationDeadline
+            && entries[tabID] === entry && entry.view === view && entry.responseCompletionObserver === observer
+            && entry.responseCompletion === lease && entry.modelChanges?.ownerToken == ownerToken
+            && entry.tab.documentGeneration == generation && view.url?.absoluteString == expectedURL
+            && Self.responseCompletionURLAllowed(view.url)
+            && lease.isCurrent(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation, sequence: sequence)
+        guard current, reply == Data([1]) else {
+            if entry.responseCompletion === lease { revokeResponseCompletion(entry) }
+            else { lease.revoke() }
+            return false
+        }
+        return true
+    }
+
+    func chatGPTResponseCompletionReceipt(tabID: UUID, view: WKWebView, ownerToken: String,
+                                         generation: UUID, sequence: Int) -> ChatGPTResponseCompletion.Receipt? {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == generation,
+              Self.responseCompletionURLAllowed(view.url), let lease = entry.responseCompletion,
+              let receipt = lease.receipt(view: ObjectIdentifier(view), ownerToken: ownerToken,
+                generation: generation, sequence: sequence) else { return nil }
+        if view.url?.path.hasPrefix("/c/local-chatgpt") != true,
+           let currentConversation = ChatGPTTemporaryConversationRoutes.id(from: view.url),
+           currentConversation.uuidString.lowercased() != receipt.conversationID {
+            revokeResponseCompletion(entry); return nil
+        }
+        return receipt
+    }
+
+    func revokeChatGPTResponseCompletion(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeResponseCompletion(entry)
+    }
+
+    fileprivate func receivedResponseCompletion(_ message: WKScriptMessage, tabID: UUID) {
+        guard !isShutdown, let entry = entries[tabID], entry.view === message.webView,
+              entry.isModelOwned, !entry.isToolOwned, message.frameInfo.isMainFrame,
+              entry.modelSignalOriginHost == "chatgpt.com", Self.responseCompletionURLAllowed(entry.view.url),
+              let lease = entry.responseCompletion,
+              lease.isCurrent(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
+                generation: entry.tab.documentGeneration, sequence: lease.sequence) else { return }
+        let origin = message.frameInfo.securityOrigin
+        guard origin.`protocol` == "https", origin.host == "chatgpt.com", origin.port == 0 || origin.port == 443 else { return }
+        if lease.receive(message.body) { entry.modelChanges?.signal() }
+    }
+
+    private func revokeResponseCompletion(_ entry: Entry) {
+        guard let lease = entry.responseCompletion else { return }
+        entry.responseCompletion = nil
+        lease.revoke()
+        guard let observer = entry.responseCompletionObserver, let url = entry.view.url,
+              Self.inspectorOriginAllowed(url) else { return }
+        // Native revocation is immediate. Late page stop cannot revive a lease,
+        // overwrite a newer correlation, or keep cleanup waiting.
+        entry.view.callAsyncJavaScript("""
+            if (document.URL === expectedURL && typeof window[key]?.stop === 'function') window[key].stop(correlationID);
+            return null;
+            """, arguments: ["key": observer.key, "expectedURL": url.absoluteString,
+                "correlationID": lease.correlationID.uuidString.lowercased()], in: nil, in: .page, completionHandler: nil)
+    }
+
+    private func removeResponseCompletionObserver(_ entry: Entry) {
+        revokeResponseCompletion(entry)
+        guard let observer = entry.responseCompletionObserver else { return }
+        entry.responseCompletionObserver = nil
+        let controller = entry.view.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: Self.responseCompletionName, contentWorld: .page)
+        let surviving = controller.userScripts.filter { $0 !== observer.script }
+        controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+    }
+
+    private func responseCompletionSource() -> String? {
+        #if DEBUG
+        if let responseCompletionSourceForTesting { return responseCompletionSourceForTesting }
+        #endif
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "chatgpt-completion", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8) { return source }
         }
         return nil
     }
@@ -1844,6 +2018,7 @@ final class EmbeddedBrowserSession {
 
     #if DEBUG
     private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
+    private var responseCompletionSourceForTesting: String?
     private var cookieSeedFactoryForTesting: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?
     private var afterCookieSeedForTesting: (@MainActor () async -> Void)?
     private var cookieValidationSourceForTesting: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?
@@ -1851,6 +2026,12 @@ final class EmbeddedBrowserSession {
     private(set) var lastInferencePrewarmUnavailableForTesting: String?
     var afterChatGPTNavigationGateForTesting: (@MainActor () -> Void)?
     private(set) var lastChatGPTNavigationDenialForTesting: String?
+
+    /// Changes only the fixture's page observer source. All native admission,
+    /// message, generation and final response guards remain the real path.
+    func setChatGPTResponseCompletionSourceForTesting(_ source: String?) {
+        responseCompletionSourceForTesting = source
+    }
 
     func admitChatGPTNavigationForTesting(tabID: UUID, view: WKWebView, url: URL) async -> Bool {
         guard let admission = beginChatGPTNavigationAdmission(view, tabID: tabID, url: url) else { return false }
@@ -1896,6 +2077,7 @@ final class EmbeddedBrowserSession {
         let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
+            if let entry = entries[id] { installResponseCompletionObserver(entry) }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
             if let entry = entries[id] { mountModelView(entry) }
             if let initialURL { try navigate(tabID: id, to: initialURL) }
@@ -1933,6 +2115,7 @@ final class EmbeddedBrowserSession {
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
         entry.pendingConversationAdmission = nil
+        revokeResponseCompletion(entry)
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
@@ -1973,6 +2156,7 @@ final class EmbeddedBrowserSession {
 
     private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
+        if entry.responseCompletion != nil, !Self.responseCompletionURLAllowed(view.url) { revokeResponseCompletion(entry) }
         if entry.inspectorDiagnostic != nil, !Self.inspectorOriginAllowed(view.url) { revokeModelInspector(entry, reason: .origin) }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
@@ -2136,6 +2320,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
+        revokeResponseCompletion(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
@@ -2349,6 +2534,17 @@ private final class EmbeddedModelWebView: WKWebView {
 
     private func ownsResponder(_ responder: NSResponder) -> Bool {
         responder === self || (responder as? NSView)?.isDescendant(of: self) == true
+    }
+}
+
+@MainActor
+private final class EmbeddedResponseCompletionHandler: NSObject, WKScriptMessageHandler {
+    private weak var session: EmbeddedBrowserSession?
+    private let tabID: UUID
+
+    init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        session?.receivedResponseCompletion(message, tabID: tabID)
     }
 }
 

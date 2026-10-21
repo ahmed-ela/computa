@@ -687,6 +687,62 @@ describe('ChatGPT named paired-turn Copy association', () => {
   });
 });
 
+describe('ChatGPT terminal completion admission', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const conversationID = '6ad86c7a-2284-8331-b846-a59490db0c46';
+  const messageID = 'cea6201b-846d-404a-b4dc-f974e184065a';
+  const stage = async () => {
+    const x = await chatTurnFixture(choice), click = x.send.onClick!;
+    x.send.onClick = () => { click(); x.f.location.pathname = '/c/' + conversationID;
+      x.f.document.URL = 'https://chatgpt.com' + x.f.location.pathname + '?temporary-chat=true'; };
+    const record = await x.dispatch('Exact terminal candidate request', { deferModelVerification: true });
+    const answer = x.answer('Complete source text');
+    answer.values['data-chatgpt-selection-message-id'] = messageID;
+    const pending = await x.observe(record, { deferModelVerification: true });
+    expect(pending.error).toBeUndefined(); expect(pending.answerComplete).toBe(true);
+    const candidate = { correlationID: '245e3c88-8dac-4239-947b-1aff997b9f61', sequence: 1,
+      inputSHA256: createHash('sha256').update(record.outbound).digest('hex'),
+      inputMessageID: 'ae2e44b2-714e-43cd-ba07-d5c3f09c9463', conversationID, messageID, text: pending.text };
+    return { x, record, answer, candidate };
+  };
+  test('exact current terminal text and message identity still obtain fresh full model proof', async () => {
+    const p = await stage(), before = p.x.picker!.trigger.clicks;
+    const result = await p.x.observe(p.record, { deferModelVerification: false, terminalCompletionCandidate: p.candidate });
+    expect(result.error).toBeUndefined(); expect(result.terminalCompletionMatched).toBe(true);
+    expect(result.modelEvidence.selected).toEqual(choice); expect(result.submissionProof.fingerprint).toBe(p.record.fingerprint);
+    expect(p.x.picker!.trigger.clicks).toBeGreaterThan(before); expect(p.x.send.clicks).toBe(1);
+  });
+  test('terminal data does not qualify partial or different DOM, wrong identity, stale sequence, or missing completion controls', async () => {
+    for (const mutation of ['empty', 'partial', 'message_id', 'conversation_id', 'sequence', 'footer', 'busy', 'fenced_source', 'extra_key']) {
+      const p = await stage(), candidate: any = { ...p.candidate };
+      if (mutation === 'empty') p.answer.children[0].text = '';
+      if (mutation === 'partial') p.answer.children[0].text = p.candidate.text.slice(0, -2);
+      if (mutation === 'message_id') p.answer.values['data-chatgpt-selection-message-id'] = p.candidate.inputMessageID;
+      if (mutation === 'conversation_id') candidate.conversationID = p.candidate.inputMessageID;
+      if (mutation === 'sequence') candidate.sequence = 2;
+      if (mutation === 'footer') p.answer.children[1].disabled = true;
+      if (mutation === 'busy') p.x.f.body.append(new Element('BUTTON', { 'data-testid': 'stop-button' }));
+      if (mutation === 'fenced_source') candidate.text = '```json\n' + candidate.text + '\n```';
+      if (mutation === 'extra_key') candidate.authorized = true;
+      const result = await p.x.observe(p.record, { deferModelVerification: true, terminalCompletionCandidate: candidate });
+      expect(result.terminalCompletionMatched, mutation).toBeUndefined(); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+  test('message ID and exact text are rechecked after the last picker await', async () => {
+    for (const mutation of ['message_id', 'text', 'model', 'owner']) {
+      const p = await stage(), picker: any = p.x.picker, open = picker.trigger.onClick;
+      let opens = 0;
+      picker.trigger.onClick = () => { open(); if (++opens !== 2) return;
+        if (mutation === 'message_id') p.answer.values['data-chatgpt-selection-message-id'] = p.candidate.inputMessageID;
+        if (mutation === 'text') p.answer.children[0].text += ' late text';
+        if (mutation === 'model') picker.selected('High');
+        if (mutation === 'owner') p.x.f.world.__computaModelOwner = 'foreign-owner'; };
+      const result = await p.x.observe(p.record, { deferModelVerification: false, terminalCompletionCandidate: p.candidate });
+      expect(opens).toBe(2); expect(result.terminalCompletionMatched, mutation).toBeUndefined(); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+});
+
 describe('ChatGPT quiet completion precheck', () => {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
   const stage = async () => {

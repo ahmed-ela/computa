@@ -788,6 +788,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
+                browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                 // These pilot limits bound duplicated website context; they
                 // are engineering guards, not measured provider context sizes.
                 let submissionMarker = session.submitted && session.usesSubmissionOwnership
@@ -883,6 +884,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 } ?? false
                 if !alreadyReady { try await waitForSendReady(session, prompt: outbound) }
                 try Task.checkCancellation()
+                // This optional observer cannot Send or grant ownership. Arm it
+                // for precisely this outgoing body before the existing single
+                // dispatch; an unsupported decoder retains the quiet fallback.
+                if session.provider == .chatgpt, session.usesSubmissionOwnership,
+                   session.modelSelectionVerified, session.modelChoice != nil,
+                   let generation = session.documentGeneration {
+                    _ = await browser.prepareChatGPTResponseCompletion(tabID: session.tabID, view: session.view,
+                        ownerToken: session.token, generation: generation, sequence: session.sequence + 1,
+                        outboundSHA256: Self.promptFingerprint(outbound), outboundUTF8Bytes: outboundBytes,
+                        deadline: .now + responseTimeout)
+                    try Task.checkCancellation()
+                    guard sessions[session.token] === session,
+                          browser.webView(for: session.tabID) === session.view,
+                          browser.documentGeneration(for: session.tabID) == generation else { throw Failure.staleSession }
+                }
                 session.response = ""
                 session.responseCodeStructure = nil
                 session.completionCandidate = false
@@ -933,6 +949,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await poll(session)
             }
         } catch {
+            browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
             logResponseProgressFailure(session, cause: error is CancellationError ? "cancelled"
                 : (error as? Failure) == .deadline ? "response_deadline" : "request_error")
             // Recognized website gates are terminal for this inference. Even a
@@ -1636,6 +1653,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return true
     }
 
+    /// Provider observations are only an alternative to the quiet timer. The
+    /// adapter must bind their exact final bytes/message to the current owned
+    /// answer, and the unchanged fresh full proof must still succeed.
+    private func terminalCompletionReceipt(_ session: Session) -> ChatGPTResponseCompletion.Receipt? {
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              session.acknowledgedSendSequence == session.sequence, session.usesSubmissionOwnership,
+              session.currentSubmission?.sequence == session.sequence,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let generation = session.documentGeneration else { return nil }
+        return browser.chatGPTResponseCompletionReceipt(tabID: session.tabID, view: session.view,
+            ownerToken: session.token, generation: generation, sequence: session.sequence)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -1655,6 +1685,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
         let readTimeoutCount = session.readTimeoutCount
+        let terminalCandidate = terminalCompletionReceipt(session)
         let inspectsQuietCompletion = canInspectQuietChatGPTCompletion(session)
         let quietCandidateResponse = inspectsQuietCompletion ? session.response : nil
         let quietCandidateResponseCount = inspectsQuietCompletion ? session.observedResponseCount : nil
@@ -1868,9 +1899,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         session.profileCompletionTransition(.completionCandidateArmed)
                     }
                     session.completionCandidate = true
-                    if let since = session.candidateSince,
-                       ContinuousClock.now - max(since, session.lastChanged) >= Self.completionQuietInterval {
-                        if !inspectsQuietCompletion { session.responseProfile?.mark(.quietDeadlineReady) }
+                    let terminalReady = terminalCandidate != nil
+                        && terminalCandidate == terminalCompletionReceipt(session)
+                        && observed["terminalCompletionMatched"] as? Bool == true
+                    let quietReady = session.candidateSince.map {
+                        ContinuousClock.now - max($0, session.lastChanged) >= Self.completionQuietInterval
+                    } == true
+                    if terminalReady || quietReady {
+                        if quietReady && !inspectsQuietCompletion { session.responseProfile?.mark(.quietDeadlineReady) }
                         var completionObservation = observed
                         var currentAnswerVerified = true
                         if session.modelVerificationPending {
@@ -1900,6 +1936,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 && count(final, "responseCount") == count(observed, "responseCount")
                                 && count(final, "userCount") == session.sequence
                                 && session.currentSubmissionVerified && !session.pendingSubmission
+                                && (!terminalReady || final["terminalCompletionMatched"] as? Bool == true
+                                    && terminalCandidate == terminalCompletionReceipt(session))
                             completionObservation = final
                             if currentAnswerVerified {
                                 session.modelVerificationPending = false
@@ -1917,9 +1955,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                         }
                         if currentAnswerVerified {
+                            // A revoked/changed receipt cannot survive the last
+                            // await and publish through the early-completion path.
+                            guard !terminalReady || terminalCandidate == terminalCompletionReceipt(session) else {
+                                session.completionCandidate = false; session.candidateSince = nil
+                                return try snapshot(session)
+                            }
                             guard ContinuousClock.now - session.turnStarted < responseTimeout else { throw Failure.deadline }
                             logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
+                            if terminalReady {
+                                Self.inspectionLog.info("completionAdmission provider=chatgpt sequence=\(session.sequence) signal=decoded_terminal")
+                            }
                             session.state = "complete"
+                            browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                             session.responseProfile?.mark(.transportComplete)
                             logModelNativeLifecycle(session, phase: .completion)
                         }
@@ -3455,6 +3503,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .chatgpt, action == "inspect", session.submitted, session.confirmedUsers >= 1 {
             input["requestDebugStructure"] = false
         }
+        if action == "inspect", !allowBlockedProvider, let terminal = terminalCompletionReceipt(session) {
+            input["terminalCompletionCandidate"] = ["correlationID": terminal.correlationID.uuidString.lowercased(),
+                "sequence": terminal.sequence, "inputSHA256": terminal.inputSHA256,
+                "inputMessageID": terminal.inputMessageID, "conversationID": terminal.conversationID,
+                "messageID": terminal.assistantMessageID, "text": terminal.text]
+        }
         // A saved, separately leased synthetic capture only requests passive
         // measurement; it cannot change readiness, waits or inference authority.
         let benchmarkFirstInsert = action == "insert" && session.sequence == 0 && !session.submitted
@@ -4348,6 +4402,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if sessions[session.token] == nil { observationDiagnosticLogBudgets.removeValue(forKey: session.token) }
         }
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
+        browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         if let capture = session.postBlockDiagnostic, let task = capture.task {
             if cancel && cleanupCause != .failedTurn || Task.isCancelled { task.cancel() }
