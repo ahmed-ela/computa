@@ -140,8 +140,25 @@ const isSemanticNode = node =>
   || (['statictext','inlinetextbox','text','heading','paragraph','listitem','term','definition',
     'code','blockquote','cell','gridcell','rowheader','columnheader','caption','label'].includes(node.role)
     && !!trim(node.name || node.value));
-const hasSemanticContent = snapshot => snapshot.nodes.some(isSemanticNode);
-// Only empty semantic shells wait. A meaningful page returns immediately;
+const hasSemanticContent = snapshot => {
+  // Footer text/links remain observable and actionable, but cannot by
+  // themselves establish readiness of the page outside that footer.
+  const children = new Map(), footerScope = new Set();
+  for (const node of snapshot.nodes) {
+    if (!node.parentNodeID) continue;
+    if (!children.has(node.parentNodeID)) children.set(node.parentNodeID, []);
+    children.get(node.parentNodeID).push(node.nodeID);
+  }
+  const pending = snapshot.nodes.filter(node => node.role === 'contentinfo').map(node => node.nodeID);
+  while (pending.length) {
+    const id = pending.pop();
+    if (footerScope.has(id)) continue;
+    footerScope.add(id);
+    pending.push(...(children.get(id) || []));
+  }
+  return snapshot.nodes.some(node => isSemanticNode(node) && !footerScope.has(node.nodeID));
+};
+// Empty and footer-only shells wait. A meaningful page returns immediately;
 // expiration is a bounded observation, never proof that requested content is absent.
 const waitForCapture = async matches => {
   const initial = capture();

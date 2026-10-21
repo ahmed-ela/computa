@@ -337,15 +337,15 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     func testReadyObservationPublishesOnlyTheFiniteReadinessMarker() async throws {
         let wait = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_wait" })
         let description = try XCTUnwrap(wait["description"] as? String)
-        XCTAssertTrue(description.contains("When text is omitted, wait for readable text or controls after document readiness"))
-        XCTAssertTrue(description.contains("a title-only or empty shell is not ready"))
+        XCTAssertTrue(description.contains("When text is omitted, wait for readable text or controls outside the footer after document readiness"))
+        XCTAssertTrue(description.contains("a title-only, empty or footer-only shell is not ready"))
         XCTAssertTrue(description.contains("This readiness is not proof that requested content exists"))
         XCTAssertTrue(description.contains("Does not refresh or replay actions"))
         let schema = try XCTUnwrap(wait["inputSchema"] as? [String: Any])
         XCTAssertFalse((schema["required"] as? [String] ?? []).contains("text"))
         let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
         let omission = try XCTUnwrap(properties["text"]?["description"] as? String)
-        XCTAssertTrue(omission.contains("Omit text to wait for readable text or controls after document readiness"))
+        XCTAssertTrue(omission.contains("Omit text to wait for readable text or controls outside the footer after document readiness"))
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         await backend.setSemanticReadiness(.ready)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -369,6 +369,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         await backend.setSemanticReadiness(.emptyAtDeadline, empty: true)
         let empty = try await call(controller, "browser_read", ["view": "all"])
         XCTAssertEqual(try field("semantic_readiness", in: empty), "empty_at_deadline")
+        XCTAssertTrue(empty.contains("Only a document shell or footer was observed before the readiness deadline; meaningful page content is still unresolved"))
+        XCTAssertTrue(empty.contains("This does not establish that requested content is absent"))
         XCTAssertTrue(empty.contains("source_nodes=0")); XCTAssertTrue(empty.contains("no_matches=1"))
         XCTAssertTrue(empty.contains("subject_relevance=not_verified"))
         XCTAssertNotEqual(try snapshotID(empty), try snapshotID(first))
@@ -390,6 +392,26 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let counts = await backend.counts()
         XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.navigations, 0)
         _ = await controller.shutdown()
+    }
+
+    func testLinksViewExplainsOmittedControlsWithoutClaimingThatAnyExist() async throws {
+        for hasLink in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            if hasLink { await backend.setLink("http://localhost:8123/terms") }
+            let links = try await call(controller, "browser_read", ["view": "links"])
+            let lines = links.split(separator: "\n")
+            XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
+            XCTAssertTrue(lines[2].hasPrefix("LINK_VIEW_SCOPE non_link_controls_omitted=true"))
+            XCTAssertTrue(links.contains("Buttons/form controls may be outside this view; read view=overview or all before absence/access claims"))
+            XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
+            if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }
+            let overview = try await call(controller, "browser_read", ["view": "overview"])
+            XCTAssertFalse(overview.contains("LINK_VIEW_SCOPE")); XCTAssertTrue(overview.contains("label=\"Check flight\""))
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.navigations, 0)
+            _ = await controller.shutdown()
+        }
     }
 
     func testFreshReadRetryIsBoundedAndDoesNotRecoverOtherFailures() async throws {

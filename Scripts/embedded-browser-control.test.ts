@@ -122,6 +122,59 @@ describe('structural application labels', () => {
 });
 
 describe('bounded built-in semantic readiness', () => {
+  test('nested footer links do not end a semantic wait before an outside control appears', async () => {
+    const f = fixture(null), footer = new f.Node('FOOTER'), group = new f.Node('DIV', { role: 'group' });
+    group.append(new f.Node('A', { href: 'https://example.test/terms' }, 'Terms'),
+      new f.Node('A', { href: 'https://example.test/privacy' }, 'Privacy'));
+    footer.append(group); f.document.body.append(footer);
+    const pending = f.run({ operation: 'observe' });
+    expect(f.observers.some(observer => observer.active)).toBe(true);
+    expect([...f.timers.values()].map(timer => timer.delay)).toEqual([10000]);
+    f.mutate(); expect(f.observers.some(observer => observer.active)).toBe(true);
+    f.appendControl(); f.mutate();
+    const result = await pending;
+    expect(result.semanticReadiness).toBe('ready');
+    expect(result.nodes.filter((node: any) => node.role === 'link').map((node: any) => node.name)).toEqual(['Terms', 'Privacy']);
+    expect(result.nodes.some((node: any) => node.role === 'button' && node.name === 'Continue')).toBe(true);
+    expect(f.observers.every(observer => !observer.active)).toBe(true); expect(f.timers.size).toBe(0);
+  });
+
+  test('footer-only deadline retains exact footer content and supported link capabilities as inconclusive evidence', async () => {
+    const f = fixture(null), footer = new f.Node('FOOTER');
+    footer.append(new f.Node('A', { href: 'https://example.test/terms?literal=A-B' }, 'Terms'));
+    f.document.body.append(footer);
+    const pending = f.run({ operation: 'observe' });
+    f.expire(); const result = await pending;
+    expect(result.semanticReadiness).toBe('empty_at_deadline'); expect(result.sourceTruncated).toBe(false);
+    const link = result.nodes.find((node: any) => node.role === 'link');
+    expect(link.name).toBe('Terms'); expect(link.linkURL).toBe('https://example.test/terms?literal=A-B');
+    expect(link.isDOMClickable).toBe(true); expect(link.isPressUnsupported).toBe(false); expect(link.isDisabled).toBe(false);
+    expect(result.nodes.find((node: any) => node.nodeID === link.parentNodeID).role).toBe('contentinfo');
+    expect(f.observers.every(observer => !observer.active)).toBe(true); expect(f.timers.size).toBe(0);
+  });
+
+  test('an explicit footer-text wait still matches its observed text without waiting for non-footer content', async () => {
+    const f = fixture(null), footer = new f.Node('FOOTER');
+    footer.append(new f.Node('A', { href: 'https://example.test/terms' }, 'Terms'));
+    f.document.body.append(footer);
+    expect(await f.run({ operation: 'wait', text: 'Terms' })).toEqual({ matched: true });
+    expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0);
+  });
+
+  test('readable content or navigation outside a footer returns immediately', async () => {
+    for (const navigation of [false, true]) {
+      const f = fixture(null), footer = new f.Node('FOOTER');
+      footer.append(new f.Node('A', { href: 'https://example.test/terms' }, 'Terms'));
+      f.document.body.append(footer);
+      if (navigation) {
+        const nav = new f.Node('NAV'); nav.append(new f.Node('A', { href: 'https://example.test/home' }, 'Home'));
+        f.document.body.append(nav);
+      } else { f.appendText('Rendered document content'); }
+      expect((await f.run({ operation: 'observe' })).semanticReadiness).toBe('ready');
+      expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0);
+    }
+  });
+
   test('identity and preflight captures of blank documents do not register a semantic wait or claim a deadline', async () => {
     const f = fixture(null), result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
     expect(result.nodes).toEqual([]); expect(result.semanticReadiness).toBeUndefined();

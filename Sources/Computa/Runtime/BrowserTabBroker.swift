@@ -1542,12 +1542,15 @@ actor BrowserTabSessionBroker {
                 + "metadata_shown=\(elements.filter { $0.contentKind == .metadata }.count) "
                 + "scope_basis=observed_ancestry subject_relevance=not_verified",
         ]
+        if read.view == .links {
+            lines.insert("LINK_VIEW_SCOPE non_link_controls_omitted=true. Buttons/form controls may be outside this view; read view=overview or all before absence/access claims.", at: 2)
+        }
         if read.view == .overview {
             lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
         }
         lines.append(contentsOf: rows)
         if document.semanticReadiness == .emptyAtDeadline {
-            lines.append("No readable text or controls were observed before the readiness deadline. This empty observation does not establish that requested content is absent; loading or page initialization may remain unresolved.")
+            lines.append("Only a document shell or footer was observed before the readiness deadline; meaningful page content is still unresolved. This does not establish that requested content is absent.")
         }
         lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
         lines.append("Readable fields are distinct from controls and metadata. Use view=all or links for navigation/controls. Exhausting a captured selection does not establish that virtualized or uncaptured content is absent.")

@@ -43,7 +43,7 @@ enum EmbeddedBrowserTools {
         }
         let waitText: [String: Any] = ["type": "string", "minLength": 1,
             "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
-            "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls after document readiness; never send an empty or whitespace-only string."]
+            "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
         let cursor: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
@@ -88,7 +88,7 @@ enum EmbeddedBrowserTools {
                 ["snapshot_id", "element_index", "text"]),
             specification(
                 "browser_wait",
-                "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls after document readiness; a title-only or empty shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
+                "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
                 ["text": waitText, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]]),
             specification(
                 "browser_close",
