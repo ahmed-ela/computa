@@ -42,7 +42,7 @@ enum EmbeddedBrowserTools {
             ]
         }
         let string: [String: Any] = ["type": "string"]
-        let url: [String: Any] = ["type": "string", "description": "Copy the requested or observed URL exactly, preserving punctuation. Do not guess address variants."]
+        let url: [String: Any] = ["type": "string", "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let mutation: [String: Any] = [
             "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
             "element_index": ["type": "integer", "minimum": 0],
@@ -50,11 +50,11 @@ enum EmbeddedBrowserTools {
         return [
             specification(
                 "browser_tabs",
-                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
                 ["cursor": string]),
             specification(
                 "browser_open",
-                "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. Only this created tab is cleaned up at turn end.",
+                "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end.",
                 ["url": url], ["url"]),
             specification(
                 "browser_bind",

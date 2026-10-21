@@ -889,8 +889,15 @@ enum ComputerV2ToolContract {
             properties = [:]; required = []
             description = "Read macOS computer-use permissions."
         case .apps:
-            properties = ["query": string]; required = []
-            description = "List user-facing running apps compactly. Optional query searches names/bundle IDs of all running apps, including helpers. If you know bundle_id, open directly without listing."
+            // Spell out Foundation's whitespace set rather than relying on
+            // provider regex \s semantics. JSON Schema maxLength counts code
+            // points, not requiredString's extended grapheme clusters.
+            properties = ["query": [
+                "type": "string", "minLength": 1,
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "description": "Nonblank app-name or bundle-ID filter, at most 200 characters (extended grapheme clusters). Omit this field for an unfiltered listing; never send an empty or whitespace-only string.",
+            ]]; required = []
+            description = "List user-facing running apps compactly. Optional query searches names/bundle IDs of all running apps, including helpers. Omit query for an unfiltered listing. If you know bundle_id, open directly without listing."
         case .open:
             properties = [
                 "bundle_id": string,

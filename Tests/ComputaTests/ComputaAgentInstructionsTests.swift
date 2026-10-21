@@ -343,10 +343,15 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             }
         }
         let text = checks.replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("Copy requested URLs exactly, including punctuation"))
-        XCTAssertTrue(text.contains("If unavailable, compare with the task"))
-        XCTAssertTrue(text.contains("never guess variants or a homepage"))
-        XCTAssertLessThan(checks.utf8.count, 200)
+        XCTAssertTrue(text.contains("Copy requested or observed URLs exactly, including punctuation"))
+        XCTAssertTrue(text.contains("If a supplied URL is unavailable, compare with the task"))
+        XCTAssertTrue(text.contains("never substitute a guessed variant or homepage"))
+        XCTAssertTrue(text.contains("Without a supplied URL, use the user-named known service's official homepage or sign-in entrypoint, then observed controls"))
+        XCTAssertTrue(text.contains("Empty tab inventory is not access denial"))
+        XCTAssertTrue(text.contains("Never invent deep links, account paths or message IDs"))
+        XCTAssertTrue(text.contains("do not ask for passwords, tokens or cookies"))
+        XCTAssertTrue(text.contains("Respect actual access denials and approvals"))
+        XCTAssertLessThan(checks.utf8.count, 700, "The shared rule is refreshed on website turns; retain a compact instruction budget")
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -369,6 +374,42 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertEqual(handoff.contains(ComputaAgentInstructions.browserAddressChecks), item.expected,
                            item.names.joined(separator: ", "))
         }
+    }
+
+    func testKnownServiceGuidanceAndCurrentToolDescriptionsReachAPIProvidersWithoutAUserURL() throws {
+        // The real API projection must carry this guidance too; this is not a
+        // model-adherence or live website-access test.
+        let provider = APIProviderDefinition(id: "browser-guidance-fixture", name: "Fixture",
+            baseURL: try XCTUnwrap(URL(string: "https://example.invalid/v1")), wireAPI: .chatCompletions,
+            models: [.init(id: "fixture-model", name: "Fixture")])
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let definitions = EmbeddedBrowserTools.definitions().map { specification -> [String: Any] in
+            var function = specification
+            function["parameters"] = function.removeValue(forKey: "inputSchema")
+            return function
+        }
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": APIProviderCatalog.appModelID(providerID: provider.id, modelID: provider.models[0].id),
+            "input": [["role": "developer", "content": native],
+                      ["role": "user", "content": "Read my latest message in the named service using the built-in browser."]],
+            "tools": definitions, "store": false,
+        ])
+        let request = try APIModelResponseCodec.prepare(original,
+            selection: .init(provider: provider, model: provider.models[0]),
+            threadID: "550e8400-e29b-41d4-a716-446655440000",
+            capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+        let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
+        XCTAssertTrue(messages.contains { ($0["content"] as? String)?.contains(ComputaAgentInstructions.browserAddressChecks) == true })
+        let tools = try XCTUnwrap(wire["tools"] as? [[String: Any]])
+        let functions = try tools.map { try XCTUnwrap($0["function"] as? [String: Any]) }
+        let open = try XCTUnwrap(functions.first { ($0["description"] as? String)?.contains("Native tool: browser_open.") == true })
+        XCTAssertTrue((open["description"] as? String)?.contains("A user-provided URL is not required") == true)
+        let parameters = try XCTUnwrap(open["parameters"] as? [String: Any])
+        XCTAssertEqual(parameters["required"] as? [String], ["url"], "The navigation argument remains mandatory")
+        XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+        XCTAssertTrue(native.contains("Respect native permissions and access controls"))
+        XCTAssertFalse(native.contains("never guess variants or a homepage"))
     }
 
     func testFreshBrowserAddressChecksFollowUnchangedCanonicalRequestAndPreserveLiteralArguments() throws {
@@ -435,7 +476,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_000, "Binding, snapshot consumption and close evidence share one bounded browser contract.")
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_500,
+                          "The bounded browser contract includes approximately 0.5 KB clarifying named-service entrypoints without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
     }
@@ -467,8 +509,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available; if absent/unavailable, browser_read"))
             XCTAssertTrue(text.contains("After a no-input stale-target rejection, read once"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
-            XCTAssertTrue(text.contains("Copy requested URLs exactly, including punctuation"))
-            XCTAssertTrue(text.contains("compare with the task; never guess variants or a homepage"))
+            XCTAssertTrue(text.contains("Copy requested or observed URLs exactly, including punctuation"))
+            XCTAssertTrue(text.contains("compare with the task; never substitute a guessed variant or homepage"))
             XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
             XCTAssertTrue(text.contains("Never batch fill and click"))
             XCTAssertTrue(text.contains("Preserve complete requested identifiers"))
@@ -491,7 +533,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertTrue(text.contains("stale-target rejection, read once and choose an eligible target"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_000)
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_500,
+                                "Named-service navigation adds approximately 0.5 KB; all snapshot, approval and cleanup rules remain present.")
     }
 
     func testLiteralIdentifierGuidanceIsSharedWithoutChangingExactUserOutputConstraints() {

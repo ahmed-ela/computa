@@ -501,6 +501,50 @@ final class ComputerV2ToolContractTests: XCTestCase {
         }
     }
 
+    func testAppQuerySchemaAndNativeValidationAgreeOnOmissionEmptyAndWhitespace() throws {
+        let model = "api/cerebras/model/Z3B0LW9zcy0xMjBi"
+        let catalogs = [ComputerV2ToolContract.specs,
+                        ComputerV2ToolContract.specs(for: model),
+                        ComputerV2ToolContract.referenceSpecs(for: model)]
+        for catalog in catalogs {
+            let offered = try XCTUnwrap(catalog.first { $0["name"] as? String == Tool.apps.rawValue })
+            let schema = try XCTUnwrap(offered["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let query = try XCTUnwrap(properties["query"] as? [String: Any])
+            XCTAssertEqual(query["type"] as? String, "string")
+            XCTAssertEqual(query["minLength"] as? Int, 1)
+            XCTAssertEqual(schema["required"] as? [String], [])
+            XCTAssertNil(query["maxLength"], "Code-point/UTF16 limits must not narrow the native grapheme limit.")
+            XCTAssertTrue((query["description"] as? String)?.contains("200 characters (extended grapheme clusters)") == true)
+            XCTAssertTrue((query["description"] as? String)?.contains("Omit this field") == true)
+            XCTAssertTrue((offered["description"] as? String)?.contains("Omit query") == true)
+            let pattern = try NSRegularExpression(pattern: XCTUnwrap(query["pattern"] as? String))
+            // Include the Unicode whitespace boundaries where common regex
+            // engines disagree, without changing the native trimming rule.
+            let scalars: [UInt32] = [0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0x20, 0x85, 0xA0,
+                                     0x1680, 0x180E, 0x2000, 0x200A, 0x200B, 0x2028, 0x2029,
+                                     0x202F, 0x205F, 0x2060, 0x3000, 0xFEFF]
+            for value in [""] + scalars.map({ String(Unicode.Scalar($0)!) }) {
+                let advertised = pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+                let native = (try? ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": value])) != nil
+                XCTAssertEqual(advertised, native, value.debugDescription)
+            }
+        }
+        XCTAssertNoThrow(try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: [:]))
+    }
+
+    func testAppQueryKeepsNativeTwoHundredCharacterLimitForUnicodeFilters() throws {
+        for character in ["x", "e\u{301}", "👨‍👩‍👧‍👦"] {
+            let boundary = String(repeating: character, count: 200)
+            XCTAssertEqual(boundary.count, 200)
+            XCTAssertNoThrow(try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": boundary]))
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": boundary + character]))
+        }
+        for value: Any in [" ", "\t\r\n", String(repeating: "x", count: 201), 17, NSNull()] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": value]))
+        }
+    }
+
     func testAppInventoryRetainsExactIdentityAndEscapesUntrustedNames() throws {
         let app = RunningApplicationInfo(
             processIdentifier: 42, bundleIdentifier: "example.exact.identity", localizedName: "App\n\"quoted\"",

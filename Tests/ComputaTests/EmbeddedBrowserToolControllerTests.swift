@@ -452,6 +452,36 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": UUID().uuidString]))
         }
     }
+
+    func testKnownServiceEntrypointGuidanceKeepsExplicitNavigationAndTargetChecks() throws {
+        let definitions = EmbeddedBrowserTools.definitions()
+        let inventory = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_tabs" })
+        XCTAssertTrue((inventory["description"] as? String)?.contains("Empty inventory means no matching user tabs were listed, not denied access") == true)
+        let scope = ComputerTaskScope(userPrompt: "Read the requested page on Wikipedia in the built-in browser.")
+        XCTAssertEqual(scope.targetConfidence, .recognizedService)
+        let entrypoint = try XCTUnwrap(URL(string: "https://en.wikipedia.org/"))
+        XCTAssertNil(scope.siteViolation(url: entrypoint), "A user-named service does not require a literal URL in the prompt")
+        XCTAssertNotNil(scope.siteViolation(url: try XCTUnwrap(URL(string: "https://unrelated.example/"))))
+        for name in ["browser_open", "browser_navigate"] {
+            let specification = try XCTUnwrap(definitions.first { $0["name"] as? String == name })
+            let schema = try XCTUnwrap(specification["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let url = try XCTUnwrap(properties["url"] as? [String: Any])
+            let guidance = try XCTUnwrap(url["description"] as? String)
+            XCTAssertTrue(guidance.contains("Copy a supplied or observed URL exactly"))
+            XCTAssertTrue(guidance.contains("Without a supplied URL"))
+            XCTAssertTrue(guidance.contains("official homepage or sign-in entrypoint, then observed controls"))
+            XCTAssertTrue(guidance.contains("Never invent deep links, account paths, message IDs"))
+            XCTAssertEqual(schema["required"] as? [String], ["url"])
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["url": entrypoint.absoluteString]))
+            XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [:]))
+        }
+        let open = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_open" })
+        XCTAssertTrue((open["description"] as? String)?.contains("sharing its signed-in profile") == true)
+        XCTAssertTrue((open["description"] as? String)?.contains("Preserve any supplied URL exactly") == true)
+        XCTAssertTrue(EmbeddedBrowserTools.requiresApproval(tool: "browser_open"))
+    }
+
     private func call(_ controller: EmbeddedBrowserToolController, _ tool: String, _ arguments: [String: Any] = [:], key: String = "turn-a", scope: ComputerTaskScope? = nil) async throws -> String {
         try await controller.execute(taskKey: key, tool: tool, arguments: JSONSerialization.data(withJSONObject: arguments), scope: scope)
     }

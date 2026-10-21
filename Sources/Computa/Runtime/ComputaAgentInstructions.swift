@@ -314,8 +314,13 @@ enum ComputaAgentInstructions {
     /// Shared native guidance and always-current post-history browser handoff.
     /// Delivery is testable; this is not proof that a model follows an address.
     static let browserAddressChecks = """
-    Copy requested URLs exactly, including
-    punctuation. If unavailable, compare with the task; never guess variants or a homepage.
+    Copy requested or observed URLs exactly, including punctuation. If a supplied
+    URL is unavailable, compare with the task; never substitute a guessed variant or homepage.
+    Without a supplied URL, use the user-named known service's official homepage
+    or sign-in entrypoint, then observed controls. Empty tab inventory is not access
+    denial. Use offered navigation tools; ask which service only if genuinely unclear.
+    Never invent deep links, account paths or message IDs. Keep sign-in in the
+    browser; do not ask for passwords, tokens or cookies. Respect actual access denials and approvals.
     """
 
     static let builtInBrowser = """
