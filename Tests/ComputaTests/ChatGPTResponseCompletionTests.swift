@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 import XCTest
 @testable import Computa
 
@@ -178,6 +179,175 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         }
     }
 
+    func testEveryClosedDiagnosticReasonIsReadOnlyBeforeAndAfterTerminalExpiryAndRevocation() throws {
+        let fixture = try LeaseFixture()
+        let deadline = fixture.lease.deadline
+        for reason in ChatGPTResponseCompletion.DiagnosticReason.allCases {
+            let packet = fixture.diagnosticPacket(reason: reason.rawValue)
+            let diagnostic = try XCTUnwrap(fixture.lease.diagnostic(packet))
+            XCTAssertEqual(diagnostic.reason, reason)
+            XCTAssertEqual(diagnostic.correlationID, fixture.correlation)
+            XCTAssertEqual(diagnostic.sequence, fixture.sequence)
+            XCTAssertEqual(diagnostic.inputSHA256, fixture.sha)
+            XCTAssertEqual(diagnostic.calls, 257)
+            XCTAssertEqual(diagnostic.instances, 4)
+            XCTAssertEqual(fixture.lease.revision, 0)
+            XCTAssertFalse(fixture.lease.invalidated)
+            XCTAssertNil(fixture.receipt(), "Diagnostic parsing cannot grant a receipt")
+        }
+        XCTAssertTrue(fixture.lease.receive(fixture.packet()))
+        let terminal = try XCTUnwrap(fixture.receipt())
+        let packet = fixture.diagnosticPacket(reason: "input_hash")
+        XCTAssertNotNil(fixture.lease.diagnostic(packet))
+        XCTAssertEqual(fixture.receipt(), terminal, "An unrelated decoder's rejection cannot revoke the matched receipt")
+        XCTAssertEqual(fixture.lease.revision, terminal.revision)
+        XCTAssertNil(fixture.receipt(now: deadline))
+        XCTAssertNotNil(fixture.lease.diagnostic(packet))
+        XCTAssertNil(fixture.receipt(now: deadline), "Reading a diagnostic cannot renew an expired lease")
+        XCTAssertEqual(fixture.lease.deadline, deadline)
+        fixture.lease.revoke()
+        let revokedRevision = fixture.lease.revision
+        XCTAssertNotNil(fixture.lease.diagnostic(packet), "A retained exact diagnostic is not positive authority")
+        XCTAssertTrue(fixture.lease.invalidated)
+        XCTAssertEqual(fixture.lease.revision, revokedRevision)
+        XCTAssertNil(fixture.receipt())
+    }
+
+    func testDiagnosticRejectsForeignMalformedAndUnboundedRecordsWithoutMutatingAnyAuthority() throws {
+        let fixture = try LeaseFixture()
+        XCTAssertTrue(fixture.lease.receive(fixture.packet()))
+        let original = try XCTUnwrap(fixture.receipt())
+        let mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("missing", { $0.removeValue(forKey: "reason") }),
+            ("extra", { $0["text"] = "Never log provider text" }),
+            ("version_bool", { $0["version"] = true }),
+            ("version_fraction", { $0["version"] = 1.5 }),
+            ("version_unknown", { $0["version"] = 2 }),
+            ("kind", { $0["kind"] = "terminal" }),
+            ("correlation", { $0["correlationID"] = UUID().uuidString.lowercased() }),
+            ("uppercase_correlation", { $0["correlationID"] = fixture.correlation.uuidString.uppercased() }),
+            ("sequence", { $0["sequence"] = 2 }), ("sequence_bool", { $0["sequence"] = true }),
+            ("hash", { $0["inputSHA256"] = String(repeating: "b", count: 64) }),
+            ("uppercase_hash", { $0["inputSHA256"] = fixture.sha.uppercased() }),
+            ("unknown_reason", { $0["reason"] = "arbitrary provider error" }),
+            ("reason_type", { $0["reason"] = ["expired"] }),
+            ("calls_bool", { $0["calls"] = true }), ("calls_fraction", { $0["calls"] = 1.5 }),
+            ("calls_string", { $0["calls"] = "1" }), ("calls_negative", { $0["calls"] = -1 }),
+            ("calls_overflow", { $0["calls"] = 258 }),
+            ("instances_bool", { $0["instances"] = false }), ("instances_fraction", { $0["instances"] = 0.5 }),
+            ("instances_negative", { $0["instances"] = -1 }), ("instances_overflow", { $0["instances"] = 5 }),
+        ]
+        for (name, mutate) in mutations {
+            var packet = fixture.diagnosticPacket(reason: "expired")
+            mutate(&packet)
+            XCTAssertNil(fixture.lease.diagnostic(packet), name)
+            XCTAssertEqual(fixture.receipt(), original, name)
+            XCTAssertEqual(fixture.lease.revision, original.revision, name)
+            XCTAssertFalse(fixture.lease.invalidated, name)
+        }
+        XCTAssertNil(fixture.lease.diagnostic("not an object"))
+        var zero = fixture.diagnosticPacket(reason: "runtime_unsupported")
+        zero["calls"] = 0; zero["instances"] = 0
+        XCTAssertNotNil(fixture.lease.diagnostic(zero))
+    }
+
+    func testMainWorldDiagnosticDeliveryCannotRevokeWakeOrRenewAnOwnedTerminal() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        // Only the decoder is replaced. The document-start installation, .page
+        // handler, native arm, identity checks and channel are the real path.
+        browser.setChatGPTResponseCompletionSourceForTesting("""
+            (() => {
+              const config = __COMPUTA_COMPLETION_CONFIG__;
+              const api = Object.freeze({ arm(binding) {
+                window.fixtureCompletionArm = Object.freeze({...binding}); return {armed:true};
+              }, stop() {} });
+              Object.defineProperty(window, config.key, {value:api});
+              window.fixturePostCompletion = packet => {
+                window.webkit.messageHandlers[config.handlerName].postMessage(packet); return true;
+              };
+            })();
+            """)
+        let tabID = try browser.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(browser.webView(for: tabID))
+        let owner = UUID().uuidString
+        try browser.installModelChangeSignal(tabID: tabID, ownerToken: owner,
+            world: .world(name: "computa-completion-diagnostic-test"))
+        view.loadHTMLString("<p id='ready'>Local completion fixture</p>", baseURL: URL(string: "https://chatgpt.com/"))
+        let loadDeadline = ContinuousClock.now + .seconds(10)
+        var ready = false
+        while ContinuousClock.now < loadDeadline {
+            if !view.isLoading,
+               (try? await completionPage(view, "return !!document.getElementById('ready') && typeof window.fixturePostCompletion === 'function';")) == Data("true".utf8) {
+                ready = true; break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(ready)
+        let generation = try XCTUnwrap(browser.documentGeneration(for: tabID))
+        let deadline = ContinuousClock.now + .seconds(2)
+        let sha = EmbeddedWebModelTransport.promptFingerprint("Local exact outbound")
+        let armed = await browser.prepareChatGPTResponseCompletion(tabID: tabID, view: view, ownerToken: owner,
+            generation: generation, sequence: 1, outboundSHA256: sha, outboundUTF8Bytes: 20, deadline: deadline)
+        XCTAssertTrue(armed)
+        _ = try await completionPage(view, """
+            const arm = window.fixtureCompletionArm;
+            window.fixtureTerminal = {version:1,kind:'terminal',correlationID:arm.correlationID,
+              sequence:arm.sequence,inputSHA256:arm.inputSHA256,
+              inputMessageID:'11111111-1111-4111-8111-111111111111',
+              conversationID:'22222222-2222-4222-8222-222222222222',
+              messageID:'33333333-3333-4333-8333-333333333333',text:'HI'};
+            return window.fixturePostCompletion(window.fixtureTerminal);
+            """)
+        func receipt() -> ChatGPTResponseCompletion.Receipt? {
+            browser.chatGPTResponseCompletionReceipt(tabID: tabID, view: view, ownerToken: owner,
+                generation: generation, sequence: 1)
+        }
+        let receiveDeadline = min(deadline, ContinuousClock.now + .seconds(1))
+        while receipt() == nil, ContinuousClock.now < receiveDeadline { await Task.yield() }
+        let terminal = try XCTUnwrap(receipt())
+        let revision = try browser.modelChangeRevision(for: tabID)
+        _ = try await completionPage(view, """
+            const {version,correlationID,sequence,inputSHA256} = window.fixtureTerminal;
+            const diagnostic = {version,kind:'diagnostic',correlationID,sequence,inputSHA256,
+              reason:'input_hash',calls:1,instances:1};
+            // Matching malformed records must be intercepted before receive().
+            for (const packet of [{...diagnostic,reason:'private arbitrary error'},
+              {...diagnostic,calls:true}, {...diagnostic,text:'must not enter authority'},
+              {...diagnostic,correlationID:'44444444-4444-4444-8444-444444444444'},
+              {...diagnostic,sequence:2}, diagnostic, diagnostic]) window.fixturePostCompletion(packet);
+            return true;
+            """)
+        _ = try await completionPage(view, "return window.fixtureCompletionArm.sequence;")
+        let after = try await browser.waitForModelChange(tabID: tabID, after: revision, until: .now + .milliseconds(100))
+        XCTAssertEqual(after, revision, "Neither malformed, foreign nor repeated valid diagnostics may wake the channel")
+        XCTAssertEqual(try browser.modelChangeRevision(for: tabID), revision)
+        XCTAssertEqual(receipt(), terminal, "Real WK delivery cannot revoke or replace the owned terminal")
+        XCTAssertEqual(browser.documentGeneration(for: tabID), generation)
+        try await Task.sleep(until: deadline, clock: .continuous)
+        XCTAssertNil(receipt(), "Diagnostics cannot renew the original lease deadline")
+        _ = try await completionPage(view, """
+            const {version,correlationID,sequence,inputSHA256} = window.fixtureTerminal;
+            return window.fixturePostCompletion({version,kind:'diagnostic',correlationID,sequence,inputSHA256,
+              reason:'expired',calls:2,instances:1});
+            """)
+        XCTAssertNil(receipt(), "Even a valid late diagnostic cannot revive an expired receipt")
+        XCTAssertEqual(try browser.modelChangeRevision(for: tabID), revision)
+    }
+
+    private func completionPage(_ view: WKWebView, _ body: String) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            view.callAsyncJavaScript(body, arguments: [:], in: nil, in: .page) { result in
+                switch result {
+                case .success(let value):
+                    do { continuation.resume(returning: try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)) }
+                    catch { continuation.resume(throwing: error) }
+                case .failure(let error): continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     @MainActor
     private struct LeaseFixture {
         let view = NSObject()
@@ -207,6 +377,9 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
             identity().merging(["inputMessageID": inputMessage.uuidString.lowercased(),
                 "conversationID": conversation.uuidString.lowercased(),
                 "messageID": answer.uuidString.lowercased(), "text": text]) { _, right in right }
+        }
+        func diagnosticPacket(reason: String) -> [String: Any] {
+            identity().merging(["kind": "diagnostic", "reason": reason, "calls": 257, "instances": 4]) { _, right in right }
         }
         func receipt(now: ContinuousClock.Instant = .now) -> ChatGPTResponseCompletion.Receipt? {
             lease.receipt(view: viewID, ownerToken: owner, generation: generation, sequence: sequence, now: now)

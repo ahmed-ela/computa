@@ -15,6 +15,9 @@
   const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
+  const diagnosticReasons = Object.freeze(['runtime_unsupported', 'call_limit', 'decoder_limit', 'route_changed',
+    'wrapper_changed', 'input_shape', 'input_hash', 'owner_conflict', 'parent_changed', 'parent_limit', 'ancestry_missing',
+    'final_status', 'final_changed', 'terminal_order', 'error', 'send_changed', 'expired', 'observer_exception']);
   let lease = null;
   function data(object, key) {
     if (object == null) return undefined;
@@ -42,8 +45,16 @@
       sequence: current.sequence, inputSHA256: current.inputSHA256 };
   }
   function bestEffort(action) { try { action(); } catch { /* Cleanup cannot change a decoded return or throw. */ } }
-  function restore(current, notify) {
+  function diagnostic(current, reason) {
+    // First observed rejection only; an unclaimed decoder can be unrelated to
+    // the eventual matching input. This record supplies no completion authority.
+    if (lease !== current || current.stopped || current.diagnosticSent || !diagnosticReasons.includes(reason)) return;
+    current.diagnosticSent = true;
+    post({ ...identity(current, 'diagnostic'), reason, calls: current.calls, instances: current.instances.size });
+  }
+  function restore(current, notify, reason = null) {
     if (lease !== current || current.stopped) return;
+    if (reason !== null) bestEffort(() => diagnostic(current, reason));
     current.stopped = true; lease = null;
     bestEffort(() => clearTimeout(current.timer));
     bestEffort(() => current.observer?.disconnect());
@@ -81,17 +92,18 @@
   }
   function live(current) {
     if (lease !== current || current.stopped) return false;
-    if (!route(current)) { restore(current, true); return false; }
+    if (!route(current)) { restore(current, true, now() >= current.deadline ? 'expired' : 'route_changed'); return false; }
     if (current.target) {
       const present = descriptor(current.target, 'recordCompletion');
       if (!present || present.value !== current.wrapper || present.writable !== true
-        || present.configurable !== true || present.enumerable !== false) { restore(current, true); return false; }
+        || present.configurable !== true || present.enumerable !== false) { restore(current, true, 'wrapper_changed'); return false; }
     }
     return true;
   }
-  function reject(current, candidate) {
+  function reject(current, candidate, reason) {
     candidate.rejected = true;
-    if (current.owner === candidate) restore(current, true);
+    bestEffort(() => diagnostic(current, reason));
+    if (current.owner === candidate) restore(current, true, reason);
   }
   function ancestry(candidate, final) {
     const visited = new Set(); let parent = final.parentID;
@@ -109,7 +121,8 @@
   function publish(current, candidate) {
     if (!live(current) || current.owner !== candidate || candidate.rejected || current.sends !== 1
       || candidate.published || !candidate.final || !candidate.terminal
-      || candidate.terminal <= candidate.final.ordinal || !ancestry(candidate, candidate.final)) return;
+      || candidate.terminal <= candidate.final.ordinal) return;
+    if (!ancestry(candidate, candidate.final)) { diagnostic(current, 'ancestry_missing'); return; }
     candidate.published = true;
     post({ ...identity(current, 'terminal'), inputMessageID: candidate.inputMessageID,
       conversationID: candidate.conversationID, messageID: candidate.final.id, text: candidate.final.text });
@@ -123,10 +136,10 @@
   }
   function observe(current, receiver, payload) {
     if (!live(current) || current.sends !== 1) return;
-    if (++current.calls > 256) { restore(current, true); return; }
+    if (++current.calls > 256) { restore(current, true, 'call_limit'); return; }
     let candidate = current.instances.get(receiver);
     if (!candidate) {
-      if (current.instances.size >= 4) { restore(current, true); return; }
+      if (current.instances.size >= 4) { restore(current, true, 'decoder_limit'); return; }
       candidate = { parents: new Map(), ordinal: 0, rejected: false, inputSeen: false,
         inputMessageID: null, conversationID: null, final: null, terminal: null, published: false };
       current.instances.set(receiver, candidate);
@@ -137,44 +150,46 @@
       || type === 'main_stream_complete' && data(payload, 'alternate_response_expected') !== false
       || typeof type === 'string' && /_complete(?:d)?$/.test(type)
         && !['main_stream_complete', 'message_stream_complete'].includes(type)) {
-      reject(current, candidate); return;
+      reject(current, candidate, 'error'); return;
     }
     const conversationID = id(data(payload, 'conversation_id'));
     if (candidate.streamConversationID && conversationID && conversationID !== candidate.streamConversationID) {
-      reject(current, candidate); return;
+      reject(current, candidate, 'owner_conflict'); return;
     }
     if (conversationID) candidate.streamConversationID = conversationID;
     if (type === 'input_message') {
-      if (candidate.inputSeen) { reject(current, candidate); return; }
+      if (candidate.inputSeen) { reject(current, candidate, 'input_shape'); return; }
       candidate.inputSeen = true;
       const input = data(payload, 'input_message'), inputMessageID = id(data(input, 'id'));
       const text = singleText(data(input, 'content'), 180000);
       if (!conversationID || !inputMessageID || data(data(input, 'author'), 'role') !== 'user'
-        || text === null || encoder.encode(text).length !== current.inputUTF8Bytes) { reject(current, candidate); return; }
+        || text === null || encoder.encode(text).length !== current.inputUTF8Bytes) { reject(current, candidate, 'input_shape'); return; }
       // Snapshot all identifiers before digest: decoded objects may be reused.
       candidate.inputMessageID = inputMessageID; candidate.conversationID = conversationID;
       crypto.subtle.digest('SHA-256', encoder.encode(text)).then(bytes => {
         if (!live(current)) return;
         const hash = Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, '0')).join('');
-        if (hash !== current.inputSHA256) { reject(current, candidate); return; }
-        if (current.owner && current.owner !== candidate) { restore(current, true); return; }
+        if (hash !== current.inputSHA256) { reject(current, candidate, 'input_hash'); return; }
+        if (current.owner && current.owner !== candidate) { restore(current, true, 'owner_conflict'); return; }
         if (candidate.rejected) return;
         if (current.serverID && current.serverID !== conversationID) {
-          restore(current, true); return;
+          restore(current, true, 'owner_conflict'); return;
         }
         current.owner = candidate; publish(current, candidate);
-      }).catch(() => reject(current, candidate));
+      }).catch(() => reject(current, candidate, 'observer_exception'));
     }
     const message = data(payload, 'message');
     if (message && message !== unknown) {
       const messageID = id(data(message, 'id')), role = data(data(message, 'author'), 'role');
       const metadata = data(message, 'metadata'), parentID = id(data(metadata, 'parent_id'));
       if (data(metadata, 'is_error') === true || data(metadata, 'reasoning_status') === 'reasoning_cancelled'
-        || data(data(metadata, 'finish_details'), 'type') === 'interrupted') { reject(current, candidate); return; }
+        || data(data(metadata, 'finish_details'), 'type') === 'interrupted') { reject(current, candidate, 'error'); return; }
       if (messageID) {
         const previous = candidate.parents.get(messageID);
         if (previous && (previous.role !== role || previous.parentID !== parentID)
-          || !previous && candidate.parents.size >= 64) { reject(current, candidate); return; }
+          || !previous && candidate.parents.size >= 64) {
+          reject(current, candidate, previous ? 'parent_changed' : 'parent_limit'); return;
+        }
         candidate.parents.set(messageID, { role, parentID });
       }
       if (role === 'assistant') {
@@ -182,20 +197,20 @@
         const finishType = data(data(metadata, 'finish_details'), 'type');
         if (status !== 'in_progress' && status !== 'finished_successfully'
           || typeof finishType === 'string' && finishType !== 'stop'
-          || status === 'finished_successfully' && finishType !== 'stop') { reject(current, candidate); return; }
+          || status === 'finished_successfully' && finishType !== 'stop') { reject(current, candidate, 'final_status'); return; }
         const text = singleText(data(message, 'content'), 220000);
         const success = messageID && parentID && conversationID
           && data(message, 'status') === 'finished_successfully' && data(message, 'channel') === 'final'
           && data(message, 'recipient') === 'all' && data(message, 'end_turn') === true
           && finishType === 'stop' && text !== null && text.length > 0;
         if (candidate.final && (!success || candidate.final.id !== messageID || candidate.final.text !== text
-          || candidate.final.parentID !== parentID)) { reject(current, candidate); return; }
+          || candidate.final.parentID !== parentID)) { reject(current, candidate, 'final_changed'); return; }
         if (success && !candidate.final) candidate.final = { id: messageID, parentID, text, ordinal };
       }
     }
     if (type === 'message_stream_complete') {
       if (!conversationID || !candidate.conversationID || conversationID !== candidate.conversationID
-        || !candidate.final || ordinal <= candidate.final.ordinal) { reject(current, candidate); return; }
+        || !candidate.final || ordinal <= candidate.final.ordinal) { reject(current, candidate, 'terminal_order'); return; }
       candidate.terminal = ordinal;
     }
     publish(current, candidate);
@@ -210,10 +225,12 @@
         || !Number.isInteger(data(binding, 'durationMs')) || binding.durationMs < 1 || binding.durationMs > 600000) return { armed: false };
       const current = { correlationID: binding.correlationID, sequence: binding.sequence, inputSHA256: binding.inputSHA256,
         inputUTF8Bytes: binding.inputUTF8Bytes, deadline: now() + binding.durationMs, stopped: false,
-        instances: new Map(), owner: null, calls: 0, sends: 0, routeKind: 'root', serverID: null, localID: null };
+        instances: new Map(), owner: null, calls: 0, diagnosticSent: false, sends: 0, routeKind: 'root', serverID: null, localID: null };
       lease = current;
       try {
-        if (!route(current)) throw unknown;
+        if (!route(current)) {
+          bestEffort(() => diagnostic(current, now() >= current.deadline ? 'expired' : 'route_changed')); throw unknown;
+        }
         // This is an observed public runtime and an already-initialized cache.
         // Importing it must never initialize dd or call a module factory.
         const runtime = await import('https://chatgpt.com/cdn/assets/633146.fa01f470fd.js');
@@ -232,8 +249,8 @@
         const wrapper = function (...args) {
           let result;
           try { result = apply(original.value, this, args); }
-          catch (error) { restore(current, true); throw error; }
-          try { observe(current, this, result); } catch { restore(current, true); }
+          catch (error) { restore(current, true, 'error'); throw error; }
+          try { observe(current, this, result); } catch { restore(current, true, 'observer_exception'); }
           return result;
         };
         if (!live(current) || descriptor(target, 'recordCompletion')?.value !== original.value) throw unknown;
@@ -242,17 +259,17 @@
         current.click = event => {
           if (!live(current)) return;
           try {
-            if (event.target?.closest?.(stopSelector)) { restore(current, true); return; }
+            if (event.target?.closest?.(stopSelector)) { restore(current, true, 'send_changed'); return; }
             const button = event.target?.closest?.(sendSelector);
             const eligible = node => node?.isConnected && !node.disabled && node.getAttribute('aria-disabled') !== 'true'
               && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden'
               && !node.closest('[data-message-author-role], [inert], [aria-hidden="true"]');
             if (!button || !eligible(button)) return;
             const buttons = [...document.querySelectorAll(sendSelector)].filter(eligible);
-            if (buttons.length !== 1 || buttons[0] !== button || ++current.sends !== 1) restore(current, true);
-          } catch { restore(current, true); }
+            if (buttons.length !== 1 || buttons[0] !== button || ++current.sends !== 1) restore(current, true, 'send_changed');
+          } catch { restore(current, true, 'observer_exception'); }
         };
-        current.pagehide = () => restore(current, true);
+        current.pagehide = () => restore(current, true, 'route_changed');
         current.pathchange = () => { live(current); };
         current.observer = new MutationObserver(current.pathchange);
         current.observer.observe(document, { subtree: true, childList: true, attributes: true });
@@ -260,9 +277,9 @@
         window.addEventListener('pagehide', current.pagehide);
         window.addEventListener('popstate', current.pathchange);
         window.addEventListener('hashchange', current.pathchange);
-        current.timer = setTimeout(() => restore(current, true), Math.max(0, current.deadline - now()));
+        current.timer = setTimeout(() => restore(current, true, 'expired'), Math.max(0, current.deadline - now()));
         return { armed: true };
-      } catch { restore(current, false); return { armed: false }; }
+      } catch { restore(current, false, 'runtime_unsupported'); return { armed: false }; }
     },
     stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); }
   });

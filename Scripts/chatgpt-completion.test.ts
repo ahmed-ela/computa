@@ -19,15 +19,20 @@ const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0))
 
 function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean; loadRuntime?: () => Promise<unknown> } = {}) {
   let clock = 0, imports = 0, timerID = 0, throwOriginal: unknown = null;
-  const posts: any[] = [], timers = new Map<number, () => void>(), documentEvents = new Map<string, Function>();
-  const windowEvents = new Map<string, Function>(), observers: any[] = [], pendingDigests: { bytes: Uint8Array; resolve: Function }[] = [];
+  // Retain all wire packets; the original authority regressions deliberately
+  // inspect only the unchanged terminal/invalidated schemas.
+  const allPosts: any[] = [], posts: any[] = [], diagnostics: any[] = [];
+  const timers = new Map<number, () => void>(), documentEvents = new Map<string, Function>();
+  const windowEvents = new Map<string, Function>(), observers: any[] = [], pendingDigests: { bytes: Uint8Array; resolve: Function; reject: Function }[] = [];
   const O = new Function('T', 'return class O {recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}}')({
     safeParse(value: any) { if (throwOriginal) throw throwOriginal; return { success: !!value?.type, data: value }; },
   });
   const original = Object.getOwnPropertyDescriptor(O.prototype, 'recordCompletion')!;
   const exports = Object.defineProperty({}, 'c', { get: new Function('O', 'return ()=>O')(O), enumerable: true, configurable: false });
   const runtime = { __webpack_require__: { c: { dd: { exports } } } };
-  const window: any = { webkit: { messageHandlers: { computaChatGPTCompletion: { postMessage(record: any) { posts.push(record); } } } },
+  const window: any = { webkit: { messageHandlers: { computaChatGPTCompletion: { postMessage(record: any) {
+    allPosts.push(record); (record.kind === 'diagnostic' ? diagnostics : posts).push(record);
+  } } } },
     addEventListener(name: string, listener: Function) { windowEvents.set(name, listener); },
     removeEventListener(name: string, listener: Function) { if (windowEvents.get(name) === listener) windowEvents.delete(name); } };
   window.top = window;
@@ -45,7 +50,7 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
     disconnect() { this.active = false; }
   }
   const cryptoFixture = { subtle: { digest(_name: string, bytes: Uint8Array) {
-    if (options.delayedDigest) return new Promise(resolve => pendingDigests.push({ bytes, resolve }));
+    if (options.delayedDigest) return new Promise((resolve, reject) => pendingDigests.push({ bytes, resolve, reject }));
     return Promise.resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer);
   } } };
   const loadRuntime = () => { imports++; return options.loadRuntime ? options.loadRuntime()
@@ -58,7 +63,7 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
   execute(window, document, location, { now: () => clock }, cryptoFixture, Observer, () => ({ visibility: 'visible' }),
     (callback: () => void) => { timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime);
   const receiver = new O();
-  return { window, document, button, location, posts, timers, observers, imports: () => imports,
+  return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, imports: () => imports,
     api: window[key], O, receiver, original,
     send: () => documentEvents.get('click')?.({ target: button }),
     stopClick: () => documentEvents.get('click')?.({ target: { closest: (s: string) => s.includes('stop-button') ? {} : null } }),
@@ -66,6 +71,7 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
     tick: (value: number) => { clock = value; }, mutate: () => observers.filter(o => o.active).forEach(o => o.callback()),
     pagehide: () => windowEvents.get('pagehide')?.(), throwOriginal: (error: unknown) => { throwOriginal = error; },
     resolveDigests: () => pendingDigests.splice(0).forEach(({ bytes, resolve }) => resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer)),
+    rejectDigests: () => pendingDigests.splice(0).forEach(({ reject }) => reject(new Error('private digest error'))),
     listeners: () => documentEvents.size + windowEvents.size,
   };
 }
@@ -285,5 +291,84 @@ describe('ChatGPT current-response completion admission', () => {
     expect(f.posts[1]).toMatchObject({ kind: 'terminal', correlationID: otherID, sequence: 2,
       inputSHA256: hash(nextText), inputMessageID: nextInputID, messageID: nextMessageID, text: 'NEXT' });
     f.api.stop(otherID); expect(f.listeners()).toBe(0);
+  });
+
+  test('unsupported runtime emits only a bounded diagnostic and successful stop remains silent', async () => {
+    const unavailable = fixture({ unsupported: true });
+    expect(await unavailable.api.arm(binding())).toEqual({ armed: false });
+    expect(unavailable.allPosts).toEqual([{ version: 1, kind: 'diagnostic', correlationID, sequence: 1,
+      inputSHA256: hash(inputText), reason: 'runtime_unsupported', calls: 0, instances: 0 }]);
+    expect(unavailable.O.prototype.recordCompletion).toBe(unavailable.original.value);
+    expect(unavailable.listeners()).toBe(0); expect(unavailable.timers.size).toBe(0);
+    const successful = fixture(); await ready(successful); complete(successful); successful.api.stop(correlationID);
+    expect(successful.allPosts.map(p => p.kind)).toEqual(['terminal']);
+    const stopped = fixture({ delayedDigest: true });
+    expect(await stopped.api.arm(binding())).toEqual({ armed: true }); stopped.send(); stopped.decode(input());
+    stopped.api.stop(correlationID); stopped.rejectDigests(); await flush();
+    expect(stopped.allPosts).toEqual([]);
+  });
+
+  test('callback and decoder caps emit one diagnostic before the unchanged invalidation without relaxing either cap', async () => {
+    const calls = fixture(); await ready(calls);
+    for (let index = 0; index < 255; index++) calls.decode({});
+    expect(calls.allPosts).toEqual([]); calls.decode({});
+    expect(calls.allPosts).toEqual([
+      { version: 1, kind: 'diagnostic', correlationID, sequence: 1, inputSHA256: hash(inputText),
+        reason: 'call_limit', calls: 257, instances: 1 },
+      { version: 1, kind: 'invalidated', correlationID, sequence: 1, inputSHA256: hash(inputText) },
+    ]);
+    expect(calls.O.prototype.recordCompletion).toBe(calls.original.value);
+    const decoders = fixture(); expect(await decoders.api.arm(binding())).toEqual({ armed: true }); decoders.send();
+    for (let index = 0; index < 4; index++) decoders.decode({}, new decoders.O());
+    expect(decoders.allPosts).toEqual([]); decoders.decode({}, new decoders.O());
+    expect(decoders.diagnostics).toHaveLength(1);
+    expect(decoders.diagnostics[0]).toMatchObject({ reason: 'decoder_limit', calls: 5, instances: 4 });
+    expect(decoders.allPosts.map(p => p.kind)).toEqual(['diagnostic', 'invalidated']);
+  });
+
+  test('an unrelated rejected input produces no authority and cannot block a later exact claimed stream', async () => {
+    const f = fixture(); expect(await f.api.arm(binding())).toEqual({ armed: true }); f.send();
+    const foreign = new f.O(); f.decode(input('x'.repeat(new TextEncoder().encode(inputText).length)), foreign); await flush();
+    expect(f.posts).toEqual([]);
+    expect(f.diagnostics).toEqual([{ version: 1, kind: 'diagnostic', correlationID, sequence: 1,
+      inputSHA256: hash(inputText), reason: 'input_hash', calls: 1, instances: 1 }]);
+    f.decode(input()); await flush(); complete(f);
+    expect(f.posts).toEqual([{ version: 1, kind: 'terminal', correlationID, sequence: 1, inputSHA256: hash(inputText),
+      inputMessageID, conversationID, messageID, text: 'HI' }]);
+    f.decode({ error: 'private provider detail' });
+    expect(f.diagnostics).toHaveLength(1);
+    expect(f.allPosts.map(p => p.kind)).toEqual(['diagnostic', 'terminal', 'invalidated']);
+  });
+
+  test('missing ancestry reports once without rejecting a later observed valid parent', async () => {
+    const f = fixture(); await ready(f); f.decode(final()); f.decode(terminal());
+    expect(f.posts).toEqual([]); expect(f.diagnostics).toHaveLength(1);
+    expect(f.diagnostics[0]).toMatchObject({ reason: 'ancestry_missing', calls: 3, instances: 1 });
+    f.decode({ type: 'conversation_detail_metadata' }); expect(f.diagnostics).toHaveLength(1);
+    f.decode(system()); expect(f.posts[0]).toMatchObject({ kind: 'terminal', text: 'HI' });
+    f.api.stop(correlationID);
+  });
+
+  test('concrete rejection reasons remain finite and precede unchanged invalidation packets', async () => {
+    for (const [reason, action] of [
+      ['route_changed', (f: ReturnType<typeof fixture>) => { f.location.href = 'https://chatgpt.com/c/' + otherID; f.mutate(); }],
+      ['wrapper_changed', (f: ReturnType<typeof fixture>) => { Object.defineProperty(f.O.prototype, 'recordCompletion', { ...f.original, value() {} }); f.mutate(); }],
+      ['parent_changed', (f: ReturnType<typeof fixture>) => f.decode(system(otherID))],
+      ['final_status', (f: ReturnType<typeof fixture>) => f.decode(final('HI', { status: 'finished_partial_completion' }))],
+      ['final_changed', (f: ReturnType<typeof fixture>) => f.decode(final('DIFFERENT'))],
+      ['error', (f: ReturnType<typeof fixture>) => f.decode({ error: { private: 'never exported' } })],
+      ['send_changed', (f: ReturnType<typeof fixture>) => f.send()],
+      ['expired', (f: ReturnType<typeof fixture>) => { f.tick(1000); [...f.timers.values()][0](); }],
+    ] as const) {
+      const f = fixture(); await ready(f); complete(f); action(f);
+      expect(f.allPosts.map(p => p.kind)).toEqual(['terminal', 'diagnostic', 'invalidated']);
+      expect(f.diagnostics[0].reason).toBe(reason);
+      expect(Object.keys(f.diagnostics[0]).sort()).toEqual([
+        'version', 'kind', 'correlationID', 'sequence', 'inputSHA256', 'reason', 'calls', 'instances',
+      ].sort());
+      expect(JSON.stringify(f.diagnostics)).not.toContain('private');
+      expect(JSON.stringify(f.diagnostics)).not.toContain('https://');
+      expect(JSON.stringify(f.diagnostics)).not.toContain(inputMessageID);
+    }
   });
 });

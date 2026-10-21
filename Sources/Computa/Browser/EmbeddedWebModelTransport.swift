@@ -338,6 +338,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var lastChanged = ContinuousClock.now
         var turnStarted = ContinuousClock.now
         var responseProfile: WebsiteResponseProfile?
+        var completionObserverArmed = false
+        var completionMatchDiagnostic: (reason: String, routeKind: String)?
         var profiledFirstPositive = false
         var profiledFirstCompletionCandidate = false
         var profiledCompletionTransitions = 0
@@ -887,10 +889,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // This optional observer cannot Send or grant ownership. Arm it
                 // for precisely this outgoing body before the existing single
                 // dispatch; an unsupported decoder retains the quiet fallback.
+                session.completionObserverArmed = false
+                session.completionMatchDiagnostic = nil
                 if session.provider == .chatgpt, session.usesSubmissionOwnership,
                    session.modelSelectionVerified, session.modelChoice != nil,
                    let generation = session.documentGeneration {
-                    _ = await browser.prepareChatGPTResponseCompletion(tabID: session.tabID, view: session.view,
+                    session.completionObserverArmed = await browser.prepareChatGPTResponseCompletion(tabID: session.tabID, view: session.view,
                         ownerToken: session.token, generation: generation, sequence: session.sequence + 1,
                         outboundSHA256: Self.promptFingerprint(outbound), outboundUTF8Bytes: outboundBytes,
                         deadline: .now + responseTimeout)
@@ -1676,6 +1680,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Provider observations are only an alternative to the quiet timer. The
     /// adapter must bind their exact final bytes/message to the current owned
     /// answer, and the unchanged fresh full proof must still succeed.
+    static func completionMatchDiagnostic(_ raw: Any?) -> (reason: String, routeKind: String)? {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["reason", "routeKind"],
+              let reason = value["reason"] as? String,
+              ["absent_candidate", "route_mismatch", "context_invalid", "current_body_invalid",
+               "text_relation", "assistant_id", "matched"].contains(reason),
+              let route = value["routeKind"] as? String,
+              ["local", "server", "root", "other"].contains(route) else { return nil }
+        return (reason, route)
+    }
+
     private func terminalCompletionReceipt(_ session: Session) -> ChatGPTResponseCompletion.Receipt? {
         guard session.provider == .chatgpt, session.state == "running", session.submitted,
               session.acknowledgedSendSequence == session.sequence, session.usesSubmissionOwnership,
@@ -1919,6 +1933,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         session.profileCompletionTransition(.completionCandidateArmed)
                     }
                     session.completionCandidate = true
+                    let initialCompletionDiagnostic = session.completionMatchDiagnostic
                     let terminalReady = terminalCandidate != nil
                         && terminalCandidate == terminalCompletionReceipt(session)
                         && observed["terminalCompletionMatched"] as? Bool == true
@@ -1983,8 +1998,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                             guard ContinuousClock.now - session.turnStarted < responseTimeout else { throw Failure.deadline }
                             logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
-                            if terminalReady {
-                                Self.inspectionLog.info("completionAdmission provider=chatgpt sequence=\(session.sequence) signal=decoded_terminal")
+                            if session.provider == .chatgpt {
+                                // A session-bound notice survives the ordinary log level and
+                                // distinguishes an actual quiet fallback from missing telemetry.
+                                // Diagnostics have no admission authority and contain no page text.
+                                let method = terminalReady ? "decoded_terminal" : "quiet_fallback"
+                                let initialReason = initialCompletionDiagnostic?.reason ?? "unavailable"
+                                let finalReason = session.completionMatchDiagnostic?.reason ?? "unavailable"
+                                let route = session.completionMatchDiagnostic?.routeKind ?? "unavailable"
+                                let receiptPresent = terminalCompletionReceipt(session) != nil
+                                Self.inspectionLog.notice("completionDecision version=1 provider=chatgpt session=\(session.token, privacy: .public) sequence=\(session.sequence) method=\(method, privacy: .public) quietReady=\(quietReady) observerArmed=\(session.completionObserverArmed) initialReceiptPresent=\(terminalCandidate != nil) finalReceiptPresent=\(receiptPresent) initialMatch=\(initialReason, privacy: .public) finalMatch=\(finalReason, privacy: .public) routeKind=\(route, privacy: .public)")
                             }
                             session.state = "complete"
                             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
@@ -3792,6 +3815,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        // Strip this content-free diagnostic before any observation can contribute
+        // to inference state. Unknown fields/values cannot become log content.
+        let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
+        if provider == .chatgpt, action == "inspect" {
+            session.completionMatchDiagnostic = completionDiagnostic
+        }
         let observationDiagnostic = ChatGPTObservationDiagnostic.remove(from: &observed,
             binding: provider == .chatgpt ? session.benchmarkObservationBinding : nil)
         logObservationDiagnostic(observationDiagnostic, session: session)

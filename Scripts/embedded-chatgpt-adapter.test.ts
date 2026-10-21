@@ -701,9 +701,9 @@ describe('ChatGPT terminal completion admission', () => {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
   const conversationID = '6ad86c7a-2284-8331-b846-a59490db0c46';
   const messageID = 'cea6201b-846d-404a-b4dc-f974e184065a';
-  const stage = async () => {
+  const stage = async (pathname = '/c/' + conversationID) => {
     const x = await chatTurnFixture(choice), click = x.send.onClick!;
-    x.send.onClick = () => { click(); x.f.location.pathname = '/c/' + conversationID;
+    x.send.onClick = () => { click(); x.f.location.pathname = pathname;
       x.f.document.URL = 'https://chatgpt.com' + x.f.location.pathname + '?temporary-chat=true'; };
     const record = await x.dispatch('Exact terminal candidate request', { deferModelVerification: true });
     const answer = x.answer('Complete source text');
@@ -719,8 +719,44 @@ describe('ChatGPT terminal completion admission', () => {
     const p = await stage(), before = p.x.picker!.trigger.clicks;
     const result = await p.x.observe(p.record, { deferModelVerification: false, terminalCompletionCandidate: p.candidate });
     expect(result.error).toBeUndefined(); expect(result.terminalCompletionMatched).toBe(true);
+    expect(result.terminalCompletionDiagnostic).toEqual({ reason: 'matched', routeKind: 'server' });
     expect(result.modelEvidence.selected).toEqual(choice); expect(result.submissionProof.fingerprint).toBe(p.record.fingerprint);
     expect(p.x.picker!.trigger.clicks).toBeGreaterThan(before); expect(p.x.send.clicks).toBe(1);
+  });
+  test('finite diagnostics identify the first failing terminal check without granting proof', async () => {
+    for (const mutation of ['absent', 'local', 'conversation', 'context', 'text', 'assistant_id']) {
+      const p = await stage(mutation === 'local'
+        ? '/c/local-chatgpt%3A11111111-1111-4111-8111-111111111111' : '/c/' + conversationID);
+      const candidate: any = { ...p.candidate };
+      if (mutation === 'conversation') candidate.conversationID = p.candidate.inputMessageID;
+      if (mutation === 'context') candidate.sequence = 2;
+      if (mutation === 'text') candidate.text += ' changed bytes';
+      if (mutation === 'assistant_id') candidate.messageID = p.candidate.inputMessageID;
+      const result = await p.x.observe(p.record, { deferModelVerification: true,
+        ...(mutation === 'absent' ? {} : { terminalCompletionCandidate: candidate }) });
+      const reason = mutation === 'absent' ? 'absent_candidate' : mutation === 'local' || mutation === 'conversation'
+        ? 'route_mismatch' : mutation === 'context' ? 'context_invalid' : mutation === 'text' ? 'text_relation' : 'assistant_id';
+      expect(result.error, mutation).toBeUndefined();
+      expect(result.terminalCompletionDiagnostic, mutation).toEqual({ reason, routeKind: mutation === 'local' ? 'local' : 'server' });
+      expect(Object.keys(result.terminalCompletionDiagnostic).sort()).toEqual(['reason', 'routeKind']);
+      expect(result.terminalCompletionMatched, mutation).toBeUndefined();
+      expect(result.terminalCompletionRepresentation, mutation).toBeUndefined();
+      expect(result.modelEvidence, mutation).toBeUndefined(); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+  test('diagnostics are fresh and do not decorate busy or failed reads', async () => {
+    const p = await stage();
+    const matched = await p.x.observe(p.record, { deferModelVerification: true, terminalCompletionCandidate: p.candidate });
+    expect(matched.terminalCompletionDiagnostic).toEqual({ reason: 'matched', routeKind: 'server' });
+    const missing = await p.x.observe(p.record, { deferModelVerification: true });
+    expect(missing.terminalCompletionDiagnostic).toEqual({ reason: 'absent_candidate', routeKind: 'server' });
+    expect(missing.terminalCompletionMatched).toBeUndefined(); expect(missing.terminalCompletionRepresentation).toBeUndefined();
+    p.x.f.body.append(new Element('BUTTON', { 'data-testid': 'stop-button' }));
+    const busy = await p.x.observe(p.record, { deferModelVerification: true, terminalCompletionCandidate: p.candidate });
+    expect(busy.terminalCompletionDiagnostic).toBeUndefined(); expect(busy.terminalCompletionMatched).toBeUndefined();
+    p.x.f.world.__computaModelOwner = 'foreign-owner';
+    const failed = await p.x.observe(p.record, { deferModelVerification: true, terminalCompletionCandidate: p.candidate });
+    expect(failed.error).toBeDefined(); expect(failed.terminalCompletionDiagnostic).toBeUndefined(); expect(p.x.send.clicks).toBe(1);
   });
   test('terminal data does not qualify partial or different DOM, wrong identity, stale sequence, or missing completion controls', async () => {
     for (const mutation of ['empty', 'partial', 'message_id', 'conversation_id', 'sequence', 'footer', 'busy', 'fenced_source', 'extra_key']) {

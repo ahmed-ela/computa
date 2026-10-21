@@ -10795,6 +10795,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCompletionMatchDiagnosticsRejectUnboundedOrAuthorityLikeFields() {
+        let diagnostic = EmbeddedWebModelTransport.completionMatchDiagnostic(["reason": "text_relation", "routeKind": "server"])
+        XCTAssertEqual(diagnostic?.reason, "text_relation")
+        XCTAssertEqual(diagnostic?.routeKind, "server")
+        for invalid: [String: Any] in [
+            ["reason": "page text must not reach logs", "routeKind": "server"],
+            ["reason": "matched", "routeKind": "https://chatgpt.com/c/private-id"],
+            ["reason": "matched", "routeKind": "server", "terminalCompletionMatched": true],
+            ["reason": "matched", "routeKind": 1],
+            ["reason": "matched"],
+        ] {
+            XCTAssertNil(EmbeddedWebModelTransport.completionMatchDiagnostic(invalid))
+        }
+    }
+
     func testChatGPTTerminalCompletionPublishesBeforeQuietOnlyAfterFreshOwnedFullProofAcrossRounds() async throws {
         let (fixture, token, view) = try await terminalCompletionFixture()
         defer { fixture.shutdown() }

@@ -205,6 +205,7 @@ final class EmbeddedBrowserSession {
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
         var responseCompletionObserver: ResponseCompletionObserver?
         var responseCompletion: ChatGPTResponseCompletion?
+        var responseCompletionDiagnosticLogged = false
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
@@ -980,6 +981,7 @@ final class EmbeddedBrowserSession {
         let duration = Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
         guard duration > 0 else { return false }
         entry.responseCompletion = lease
+        entry.responseCompletionDiagnosticLogged = false
         let evaluationDeadline = min(deadline, ContinuousClock.now + .seconds(1))
         let result = EmbeddedScriptResult()
         let reply: Data? = try? await withTaskCancellationHandler {
@@ -1052,11 +1054,25 @@ final class EmbeddedBrowserSession {
               entry.isModelOwned, !entry.isToolOwned, message.frameInfo.isMainFrame,
               entry.modelSignalOriginHost == "chatgpt.com", Self.responseCompletionURLAllowed(entry.view.url),
               let lease = entry.responseCompletion,
-              lease.isCurrent(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
-                generation: entry.tab.documentGeneration, sequence: lease.sequence) else { return }
+              lease.view == ObjectIdentifier(entry.view), lease.ownerToken == entry.modelChanges?.ownerToken,
+              lease.generation == entry.tab.documentGeneration else { return }
         let origin = message.frameInfo.securityOrigin
         guard origin.`protocol` == "https", origin.host == "chatgpt.com", origin.port == 0 || origin.port == 443 else { return }
-        if lease.receive(message.body) { entry.modelChanges?.signal() }
+        if let body = message.body as? [String: Any], body["kind"] as? String == "diagnostic" {
+            // Diagnostic packets are never passed to the authoritative receipt
+            // parser, even when malformed or foreign to the current lease.
+            guard let diagnostic = lease.diagnostic(body), !entry.responseCompletionDiagnosticLogged else { return }
+            entry.responseCompletionDiagnosticLogged = true
+            Self.inferencePrewarmLog.notice("completionObserver version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(diagnostic.reason.rawValue, privacy: .public) calls=\(diagnostic.calls) instances=\(diagnostic.instances)")
+            return
+        }
+        guard lease.isCurrent(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
+            generation: entry.tab.documentGeneration, sequence: lease.sequence) else { return }
+        if lease.receive(message.body) {
+            let state = lease.invalidated ? "invalidated" : "terminal"
+            Self.inferencePrewarmLog.notice("completionSignal version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) state=\(state, privacy: .public)")
+            entry.modelChanges?.signal()
+        }
     }
 
     private func revokeResponseCompletion(_ entry: Entry) {

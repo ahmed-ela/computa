@@ -10,6 +10,24 @@ final class ChatGPTResponseCompletion {
     static let maximumInputUTF8Bytes = 180_000
     static let maximumSequence = 16
 
+    enum DiagnosticReason: String, CaseIterable {
+        case runtimeUnsupported = "runtime_unsupported", callLimit = "call_limit", decoderLimit = "decoder_limit"
+        case routeChanged = "route_changed", wrapperChanged = "wrapper_changed"
+        case inputShape = "input_shape", inputHash = "input_hash", ownerConflict = "owner_conflict"
+        case parentChanged = "parent_changed", parentLimit = "parent_limit", ancestryMissing = "ancestry_missing"
+        case finalStatus = "final_status", finalChanged = "final_changed", terminalOrder = "terminal_order"
+        case error, sendChanged = "send_changed", expired, observerException = "observer_exception"
+    }
+
+    struct Diagnostic: Equatable {
+        let correlationID: UUID
+        let sequence: Int
+        let inputSHA256: String
+        let reason: DiagnosticReason
+        let calls: Int
+        let instances: Int
+    }
+
     struct Receipt: Equatable {
         let identity: UUID
         let revision: UInt64
@@ -64,6 +82,23 @@ final class ChatGPTResponseCompletion {
                  now: ContinuousClock.Instant = .now) -> Receipt? {
         guard isCurrent(view: view, ownerToken: ownerToken, generation: generation, sequence: sequence, now: now) else { return nil }
         return terminal
+    }
+
+    /// The first observed rejection may concern an unclaimed decoder, rather
+    /// than the eventual matching input. Parsing it never changes authority,
+    /// receipt identity, revocation or the original deadline, even after expiry.
+    func diagnostic(_ raw: Any) -> Diagnostic? {
+        guard let body = raw as? [String: Any],
+              Set(body.keys) == ["version", "kind", "correlationID", "sequence", "inputSHA256", "reason", "calls", "instances"],
+              Self.exactInteger(body["version"]) == 1, body["kind"] as? String == "diagnostic",
+              let correlation = Self.canonicalUUID(body["correlationID"]), correlation == correlationID,
+              Self.exactInteger(body["sequence"]) == sequence,
+              body["inputSHA256"] as? String == inputSHA256,
+              let reasonText = body["reason"] as? String, let reason = DiagnosticReason(rawValue: reasonText),
+              let calls = Self.exactInteger(body["calls"]), (0...257).contains(calls),
+              let instances = Self.exactInteger(body["instances"]), (0...4).contains(instances) else { return nil }
+        return Diagnostic(correlationID: correlation, sequence: sequence, inputSHA256: inputSHA256,
+                          reason: reason, calls: calls, instances: instances)
     }
 
     /// Foreign identities cannot revoke a current round. Once a matching

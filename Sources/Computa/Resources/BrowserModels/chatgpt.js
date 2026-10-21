@@ -2132,8 +2132,23 @@ function chatGPTTerminalResponseTextRelation(source, answer, extraction, message
 
 function chatGPTTerminalCompletionMatches(observed) {
   const candidate = input.terminalCompletionCandidate;
+  const finish = reason => {
+    // Content-free rejection facts only. They never supply a match bit or
+    // alter a busy/error/preparation read, and are recomputed for this read.
+    try {
+      if (input.action === 'inspect' && !observed.error && observed.busy === false && observed.answerComplete === true) {
+        const path = location.pathname;
+        const routeKind = path === '/' ? 'root'
+          : /^\/c\/local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+\/?$/.test(path) ? 'local'
+            : /^\/c\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/?$/.test(path) ? 'server' : 'other';
+        observed.terminalCompletionDiagnostic = { reason, routeKind };
+      }
+    } catch { /* Diagnostics cannot change completion admission. */ }
+    return reason === 'matched';
+  };
   const keys = ['correlationID', 'sequence', 'inputSHA256', 'inputMessageID', 'conversationID', 'messageID', 'text'];
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  if (candidate == null) return finish('absent_candidate');
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
     || Object.keys(candidate).length !== keys.length || !keys.every(key => Object.hasOwn(candidate, key))
     || !['correlationID', 'inputMessageID', 'conversationID', 'messageID'].every(key => typeof candidate[key] === 'string' && uuid.test(candidate[key]))
@@ -2144,22 +2159,22 @@ function chatGPTTerminalCompletionMatches(observed) {
     || !Array.isArray(input.expectedUserCounts) || ![1, 2].includes(input.expectedUserCounts.length)
     || !input.expectedUserCounts.includes(candidate.sequence)
     || !input.expectedUserCounts.every(count => count === candidate.sequence || count === candidate.sequence - 1)
-    || window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
-    || location.pathname !== '/c/' + candidate.conversationID
-    || globalThis.__computaModelOwner !== input.ownerToken
-    || observed.error || observed.busy !== false || observed.answerComplete !== true
-    || observed.userCount !== candidate.sequence) return false;
+    || window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL) return finish('context_invalid');
+  if (location.pathname !== '/c/' + candidate.conversationID) return finish('route_mismatch');
+  if (globalThis.__computaModelOwner !== input.ownerToken) return finish('context_invalid');
+  if (observed.error || observed.busy !== false || observed.answerComplete !== true
+    || observed.userCount !== candidate.sequence) return finish('current_body_invalid');
   const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
   if (!record || state.pending != null || !chatGPTSubmissionContext(state)
-    || record.phase !== 'verified' || record.sequence !== candidate.sequence || !chatGPTSubmissionPins(record)) return false;
+    || record.phase !== 'verified' || record.sequence !== candidate.sequence || !chatGPTSubmissionPins(record)) return finish('context_invalid');
   const current = chatGPTResponseReadSnapshot();
   if (current.busy !== false || !current.answer?.isConnected || !current.footer?.isConnected
     || current.text !== observed.text || current.answers.length !== observed.responseCount
     || current.users.length !== candidate.sequence || !current.copies.some(copy => copy.enabled)
-    || !chatGPTSubmissionBodyIntact(record, current.users.map(user => user.root))) return false;
+    || !chatGPTSubmissionBodyIntact(record, current.users.map(user => user.root))) return finish('current_body_invalid');
   const relation = chatGPTTerminalResponseTextRelation(candidate.text, current.answer,
     modelResponseExtraction(current.answer), candidate.messageID);
-  if (!relation) return false;
+  if (!relation) return finish('text_relation');
   // This attribute was observed on the final assistant's containing element,
   // after the decoded terminal event. Never borrow an ID from another turn.
   let scope = current.answer;
@@ -2169,17 +2184,19 @@ function chatGPTTerminalCompletionMatches(observed) {
         && current.answers.filter(answer => answer === scope || scope.contains(answer)).length === 1
         && !current.users.some(user => user.root === scope || scope.contains(user.root));
       if (matches) observed.terminalCompletionRepresentation = relation;
-      return matches;
+      return finish(matches ? 'matched' : 'assistant_id');
     }
   }
-  return false;
+  return finish('assistant_id');
 }
 function chatGPTFinalizeResponseRead(observed) {
+  delete observed.terminalCompletionDiagnostic;
   if (observed.error) return observed;
   const terminalChecked = () => {
     // Never retain a positive bit from an earlier read or across an await.
     delete observed.terminalCompletionMatched;
     delete observed.terminalCompletionRepresentation;
+    delete observed.terminalCompletionDiagnostic;
     if (chatGPTTerminalCompletionMatches(observed)) observed.terminalCompletionMatched = true;
     return observed;
   };
