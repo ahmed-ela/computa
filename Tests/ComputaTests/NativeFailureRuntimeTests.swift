@@ -57,32 +57,6 @@ final class NativeFailureRuntimeTests: XCTestCase {
         }
     }
 
-    func testChromeRecoveryExhaustionStopsRetriesAndPersistsWithoutInventingNavigation() async throws {
-        try await withHarness(chromeRecoveryFailure: true) { runtime, root, audit in
-            try await runtime.submit(prompt: "Synthetic exhausted Chrome recovery", toTaskID: "native-failure-task", modelID: self.modelID)
-            try await self.waitFor { audit.status == .waiting && !audit.diagnostics.isEmpty }
-            XCTAssertEqual(audit.diagnostics.count, 1)
-            XCTAssertTrue(audit.assistant.isEmpty)
-            XCTAssertTrue(audit.assistantDeltas.isEmpty)
-            XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("interrupt-order"), encoding: .utf8), "interrupt-first")
-            let records = try NativeFailureEvidenceStore(directory: root.appendingPathComponent("heydash-native-failures"))
-                .load(threadID: "native-failure-task")
-            XCTAssertEqual(records.count, 1)
-            let diagnostic = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[0].diagnosticText.utf8)) as? [String: Any])
-            XCTAssertEqual((diagnostic["error"] as? [String: String])?["code"], "chrome_navigation_recovery_required")
-            XCTAssertEqual(diagnostic["action_outcome"] as? String, "navigation_not_confirmed")
-            let reloaded = try await runtime.loadTasks()
-            XCTAssertEqual(reloaded.first?.entries.filter { $0.title == "Native action stopped" }.map(\.body), audit.diagnostics)
-            try await runtime.submit(prompt: "A new unrelated turn", toTaskID: "native-failure-task", modelID: self.modelID)
-            try await self.waitFor { audit.status == .completed }
-            XCTAssertEqual(audit.assistant, ["NEXT_TURN_OK"])
-            XCTAssertTrue(audit.assistantDeltas.isEmpty)
-            let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
-            let denied = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.identifier == "string:late-tool" })
-            XCTAssertNotNil(denied.object["error"])
-        }
-    }
-
     func testEvidenceWriteFailureStopsWithoutClaimingPersistence() async throws {
         try await withHarness { runtime, root, audit in
             // The store must reject a regular file where its directory belongs.
@@ -117,7 +91,7 @@ final class NativeFailureRuntimeTests: XCTestCase {
         }
     }
 
-    private func withHarness(chromeRecoveryFailure: Bool = false, expectedShutdownIssues: [String] = [],
+    private func withHarness(expectedShutdownIssues: [String] = [],
                              _ body: (CodexAppServerRuntime, URL, Audit) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaNativeFailure-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -128,12 +102,7 @@ final class NativeFailureRuntimeTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         var config = CodexAppServerRuntime.Configuration.localQwen
         config.executable = .fixture(path: executable.path)
-        // This retained compatibility fixture must admit its Chrome route to
-        // reach the injected typed failure. Default-off admission is tested
-        // separately; no Chrome connection or OS input is used here.
-        config.externalChromeToolsEnabled = true
         config.fixtureActivationFailurePID = 1234
-        config.fixtureChromeNavigationRecoveryFailure = chromeRecoveryFailure
         config.model = modelID
         config.codexHomePath = root.path
         config.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path

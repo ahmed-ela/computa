@@ -13,7 +13,7 @@ examples, approvals, and process-session limits.
 
 Private personal repository: [ahmed-wlb/computa](https://github.com/ahmed-wlb/computa). Repository access is required; this is not an anonymous public download.
 
-Next work: [Chrome/Computa lookup comparison and generalized evidence handling](TODO.md).
+Next work: [built-in browser tooling and generalized evidence handling](TODO.md).
 
 The complete Rust migration is being qualified on
 [`codex/browser-model-providers`](https://github.com/ahmed-ela/computa/pull/3).
@@ -65,19 +65,18 @@ cd computa
 ./Scripts/setup.sh --download-model
 ```
 
-This builds the Rust agent runtime, Octane/WebKit app and native helper from source, prepares an app-owned Python environment, downloads the pinned Qwen 3.5 4B 4-bit weights (~3.06 GB), installs into `~/Applications/Computa.app`, and opens it. Use `./Scripts/setup.sh --check` for a read-only prerequisite check. No LM Studio or installed Codex app is required. No model weights or executable binaries are stored in this Git repository.
+This builds the Rust agent runtime and Octane/WebKit app from source, prepares an app-owned Python environment, downloads the pinned Qwen 3.5 4B 4-bit weights (~3.06 GB), installs into `~/Applications/Computa.app`, and opens it. Use `./Scripts/setup.sh --check` for a read-only prerequisite check. No LM Studio or installed Codex app is required. No model weights or executable binaries are stored in this Git repository.
 
-The default local build is ad-hoc signed and supports chat and native Accessibility. **The optional Chrome extension bridge requires an Apple Development or Developer ID signing identity**; see the [signed build option](docs/BUILDING.md). The bridge does not drop its certificate checks to make an ad-hoc build connect. macOS permissions and browser pairing remain explicit user actions. Existing installed apps are backed up, not deleted.
+The default local build is ad-hoc signed and supports chat, the built-in browser and native Accessibility. An optional [signed build](docs/BUILDING.md) can use your Apple signing identity. macOS permissions remain explicit user actions. Existing installed apps are backed up, not deleted.
 
 ### Where all the source lives
 
 | Component | Source and locked dependencies |
 | --- | --- |
-| Swift host, computer-use harness, Chrome helper | [`Sources`](Sources), [`project.yml`](project.yml) |
+| Swift host and computer-use harness | [`Sources`](Sources), [`project.yml`](project.yml) |
 | Octane UI (built with Bun; rendered by system WebKit) | [`WebUI`](WebUI), [`WebUI/bun.lock`](WebUI/bun.lock) |
 | Rust agent runtime | [Exact public upstream commit](https://github.com/openai/codex/tree/4607249e430dac1c961df4dc615beae88e33cec8), [our complete patch](Runtime/patches/compaction-retention.patch), [checksum lock](Runtime/codex-source.lock.json) |
 | Headless MLX server and installation | [`Sources/Computa/Resources/MLXServer`](Sources/Computa/Resources/MLXServer), [`Scripts`](Scripts) |
-| Browser extension | [`BrowserExtension`](BrowserExtension) |
 
 To fetch and inspect the complete patched Rust tree without compiling:
 
@@ -95,9 +94,9 @@ The project has moved beyond a static UI shell: it launches an isolated App Serv
 
 ## Rename compatibility
 
-Computa is the product name used throughout this documentation, including reports about earlier versions. Historical filenames and compatibility identifiers retain their original spellings. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Computa. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`, `HeyDash.rememberedChromeConnection`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
+Computa is the product name used throughout this documentation, including reports about earlier versions. Historical filenames and compatibility identifiers retain their original spellings. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Computa. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
 
-The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `MACTOPUS_*`, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The browser capture field `mactopusClickability` also remains a stable protocol name. The current source-pinned engine is `mactopus-6`, as recorded in `Runtime/codex-source.lock.json`. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding. The repository is `ahmed-ela/computa`; existing clones can update their origin to `https://github.com/ahmed-ela/computa.git`. The source and release installers target `~/Applications/Computa.app` and can migrate a compatible `~/Applications/Mactopus.app`. They refuse installation if both names exist or either app is running. The existing bundle must have the same bundle identity; it is backed up under `~/Applications/Computa Backups` with its original name, and rollback restores its original path. Saved Computa data stays in its existing location. The mounted Computa preview installer successfully exercised this migration on the existing Mac; clean-Mac validation remains separate.
+The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `MACTOPUS_*`, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The browser capture field `mactopusClickability` also remains a stable protocol name. The current source-pinned engine is `mactopus-6`, as recorded in `Runtime/codex-source.lock.json`. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding. The repository is `ahmed-ela/computa`; existing clones can update their origin to `https://github.com/ahmed-ela/computa.git`. The source and release installers target `~/Applications/Computa.app` and can migrate a compatible `~/Applications/Mactopus.app`. They refuse installation if both names exist or either app is running. The existing bundle must have the same bundle identity; it is backed up under `~/Applications/Computa Backups` with its original name, and rollback restores its original path. Saved Computa data stays in its existing location. The mounted Computa preview installer successfully exercised this migration on the existing Mac; clean-Mac validation remains separate.
 
 ## Current architecture
 
@@ -245,47 +244,6 @@ its commands before starting a turn with reduced access.
 An automatic approval failure is shown as “Action paused” and is not retried in
 a loop; switch to Ask every time to review or decline it.
 
-### Remembered extension bridge (local developer installation)
-
-The optional [Computa Browser Bridge](BrowserExtension/README.md) uses a pinned
-Manifest V3 extension, a signed Swift native-messaging helper, and authenticated
-local IPC. Explicitly install it in the intended Chrome profile, choose **Pair
-with Computa** in its popup, then confirm **Pair and remember** in Computa.
-Pairing is held in this app's Keychain namespace and that extension installation;
-live sessions and tab handles are always fresh. It does not copy browser profiles
-or use the remote-debugging WebSocket approval flow.
-
-The existing `computer_v2_tabs` / `bind_tab` / semantic snapshot and action
-contract is unchanged. Chrome's debugger indicator and Cancel remain intact.
-Cancel suspends access until the user chooses Resume in the popup. **Disconnect
-Chrome** removes the saved pairing. A different profile, reinstall, changed
-permissions, or identity conflict requires explicit setup again. There is no
-silent fallback to the direct connection below. Routine app reconnection was
-verified locally; full browser restart, sleep/wake, and sustained concurrent
-human-use qualification remain separate gates. This is an unpacked developer
-extension, not a Chrome Web Store distribution.
-
-### Direct Chrome connection (legacy alternative)
-
-The separate native **Connect existing Chrome** control grants a revocable connection
-to the already-running, ordinary Chrome session. It requires an idle runtime and
-an explicit confirmation even in Full access. Chrome Remote Debugging must be
-enabled by the user, and Chrome may show its own Allow prompt. If macOS denies
-the connection-file read, check **Files & Folders → Computa → Google Chrome** (older macOS permission
-entries may retain a previous product name). That OS permission covers Chrome's app-data directory; Computa
-reads only `DevToolsActivePort`, not cookies or other profile files. Full Disk
-Access is not required. Disconnect revokes consent immediately, including while
-a connection is pending; quitting ends the live connection. **Connect & Remember**
-(or **Reconnect automatically…** for an already connected session) explicitly
-authorizes one reconnect attempt on each launch, when the runtime is idle and the
-same Chrome app/profile is already running. Only that approved scope is saved;
-process IDs, ports, endpoints and live consent tokens are never persisted. The
-first message waits for a pending reconnect. Chrome/macOS approval remains
-required if requested. **Disconnect Chrome** also forgets the saved choice;
-**Forget automatic connection** leaves the current session connected but disables
-future reconnection. Missing, changed, or invalid scope fails closed without
-launching Chrome, changing permissions, or retrying automatically.
-
 ## Native computer tool
 
 New tasks register action-specific `computer_v2_*` dynamic tools backed by the clean-room `AutomationCore` Swift target. The schemas describe each call, and Swift validates every field before dispatch because the local model server can accept malformed arguments despite a `required` schema. The production runtime defaults to host-owned `backgroundOnly` interaction: it does not activate apps, raise windows, or send global keyboard/pointer input. The model cannot relax this policy, including after a follow-up or compaction. The default model-facing contract is:
@@ -293,49 +251,39 @@ New tasks register action-specific `computer_v2_*` dynamic tools backed by the c
 | V2 tools | Behavior |
 | --- | --- |
 | `computer_v2_status`, `computer_v2_apps` | Read macOS authorization state or list running applications. |
-| `computer_v2_tabs`, `computer_v2_bind_tab` | With an explicitly connected Chrome session, list a bounded page of tab metadata and bind an observed opaque candidate token. Follow `next_cursor` until null for a complete inventory. Tokens belong to this task turn and connection; binding does not activate, navigate, or close the tab. |
-| `computer_v2_open` | Bind the selected window of an already-running application by bundle identifier, without launch or activation. Omitted `activation` means `"none"`. Native URL navigation, new tabs, and isolated profiles are unavailable in background-only mode. For existing Chrome webpage content, prefer `tabs` → `bind_tab`. |
+| `computer_v2_open` | Bind the selected window of an already-running application by bundle identifier, without launch or activation. Omitted `activation` means `"none"`. Native URL navigation, new tabs, and isolated profiles are unavailable in background-only mode. Webpages use the built-in `browser_*` tools. |
 | `computer_v2_snapshot` | Read a bounded semantic page with snapshot-scoped indices. Use `view: "content"`, `"headings"`, or `"links"` to discover unknown text; follow an opaque `cursor` alone, or expand an observed `snapshot_id` + `element_index`. `query` is a literal text filter, not an extraction instruction. |
-| `computer_v2_ax`, `computer_v2_set_text` | Perform a checked, supported background semantic action on a current inspected native element or exact brokered-tab element. `AXRaise` and foreground/global-input fallbacks are rejected. Setting text does not establish submission. |
+| `computer_v2_ax`, `computer_v2_set_text` | Perform a checked, supported background semantic action on a current inspected native element. `AXRaise` and foreground/global-input fallbacks are rejected. Setting text does not establish submission. |
 | `computer_v2_verify` | Verify one changed, previously observed property against a fresh same-target read, using an app-issued operation receipt. `value` corresponds to `value=`, `text` to `label=`, and `document_url` to `url=`. This is not a model-supplied success flag. |
-| `computer_v2_capture` | Return a read-only image of the exact bound native window without activation, with an `observation_id` rather than an input-capable `capture_id`. It grants no click or keyboard capability and no synchronized AX. Brokered Chrome tabs reject this tool. |
+| `computer_v2_capture` | Return a read-only image of the exact bound native window without activation, with an `observation_id` rather than an input-capable `capture_id`. It grants no click or keyboard capability and no synchronized AX. |
 
-Browser actions now use host-owned **act → observe → verify** execution. An observed link destination or requested field value supplies an automatic postcondition. Other browser presses require a typed `postcondition` before approval/input: an observed result `value`, complete rendered `region_text`, or a `detail_view` heading already observed within the selected row/card. A detail view requires a same-origin URL transition and the exact unique heading, not just an arbitrary page change. No model JavaScript or new browser permission is introduced.
-
-The runtime retains the immutable plan, bounded baseline, target identity and three-read verification budget outside the model summary. It rechecks the baseline before dispatch, sends input once, and observes the result without another model round trip. Delayed rendering or an uncertain dispatch acknowledgement can receive read-only reconciliation, never automatic input replay. Region verification tolerates replacement text children; replacement containers require the same retained parent and corroborating named/structural identity. Missing, ambiguous or truncated evidence remains unverified. These receipts survive same-turn compaction; they do not yet provide automatic crash/restart recovery or transfer old element authority into a new user turn.
-
-`VERIFIED_PROPERTY` proves only the declared property. It does not prove a whole task, search submission, empty results, or the truth of an arbitrary final answer. Unresolved plans block further input and verified completion. The final-answer guard remains in place. Native-app verification is unchanged; this automatic path qualifies browser actions only.
+Webpage tasks use the separate built-in `browser_*` contract, including current
+page observations, exact snapshot references and native approval for mutations.
+See [built-in browser tools](docs/BUILT-IN-BROWSER-TOOLS.md). Native app actions
+retain host-owned postconditions and read-only verification; a dispatch receipt
+alone is not proof that the requested task completed.
 
 `computer_v2_ground_click`, `computer_v2_click`, `computer_v2_pointer`, `computer_v2_keypress`, and `computer_v2_type` are not registered for the default runtime. Its visual-grounding sidecar is not warmed up. Direct calls from an older schema are rejected before approval or input. Pure legacy observations remain available, but legacy mutations are rejected and directed to the scoped V2 path. An unavailable app or unsupported background action is a capability limitation, not a reason to open a new tab, activate the app, or guess a pixel click. Repeated requests for the unchanged foreground-only capability are bounded and stopped without abandoning the chat.
 
 Allowed mutations use the native approval controller: Ask every time waits for a human decision; Full access automatically resolves **only requests allowed by the host policy**. Full access does not enable foreground input. The V2 executor binds the running app to its task and rechecks its process, bundle, and exact inspected window across approval. The model need not repeat a process ID on every call. Native AX can cause an application to activate itself; the runtime checks foreground identity around dispatch, revokes the binding on a detected change, preserves uncertainty, and does not restore focus or replay input. This boundary check cannot detect every delayed effect or a focus change away and back between checks, so it is not a universal noninterference guarantee.
 
-The separately approved Chrome connection exposes `tabs` → `bind_tab` → semantic snapshot/action tools for exact background tabs. The direct connection validates the selected process, connection-file generation and loopback listener at connection and wire admission. Ambiguous or unreadable identity fails closed instead of guessing. No cookies, credentials, or profile files are copied, and normal Chrome remains user-owned during shutdown.
-
-Borrowed-tab inventories are capped at 12 KiB of encoded JSON per page, with
-UTF-8-safe title truncation and explicit omission of oversized URLs; shortened
-URLs are never presented as navigable addresses. Native binding metadata stays
-intact. Two turns cannot reserve the same target concurrently. Cancellation
-revokes the original turn and detaches its original session, never closing a
-user-owned tab or browser. Borrowed semantic reads/actions do not take the global
-desktop-input lane. Browser screenshot, coordinate and keyboard tools remain
-unavailable; actions still need fresh snapshots and normal native approval.
-This routing is not yet evidence of real-Qwen accuracy or concurrent-user
-non-interference; those live qualifications remain pending.
-
 ### Retained foreground tooling (host/test opt-in only)
 
 The guarded foreground and global-input implementations remain for an explicit host/test `foregroundAllowed` configuration; they are not the production default, and the app currently has no user-facing switch for this mode. A model argument or Full access cannot opt into it. Foreground app launch/navigation additionally requires explicit `activation: "foreground"`; omitted activation still means non-activating binding. The historical benchmarks below describe their original configurations, not background-only qualification.
 
-Within that host opt-in, an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; foreground pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while Computa runs.
+A native semantic mutation requires the current snapshot UUID and element index;
+foreground pointer input requires a current `capture_id` and image coordinates.
+The runtime rejects stale or changed native windows and targets. A consumed
+observation must be replaced with a fresh snapshot or capture to verify the result.
+Window capture is read-only and requires macOS Screen Recording access.
 
-Computa remains semantic-first: it uses native Accessibility or the brokered browser DOM whenever those surfaces expose the intended control. Only under the foreground host opt-in is `computer_v2_ground_click` available as a native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. That opt-in runtime starts preparing the sidecar when a supported-model turn begins so planning can overlap model load and warm-up; background-only turns never start this warm-up. GoClick and GUI-Owl 2B run on each grounding request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
+Computa remains semantic-first: it uses native Accessibility or the built-in browser DOM whenever those surfaces expose the intended control. Only under the foreground host opt-in is `computer_v2_ground_click` available as a native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. That opt-in runtime starts preparing the sidecar when a supported-model turn begins so planning can overlap model load and warm-up; background-only turns never start this warm-up. GoClick and GUI-Owl 2B run on each grounding request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
 
 ### Shared browser checks and permissions
 
-Browser approvals include `observed_page_url` from the immutable retained browser snapshot, in addition to the bundle, PID, handle, and epoch. No title is inferred from page-controlled labels or parsed out of formatted text. URL display does not replace post-approval document and node revalidation. Runtime-owned lifetimes also cover targets still being created: terminal cleanup can synchronously revoke a pending open or mutation before scheduling network cleanup.
-
-The opt-in model-free production broker gate is `CuaV2SafeChromeSemanticLiveTests/testProductionBrokerMutatesOnlyBackgroundTabAndShutsDown`, enabled with `LOCALCODEX_LIVE_CHROME_BROKER_PRIMITIVE_TEST=1`. It uses an inline, nonce-restricted loopback fixture, same-title tabs, independent acknowledged page telemetry, a retained-snapshot reuse refusal, and process-group/profile-marker cleanup checks. It does not start App Server or LM Studio and does not request a Computa approval. The ordinary semantic and same-title model gates honor `LOCALCODEX_LIVE_MODEL_ID` for the supplied 4B/9B IDs. Their capability deadline is 180 seconds; the 30-second performance SLO is reported separately and does not terminate a capability trial. Every gate prints `BROWSER_GATE_ARTIFACT_DIR`; set the absolute `LOCALCODEX_LIVE_ARTIFACT_DIR` to choose a durable root. Model wire traces and result/cleanup records are retained there. Model-run JSON records use schema version 8, with separate functional, protocol, harness/model-failure, active-tab, global-application-focus, and owned-cleanup outcomes. The model gates await independent successful-press proof before the tool response and normal terminal tab closure; B can also be checked after the turn. No new gate result is claimed here.
+Built-in browser actions retain their inspected page and document identity across
+approval and revalidate the selected element before input. Task cleanup revokes
+only the task's authority and closes only its owned tabs.
 
 Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in Computa Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt. If the request remains denied, Computa opens **System Settings → Privacy & Security → Screen & System Audio Recording** when that pane link is available, or opens System Settings as a fallback, so the user can add and enable the app in the screen-recording list, not the audio-only list. Relaunch Computa after granting access, then refresh its Settings status. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
 
@@ -541,9 +489,8 @@ Qwen tasks and sustained concurrent human use still require separate qualificati
 ### Website models
 
 In the Swift app, choose **ChatGPT**, **Gemini**, or **Claude** after signing into that provider in the Browser
-pane. All three use Computa's WebKit profile and require neither Chrome nor its
-extension for inference. Chrome connections remain available independently for
-ordinary browser tools.
+pane. All three use Computa's WebKit profile for inference. Ordinary browser
+tools also use the app's built-in browser.
 These website routes do not require provider API keys.
 
 Each inference creates a new owned, inactive website chat. ChatGPT and Gemini
@@ -639,13 +586,12 @@ LOCALCODEX_LIVE_MODEL_ID=lmstudio-community/Qwen3.5-4B-MLX-4bit \
   swift test --filter LocalQwenLiveTests/testProductionRuntimeExecutesReadOnlyComputerTool
 ```
 
-The V2 desktop gates are separate, explicit opt-ins. Set `LOCALCODEX_LIVE_MODEL_ID` to the installed model being checked and run one model at a time; the Chrome gate requires an explicit model ID. It opens a unique `https://example.com/` URL, reads the bound Chrome Accessibility tree, and checks the nonce URL and page heading independently. The Calculator gates observe the bound app, approve a single digit-1 `AXPress`, or approve one image-coordinate click only if its resolved point lies inside the independently measured digit-1 button. They also inspect the resulting Calculator display. These gates do not exercise the blocked historical browser fixture:
+The V2 desktop gates are separate, explicit opt-ins. Set `LOCALCODEX_LIVE_MODEL_ID`
+to the installed model being checked and run one model at a time. Calculator
+gates observe the bound app, approve one semantic press or one checked image
+coordinate click, then independently inspect the display.
 
 ```sh
-LOCALCODEX_LIVE_CHROME_V2_READ_TEST=1 \
-LOCALCODEX_LIVE_MODEL_ID=lmstudio-community/Qwen3.5-4B-MLX-4bit \
-  swift test --filter ChromeV2LiveTests/testBoundChromeReadOnlyV2WithSelectedModel
-
 LOCALCODEX_LIVE_SEMANTIC_COMPUTER_TEST=1 \
 LOCALCODEX_LIVE_MODEL_ID=lmstudio-community/Qwen3.5-4B-MLX-4bit \
   swift test --filter LocalQwenLiveTests/testProductionRuntimeObservesBoundCalculatorWithV2
@@ -659,7 +605,8 @@ LOCALCODEX_LIVE_MODEL_ID=lmstudio-community/Qwen3.5-4B-MLX-4bit \
   swift test --filter CalculatorVisualV2LiveTests/testModelClicksCalculatorDigitOneFromDisplayCapture
 ```
 
-The historical semantic and visual Chrome fixture tests are retained as V1 evidence but now skip unconditionally. They use a blocked local file-URL fixture and the persisted legacy `computer` schema; do not invoke them as V2 acceptance tests.
+Chrome connection implementations and their executable fixtures have been removed.
+Dated Chrome results below describe earlier builds and are retained only as historical evidence.
 
 Normal test runs compile the live cases but skip external model and desktop work. The presence of a live test is not evidence that it passed.
 
@@ -718,9 +665,7 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 ## Current limitations
 
 - Tasks support native `exec_command`, `write_stdin`, and `apply_patch` alongside `computer_v2_*`. Choose a project folder before sending a new chat, then use **Changes** to review recorded patches or current Git changes, stage/unstage files and hunks, or revert unstaged changes with confirmation. See [code editing and review](docs/CODE-EDITING.md), [CLI limits](docs/COMMANDS.md), and [TODO.md](TODO.md) for validation boundaries.
-- Ordinary Chrome can be bound for non-activating native AX/read-only capture, or separately connected by the native user for exact background DOM tab access. The default runtime does not permit native URL navigation or global input. The retained foreground host/test opt-in requires a positively identified native address bar for existing-mode navigation and fails closed otherwise; its explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Owned brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
-- Brokered actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is retained only for foreground host/test opt-in native-window work and does not add browser visual control.
-- Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-session detachment (borrowed) or exact-target closure (owned). Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.
+- Built-in browser actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is retained only for foreground host/test opt-in native-window work and does not add browser visual control.
 - This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but Computa does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
 - The historical semantic and visual smoke turns proved V1 model/runtime paths on the controlled Chrome fixture; they do not establish V2 performance or reliable tool selection on arbitrary interfaces.
 - The focused-window screenshot reduces visible image size, but a visual grounder is still probabilistic. The agreement threshold, whole-window freshness checks, native approval, and post-action verification reduce risk; they do not establish reliability on arbitrary apps, targets, display scales, or instructions.

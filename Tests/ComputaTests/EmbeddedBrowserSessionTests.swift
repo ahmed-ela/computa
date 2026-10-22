@@ -140,8 +140,10 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let humanID = try session.createTab()
         let human = try XCTUnwrap(session.webView(for: humanID))
         var constructionPolicy: WKPreferences.InactiveSchedulingPolicy?
+        var constructionHasNoScripts = false
         let modelID = try session.createUnloadedModelTabForTesting { configuration in
             constructionPolicy = configuration.preferences.inactiveSchedulingPolicy
+            constructionHasNoScripts = configuration.userContentController.userScripts.isEmpty
             return WKWebView(frame: .zero, configuration: configuration)
         }
         let model = try XCTUnwrap(session.webView(for: modelID))
@@ -161,7 +163,16 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertFalse(model.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
         XCTAssertFalse(tool.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
         XCTAssertTrue(human.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
-        XCTAssertTrue(model.configuration.userContentController.userScripts.isEmpty)
+        XCTAssertTrue(constructionHasNoScripts)
+        // The production completion observer is installed only after the
+        // inference view exists. It must never enter human or tool views.
+        let scripts = model.configuration.userContentController.userScripts
+        XCTAssertEqual(scripts.count, 1)
+        XCTAssertTrue(try XCTUnwrap(scripts.first).source.contains(EmbeddedBrowserSession.responseCompletionName))
+        XCTAssertTrue(try XCTUnwrap(scripts.first).isForMainFrameOnly)
+        for view in [human, tool, laterHuman] {
+            XCTAssertTrue(view.configuration.userContentController.userScripts.isEmpty)
+        }
     }
 
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {

@@ -17,7 +17,7 @@ async function file(path: string, contents = "fixture") {
 async function app(path: string, identity = "com.ahmedelamin.LocalCodex", marker = "new build", executable = "Computa") {
   await file(join(path, "Contents/Info.plist"), JSON.stringify({ CFBundleIdentifier: identity, CFBundleExecutable: executable }));
   await file(join(path, "Contents/MacOS", executable), marker);
-  for (const relative of ["ChromeBridge/ChromeBridgeHost", "AgentRuntime/codex-app-server", "AgentRuntime/manifest.json",
+  for (const relative of ["AgentRuntime/codex-app-server", "AgentRuntime/manifest.json",
     "MLXServer/server.py", "WebUI/index.html"]) await file(join(path, "Contents/Resources", relative));
 }
 
@@ -115,11 +115,11 @@ describe("source prerequisite checks", () => {
 });
 
 describe("source build flow", () => {
-  test("explicit certificate signs helper and outer app and checks Apple trust", async () => {
+  test("explicit certificate signs the app and checks Apple trust", async () => {
     const f = await fixture();
     await setup(parseOptions(["--build-only", "--signing-identity", "Apple Development: Fixture (FIXTURE123)"]), f.context);
     const signatures = f.calls.filter(call => call[0] === "/usr/bin/codesign" && call.includes("--sign"));
-    expect(signatures).toHaveLength(2);
+    expect(signatures).toHaveLength(1);
     expect(signatures.every(call => call[call.indexOf("--sign") + 1] === "ABCDEF0123456789ABCDEF0123456789ABCDEF01")).toBe(true);
     expect(f.calls.some(call => call.includes("=anchor apple generic"))).toBe(true);
   });
@@ -140,7 +140,7 @@ describe("source build flow", () => {
     expect(f.calls.find(call => call[0] === "xcodebuild" && call.includes("build"))).toContain("DEVELOPMENT_TEAM=");
     expect(f.calls.some(call => call.includes("Scripts/install-mlx-runtime.sh") || call[0] === "/usr/bin/open")).toBe(false);
     const signatures = f.calls.filter(call => call[0] === "/usr/bin/codesign" && call.includes("--sign"));
-    expect(signatures).toHaveLength(2);
+    expect(signatures).toHaveLength(1);
     expect(signatures.every(call => call[call.indexOf("--sign") + 1] === "-")).toBe(true);
     expect(signatures.some(call => call.at(-1)?.endsWith("AgentRuntime/codex-app-server"))).toBe(false);
     expect(await lstat(join(f.context.userHome, "Applications")).catch(() => null)).toBeNull();
@@ -286,4 +286,33 @@ describe("installation preservation", () => {
     await expect(installApp(f.context, source)).rejects.toThrow("previous app was preserved");
     expect(await readFile(join(destination, "Contents/MacOS/Computa"), "utf8")).toBe("previous build");
   });
+});
+
+test("source upgrade removes only retired generated resources and preserves the old installation", async () => {
+  const f = await fixture();
+  const product = join(f.context.root, ".build/SourceInstall/Build/Products/Release/Computa.app");
+  const installed = join(f.context.userHome, "Applications/Computa.app");
+  await app(installed, undefined, "previous build");
+  const retired = ["Contents/Resources/ChromeBridge", "Contents/Resources/BrowserExtension"];
+  for (const relative of retired) {
+    await file(join(product, relative, "stale"), "generated stale resource");
+    await file(join(installed, relative, "stale"), "previous installation resource");
+  }
+  const unrelated = "Contents/Resources/unrelated-fixture.txt";
+  await file(join(product, unrelated), "preserve");
+  const run = f.context.run;
+  f.context.run = async (...args) => {
+    if (args[0][0] === "/usr/bin/codesign" && args[0].includes("--sign")) {
+      for (const relative of retired) expect(await lstat(join(product, relative)).catch(() => null)).toBeNull();
+    }
+    return run(...args);
+  };
+  const result = await setup(parseOptions(["--no-launch"]), f.context);
+  expect(result.backup).toBeDefined();
+  for (const relative of retired) {
+    expect(await lstat(join(result.app!, relative)).catch(() => null)).toBeNull();
+    expect(await readFile(join(result.backup!, relative, "stale"), "utf8")).toBe("previous installation resource");
+  }
+  expect(await readFile(join(result.app!, unrelated), "utf8")).toBe("preserve");
+  expect(await readFile(join(result.backup!, "Contents/MacOS/Computa"), "utf8")).toBe("previous build");
 });

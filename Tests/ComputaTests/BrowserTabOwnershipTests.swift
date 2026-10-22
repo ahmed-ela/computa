@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import Computa
 
-/// These are adapter-independent lifecycle tests, not an ordinary-Chrome live gate.
+/// Lifecycle tests shared by the built-in browser transport.
 final class BrowserTabOwnershipTests: XCTestCase {
     func testBorrowedBindingDoesNotCreateActivateOrCloseTarget() async throws {
         let fixture = OwnershipFixture()
@@ -308,8 +308,7 @@ final class BrowserTabOwnershipTests: XCTestCase {
 private struct OwnershipFixture: Sendable {
     let target = BrowserTarget(
         targetID: "user-target", instanceToken: "user-instance", title: "User tab",
-        url: URL(string: "https://example.test/existing")!,
-        webSocketURL: URL(string: "ws://127.0.0.1/user-target")!
+        url: URL(string: "https://example.test/existing")!
     )
     let transport: OwnershipTransport
     let broker: BrowserTabSessionBroker
@@ -328,7 +327,7 @@ private struct OwnershipFixture: Sendable {
     }
 
     func snapshot(_ binding: BrowserTabBinding) async throws -> BrowserTabObservation {
-        try await broker.snapshot(taskKey: "task", binding: binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        try await broker.snapshot(taskKey: "task", binding: binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
     }
 
     func press(_ observation: BrowserTabObservation) async throws {
@@ -367,7 +366,7 @@ private actor OwnershipTransport: BrowserTabTransport {
         guard let prior = targets["user-target"] else { return }
         targets[prior.targetID] = BrowserTarget(
             targetID: prior.targetID, instanceToken: "replacement", title: prior.title,
-            url: prior.url, webSocketURL: prior.webSocketURL
+            url: prior.url
         )
     }
 
@@ -375,7 +374,7 @@ private actor OwnershipTransport: BrowserTabTransport {
         lifecycleCalls.append("create")
         let target = BrowserTarget(
             targetID: "owned-target", instanceToken: "owned-instance", title: "Owned tab",
-            url: url, webSocketURL: URL(string: "ws://127.0.0.1/owned-target")!
+            url: url
         )
         targets[target.targetID] = target
         return target

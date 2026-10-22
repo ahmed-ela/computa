@@ -16,8 +16,6 @@ protocol AgentRuntimeClient: Sendable {
     func interrupt(taskID: AgentTask.ID) async throws
     func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt
     func resolveApproval(requestID: String, approved: Bool) async throws
-    func connectChrome(_ request: ChromeConnectionRequest) async throws
-    func disconnectChrome() async
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async
     func configureAPIProviders(_ providers: [APIProviderDefinition],
@@ -55,12 +53,6 @@ extension AgentRuntimeClient {
         throw AgentRuntimeCapabilityError.compactionUnsupported
     }
 
-    func connectChrome(_ request: ChromeConnectionRequest) async throws {
-        throw AgentRuntimeCapabilityError.chromeConnectionUnsupported
-    }
-
-    func disconnectChrome() async {}
-
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {}
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {}
 
@@ -84,7 +76,6 @@ extension AgentRuntimeClient {
 enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case steeringUnsupported
     case compactionUnsupported
-    case chromeConnectionUnsupported
     case workspaceSelectionUnsupported
     case accessModeUnsupported
     case apiProvidersUnsupported
@@ -95,8 +86,6 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support steering an active turn. Your message was not sent."
         case .compactionUnsupported:
             "This runtime does not support context compaction."
-        case .chromeConnectionUnsupported:
-            "This runtime does not support connecting to your existing Chrome session."
         case .workspaceSelectionUnsupported:
             "This runtime does not support choosing a project folder."
         case .accessModeUnsupported:
@@ -124,7 +113,6 @@ enum AgentRuntimeEvent: Sendable {
     case approvalRequested(ActionApprovalRequest)
     case approvalResolved(requestID: String)
     case connectionChanged(RuntimeConnectionState)
-    case chromeConnectionChanged(connectionID: UUID, state: ChromeConnectionState)
 }
 
 enum RuntimeConnectionState: Equatable, Sendable {

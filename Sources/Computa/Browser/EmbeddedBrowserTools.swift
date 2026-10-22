@@ -3,7 +3,7 @@ import CoreFoundation
 import Foundation
 
 /// Strict model-facing contract for Computa's own browser, independent of
-/// Chrome attachment and native computer/window input.
+/// native computer/window input.
 enum EmbeddedBrowserTools {
     enum MutationEligibilityFailure: Error, LocalizedError, Equatable {
         case disabledTarget, pressUnavailable, fillUnavailable

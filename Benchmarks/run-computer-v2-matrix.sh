@@ -5,9 +5,9 @@ set -o pipefail
 
 usage() {
     printf '%s\n' \
-        'Usage: Benchmarks/run-computer-v2-matrix.sh [--models 4b,9b] [--tasks status,chrome,semantic,combined,visual,interrupt] [--reps N]' \
+        'Usage: Benchmarks/run-computer-v2-matrix.sh [--models 4b,9b] [--tasks status,semantic,combined,visual,interrupt] [--reps N]' \
         '' \
-        'Defaults: 4B and 9B, all five V2 gates, three fresh trials per cell.' \
+        'Defaults: 4B and 9B, all four V2 gates, three fresh trials per cell.' \
         '27B remains opt-in with --models 27b; it is never selected by default.' \
         'interrupt is an optional transport-cancellation gate, not a desktop-action task.' \
         'The runner is serial. Results go to a unique directory under ../outputs.' \
@@ -15,7 +15,7 @@ usage() {
 }
 
 models_arg='4b,9b'
-tasks_arg='status,chrome,semantic,combined,visual'
+tasks_arg='status,semantic,combined,visual'
 reps=3
 dry_run=0
 while (( $# > 0 )); do
@@ -42,7 +42,7 @@ while (( $# > 0 )); do
 done
 
 [[ "$models_arg" == 'all' ]] && models_arg='4b,9b'
-[[ "$tasks_arg" == 'all' ]] && tasks_arg='status,chrome,semantic,combined,visual'
+[[ "$tasks_arg" == 'all' ]] && tasks_arg='status,semantic,combined,visual'
 if [[ ! "$reps" =~ ^[0-9]+$ ]] || (( reps < 1 || reps > 20 )); then
     printf '%s\n' '--reps must be an integer from 1 through 20.' >&2
     exit 2
@@ -58,7 +58,7 @@ for model in "${requested_models[@]}"; do
     case "$model" in 4b|9b|27b) ;; *) printf 'Unknown model: %s\n' "$model" >&2; exit 2 ;; esac
 done
 for task in "${requested_tasks[@]}"; do
-    case "$task" in status|chrome|semantic|combined|visual|interrupt) ;; *) printf 'Unknown task: %s\n' "$task" >&2; exit 2 ;; esac
+    case "$task" in status|semantic|combined|visual|interrupt) ;; *) printf 'Unknown task: %s\n' "$task" >&2; exit 2 ;; esac
 done
 
 # Canonical order avoids reloading a model between task types.
@@ -67,7 +67,7 @@ tasks=()
 for model in 4b 9b 27b; do
     [[ ",$models_arg," == *",$model,"* ]] && models+=("$model")
 done
-for task in status chrome semantic combined visual interrupt; do
+for task in status semantic combined visual interrupt; do
     [[ ",$tasks_arg," == *",$task,"* ]] && tasks+=("$task")
 done
 
@@ -82,7 +82,6 @@ model_id() {
 gate() {
     case "$1" in
         status) printf '%s\n' 'LOCALCODEX_LIVE_MODEL_TEST' 'LocalQwenLiveTests/testProductionRuntimeExecutesReadOnlyComputerTool' ;;
-        chrome) printf '%s\n' 'LOCALCODEX_LIVE_CHROME_V2_READ_TEST' 'ChromeV2LiveTests/testBoundChromeReadOnlyV2WithSelectedModel' ;;
         semantic) printf '%s\n' 'LOCALCODEX_LIVE_CALCULATOR_MUTATION_TEST' 'LocalQwenLiveTests/testProductionRuntimePressesCalculatorDigitOneWithV2' ;;
         combined) printf '%s\n' 'LOCALCODEX_LIVE_COMBINED_CAPTURE_TEST' 'LocalQwenLiveTests/testProductionRuntimeUsesCombinedCalculatorCaptureWithV2' ;;
         visual) printf '%s\n' 'LOCALCODEX_LIVE_VISUAL_CALCULATOR_TEST' 'CalculatorVisualV2LiveTests/testModelClicksCalculatorDigitOneFromDisplayCapture' ;;
@@ -201,7 +200,6 @@ for model in "${models[@]}"; do
             artifact_paths='[]'
             artifact_records='[]'
             for artifact_dir in "$system_tmp"/LocalCodexLiveTest-* \
-                "$system_tmp"/LocalCodexChromeV2-* \
                 "$system_tmp"/LocalCodexVisualCalculator-*; do
                 [[ -d "$artifact_dir" && "$artifact_dir" -nt "$trial_dir/started.marker" ]] || continue
                 artifact_paths="$(jq -n --argjson paths "$artifact_paths" --arg path "$artifact_dir" '$paths + [$path]')"

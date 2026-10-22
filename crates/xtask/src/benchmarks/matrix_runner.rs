@@ -9,16 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const TASK_ORDER: &[&str] = &[
-    "status",
-    "chrome",
-    "semantic",
-    "combined",
-    "visual",
-    "interrupt",
-];
+const TASK_ORDER: &[&str] = &["status", "semantic", "combined", "visual", "interrupt"];
 const MODEL_ORDER: &[&str] = &["4b", "9b", "27b"];
-const DEFAULT_TASKS: &str = "status,chrome,semantic,combined,visual";
+const DEFAULT_TASKS: &str = "status,semantic,combined,visual";
 const DEFAULT_MODELS: &str = "4b,9b";
 const TRIAL_DEADLINE: Duration = Duration::from_secs(950);
 const CLEANUP_DEADLINE: Duration = Duration::from_secs(10);
@@ -35,7 +28,6 @@ pub struct MatrixRunOptions {
 #[serde(rename_all = "snake_case")]
 pub enum MatrixTask {
     Status,
-    Chrome,
     Semantic,
     Combined,
     Visual,
@@ -45,7 +37,6 @@ impl MatrixTask {
     fn parse(value: &str) -> Result<Self> {
         Ok(match value {
             "status" => Self::Status,
-            "chrome" => Self::Chrome,
             "semantic" => Self::Semantic,
             "combined" => Self::Combined,
             "visual" => Self::Visual,
@@ -56,7 +47,6 @@ impl MatrixTask {
     pub fn name(self) -> &'static str {
         match self {
             Self::Status => "status",
-            Self::Chrome => "chrome",
             Self::Semantic => "semantic",
             Self::Combined => "combined",
             Self::Visual => "visual",
@@ -93,12 +83,6 @@ fn definition(task: MatrixTask) -> Value {
             "Production Runtime selected-model turn; exactly one computer_v2_status({}); exact LOCAL_COMPUTER_TOOL_OK assistant and correlated wire/rollout evidence.",
             vec!["computer_v2_status"],
             vec![],
-        ),
-        MatrixTask::Chrome => (
-            "ChromeV2LiveTests/testBoundChromeReadOnlyV2WithSelectedModel",
-            "Production model opens the exact fresh example.com nonce URL; only bounded read-only snapshots until the heading is observed; exact approvals, existing Chrome identity/foreground preserved, terminal marker, wire/rollout and owned runtime cleanup.",
-            vec!["computer_v2_open", "computer_v2_snapshot"],
-            vec!["open"],
         ),
         MatrixTask::Semantic => (
             "LocalQwenLiveTests/testProductionRuntimePressesCalculatorDigitOneWithV2",
@@ -143,16 +127,12 @@ fn definition(task: MatrixTask) -> Value {
         MatrixTask::Semantic | MatrixTask::Combined | MatrixTask::Visual => {
             "Disposable exact-PID calculator-equivalent AppKit fixture. Same digit append, observed reference/capture, independent display and approval oracles; does not mutate the user's Calculator."
         }
-        MatrixTask::Chrome => {
-            "Disposable exact-owned Chrome process/profile and private nonce HTML file. Same bounded observed-heading/tool-order/terminal oracles; no extension activation or borrowed example.com navigation."
-        }
         MatrixTask::Status | MatrixTask::Interrupt => {
             "Current Rust Production Runtime with the exact selected local model and private task history."
         }
     };
     let rust_tools = match task {
         MatrixTask::Status => vec!["computer_v2_status"],
-        MatrixTask::Chrome => vec!["computer_v2_open", "computer_v2_read_page"],
         MatrixTask::Semantic => vec![
             "computer_v2_open",
             "computer_v2_read_page",
@@ -175,14 +155,13 @@ fn definition(task: MatrixTask) -> Value {
     };
     let rust_approvals = match task {
         MatrixTask::Status | MatrixTask::Interrupt => vec![],
-        MatrixTask::Chrome => vec!["open"],
         MatrixTask::Semantic | MatrixTask::Combined => vec!["open", "press"],
         MatrixTask::Visual => vec!["open", "click"],
     };
     json!({"task":task,"legacy_gate":legacy,"rust_gate":format!("computa-model-driven-matrix-v1/{}",task.name()),
         "rust_scope_variant":scope_variant,"scope_variant_is_explicit":true,
         "legacy_oracle":oracle,"legacy_allowed_tools":tools,"rust_allowed_tools":rust_tools,"legacy_allowed_approvals":approvals,"rust_allowed_approvals":rust_approvals,
-        "rust_terminal_marker_pattern":format!("COMPUTA_MATRIX_{}_OK_<{}>",task.name().to_ascii_uppercase(),if task==MatrixTask::Chrome{"owned_fixture_nonce"}else{"trial_uuid"}),
+        "rust_terminal_marker_pattern":format!("COMPUTA_MATRIX_{}_OK_<{}>",task.name().to_ascii_uppercase(),"trial_uuid"),
         "rust_oracle":"Exactly correlated Production Runtime tool/approval order, opaque observation/action references, independent owned fixture result (where applicable), exact per-trial or owned-fixture terminal marker, compiled gate/wire/rollout/oracle digests and confirmed owned cleanup.",
         "required_evidence":["selected model on Production Runtime thread","correlated private wire and rollout","independent gate oracle","exact owned cleanup"],
         "availability":"missing_production_rust_fixture","legacy_source_is_qualification_only":true})
@@ -447,7 +426,7 @@ mod tests {
         MatrixRunOptions {
             output,
             models: "4b".into(),
-            tasks: "status,chrome".into(),
+            tasks: "status,semantic".into(),
             repetitions: 2,
             dry_run: false,
         }
@@ -455,7 +434,8 @@ mod tests {
     #[test]
     fn defaults_are_canonical_and_never_enable_optional_27b_or_interrupt() {
         let plan = computer_matrix_plan("all", "all", 3).unwrap();
-        assert_eq!(plan["total_trials"], 30);
+        assert_eq!(plan["total_trials"], 24);
+        assert!(computer_matrix_plan("4b", "chrome", 1).is_err());
         assert_eq!(plan["models"], json!(["4b", "9b"]));
         assert!(
             !plan["tasks"]
@@ -564,7 +544,12 @@ mod tests {
             if clean && !wrong {
                 assert_eq!(
                     *driver.attempts.lock().unwrap(),
-                    ["4b-status-1", "4b-status-2", "4b-chrome-1", "4b-chrome-2"]
+                    [
+                        "4b-status-1",
+                        "4b-status-2",
+                        "4b-semantic-1",
+                        "4b-semantic-2"
+                    ]
                 );
             }
         }

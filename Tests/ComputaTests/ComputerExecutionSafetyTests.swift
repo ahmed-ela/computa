@@ -47,13 +47,6 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         }
     }
 
-    func testInventoryCursorOrPageSizeChangesCannotResetRetryIdentity() {
-        let first = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs", arguments: ["cursor": UUID().uuidString])
-        for size in [1, 25, 100] {
-            XCTAssertEqual(first, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs",
-                arguments: ["cursor": UUID().uuidString, "page_size": size]))
-        }
-    }
     func testVerificationAcceptsOnlyFiniteObservedPropertyContract() throws {
         var arguments = fixture()
         let value = try ComputerOutcomeToolContract.validate(arguments)
@@ -125,11 +118,11 @@ final class ComputerExecutionSafetyTests: XCTestCase {
 
     func testChangingOpaqueCapabilitiesDoesNotResetRetryBudget() {
         let one = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: [
-            "snapshot_id": "one", "capture_id": "capture-one", "candidate_token": "candidate-one", "cursor": "page-one",
+            "snapshot_id": "one", "capture_id": "capture-one", "cursor": "page-one",
             "element_index": 7, "text": "requested query",
         ])
         let two = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: [
-            "snapshot_id": "two", "capture_id": "capture-two", "candidate_token": "candidate-two", "cursor": "page-two",
+            "snapshot_id": "two", "capture_id": "capture-two", "cursor": "page-two",
             "element_index": 7, "text": "requested query",
         ])
         XCTAssertEqual(one, two)

@@ -3,8 +3,7 @@ import XCTest
 @testable import Computa
 
 /// Production Core and child-process JSON-RPC, not policy-helper unit tests.
-/// Targets and observations are deliberately nonexistent. The owned-browser
-/// launch seam also throws before spawn. These tests never use the live UI.
+/// Targets and observations are deliberately nonexistent. These tests never use the live UI.
 @MainActor
 final class BackgroundInteractionRuntimeTests: XCTestCase {
     private let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
@@ -15,15 +14,10 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
     private actor GrounderAudit: VisualGroundingClient {
         var prepares = 0
         var grounds = 0
-        var browserLaunches = 0
         func prepare() async throws { prepares += 1 }
         func ground(_ request: VisualGroundingRequest) async throws -> VisualGroundingDecision {
             grounds += 1
             throw NSError(domain: "NoLiveGroundingInPolicyFixture", code: 1)
-        }
-        func refuseBrowserLaunch() throws {
-            browserLaunches += 1
-            throw NSError(domain: "NoLiveBrowserInPolicyFixture", code: 1)
         }
         func shutdown() async -> [String] { [] }
     }
@@ -38,12 +32,10 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
         func beginTurn() { status = nil }
     }
 
-    func testBackgroundPolicyRejectsForegroundV2RoutesWithChromeCompatibilityEnabled() async throws {
+    func testBackgroundPolicyRejectsForegroundV2Routes() async throws {
         let points: [String: Any] = ["capture_id": staleID, "x": 1, "y": 1]
         let cases: [(String, [String: Any])] = [
             ("computer_v2_open", ["bundle_id": absentApp, "activation": "foreground"]),
-            ("computer_v2_open", ["bundle_id": absentApp, "url": "https://example.com/inert"]),
-            ("computer_v2_open", ["bundle_id": "com.google.Chrome", "browser_mode": "isolated", "url": "https://example.com/inert"]),
             ("computer_v2_ax", ["snapshot_id": staleID, "element_index": 1, "ax_action": "AXRaise"]),
             ("computer_v2_click", points),
             ("computer_v2_pointer", points.merging(["action": "move"]) { _, new in new }),
@@ -54,9 +46,7 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
             ("computer_v2_type", ["text": "MUST_NOT_TYPE"]),
             ("computer_v2_ground_click", ["capture_id": staleID, "target": "Synthetic control"]),
         ]
-        // Isolate the background capability ceiling from the stricter default
-        // Chrome route admission; even compatibility cannot grant foreground.
-        try await withHarness(externalChromeTools: true) { runtime, root, audit, grounder in
+        try await withHarness { runtime, root, audit, grounder in
             for (index, item) in cases.enumerated() {
                 try await self.submit(["tool": item.0, "arguments": item.1], runtime: runtime, audit: audit)
                 try await self.waitFor { audit.status == .waiting && self.rowCount(root) == index + 1 }
@@ -69,10 +59,9 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
             }
             try self.assertNoUnsupportedAnswer(audit)
             XCTAssertEqual(audit.approvals, 0, "Even an auto-approving controller cannot grant a foreground capability.")
-            let prepares = await grounder.prepares, grounds = await grounder.grounds, launches = await grounder.browserLaunches
+            let prepares = await grounder.prepares, grounds = await grounder.grounds
             XCTAssertEqual(prepares, 0)
             XCTAssertEqual(grounds, 0)
-            XCTAssertEqual(launches, 0)
             let specs = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("specs.json"))) as? [[String: Any]])
             let names = Set(specs.compactMap { $0["name"] as? String })
             for tool in ["computer_v2_click", "computer_v2_pointer", "computer_v2_keypress", "computer_v2_type", "computer_v2_ground_click"] {
@@ -205,7 +194,7 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
 
     private func rowCount(_ root: URL) -> Int { (try? rows(root).count) ?? 0 }
 
-    private func withHarness(externalChromeTools: Bool = false,
+    private func withHarness(
                              _ body: (CodexAppServerRuntime, URL, Audit, GrounderAudit) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBackgroundPolicy-\(UUID().uuidString)")
         let workspace = root.appendingPathComponent("workspace")
@@ -218,14 +207,12 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
         var configuration = CodexAppServerRuntime.Configuration.localQwen
         XCTAssertEqual(configuration.computerInteractionPolicy, .backgroundOnly)
         configuration.executable = .fixture(path: executable.path)
-        configuration.externalChromeToolsEnabled = externalChromeTools
         configuration.codexHomePath = root.path
         configuration.workspacePath = workspace.path
         configuration.model = modelID
         configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         let grounder = GrounderAudit()
-        let broker = ChromeTabBroker(willLaunchBrowser: { try await grounder.refuseBrowserLaunch() })
-        let runtime = CodexAppServerRuntime(configuration: configuration, browserBroker: broker, visualGrounder: grounder)
+        let runtime = CodexAppServerRuntime(configuration: configuration, visualGrounder: grounder)
         let audit = Audit()
         let events = Task {
             for await event in runtime.events() {

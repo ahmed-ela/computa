@@ -85,10 +85,10 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fixtureURL.path)
         let runtime = try makeRuntime(root: root, phase: "within", payload: "ax-query-recovery")
         let audit = Audit(taskID: "ax-query-recovery-\(UUID().uuidString)",
-            permittedSyntheticTools: ["computer_v2_apps", "computer_v2_open", "computer_v2_snapshot"], permitsUnboundSnapshotFailure: true)
+            permittedSyntheticTools: ["computer_v2_apps", "computer_v2_open", "computer_v2_read_page"], permitsUnboundSnapshotFailure: true)
         let events = pump(runtime, audit: audit)
         defer { events.cancel() }
-        let prompt = "In the current Chrome tab, what is the delivery status for \(scenario.target)? Return only its exact status text."
+        let prompt = "In the already-running Computa Orders Fixture app, what is the delivery status for \(scenario.target)? Return only its exact status text."
         do {
             try require(try await runtime.loadTasks().isEmpty, "The diagnostic requires isolated history.")
             try await send(prompt, runtime: runtime, audit: audit, timeoutSeconds: 120)
@@ -114,11 +114,13 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             let start = try exactlyOne("thread/start", in: trace)
             let params = try XCTUnwrap(start.object["params"] as? [String: Any])
             let tools = try XCTUnwrap(params["dynamicTools"] as? [[String: Any]])
-            try require(NSArray(array: tools).isEqual(to: ComputerV2ToolContract.specs(for: model)),
+            try require(NSArray(array: tools).isEqual(to: ComputerV2ToolContract.referenceSpecs(for: model) + [ComputerOutcomeToolContract.spec]),
                 "Use all current production model tools, not a narrowed fixture contract.")
-            try require(params["baseInstructions"] as? String == CodexAppServerRuntime.Configuration.externalLocalQwen.baseInstructions
-                + "\n" + ComputerV2ToolContract.visualGroundingInstructions,
-                "The diagnostic must not add strategy hints to production base instructions.")
+            let baseInstructions = try XCTUnwrap(params["baseInstructions"] as? String)
+            try require(baseInstructions.hasPrefix(CodexAppServerRuntime.Configuration.externalLocalQwen.baseInstructions)
+                && baseInstructions.contains(ComputerV2ToolContract.instructions(for: .backgroundOnly))
+                && !baseInstructions.contains(scenario.target) && !baseInstructions.contains(scenario.expectedStatus),
+                "The diagnostic must retain production native policy without fixture-specific strategy hints.")
             let submitted = try exactlyOne("turn/start", in: trace)
             let submittedInput = try XCTUnwrap((submitted.object["params"] as? [String: Any])?["input"] as? [[String: Any]])
             try require(submittedInput.count == 1 && submittedInput[0]["text"] as? String == prompt,
@@ -221,7 +223,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             nodes.append(node)
             return index
         }
-        let window = add(nil, "AXWindow", title: "Orders — Google Chrome",
+        let window = add(nil, "AXWindow", title: "Orders — Computa Orders Fixture",
             frame: ["x": 0, "y": 0, "width": 1_280, "height": 900])
         let document = add(window, "AXWebArea", title: "Orders")
         let navigation = add(document, "AXGroup", subrole: "AXLandmarkNavigation")
@@ -259,7 +261,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                 "The first acquisition must genuinely lack the target text, not merely hide its output line.")
         }
         var raw: [String: Any] = ["id": UUID().uuidString,
-            "application": ["processIdentifier": 4242, "bundleIdentifier": "com.google.Chrome", "applicationName": "Google Chrome"],
+            "application": ["processIdentifier": 4242, "bundleIdentifier": "com.ahmedelamin.ComputaOrdersFixture", "applicationName": "Computa Orders Fixture"],
             "limits": ["maxDepth": 16, "maxElements": 240, "maxChildrenPerElement": 80, "maxActionsPerElement": 12, "maxTextLength": 4096],
             "rootIndex": window, "elements": initialNodes, "wasTruncated": false]
         let initialTree = try JSONDecoder().decode(AccessibilityTreeSnapshot.self, from: JSONSerialization.data(withJSONObject: raw))
@@ -277,17 +279,17 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
         let statusLine = targeted.split(separator: "\n").first { $0.contains("value=\"\(scenario.expectedStatus)\"") }
         try require(statusLine?.hasSuffix("parent=\(targetParent)") == true && targeted.contains("parents=["),
             "The targeted real-format observation must reveal the status with its card association.")
-        let application = ActivatedApplication(processIdentifier: 4242, bundleIdentifier: "com.google.Chrome", localizedName: "Google Chrome")
+        let application = ActivatedApplication(processIdentifier: 4242, bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Computa Orders Fixture")
         let open = String(decoding: try JSONEncoder().encode(application), as: UTF8.self)
             + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
-            + ComputerV2ToolContract.existingBrowserSessionNote
+
         let unbound = ComputerToolFailureEvidence.text(
-            for: Failure(ComputerV2ToolContract.unboundApplicationMessage), tool: "computer_v2_snapshot")
+            for: Failure(ComputerV2ToolContract.unboundApplicationMessage), tool: "computer_v2_read_page")
         let syntheticApps = [RunningApplicationInfo(processIdentifier: 4242,
-            bundleIdentifier: "com.google.Chrome", localizedName: "Google Chrome", activationPolicy: .regular,
+            bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Computa Orders Fixture", activationPolicy: .regular,
             isActive: true, isHidden: false, isTerminated: false)]
         var fixture = ["queryLiteral": scenario.target, "open": open, "initial": initial, "targeted": targeted, "unbound": unbound,
-                "apps": ComputerV2ToolContract.appInventory(syntheticApps, query: "Chrome"),
+                "apps": ComputerV2ToolContract.appInventory(syntheticApps, query: "Computa Orders Fixture"),
                 "apps-default": ComputerV2ToolContract.appInventory(syntheticApps, query: nil)]
         // A shorter unique literal is a valid production query. Accept it only
         // after proving the real formatter returns exactly the same bytes.
@@ -1142,7 +1144,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                 if let tool = entry.toolEvent {
                     if tool.name == "computer_v2_status", tool.status == .succeeded { statusTools += 1 }
                     else if permittedSyntheticTools.contains(tool.name), tool.status == .succeeded { /* Intercepted synthetic result. */ }
-                    else if permitsUnboundSnapshotFailure && tool.name == "computer_v2_snapshot"
+                    else if permitsUnboundSnapshotFailure && tool.name == "computer_v2_read_page"
                         && tool.status == .failed && unboundSnapshotFailures == 0 { unboundSnapshotFailures += 1 }
                     else if permitsActivationFailure && tool.name == "computer_v2_open" && tool.status == .failed { /* Expected synthetic failure. */ }
                     else { failures.append("Unexpected tool or failed status: \(tool.name)") }

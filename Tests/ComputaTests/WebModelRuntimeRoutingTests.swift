@@ -45,7 +45,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertTrue(names.contains("computer_v2_read_page"))
                 XCTAssertTrue(names.contains("computer_v2_press"))
                 XCTAssertFalse(names.contains("computer_v2_capture"))
-                XCTAssertTrue(names.isDisjoint(with: ComputaModelToolCatalog.externalChromeToolNames))
+                XCTAssertTrue(names.isDisjoint(with: ["computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow"]))
                 let toolBytes = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
                 if let baselineTools { XCTAssertEqual(toolBytes, baselineTools) }
                 else { baselineTools = toolBytes }
@@ -67,7 +67,6 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                     "excludeTmpdirEnvVar": false, "excludeSlashTmp": false,
                 ]
                 XCTAssertEqual(sandbox, expected)
-                await runtime.disconnectChrome()
                 let report = await runtime.shutdown()
                 XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
             } catch {

@@ -29,23 +29,23 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testProductCatalogHidesChromeAndRejectsRetainedCallsBeforeAnyInput() async throws {
+    func testProductCatalogRemovesChromeAndRejectsRetainedCallsBeforeAnyInput() async throws {
         try await withHarness { harness in
             try await harness.submit([
                 ["tool": "computer_v2_tabs", "arguments": [:]],
                 ["tool": "computer_v2_bind_tab", "arguments": ["candidate_token": UUID().uuidString]],
                 ["tool": "computer_v2_create_workspace", "arguments": ["candidate_token": UUID().uuidString]],
-                ["tool": "computer_v2_open", "arguments": ["bundle_id": "com.google.Chrome", "activation": "none"]],
+                ["tool": "computer_v2_follow_link", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 0]],
                 ["tool": "browser_tabs", "arguments": [:]],
             ])
             try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
             let offered = try harness.offeredNames()
-            XCTAssertTrue(offered.isDisjoint(with: ComputaModelToolCatalog.externalChromeToolNames))
+            XCTAssertTrue(offered.isDisjoint(with: Set(["computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow"])))
             XCTAssertEqual(offered.intersection(EmbeddedBrowserTools.names), EmbeddedBrowserTools.names)
             let rows = try harness.rows()
             for row in rows.prefix(4) {
                 XCTAssertEqual(row["success"] as? Bool, false)
-                XCTAssertTrue((row["text"] as? String)?.contains("External Chrome tools are hidden") == true)
+                XCTAssertTrue((row["text"] as? String)?.contains("Unknown computer V2 tool") == true)
             }
             XCTAssertEqual(rows.last?["success"] as? Bool, true)
             let counts = await harness.backend.counts()
@@ -55,15 +55,15 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue(harness.audit.approvals.isEmpty)
             XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
             XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." },
-                          "Known hidden routes must not suppress a later supported result with fabricated action debt")
+                          "Retired routes must not suppress a later supported result with fabricated action debt")
         }
     }
 
-    func testDeniedChromeOpenDoesNotSuppressSuccessfulBuiltInReadAndFinal() async throws {
+    func testRetiredToolDoesNotSuppressSuccessfulBuiltInReadAndFinal() async throws {
         for call in [
-            ["tool": "computer_v2_open", "arguments": ["bundle_id": "COM.GOOGLE.CHROME.canary", "activation": "none"]],
-            ["tool": "desktop_open_application", "arguments": ["bundle_id": "com.google.Chrome"]],
-            ["tool": "computer", "arguments": ["action": "open", "parameters": ["bundle_id": "com.google.Chrome"]]],
+            ["tool": "computer_v2_tabs", "arguments": [:]],
+            ["tool": "computer_v2_bind_tab", "arguments": ["candidate_token": UUID().uuidString]],
+            ["tool": "computer_v2_follow", "arguments": ["link_ref": "retired"]],
         ] as [[String: Any]] {
             try await withHarness(approval: true) { harness in
                 try await harness.submit([
@@ -76,7 +76,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 let rows = try harness.rows()
                 XCTAssertEqual(rows.first?["success"] as? Bool, false)
                 let denial = try XCTUnwrap(rows.first?["text"] as? String)
-                XCTAssertTrue(denial.contains("External Chrome tools are hidden"))
+                XCTAssertTrue(denial.contains("Unknown computer V2 tool"))
                 XCTAssertFalse(denial.contains("ACTION_EVIDENCE"))
                 XCTAssertFalse(denial.contains("operation="))
                 XCTAssertTrue(rows.dropFirst().allSatisfy { $0["success"] as? Bool == true })
@@ -144,14 +144,14 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testDeniedChromeRouteAndBuiltInSuccessCannotEraseDispatchedNativeDebt() async throws {
+    func testRetiredRouteAndBuiltInSuccessCannotEraseDispatchedNativeDebt() async throws {
         try await withHarness(approval: true) { harness in
             let native = PendingNativeSelectionBackend()
             let background = NativeBackgroundAccessibility(backend: native, foregroundProcessIdentifier: { 999 })
             try await harness.submit([
                 ["tool": "computer_v2_snapshot", "arguments": [:]],
                 ["tool": "computer_v2_ax", "arguments": ["snapshot_id": "@snapshot", "element_index": "@nativeRow", "ax_action": "AXPress"]],
-                ["tool": "computer_v2_open", "arguments": ["bundle_id": "com.google.Chrome", "activation": "none"]],
+                ["tool": "computer_v2_follow_link", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 0]],
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
                 ["tool": "browser_close", "arguments": [:]],
@@ -169,7 +169,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertEqual(native.postInputReads, 3)
             XCTAssertEqual(rows[2]["success"] as? Bool, false)
             let denied = try XCTUnwrap(rows[2]["text"] as? String)
-            XCTAssertTrue(denied.contains("External Chrome tools are hidden"))
+            XCTAssertTrue(denied.contains("Unknown computer V2 tool"))
             XCTAssertTrue(denied.contains("operation=call-1-1 tool=computer_v2_ax dispatch=dispatched"))
             XCTAssertFalse(denied.contains("operation=call-1-2"), "The new rejected route is not another admitted action")
             XCTAssertTrue(rows.suffix(3).allSatisfy { $0["success"] as? Bool == true })
@@ -183,37 +183,10 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testLegacyChromePIDRoutesAreDeniedBeforeReadApprovalAndEvidenceAdmission() async throws {
-        let process = LegacyPIDFixture(bundleID: "com.google.Chrome", replacement: nil)
-        try await withHarness(legacyPIDFixture: process) { harness in
-            try await harness.submit([
-                ["tool": "desktop_snapshot_app", "arguments": ["process_id": LegacyPIDFixture.processID]],
-                ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
-                ["tool": "browser_tabs", "arguments": [:]],
-            ])
-            try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
-            let rows = try harness.rows()
-            for row in rows.prefix(2) {
-                XCTAssertEqual(row["success"] as? Bool, false)
-                let text = try XCTUnwrap(row["text"] as? String)
-                XCTAssertTrue(text.contains("External Chrome tools are hidden"))
-                XCTAssertFalse(text.contains("operation="))
-                XCTAssertFalse(text.contains("ACTION_EVIDENCE"))
-            }
-            XCTAssertEqual(rows.last?["success"] as? Bool, true)
-            let counts = await process.counts()
-            XCTAssertEqual(counts.lookups, 2)
-            XCTAssertEqual(counts.reads, 0)
-            XCTAssertTrue(harness.audit.approvals.isEmpty)
-            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
-            XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
-        }
-    }
-
-    func testLegacyPIDReadsPreserveNativeAndEnabledChromeCompatibility() async throws {
-        for (bundleID, enabled) in [("com.example.native-pid-fixture", false), ("com.google.Chrome", true)] {
+    func testLegacyPIDReadsTreatBrowsersAsOrdinaryNativeApps() async throws {
+        for bundleID in ["com.example.native-pid-fixture", "com.google.Chrome"] {
             let process = LegacyPIDFixture(bundleID: bundleID, replacement: nil)
-            try await withHarness(externalChromeTools: enabled, legacyPIDFixture: process) { harness in
+            try await withHarness(legacyPIDFixture: process) { harness in
                 try await harness.submit([
                     ["tool": "desktop_snapshot_app", "arguments": ["pid": LegacyPIDFixture.processID]],
                     ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
@@ -724,7 +697,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         let audit = Audit()
         var events: Task<Void, Never>?
 
-        init(configured: Bool, approval: Bool?, externalChromeTools: Bool, legacyPIDFixture: LegacyPIDFixture?) async throws {
+        init(configured: Bool, approval: Bool?, legacyPIDFixture: LegacyPIDFixture?) async throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserRuntime-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let fixture = root.appendingPathComponent("fixture.ts")
@@ -736,7 +709,6 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             configuration.workspacePath = root.path
             configuration.model = Self.modelID
             configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
-            configuration.externalChromeToolsEnabled = externalChromeTools
             if let legacyPIDFixture {
                 configuration.fixtureNativeProcessIdentity = { await legacyPIDFixture.resolve($0) }
                 configuration.fixtureLegacyNativeSnapshot = { try await legacyPIDFixture.read($0) }
@@ -788,11 +760,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     }
 
     private func withHarness(configured: Bool = true, approval: Bool? = nil,
-                             externalChromeTools: Bool = false, legacyPIDFixture: LegacyPIDFixture? = nil,
+                             legacyPIDFixture: LegacyPIDFixture? = nil,
                              allowsCleanupFailure: Bool = false,
                              _ body: @MainActor (Harness) async throws -> Void) async throws {
         let harness = try await Harness(configured: configured, approval: approval,
-            externalChromeTools: externalChromeTools, legacyPIDFixture: legacyPIDFixture)
+            legacyPIDFixture: legacyPIDFixture)
         defer { try? FileManager.default.removeItem(at: harness.root) }
         do {
             try await body(harness)
@@ -1003,7 +975,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         var mutations: Int { fills + presses + navigations }
     }
     private var ledger = Counts()
-    private var targets: [String: BrowserTarget] = [humanID: BrowserTarget(targetID: humanID, instanceToken: "human-incarnation", title: "User flight page", url: URL(string: "https://example.invalid/user")!, webSocketURL: nil)]
+    private var targets: [String: BrowserTarget] = [humanID: BrowserTarget(targetID: humanID, instanceToken: "human-incarnation", title: "User flight page", url: URL(string: "https://example.invalid/user")!)]
     private var owned = Set<String>()
     private var values = [String: String]()
     private var results = [String: String]()
@@ -1027,7 +999,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     func createTarget(url: URL) -> BrowserTarget {
         ledger.created += 1
         let id = UUID().uuidString
-        let target = BrowserTarget(targetID: id, instanceToken: UUID().uuidString, title: "Fixture flight", url: url, webSocketURL: nil)
+        let target = BrowserTarget(targetID: id, instanceToken: UUID().uuidString, title: "Fixture flight", url: url)
         targets[id] = target; owned.insert(id); return target
     }
     func target(id: String) -> BrowserTarget? { targets[id] }
@@ -1073,7 +1045,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) throws {
         try permit.commit {
             ledger.navigations += 1
-            targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken, title: target.title, url: url, webSocketURL: nil)
+            targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken, title: target.title, url: url)
         }
     }
     func wait(target: BrowserTarget, text: String?, timeoutMS: Int) -> Bool { text.map { (results[target.targetID] ?? "").contains($0) } ?? true }

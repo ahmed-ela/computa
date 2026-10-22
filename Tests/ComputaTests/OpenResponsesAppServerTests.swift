@@ -188,7 +188,7 @@ private struct EngineTestFailure: LocalizedError {
 /// arbitrary serialized tool data. Neither permission state requests access.
 private enum EngineHostStatusProof {
     static func matches(_ text: String) -> Bool {
-        let route = "\nbrowser_route=computa_builtin external_chrome_tools=hidden. "
+        let route = "\nbrowser_route=computa_builtin. "
         guard text.utf8.count <= 512, let boundary = text.range(of: route),
               let permissions = try? JSONSerialization.jsonObject(with: Data(text[..<boundary.lowerBound].utf8)) as? [String: String],
               Set(permissions.keys) == ["accessibility", "screenRecording"],

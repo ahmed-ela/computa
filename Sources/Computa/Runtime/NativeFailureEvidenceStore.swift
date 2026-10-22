@@ -277,7 +277,8 @@ struct NativeFailureEvidenceStore: Sendable {
                 throw StoreError.invalid("record is not bounded native activation-failure evidence")
             }
         case "chrome_navigation_recovery_required":
-            // This explicit alternative has no PID, URL, or browser-state
+            // Historical schema only; the removed connection cannot emit new
+            // records. This alternative has no PID, URL, or browser-state
             // fields. Human-readable text is bounded inert evidence, not
             // authority; older copy must remain readable after wording changes.
             guard Set(diagnostic.keys) == ["type", "error", "cause", "website_status", "action_outcome", "tab_state", "retry_policy", "next_step"],

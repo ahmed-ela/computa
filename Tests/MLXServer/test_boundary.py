@@ -358,8 +358,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 def native_tool_policy():
-    return server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0",
-        "COMPUTA_NATIVE_TOOL_OVERRIDES": json.dumps([{"name": "computer_v2_open",
+    return server.NativeToolVisibility({"COMPUTA_NATIVE_TOOL_OVERRIDES": json.dumps([{"name": "computer_v2_open",
             "description": "Bind a native app. Use browser_* for webpages.",
             "inputSchema": {"activation": {"enum": ["foreground"]}}}])})
 
@@ -375,20 +374,28 @@ def native_tool_request():
                   {"type": "function_call_output", "call_id": "old-call", "output": "Synthetic saved tab observation"},
                   {"type": "message", "role": "user", "content": "Use the built-in browser now."}],
         "tools": [open_tool, *[{"type": "function", "name": name, "parameters": {}}
-                               for name in sorted(server.CHROME_TOOL_NAMES)],
+                               for name in sorted(server.RETIRED_TOOL_NAMES)],
                   {"type": "namespace", "name": "functions", "tools": [
                       {"type": "function", "name": "computer_v2_follow", "parameters": {}},
                       {"type": "function", "name": "browser_tabs", "parameters": {}}]}]}
 
 
 class NativeToolVisibilityTests(unittest.TestCase):
-    def test_generic_and_explicit_chrome_enabled_profiles_preserve_original_request(self):
+    def test_removed_routes_are_filtered_with_no_configuration_and_legacy_flags_cannot_restore_them(self):
         request = native_tool_request()
-        for environment in ({}, {"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "1",
-                                  "COMPUTA_NATIVE_TOOL_OVERRIDES": "not-used"}):
-            result, allowed = server.NativeToolVisibility(environment).apply(request)
-            self.assertIs(result, request)
-            self.assertIsNone(allowed)
+        before = copy.deepcopy(request)
+        environments = [{}] + [{"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": value}
+                                for value in ("0", "1", "unexpected", "")]
+        for environment in environments:
+            with self.subTest(environment=environment):
+                result, allowed = server.NativeToolVisibility(environment).apply(request)
+                self.assertEqual(allowed, frozenset(("computer_v2_open", "browser_tabs", "functions.browser_tabs")))
+                self.assertEqual([item["name"] for item in result["tools"]], ["computer_v2_open", "functions"])
+                self.assertEqual(result["tools"][1]["tools"], [{"type": "function", "name": "browser_tabs", "parameters": {}}])
+                self.assertEqual(set(result["tools"][0]["parameters"]["properties"]), {"bundle_id", "activation"})
+                self.assertEqual(result["tools"][0]["parameters"]["required"], ["bundle_id", "activation"])
+                self.assertEqual(result["input"], before["input"])
+                self.assertEqual(request, before)
 
     def test_empty_hidden_namespace_is_removed_and_unrelated_definitions_are_unchanged(self):
         other = {"type": "function", "name": "synthetic_echo", "description": "Synthetic",
@@ -405,10 +412,10 @@ class NativeToolVisibilityTests(unittest.TestCase):
         for overrides in ("not-json", "{}", '[{"name":"computer_v2_open","description":false}]',
                           '[{"name":"computer_v2_open","description":"a"},{"name":"computer_v2_open","description":"b"}]'):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
-                server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0",
+                server.NativeToolVisibility({"COMPUTA_NATIVE_TOOL_OVERRIDES": overrides})
+            with self.subTest(legacy_flag="1", overrides=overrides), self.assertRaises(ValueError):
+                server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "1",
                                              "COMPUTA_NATIVE_TOOL_OVERRIDES": overrides})
-        with self.assertRaises(ValueError):
-            server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "unexpected"})
         with self.assertRaises(ValueError):
             native_tool_policy().apply({"tools": [{"type": "function", "name": "computer_v2_open", "parameters": {}}]})
 

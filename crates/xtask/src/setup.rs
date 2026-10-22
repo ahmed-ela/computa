@@ -199,8 +199,6 @@ pub fn build_app(
             "-p",
             "computa-desktop",
             "-p",
-            "computa-browser",
-            "-p",
             "computa-inference",
         ],
         root,
@@ -220,18 +218,12 @@ pub fn build_app(
         root.join("target/release/computa-desktop"),
         contents.join("MacOS/Computa"),
     )?;
-    for resource in ["WebUI", "BrowserExtension", "AgentRuntime"] {
+    for resource in ["WebUI", "AgentRuntime"] {
         crate::assets::copy_tree(
             &resources.join(resource),
             &contents.join("Resources").join(resource),
         )?;
     }
-    let chrome = contents.join("Resources/ChromeBridge");
-    fs::create_dir(&chrome)?;
-    fs::copy(
-        root.join("target/release/computa-chrome-host"),
-        chrome.join("ChromeBridgeHost"),
-    )?;
     let inference = contents.join("Resources/InferenceRuntime");
     fs::create_dir(&inference)?;
     fs::copy(

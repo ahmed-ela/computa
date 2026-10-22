@@ -98,18 +98,18 @@ struct ComputerTaskScope: Equatable, Sendable {
         .init(name: "Wikipedia", aliases: ["wikipedia"], hosts: ["wikipedia.org", "www.wikipedia.org", "en.wikipedia.org"]),
     ]
 
-    let backgroundChromeOnly: Bool
+    let backgroundBrowserOnly: Bool
     /// Generic background-browser requests can use Computa's own browser.
-    /// Only an explicitly named Chrome restriction excludes that backend.
-    let explicitChromeBrowserOnly: Bool
+    /// An explicit restriction to another browser excludes that backend.
+    let externalBrowserOnly: Bool
     let targetConfidence: TargetConfidence
     private let site: Site?
     private let exactTitle: String?
 
     init(userPrompt: String) {
         let normalized = userPrompt.replacingOccurrences(of: "\u{2011}", with: "-")
-        backgroundChromeOnly = Self.explicitBackgroundOnly(normalized)
-        explicitChromeBrowserOnly = Self.explicitBackgroundChromeOnly(normalized)
+        backgroundBrowserOnly = Self.explicitBackgroundOnly(normalized)
+        externalBrowserOnly = Self.explicitExternalBrowserOnly(normalized)
         let titles = Set(Self.matches(#"\b(?:tabs?|pages?)\s+(?:titled|named|called)\s+[\"“]([^\"”]+)[\"”]"#,
                                      in: normalized, group: 1).map(Self.normalizedTitle))
         let rawURLs = Self.matches(#"https?://[^\s<>\"“”]+"#, in: normalized)
@@ -155,46 +155,18 @@ struct ComputerTaskScope: Equatable, Sendable {
         }
     }
 
-    /// A host-retained target can give an otherwise untargeted follow-up its
-    /// previous restrictions, never its old action capabilities. The caller
-    /// must require the same still-authorized connection before setting the
-    /// flag. Explicit/ambiguous current targets are new user intent and win.
-    /// No affirmative-word list or model-authored history is used as authority.
-    func preservingContinuationRestrictions(from previous: Self?, hasRetainedTarget: Bool) -> Self {
-        guard hasRetainedTarget, targetConfidence == .unknown, let previous else { return self }
-        return Self(continuing: previous, backgroundChromeOnly: backgroundChromeOnly || previous.backgroundChromeOnly,
-                    explicitChromeBrowserOnly: explicitChromeBrowserOnly || previous.explicitChromeBrowserOnly)
-    }
-
-    private init(continuing previous: Self, backgroundChromeOnly: Bool, explicitChromeBrowserOnly: Bool) {
-        self.backgroundChromeOnly = backgroundChromeOnly
-        self.explicitChromeBrowserOnly = explicitChromeBrowserOnly
-        targetConfidence = previous.targetConfidence
-        site = previous.site
-        exactTitle = previous.exactTitle
-    }
-
     func embeddedBrowserToolViolation() -> String? {
-        explicitChromeBrowserOnly
-            ? "This request explicitly permits Chrome only. Computa's built-in browser is a separate surface; no built-in browser action was dispatched."
+        externalBrowserOnly
+            ? "This request explicitly permits another browser only. Computa's built-in browser is a separate surface; no built-in browser action was dispatched."
             : nil
     }
 
-    /// Called before tool dispatch, with host-owned binding state. A model may
-    /// not relax this restriction by passing activation=none or inventing an
-    /// alternative tool name. Reads/actions require the borrowed tab binding.
-    func toolViolation(tool: String, hasBorrowedBinding: Bool) -> String? {
-        guard backgroundChromeOnly else { return nil }
-        switch tool {
-        case "computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace":
-            return nil
-        case "computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text", "computer_v2_verify":
-            guard !hasBorrowedBinding else { return nil }
-            return "This request permits background Chrome tab tools only. Bind an observed Chrome tab before reading or interacting; native app fallback is outside the requested scope."
-        default:
-            guard tool == "computer" || tool.hasPrefix("computer_") || tool.hasPrefix("desktop_") else { return nil }
-            return "This request permits background Chrome tab tools only. Foreground app opening, new-tab fallback, screenshots, and global keyboard/pointer input are outside the requested scope. No action was dispatched."
-        }
+    /// Native fallback cannot bypass an explicit browser-only request.
+    func toolViolation(tool: String) -> String? {
+        guard backgroundBrowserOnly else { return nil }
+        if ["computer_v2_status", "computer_v2_apps"].contains(tool) { return nil }
+        guard tool == "computer" || tool.hasPrefix("computer_") || tool.hasPrefix("desktop_") else { return nil }
+        return "This request permits background browser tools only. Native app fallback, screenshots, and global keyboard/pointer input are outside the requested scope. No action was dispatched."
     }
 
     /// Presentation reuses the bind-time restriction, never a relevance guess.
@@ -228,22 +200,22 @@ struct ComputerTaskScope: Equatable, Sendable {
 
     private static func explicitBackgroundOnly(_ prompt: String) -> Bool {
         // Only explicit restrictions, not a passing mention such as "is
-        // background Chrome faster?". Unrecognized phrasing is not interpreted
+        // background browser faster?". Unrecognized phrasing is not interpreted
         // as a runtime-enforced promise.
         let patterns = [
-            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:chrome|browser)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
-            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:chrome|browser)\b"#,
-            #"\b(?:chrome|browser)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:browser|chrome|safari|firefox|edge)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:browser|chrome|safari|firefox|edge)\b"#,
+            #"\b(?:browser|chrome|safari|firefox|edge)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
         ]
         return patterns.contains { hasMatch($0, in: prompt) }
     }
 
-    private static func explicitBackgroundChromeOnly(_ prompt: String) -> Bool {
+    private static func explicitExternalBrowserOnly(_ prompt: String) -> Bool {
         let patterns = [
-            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+chrome(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
-            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+chrome\b"#,
-            #"\bchrome\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
-            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?chrome(?:\s+browser)?(?:\s+tab)?(?:\s+tools?)?\s+only\b"#
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:chrome|safari|firefox|edge)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:chrome|safari|firefox|edge)\b"#,
+            #"\b(?:chrome|safari|firefox|edge)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?(?:chrome|safari|firefox|edge)(?:\s+browser)?(?:\s+tab)?(?:\s+tools?)?\s+only\b"#
         ]
         return patterns.contains { hasMatch($0, in: prompt) }
     }

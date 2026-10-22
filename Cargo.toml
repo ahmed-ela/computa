@@ -5,8 +5,6 @@ members = [
   "crates/computa-state",
   "crates/computa-macos",
   "crates/computa-harness",
-  "crates/computa-browser",
-  "crates/computa-extension",
   "crates/computa-runtime",
   "crates/computa-inference",
   "crates/computa-ui",

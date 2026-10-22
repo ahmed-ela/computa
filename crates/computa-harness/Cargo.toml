@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 computa-contracts = { path = "../computa-contracts" }
 computa-macos = { path = "../computa-macos" }
-computa-browser = { path = "../computa-browser" }
 computa-state = { path = "../computa-state" }
 url.workspace = true
 serde.workspace = true

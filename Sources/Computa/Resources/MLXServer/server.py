@@ -25,22 +25,16 @@ MODEL_IDS = (
 MAX_BODY = 32 * 1024 * 1024
 MAX_IMAGE = 6 * 1024 * 1024
 MAX_IMAGES = 8
-CHROME_TOOL_NAMES = frozenset(("computer_v2_tabs", "computer_v2_bind_tab",
+RETIRED_TOOL_NAMES = frozenset(("computer_v2_tabs", "computer_v2_bind_tab",
     "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow"))
 
 
 class NativeToolVisibility:
-    """Startup-owned policy changes active tools, never saved calls or outputs."""
+    """Retire removed tool routes unconditionally; preserve saved calls and outputs."""
 
     def __init__(self, environment=None):
         environment = os.environ if environment is None else environment
-        flag = environment.get("COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED")
-        if flag not in (None, "0", "1"):
-            raise ValueError("Invalid native tool visibility configuration.")
-        self.enabled = flag == "0"
         self.descriptions = {}
-        if not self.enabled:
-            return
         raw = environment.get("COMPUTA_NATIVE_TOOL_OVERRIDES", "[]")
         if not isinstance(raw, str) or len(raw.encode("utf-8")) > 131_072:
             raise ValueError("Invalid native tool visibility configuration.")
@@ -61,11 +55,9 @@ class NativeToolVisibility:
 
     @staticmethod
     def hidden(name):
-        return isinstance(name, str) and name.rsplit(".", 1)[-1] in CHROME_TOOL_NAMES
+        return isinstance(name, str) and name.rsplit(".", 1)[-1] in RETIRED_TOOL_NAMES
 
     def apply(self, request):
-        if not self.enabled:
-            return request, None
         schemas = request.get("tools") or []
         if not isinstance(schemas, list) or len(schemas) > 256:
             raise ValueError("Invalid active tool catalog.")
@@ -126,7 +118,7 @@ class NativeToolVisibility:
         result = dict(request)
         if "tools" in request:
             result["tools"] = active
-        return result, frozenset(active_names)
+        return (request if result == request else result), frozenset(active_names)
 
 
 def discover_model_paths(root, fallback_root=None):
@@ -281,7 +273,9 @@ class LocalInferenceBoundary:
             try:
                 request = json.loads(body, parse_constant=reject_nonfinite)
                 validate_request(request, self.models)
+                original_request = request
                 request, active_names = self.tool_visibility.apply(request)
+                request_changed = request is not original_request
             except (ValueError, TypeError, RecursionError):
                 return await self.json(send, 400, {"error": {"message": "Invalid local inference request."}})
             # The pinned upstream retains old model references during a switch.
@@ -302,7 +296,7 @@ class LocalInferenceBoundary:
             # lets owned 4B coexist with a legacy 9B without copying either.
             if self.selected_model in self.model_paths:
                 request["model"] = str(self.model_paths[self.selected_model])
-            if self.tool_visibility.enabled or self.selected_model in self.model_paths:
+            if request_changed or self.selected_model in self.model_paths:
                 body = json.dumps(request, separators=(",", ":")).encode()
                 scope = {**scope, "headers": [(key, value) for key, value in scope.get("headers", [])
                                                if key.lower() != b"content-length"]

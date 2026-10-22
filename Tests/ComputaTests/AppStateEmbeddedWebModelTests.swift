@@ -158,7 +158,6 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         await state.startRuntime()
         XCTAssertEqual(runtime.operations, ["configure", "load"])
         XCTAssertNotNil(runtime.transport)
-        XCTAssertEqual(state.chromeConnectionState, .disconnected)
         XCTAssertEqual(state.connectionState, .connected(provider: runtime.providerName))
         _ = await state.shutdownRuntime()
     }

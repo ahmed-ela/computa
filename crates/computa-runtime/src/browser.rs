@@ -12,7 +12,7 @@ pub enum InferenceError {
     Codec(#[from] codec::CodecError),
     #[error("The website model request is not authorized for this active task.")]
     UnauthorizedTask,
-    #[error("Sign in to this website in Chrome, then retry the task.")]
+    #[error("Sign in to this website in the built-in browser, then retry the task.")]
     SignInRequired,
     #[error("{0}")]
     Website(BrowserFailureCode),
@@ -52,7 +52,7 @@ struct Connection {
     generation: uuid::Uuid,
     transport: Arc<dyn BrowserTransport>,
 }
-/// Initial launch can bind a stable HTTP endpoint before Chrome connects.
+/// Initial launch can bind a stable HTTP endpoint before a website model transport is available.
 pub struct DisconnectedBrowserTransport;
 #[async_trait::async_trait]
 impl BrowserTransport for DisconnectedBrowserTransport {

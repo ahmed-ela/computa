@@ -49,12 +49,12 @@ because the model returned a patch. See [code editing](CODE-EDITING.md).
 
 Current website models receive text observations. The `browser_*` tools control
 Computa's normal built-in WebKit tabs through a separate owned controller;
-the `computer_v2_*` browser interface retains its authorized Chrome connection.
+the `computer_v2_*` tools operate native applications.
 Embedded ChatGPT, Gemini and Claude model pages remain private inference surfaces
 and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).
 Image/audio input remains unavailable. Full Access automatically resolves permitted
 approval requests; it does not remove the engine sandbox, private HOME, native
-privacy grants, Chrome consent or the native interaction policy.
+privacy grants or the native interaction policy.
 
 The instruction design takes inspiration from the public Codex autonomy/task
 template and terminal session/output schemas in the pinned source revision

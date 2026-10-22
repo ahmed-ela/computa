@@ -4,10 +4,9 @@ import XCTest
 final class ComputerInteractionPolicyTests: XCTestCase {
     func testDefaultViolationGuidanceRoutesWebpagesWithoutRelaxingNativePolicy() throws {
         for violation: ComputerInteractionPolicy.Violation in [.foregroundUnavailable, .legacyMutationUnavailable] {
-            let message = violation.message(externalChromeTools: false)
+            let message = violation.localizedDescription
             XCTAssertFalse(message.contains("Chrome")); XCTAssertFalse(message.contains("computer_v2_tabs"))
             XCTAssertTrue(message.contains("native app")); XCTAssertTrue(message.contains("browser_*"))
-            XCTAssertEqual(violation.message(externalChromeTools: true), violation.localizedDescription)
         }
         XCTAssertThrowsError(try ComputerInteractionPolicy.backgroundOnly.requireForeground()) {
             XCTAssertEqual($0 as? ComputerInteractionPolicy.Violation, .foregroundUnavailable)
@@ -32,8 +31,8 @@ final class ComputerInteractionPolicyTests: XCTestCase {
         let calls: [(ComputerV2ToolContract.Tool, [String: Any])] = [
             (.status, [:]), (.apps, [:]),
             (.open, ["bundle_id": "com.apple.MobileSMS"]),
-            (.open, ["bundle_id": "com.google.Chrome", "activation": "none", "browser_mode": "existing"]),
-            (.tabs, [:]), (.bindTab, ["candidate_token": snapshotID]), (.snapshot, [:]),
+            (.open, ["bundle_id": "com.google.Chrome", "activation": "none"]),
+            (.snapshot, [:]),
             (.capture, [:]),
             (.ax, ["snapshot_id": snapshotID, "element_index": 0, "ax_action": "AXPress"]),
             (.setText, ["snapshot_id": snapshotID, "element_index": 0, "text": "read-only fixture query"]),
@@ -51,8 +50,6 @@ final class ComputerInteractionPolicyTests: XCTestCase {
             (.pointer, ["capture_id": snapshotID, "action": "move", "x": 1, "y": 2]),
             (.keypress, ["key": "Return"]), (.type, ["text": "text"]),
             (.open, ["bundle_id": "com.apple.MobileSMS", "activation": "foreground"]),
-            (.open, ["bundle_id": "com.google.Chrome", "url": "https://example.com"]),
-            (.open, ["bundle_id": "com.google.Chrome", "url": "https://example.com", "browser_mode": "isolated"]),
             (.ax, ["snapshot_id": snapshotID, "element_index": 0, "ax_action": "AXRaise"]),
         ]
         for (tool, arguments) in calls {
@@ -100,7 +97,7 @@ final class ComputerInteractionPolicyTests: XCTestCase {
         }
         XCTAssertThrowsError(try ComputerInteractionPolicy.backgroundOnly.requireForeground()) { error in
             XCTAssertEqual(error as? ComputerInteractionPolicy.Violation, .foregroundUnavailable)
-            XCTAssertTrue(error.localizedDescription.contains("Foreground interaction is not enabled for this runtime"))
+            XCTAssertTrue(error.localizedDescription.contains("Background-only computer use cannot activate apps"))
             XCTAssertFalse(error.localizedDescription.contains("Open it again"))
         }
         XCTAssertNoThrow(try ComputerInteractionPolicy.foregroundAllowed.requireForeground())

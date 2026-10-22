@@ -7,10 +7,9 @@ final class ComputerModelReferencesTests: XCTestCase {
     private let snapshot = UUID()
     private let scope = "task/binding/generation"
 
-    private func row(_ index: Int, text: String, actions: [String] = [], settable: Bool = false,
-                     follow: Bool = false, regionChanged: Bool = false) -> SemanticReadPresentedRow {
+    private func row(_ index: Int, text: String, actions: [String] = [], settable: Bool = false) -> SemanticReadPresentedRow {
         SemanticReadPresentedRow(index: index, text: "#\(index) \(text)", actions: actions,
-                                 settable: settable, followLink: follow, region: true, regionChanged: regionChanged)
+                                 settable: settable, followLink: false, region: true)
     }
 
     private func publish(_ rows: [SemanticReadPresentedRow], id: UUID? = nil,
@@ -34,17 +33,23 @@ final class ComputerModelReferencesTests: XCTestCase {
     func testNavigationContextCannotBePressedAndSearchMapsExactly() throws {
         let prepared = try publish([
             row(6, text: #"role="navigation" label="Chat history" actions=[]"#),
-            row(7, text: #"role="button" label="Search" actions=["AXPress"]"#, actions: ["AXPress"]),
+            row(7, text: #"role="AXButton" label="Search" actions=["AXPress"]"#, actions: ["AXPress"]),
+            row(8, text: #"role="AXGroup" label="Search results""#),
         ])
         let action = try ref("action_ref", in: prepared)
         let region = try ref("region_ref", in: prepared, containing: "Chat history")
+        let resultRegion = try ref("region_ref", in: prepared, containing: "Search results")
         let call = try prepared.references.resolve(tool: "computer_v2_press",
-            arguments: ["action_ref": action, "postcondition": ["kind": "dialog_opened"]],
+            arguments: ["action_ref": action, "postcondition": ["kind": "region_text", "region_ref": resultRegion, "expected": "Order A"]],
             scope: scope, currentSnapshotID: snapshot)
         XCTAssertEqual(call.tool, "computer_v2_ax")
         XCTAssertEqual(call.arguments["snapshot_id"] as? String, snapshot.uuidString)
         XCTAssertEqual(call.arguments["element_index"] as? Int, 7)
         XCTAssertEqual(call.arguments["ax_action"] as? String, "AXPress")
+        let postcondition = try XCTUnwrap(call.arguments["postcondition"] as? [String: Any])
+        XCTAssertEqual(postcondition["element_index"] as? Int, 8)
+        XCTAssertEqual(postcondition["expected"] as? String, "Order A")
+        XCTAssertNil(postcondition["region_ref"])
         XCTAssertThrowsError(try prepared.references.resolve(tool: "computer_v2_press",
             arguments: ["action_ref": region], scope: scope, currentSnapshotID: snapshot))
         let text = try XCTUnwrap(prepared.contentItems.first?["text"] as? String)
@@ -83,24 +88,32 @@ final class ComputerModelReferencesTests: XCTestCase {
         XCTAssertThrowsError(try next.references.resolve(tool: "computer_v2_press", arguments: args, scope: scope, currentSnapshotID: nextID))
     }
 
-    func testFillFollowReadAndPostconditionKeepDistinctTypesAndExactTargets() throws {
+    func testFillReadAndPostconditionKeepDistinctTypesAndExactTargets() throws {
         let prepared = try publish([
             row(0, text: #"label="Query" value="""#, settable: true),
-            row(1, text: #"label="Record" href="https://example.test/record""#, actions: ["AXPress"], follow: true),
+            row(1, text: #"label="Record""#, actions: ["AXPress"]),
             row(2, text: #"label="More""#, actions: ["AXPress"]),
-            row(3, text: #"label="Results""#, regionChanged: true),
+            row(3, text: #"label="Results""#),
         ])
-        let field = try ref("field_ref", in: prepared), link = try ref("link_ref", in: prepared)
+        let field = try ref("field_ref", in: prepared)
         let action = try ref("action_ref", in: prepared), region = try ref("region_ref", in: prepared, containing: "Results")
         let fill = try prepared.references.resolve(tool: "computer_v2_fill", arguments: ["field_ref": field, "text": "orchid"], scope: scope, currentSnapshotID: snapshot)
         XCTAssertEqual(fill.tool, "computer_v2_set_text")
         XCTAssertEqual(fill.arguments["text"] as? String, "orchid")
-        let follow = try prepared.references.resolve(tool: "computer_v2_follow", arguments: ["link_ref": link], scope: scope, currentSnapshotID: snapshot)
-        XCTAssertEqual(follow.arguments["element_index"] as? Int, 1)
-        XCTAssertThrowsError(try prepared.references.resolve(tool: "computer_v2_fill", arguments: ["field_ref": link, "text": "x"], scope: scope, currentSnapshotID: snapshot))
+        XCTAssertEqual(fill.arguments["element_index"] as? Int, 0)
+        XCTAssertThrowsError(try prepared.references.resolve(tool: "computer_v2_fill", arguments: ["field_ref": action, "text": "x"], scope: scope, currentSnapshotID: snapshot))
         let press = try prepared.references.resolve(tool: "computer_v2_press", arguments: ["action_ref": action,
-            "postcondition": ["kind": "region_changed", "region_ref": region]], scope: scope, currentSnapshotID: snapshot)
-        XCTAssertEqual((press.arguments["postcondition"] as? [String: Any])?["element_index"] as? Int, 3)
+            "postcondition": ["kind": "region_text", "region_ref": region, "expected": "Record"]], scope: scope, currentSnapshotID: snapshot)
+        XCTAssertEqual(press.arguments["element_index"] as? Int, 1)
+        let postcondition = try XCTUnwrap(press.arguments["postcondition"] as? [String: Any])
+        XCTAssertEqual(postcondition["element_index"] as? Int, 3)
+        XCTAssertEqual(postcondition["kind"] as? String, "region_text")
+        XCTAssertEqual(postcondition["expected"] as? String, "Record")
+        for wrongType in [field, action] {
+            XCTAssertThrowsError(try prepared.references.resolve(tool: "computer_v2_press", arguments: ["action_ref": action,
+                "postcondition": ["kind": "region_text", "region_ref": wrongType, "expected": "Record"]],
+                scope: scope, currentSnapshotID: snapshot))
+        }
         let read = try prepared.references.resolve(tool: "computer_v2_read_region", arguments: ["region_ref": region, "view": "content"], scope: scope, currentSnapshotID: snapshot)
         XCTAssertEqual(read.arguments["element_index"] as? Int, 3)
         let fresh = try prepared.references.resolve(tool: "computer_v2_read_page", arguments: ["view": "content"], scope: "new scope", currentSnapshotID: nil)
@@ -126,7 +139,7 @@ final class ComputerModelReferencesTests: XCTestCase {
     func testParentRelationshipUsesOnlyCurrentPublishedRegionReferences() throws {
         let child = SemanticReadPresentedRow(index: 1, text: #"#1 parent_index=0 label="Status" sibling_heading=#42:"Visible heading""#,
             actions: [], settable: false, followLink: false, region: true, parentIndex: 0)
-        let parent = row(0, text: #"role="region" label="Results""#, regionChanged: true)
+        let parent = row(0, text: #"role="region" label="Results""#)
         let prepared = try publish([child, parent])
         let reference = try ref("region_ref", in: prepared, containing: "Results")
         let text = try XCTUnwrap(prepared.contentItems.first?["text"] as? String)

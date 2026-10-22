@@ -654,7 +654,7 @@ enum ComputerV2TargetContract {
                 && $0.owningBundleIdentifier == focused.bundleIdentifier
                 && sameFrame($0.frame, frame, tolerance: 8)
         }
-        // AX and ScreenCaptureKit can describe the same Chrome window with
+        // AX and ScreenCaptureKit can describe the same app window with
         // different titles. Cross-API title equality is not a reliable
         // identity check; require a unique PID/bundle/frame match instead.
         // Subsequent checks retain the SC window ID, fingerprint, and exact
@@ -836,7 +836,6 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// Host-owned capability ceiling, copied into Core for its lifetime.
         /// Model arguments, Full Access, history and compaction cannot elevate it.
         var computerInteractionPolicy: ComputerInteractionPolicy = .backgroundOnly
-        var externalChromeToolsEnabled = ComputaModelToolCatalog.enableExternalChromeTools
         /// Optional raw NDJSON recorder for protocol-level integration tests.
         /// The production app leaves this nil so prompts and tool payloads are
         /// never copied into a second log by Computa.
@@ -895,7 +894,6 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// Synthetic failure at the native boundary, only with an explicit
         /// fixture transport. Never enabled for a bundled production runtime.
         var fixtureActivationFailurePID: Int32? = nil
-        var fixtureChromeNavigationRecoveryFailure = false
         var fixtureBeforeNativeVerificationRead: (@Sendable () async throws -> Void)? = nil
         /// Metadata/read substitutes only for owned JSON-RPC fixtures. Neither
         /// is consulted by a bundled production runtime.
@@ -933,26 +931,12 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
     init(
         configuration: Configuration,
-        browserBroker: ChromeTabBroker = ChromeTabBroker(),
-        visualGrounder: any VisualGroundingClient = PythonVisualGroundingClient.local(),
-        borrowedChromeConnector: @escaping @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner = { request in
-            if let bridge = request.extensionAdmission { return try await bridge.connect(request: request) }
-            return try await BorrowedChromeSessionOwner.connect(
-                application: request.application, explicitlyApprovedUserDataDirectory: request.userDataDirectory,
-                consent: request.consent
-            )
-        }
+        visualGrounder: any VisualGroundingClient = PythonVisualGroundingClient.local()
     ) {
         providerName = "Codex App Server · \(configuration.effectiveBackend.displayName)"
         var continuation: AsyncStream<AgentRuntimeEvent>.Continuation?
         eventStream = AsyncStream { continuation = $0 }
-        core = Core(
-            configuration: configuration,
-            events: continuation!,
-            browserBroker: browserBroker,
-            visualGrounder: visualGrounder,
-            borrowedChromeConnector: borrowedChromeConnector
-        )
+        core = Core(configuration: configuration, events: continuation!, visualGrounder: visualGrounder)
     }
 
     func loadTasks() async throws -> [AgentTask] {
@@ -1001,14 +985,6 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.resolveApproval(requestID: requestID, approved: approved)
     }
 
-    func connectChrome(_ request: ChromeConnectionRequest) async throws {
-        try await core.connectChrome(request)
-    }
-
-    func disconnectChrome() async {
-        await core.disconnectChrome()
-    }
-
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
         await core.configureEmbeddedWebModelTransport(transport)
     }
@@ -1023,24 +999,12 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         await core.waitForWebsiteSessionShutdownForFixture()
     }
 
-    /// Inert integration fixture only. Not a tool, WebKit message or Release API.
-    func installOwnedBrowserBindingForFixture(taskID: AgentTask.ID, binding: BrowserTabBinding) async throws {
-        try await core.installOwnedBrowserBindingForFixture(taskID: taskID, binding: binding)
-    }
-
     /// Inert native AX backend only; absent from the shipped Release runtime.
     func installNativeBackgroundBindingForFixture(taskID: AgentTask.ID, application: ActivatedApplication,
                                                    background: NativeBackgroundAccessibility) async throws {
         try await core.installNativeBackgroundBindingForFixture(taskID: taskID, application: application, background: background)
     }
 
-    func browserStateForFixture(taskID: AgentTask.ID) async throws -> (BrowserTabBinding?, BrowserTabSnapshot?) {
-        try await core.browserStateForFixture(taskID: taskID)
-    }
-
-    func failServerAndDrainChromeForFixture() async throws {
-        try await core.failServerAndDrainChromeForFixture()
-    }
     #endif
 
     func shutdown() async -> RuntimeShutdownReport {
@@ -1107,24 +1071,12 @@ private extension CodexAppServerRuntime {
             var backgroundAccessibility: NativeBackgroundAccessibility?
             var backgroundLifetime: NativeBackgroundLifetime?
             var capture: ComputerV2Capture?
-            var browserTab: BrowserTabBinding?
-            var browserSnapshot: BrowserTabSnapshot?
-            var pendingBrowserContinuation: BrowserContinuationTarget?
-            var browserLifetime: BrowserTabLifetime?
-            var borrowedChrome: BorrowedChromeContext?
-            // Keep partial native navigation in this turn. Recreating the
-            // controller on failure would lose the exact tab receipt and let
-            // every model retry open another tab. The controller bounds recovery
-            // and never substitutes a new tab for an uncertain prior mutation.
-            var existingChromeController: ExistingChromeController?
             var semanticProgress = SemanticObservationProgressTracker()
             // Capabilities are local to this turn, never copied from model
             // history or reconstituted from a compacted transcript.
             var readContinuations = ComputerReadContinuation()
             var modelReferences = ComputerModelReferences()
             var referenceRecoveryScope: String?
-            var inventoryObservationID: String?
-            var inventoryObservationIsFresh = false
             #if DEBUG
             var fixtureNativeBinding = false
             #endif
@@ -1133,9 +1085,6 @@ private extension CodexAppServerRuntime {
         private struct ComputerPreflightFailure: LocalizedError {
             let kind: ComputerActionEvidence.PreflightRejection
             let message: String
-            /// Host-owned exact binding/document prerequisite, never model supplied.
-            var requiredReadScope: String? = nil
-            var issue: ComputerActionEvidence.PreflightIssue? = nil
             var errorDescription: String? { message }
         }
 
@@ -1146,19 +1095,6 @@ private extension CodexAppServerRuntime {
                 + "No action was replayed. The original verification obligation remains active; "
                 + "use a read-only observation or verification, not another click."
             }
-        }
-
-        private struct BorrowedChromeContext: Sendable {
-            let connectionID: UUID
-            let owner: BorrowedChromeSessionOwner
-            let turn: BorrowedChromeTurn
-        }
-
-        private struct ChromeConnection {
-            let attemptID: UUID
-            let request: ChromeConnectionRequest
-            var task: Task<BorrowedChromeSessionOwner, Error>?
-            var owner: BorrowedChromeSessionOwner?
         }
 
         private enum DesktopInputAction {
@@ -1246,7 +1182,6 @@ private extension CodexAppServerRuntime {
 
         private let configuration: Configuration
         private let events: AsyncStream<AgentRuntimeEvent>.Continuation
-        private let browserBroker: ChromeTabBroker
         private var embeddedBrowserTools: EmbeddedBrowserToolController?
         private struct EmbeddedBrowserTurnLease {
             let key: String
@@ -1258,10 +1193,8 @@ private extension CodexAppServerRuntime {
         private var embeddedBrowserTurnKeys = [AgentTask.ID: EmbeddedBrowserTurnLease]()
         private var embeddedBrowserTaskCleanups = [AgentTask.ID: (turnID: String, task: Task<[String], Never>)]()
         private let visualGrounder: any VisualGroundingClient
-        private let borrowedChromeConnector: @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
         private var fileChangeTranscripts = [AgentTask.ID: AppServerFileChangeTranscript]()
         private var initializedDiffTurns = [AgentTask.ID: Set<String>]()
-        private var chromeConnection: ChromeConnection?
 
         private var process: OwnedChildProcess?
         private var input: FileHandle?
@@ -1275,8 +1208,6 @@ private extension CodexAppServerRuntime {
         private var nextRequestID = 1
         private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
         private var dynamicToolTasks = [ServerRequestID: DynamicToolTask]()
-        private var chromeRecoveryAttemptID: UUID?
-        private var chromeRecoveryTask: Task<Void, Never>?
         private var threadForTask: [AgentTask.ID: String] = [:]
         private var workspaceForTask: [AgentTask.ID: String] = [:]
         private var taskForThread: [String: AgentTask.ID] = [:]
@@ -1317,7 +1248,6 @@ private extension CodexAppServerRuntime {
         // These survive capability invalidation and mid-turn compaction. A
         // model summary cannot clear runtime failures or mint outcome evidence.
         private var computerTaskScopes: [AgentTask.ID: ComputerTaskScope] = [:]
-        private var computerRecovery: [AgentTask.ID: ComputerRecoveryState] = [:]
         private var computerAttempts: [AgentTask.ID: ComputerUnchangedAttemptGuard] = [:]
         private var computerEvidence: [AgentTask.ID: ComputerActionEvidence] = [:]
         private var computerReadEvidence: [AgentTask.ID: ComputerReadEvidence] = [:]
@@ -1327,7 +1257,6 @@ private extension CodexAppServerRuntime {
         private var computerActiveOperation: [AgentTask.ID: String] = [:]
         private var computerFinalDiagnostics: [AgentTask.ID: String] = [:]
         private var computerRegisteredObservations: [AgentTask.ID: Set<String>] = [:]
-        private var computerObservedActionIdentities: [AgentTask.ID: ComputerObservedActionIdentities] = [:]
         private var nativeStopTasks: [AgentTask.ID: Task<Void, Never>] = [:]
         private var nativeStopOperationIDs: [AgentTask.ID: UUID] = [:]
         private var pendingCompactionRequests: Set<AgentTask.ID> = []
@@ -1397,7 +1326,6 @@ private extension CodexAppServerRuntime {
         private var computerApprovalTask: [String: AgentTask.ID] = [:]
         private var accessibilitySessions: [Int32: ActiveAccessibilitySession] = [:]
         private var computerV2Sessions: [AgentTask.ID: ComputerV2Session] = [:]
-        private var browserContinuationTargets: [AgentTask.ID: BrowserContinuationTarget] = [:]
         private var computerV2InFlight: [AgentTask.ID: UUID] = [:]
         private var computerGlobalInFlight: UUID?
         private var isReady = false
@@ -1416,9 +1344,7 @@ private extension CodexAppServerRuntime {
         init(
             configuration: Configuration,
             events: AsyncStream<AgentRuntimeEvent>.Continuation,
-            browserBroker: ChromeTabBroker,
-            visualGrounder: any VisualGroundingClient,
-            borrowedChromeConnector: @escaping @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
+            visualGrounder: any VisualGroundingClient
         ) {
             self.configuration = configuration
             #if DEBUG
@@ -1439,9 +1365,7 @@ private extension CodexAppServerRuntime {
                     .appendingPathComponent("APIModelCorrectionUsage-v1", isDirectory: true))
             #endif
             self.events = events
-            self.browserBroker = browserBroker
             self.visualGrounder = visualGrounder
-            self.borrowedChromeConnector = borrowedChromeConnector
             // Captures stay disabled unless a private, exact-task one-shot arm
             // is explicitly created in this local diagnostic directory.
             self.webModelServer = WebModelServer(rejectedReplyDirectory:
@@ -1587,66 +1511,6 @@ private extension CodexAppServerRuntime {
             serverFailed(error)
         }
 
-        func connectChrome(_ request: ChromeConnectionRequest) async throws {
-            guard !isShuttingDown else { throw RuntimeError.serverStopped }
-            guard chromeConnectionAdmissionIsIdle else {
-                request.consent.revoke()
-                throw RuntimeError.serverError("Connect Chrome from the native app while all agent turns and context maintenance are idle. No connection was granted.")
-            }
-            try request.consent.check()
-            let previousCleanup = invalidateChromeConnection()
-            let attemptID = UUID()
-            chromeConnection = ChromeConnection(attemptID: attemptID, request: request)
-            events.yield(.chromeConnectionChanged(connectionID: request.id, state: .connecting))
-            var created: BorrowedChromeSessionOwner?
-            do {
-                await previousCleanup?.value
-                try Task.checkCancellation()
-                guard chromeConnection?.attemptID == attemptID else { throw CancellationError() }
-                try request.consent.check()
-                let connector = borrowedChromeConnector
-                let task = Task { try await connector(request) }
-                chromeConnection?.task = task
-                let owner = try await withTaskCancellationHandler {
-                    try await task.value
-                } onCancel: {
-                    // Wire admission stops synchronously, even if the connector
-                    // has not yet returned its owner to this actor.
-                    request.consent.revoke()
-                    task.cancel()
-                }
-                created = owner
-                try Task.checkCancellation()
-                guard chromeConnectionAdmissionIsIdle, chromeConnection?.attemptID == attemptID,
-                      owner.application == request.application else { throw CancellationError() }
-                try request.consent.check()
-                chromeConnection?.task = nil
-                chromeConnection?.owner = owner
-                await webModelServer.connect(request)
-                for taskID in computerRecovery.keys {
-                    computerRecovery[taskID]?.connected(generation: request.id)
-                }
-                events.yield(.chromeConnectionChanged(connectionID: request.id, state: .connected))
-            } catch {
-                request.consent.revoke()
-                if let created { await created.disconnect() }
-                if chromeConnection?.attemptID == attemptID {
-                    chromeConnection = nil
-                    let state: ChromeConnectionState = error is CancellationError
-                        ? .disconnected : .failed(message: Self.chromeFailureMessage(error))
-                    events.yield(.chromeConnectionChanged(connectionID: request.id, state: state))
-                }
-                // Never forward an endpoint, profile path, socket token or an
-                // arbitrary injected transport error into the UI/model stream.
-                if error is CancellationError { throw CancellationError() }
-                throw RuntimeError.serverError(Self.chromeFailureMessage(error))
-            }
-        }
-
-        func disconnectChrome() async {
-            await invalidateChromeConnection()?.value
-        }
-
         func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) {
             guard !isShuttingDown, !isPreparingCommandShutdown, embeddedBrowserTools == nil else { return }
             embeddedBrowserTools = controller
@@ -1708,65 +1572,6 @@ private extension CodexAppServerRuntime {
             return receipt
         }
 
-        @discardableResult
-        private func invalidateChromeConnection() -> Task<Void, Never>? {
-            guard let connection = chromeConnection else { return nil }
-            chromeConnection = nil
-            browserContinuationTargets.removeAll()
-            connection.request.consent.revoke()
-            connection.task?.cancel()
-            for taskID in Array(computerV2Sessions.keys) {
-                guard let session = computerV2Sessions[taskID],
-                      session.borrowedChrome?.connectionID == connection.request.id else { continue }
-                session.borrowedChrome?.turn.lifetime.revoke()
-                if session.browserTab?.ownership == .borrowed {
-                    session.browserLifetime?.revoke()
-                    session.browserTab?.lifetime.revoke()
-                    computerV2Sessions[taskID]?.application = nil
-                    computerV2Sessions[taskID]?.browserTab = nil
-                    computerV2Sessions[taskID]?.browserLifetime = nil
-                    computerV2Sessions[taskID]?.browserSnapshot = nil
-                }
-                computerV2Sessions[taskID]?.borrowedChrome = nil
-            }
-            events.yield(.chromeConnectionChanged(connectionID: connection.request.id, state: .disconnected))
-            let cleanupID = UUID()
-            let cleanup = Task<Void, Never> {
-                let issues = await webModelServer.disconnect()
-                childCleanupIssues.append(contentsOf: issues)
-                if let owner = connection.owner { await owner.disconnect() }
-                // A connector that completed after cancellation owns only its
-                // original connection. Never tear down the replacement owner.
-                if let task = connection.task, let lateOwner = try? await task.value { await lateOwner.disconnect() }
-                browserCleanupTasks.removeValue(forKey: cleanupID)
-            }
-            browserCleanupTasks[cleanupID] = cleanup
-            return cleanup
-        }
-
-        private static func chromeFailureMessage(_ error: Error) -> String {
-            if let endpoint = error as? ChromeDebuggingEndpointError { return endpoint.localizedDescription }
-            if let admission = error as? ChromeDebuggingAdmissionError { return admission.localizedDescription }
-            if let bridge = error as? ChromeBridgeIPC.Failure { return bridge.localizedDescription }
-            return "The approved Chrome connection is unavailable or changed. No browser settings or existing tabs were changed. Reconnect explicitly after checking Chrome."
-        }
-
-        private var chromeConnectionAdmissionIsIdle: Bool {
-            !isShuttingDown && !isStartingServer && headlessWorkState().isIdle
-                && chromeRecoveryTask == nil
-                && pendingComputerUseApprovals.isEmpty && pendingServerApprovals.isEmpty
-                && computerV2InFlight.isEmpty && computerGlobalInFlight == nil
-        }
-
-        private func requireNoPendingChromeConnection() throws {
-            guard chromeRecoveryTask == nil else {
-                throw RuntimeError.serverError("Chrome is finishing cleanup from the previous runtime. Wait before starting another turn; no browser action will be replayed.")
-            }
-            guard chromeConnection == nil || chromeConnection?.owner != nil else {
-                throw RuntimeError.serverError("Finish or cancel the native Chrome connection before running an agent turn or context maintenance.")
-            }
-        }
-
         #if DEBUG
         func installNativeBackgroundBindingForFixture(taskID: AgentTask.ID, application: ActivatedApplication,
                                                        background: NativeBackgroundAccessibility) async throws {
@@ -1787,42 +1592,6 @@ private extension CodexAppServerRuntime {
             computerV2Sessions[taskID] = session
         }
 
-        func installOwnedBrowserBindingForFixture(taskID: AgentTask.ID, binding: BrowserTabBinding) async throws {
-            guard case .fixture = configuration.executable,
-                  turnIdentity.activeTurnID(for: taskID) != nil,
-                  let epoch = computerV2Sessions[taskID]?.epoch,
-                  computerV2Sessions[taskID]?.browserTab == nil,
-                  binding.taskKey == browserTaskKey(taskID), binding.ownership == .owned else {
-                throw RuntimeError.serverError("Owned-binding fixture admission rejected.")
-            }
-            // Exercise the supplied real owned broker/session registry first;
-            // a fabricated handle or unrelated generation is not admissible.
-            let observation = try await browserBroker.snapshot(taskKey: browserTaskKey(taskID), binding: binding, query: nil)
-            var session = try computerV2Session(taskID: taskID, epoch: epoch)
-            try binding.lifetime.check()
-            session.application = ActivatedApplication(processIdentifier: binding.processIdentifier,
-                                                        bundleIdentifier: "com.google.Chrome", localizedName: "Inert owned fixture")
-            session.browserTab = binding
-            session.browserLifetime = binding.lifetime
-            session.browserSnapshot = observation.snapshot
-            computerV2Sessions[taskID] = session
-        }
-
-        func browserStateForFixture(taskID: AgentTask.ID) throws -> (BrowserTabBinding?, BrowserTabSnapshot?) {
-            guard case .fixture = configuration.executable, turnIdentity.activeTurnID(for: taskID) != nil,
-                  let session = computerV2Sessions[taskID] else {
-                throw RuntimeError.serverError("Browser-state fixture admission rejected.")
-            }
-            return (session.browserTab, session.browserSnapshot)
-        }
-
-        func failServerAndDrainChromeForFixture() async throws {
-            guard case .fixture = configuration.executable else {
-                throw RuntimeError.serverError("Runtime recovery fixture admission rejected.")
-            }
-            serverFailed(RuntimeError.serverStopped)
-            await chromeRecoveryTask?.value
-        }
         #endif
 
         func shutdown() async -> RuntimeShutdownReport {
@@ -1880,7 +1649,6 @@ private extension CodexAppServerRuntime {
         private func finishShutdown() async -> RuntimeShutdownReport {
             await cancelVisualGrounderPreparation()
             let children = Array(retiringChildren.values)
-            async let browserResult = browserBroker.shutdown()
             async let groundingIssues = visualGrounder.shutdown()
             let inferenceServers = Array(retiringInferenceServers.values)
             let inferenceIssues = await withTaskGroup(of: [String].self) { group in
@@ -1897,7 +1665,6 @@ private extension CodexAppServerRuntime {
                 for await result in group { issues.append(contentsOf: result) }
                 return issues
             }
-            let browser = await browserResult
             let grounder = await groundingIssues
             for cleanup in Array(browserCleanupTasks.values) { await cleanup.value }
             browserCleanupTasks.removeAll()
@@ -1909,39 +1676,11 @@ private extension CodexAppServerRuntime {
             for cleanup in Array(webCleanupTasks.values) { _ = await cleanup.value }
             webCleanupTasks.removeAll()
             let issues = Array(Set(
-                processIssues + inferenceIssues + webIssues + childCleanupIssues + browser.issues + embeddedBrowserIssues + grounder
+                processIssues + inferenceIssues + webIssues + childCleanupIssues + embeddedBrowserIssues + grounder
             )).sorted()
             events.yield(.connectionChanged(.disconnected))
             events.finish()
             return RuntimeShutdownReport(issues: issues)
-        }
-
-        @discardableResult
-        private func scheduleBrowserCleanup(
-            taskID: AgentTask.ID,
-            binding: BrowserTabBinding?,
-            borrowed: BorrowedChromeContext? = nil
-        ) -> Task<Void, Never> {
-            binding?.lifetime.revoke()
-            borrowed?.turn.lifetime.revoke()
-            let key = browserTaskKey(taskID)
-            let id = UUID()
-            let cleanup = Task<Void, Never> {
-                if let borrowed {
-                    await borrowed.owner.revoke(turn: borrowed.turn)
-                    let notices = await borrowed.owner.temporaryCleanupIssues()
-                    if !notices.isEmpty {
-                        events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
-                            kind: .system, title: "Temporary tab retained", body: notices.joined(separator: "\n"))))
-                    }
-                }
-                if let binding, binding.ownership == .owned {
-                    await browserBroker.revoke(taskKey: key, binding: binding)
-                }
-                browserCleanupTasks.removeValue(forKey: id)
-            }
-            browserCleanupTasks[id] = cleanup
-            return cleanup
         }
 
         @discardableResult
@@ -1995,9 +1734,6 @@ private extension CodexAppServerRuntime {
             } else { embeddedCleanup = nil }
             let session = computerV2Sessions.removeValue(forKey: taskID)
             session?.backgroundLifetime?.revoke()
-            session?.browserLifetime?.revoke()
-            session?.browserTab?.lifetime.revoke()
-            session?.borrowedChrome?.turn.lifetime.revoke()
             let requestIDs = computerApprovalTask.compactMap { $0.value == taskID ? $0.key : nil }
             for requestID in requestIDs {
                 computerApprovalTask.removeValue(forKey: requestID)
@@ -2010,9 +1746,7 @@ private extension CodexAppServerRuntime {
                 try? sendResponse(id: approval.serverRequestID, result: ["decision": "decline"])
                 events.yield(.approvalResolved(requestID: requestID))
             }
-            guard session?.browserTab != nil || session?.borrowedChrome != nil else { return embeddedCleanup }
-            let chromeCleanup = scheduleBrowserCleanup(taskID: taskID, binding: session?.browserTab, borrowed: session?.borrowedChrome)
-            return Task { await chromeCleanup.value; await embeddedCleanup?.value }
+            return embeddedCleanup
         }
 
         private func headlessWorkState(excludingSubmissionFor taskID: AgentTask.ID? = nil) -> HeadlessMLXWorkState {
@@ -2101,7 +1835,6 @@ private extension CodexAppServerRuntime {
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
-            try requireNoPendingChromeConnection()
             try configuration.validateSelectedModel(modelID)
             try requireHeadlessInferenceIdle(for: modelID)
             guard turnIdentity.activeTurnID(for: taskID) == nil,
@@ -2196,7 +1929,7 @@ private extension CodexAppServerRuntime {
                             "sandbox": accessMode.sandboxMode,
                             "approvalPolicy": accessMode.approvalPolicy,
                             "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
-                            "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil, externalChromeTools: configuration.externalChromeToolsEnabled),
+                            "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                             "config": threadConfig(for: modelID, taskID: taskID),
                             "excludeTurns": true,
                             "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
@@ -2233,7 +1966,7 @@ private extension CodexAppServerRuntime {
                         "ephemeral": false,
                         "threadSource": "local_codex",
                         "baseInstructions": baseInstructions(for: modelID),
-                        "developerInstructions": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: embeddedBrowserTools != nil, externalChromeTools: configuration.externalChromeToolsEnabled),
+                        "developerInstructions": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: embeddedBrowserTools != nil),
                         "config": threadConfig(for: modelID, taskID: taskID),
                         "dynamicTools": dynamicToolSpecs(for: modelID),
                     ]
@@ -2276,11 +2009,6 @@ private extension CodexAppServerRuntime {
             computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
 
             computerTaskScopes[taskID] = ComputerTaskScope(userPrompt: prompt)
-                .preservingContinuationRestrictions(from: computerTaskScopes[taskID],
-                    hasRetainedTarget: browserContinuationTargets[taskID].map {
-                        $0.connectionID == chromeConnection?.request.id
-                    } ?? false)
-            computerRecovery[taskID] = ComputerRecoveryState()
             computerAttempts[taskID] = ComputerUnchangedAttemptGuard()
             computerEvidence.removeValue(forKey: taskID)
             computerReadEvidence.removeValue(forKey: taskID)
@@ -2288,7 +2016,6 @@ private extension CodexAppServerRuntime {
             computerSearchEvidence[taskID] = ComputerSearchEvidence()
             nativeMessageEvidence[taskID] = NativeMessageEvidence(prompt: prompt)
             computerRegisteredObservations.removeValue(forKey: taskID)
-            computerObservedActionIdentities[taskID] = ComputerObservedActionIdentities()
             computerFinalDiagnostics.removeValue(forKey: taskID)
 
             let turnResponse: Data
@@ -2646,12 +2373,9 @@ private extension CodexAppServerRuntime {
         private func computerTurnInput(prompt: String, threadID: String, taskID: AgentTask.ID) throws -> [[String: String]] {
             var input = [["type": "text", "text": prompt]]
             if configuration.computerInteractionPolicy == .backgroundOnly {
-                input.append(["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy(
-                    externalChromeTools: configuration.externalChromeToolsEnabled)])
+                input.append(["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
             }
-            if configuration.externalChromeToolsEnabled, browserContinuationTargets[taskID] != nil {
-                input.append(["type": "text", "text": "APP_RUNTIME_CONTINUATION: Previous turn's element references and cursors have expired. If continuing with the same browser tab, first call \(usesReferenceGuidance(taskID: taskID) ? "computer_v2_read_page(view=overview)" : "computer_v2_snapshot(view=overview)") without old IDs. The runtime can reacquire that exact tab through the existing authorized connection and return fresh elements; it never replays an action or substitutes another tab. For a different target, inventory and bind explicitly."])
-            }
+
             guard let failures = try? nativeFailureStore().load(threadID: threadID) else {
                 input.append(["type": "text", "text": "APP_RUNTIME_OUTCOME_CORRECTION: Previous execution evidence could not be loaded. Do not treat historical assistant claims of completed computer actions as verified; obtain fresh evidence for this request."])
                 return input
@@ -2845,7 +2569,6 @@ private extension CodexAppServerRuntime {
             guard !isConfiguringAPIProviders else {
                 throw RuntimeError.serverError("Wait for API provider configuration to finish.")
             }
-            try requireNoPendingChromeConnection()
             let accessMode = accessModeForTask[taskID] ?? .askEveryTime
             let modelID = modelForTask[taskID] ?? configuration.model
             try requireHeadlessInferenceIdle(for: modelID)
@@ -2886,7 +2609,7 @@ private extension CodexAppServerRuntime {
                         "sandbox": accessMode.sandboxMode,
                         "approvalPolicy": accessMode.approvalPolicy,
                         "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
-                        "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil, externalChromeTools: configuration.externalChromeToolsEnabled),
+                        "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                         "config": threadConfig(for: modelID, taskID: taskID),
                         "excludeTurns": true,
                         "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
@@ -4150,34 +3873,23 @@ private extension CodexAppServerRuntime {
             // on resume. New threads use a model-aware V2 contract so the 27B
             // and 35B models are never offered a resident sidecar they cannot
             // safely fit beside.
-            ComputerV2ToolContract.referenceSpecs(for: modelID, interactionPolicy: configuration.computerInteractionPolicy, externalChromeTools: configuration.externalChromeToolsEnabled)
+            ComputerV2ToolContract.referenceSpecs(for: modelID, interactionPolicy: configuration.computerInteractionPolicy)
                 .filter { spec in
                     (apiModel(for: modelID)?.supportsToolImages != false
                         || spec["name"] as? String != ComputerV2ToolContract.Tool.capture.rawValue)
-                    && (spec["name"] as? String != ComputerV2ToolContract.Tool.createWorkspace.rawValue
-                        || chromeConnection?.request.consent.allowsTemporaryTabs == true
-                    )
                 }
                 + [ComputerOutcomeToolContract.spec]
                 + (embeddedBrowserTools == nil ? [] : EmbeddedBrowserTools.definitions())
         }
 
         private func computerEvidenceTarget(taskID: AgentTask.ID, tool: String) -> String {
-            if tool == "computer_v2_tabs" {
-                return "browser-inventory:\(chromeConnection?.request.id.uuidString ?? "disconnected"):\(computerV2Sessions[taskID]?.epoch.uuidString ?? "inactive")"
-            }
-            if tool == "computer_v2_bind_tab" || tool == "computer_v2_create_workspace" { return "browser-inventory" }
             if tool == "computer_v2_apps" || tool == "computer_v2_status" { return "computer-discovery" }
             let session = computerV2Sessions[taskID]
-            if let tab = session?.browserTab { return "browser:\(tab.browserGeneration):\(tab.targetID)" }
             return "native:\(session?.nativeEvidenceID.uuidString ?? "inactive"):\(session?.application?.processIdentifier ?? 0)"
         }
 
         private func computerReadPageScope(taskID: AgentTask.ID) -> String? {
             guard let session = computerV2Sessions[taskID] else { return nil }
-            if let tab = session.browserTab {
-                return "\(session.epoch):\(tab.browserGeneration):\(tab.handle):\(tab.documentEpoch)"
-            }
             guard session.application != nil else { return nil }
             return "\(session.epoch):\(session.nativeEvidenceID)"
         }
@@ -4187,21 +3899,14 @@ private extension CodexAppServerRuntime {
                   let turnID = turnIdentity.activeTurnID(for: taskID) else {
                 throw ComputerExecutionFailure(message: "No active computer-use turn exists. Observe again in an active turn.")
             }
-            var fields = [taskID, turnID, session.epoch.uuidString]
-            if let tab = session.browserTab {
-                fields += ["browser", tab.browserGeneration.uuidString, tab.handle.uuidString,
-                    tab.targetID, tab.targetInstanceToken, tab.documentEpoch.uuidString]
-            } else {
-                fields += ["native", session.nativeEvidenceID.uuidString,
-                    String(session.application?.processIdentifier ?? 0), session.application?.bundleIdentifier ?? "unbound"]
-            }
+            let fields = [taskID, turnID, session.epoch.uuidString, "native", session.nativeEvidenceID.uuidString,
+                String(session.application?.processIdentifier ?? 0), session.application?.bundleIdentifier ?? "unbound"]
             return SHA256.hash(data: try JSONSerialization.data(withJSONObject: fields))
                 .map { String(format: "%02x", $0) }.joined()
         }
 
         private func currentComputerSnapshotID(taskID: AgentTask.ID) async throws -> UUID? {
             guard let session = computerV2Sessions[taskID] else { return nil }
-            if let snapshot = session.browserSnapshot { return snapshot.id }
             if let background = session.backgroundAccessibility {
                 return try await background.currentObservedProperties()?.id
             }
@@ -4215,44 +3920,10 @@ private extension CodexAppServerRuntime {
             return ComputerModelReferences.attach(item: item, presentation: presentation)
         }
 
-        private func computerSearchEvidenceTarget(taskID: AgentTask.ID) throws -> String {
-            guard let session = computerV2Sessions[taskID], let tab = session.browserTab else {
-                return computerEvidenceTarget(taskID: taskID, tool: "computer_v2_snapshot")
-            }
-            // Search receipts survive expected document navigation, but not a
-            // replaced/rebound target or a new computer-use session.
-            let fields = [session.epoch.uuidString, tab.browserGeneration.uuidString, tab.handle.uuidString,
-                tab.targetID, tab.targetInstanceToken]
-            let encoded = try JSONSerialization.data(withJSONObject: fields)
-            return "browser-search:" + SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
-        }
-
-        private func registerReadContinuation(taskID: AgentTask.ID, text: String, replacing: Bool,
-                                              browserCursor: String? = nil) throws {
+        private func registerReadContinuation(taskID: AgentTask.ID, text: String, replacing: Bool) throws {
             guard let scope = computerReadPageScope(taskID: taskID) else { return }
-            let next = browserCursor.flatMap(UUID.init(uuidString:)) ?? ComputerReadContinuation.nextPageCursor(from: text)
+            let next = ComputerReadContinuation.nextPageCursor(from: text)
             try computerV2Sessions[taskID]?.readContinuations.recordPage(nextCursor: next, scope: scope, replacing: replacing)
-        }
-
-        private func browserEvidenceProperties(_ snapshot: BrowserTabSnapshot) -> [String: String] {
-            var values = ["document_url": snapshot.documentURL.absoluteString]
-            for element in snapshot.elements {
-                // Backend IDs, not re-numbered presentation indices, maintain
-                // identity when progressive snapshots reorder their output.
-                values["node:\(element.backendNodeID):text"] = element.label
-                if let value = element.value { values["node:\(element.backendNodeID):value"] = value }
-            }
-            return values
-        }
-
-        private func browserReadCorrectionScope(taskID: AgentTask.ID, snapshot: BrowserTabSnapshot) -> String? {
-            guard let session = computerV2Sessions[taskID], let tab = session.browserTab,
-                  snapshot.tabHandle == tab.handle, snapshot.documentEpoch == tab.documentEpoch else { return nil }
-            let fields = [session.epoch.uuidString, tab.browserGeneration.uuidString, tab.handle.uuidString,
-                tab.targetID, tab.targetInstanceToken, snapshot.documentEpoch.uuidString,
-                snapshot.loaderID, snapshot.documentURL.absoluteString]
-            guard let encoded = try? JSONSerialization.data(withJSONObject: fields) else { return nil }
-            return SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
         }
 
         private func registerComputerObservation(taskID: AgentTask.ID) async throws {
@@ -4260,29 +3931,7 @@ private extension CodexAppServerRuntime {
             let id: String
             let properties: [String: String]
             var isLive = true
-            var readScope: String?
-            var sourceComplete = false
-            if let snapshot = session.browserSnapshot {
-                readScope = browserReadCorrectionScope(taskID: taskID, snapshot: snapshot)
-                if let document = snapshot.evidenceDocument {
-                    // Host capture completeness only. A filtered/paginated
-                    // publication may expose fewer nodes; this repairs only
-                    // the rejected reference prerequisite, never a read or
-                    // action-success claim and never new input authority.
-                    sourceComplete = !snapshot.sourceTruncated && !document.sourceTruncated
-                        && document.loaderID == snapshot.loaderID && document.url == snapshot.documentURL
-                        && !document.nodes.isEmpty
-                }
-                id = snapshot.id.uuidString
-                properties = browserEvidenceProperties(snapshot)
-                isLive = snapshot.isLiveObservation
-                try computerObservedActionIdentities[taskID]?.record(
-                    targetID: computerEvidenceTarget(taskID: taskID, tool: "computer_v2_snapshot") + ":document:\(snapshot.documentEpoch)",
-                    snapshotID: snapshot.id,
-                    elements: snapshot.elements.map { .init(index: $0.index, backendNodeID: $0.backendNodeID, supportsSetText: $0.supportsSetText) })
-                computerSearchEvidence[taskID]?.observe(targetID: try computerSearchEvidenceTarget(taskID: taskID),
-                    snapshot: snapshot)
-            } else if let background = session.backgroundAccessibility,
+            if let background = session.backgroundAccessibility,
                       let observation = try await background.currentObservedProperties() {
                 id = observation.id.uuidString
                 properties = observation.properties
@@ -4300,7 +3949,7 @@ private extension CodexAppServerRuntime {
             guard computerRegisteredObservations[taskID]?.contains(id) != true else { return }
             try computerEvidence[taskID]?.recordObservation(id: id,
                 targetID: computerEvidenceTarget(taskID: taskID, tool: "computer_v2_snapshot"), properties: properties,
-                isLive: isLive, readScope: readScope, sourceComplete: sourceComplete)
+                isLive: isLive)
             computerRegisteredObservations[taskID, default: []].insert(id)
         }
 
@@ -4318,44 +3967,7 @@ private extension CodexAppServerRuntime {
                 _ = try? computerEvidence[taskID]?.recoverPreflightRejections(afterSuccessfulOperationID: successor,
                     correction: .freshBoundObservation(observationID: observation.id, targetID: observation.targetID))
             }
-            if operation.tool == "computer_v2_tabs",
-               let observation = ledger.latestLiveObservationIdentity(targetID: operation.targetID) {
-                _ = try? computerEvidence[taskID]?.recoverPreflightRejections(afterSuccessfulOperationID: successor,
-                    correction: .freshInventory(observationID: observation.id, targetID: observation.targetID))
-            }
-        }
 
-        private func observedBrowserActionElement(taskID: AgentTask.ID?, arguments: [String: Any]) -> BrowserTabElement? {
-            guard let taskID, let session = computerV2Sessions[taskID], let tab = session.browserTab,
-                  let snapshot = session.browserSnapshot,
-                  let id = arguments["snapshot_id"] as? String, UUID(uuidString: id) == snapshot.id,
-                  snapshot.tabHandle == tab.handle, snapshot.documentEpoch == tab.documentEpoch,
-                  let index = arguments["element_index"] as? NSNumber,
-                  CFGetTypeID(index) != CFBooleanGetTypeID(), index.doubleValue.isFinite,
-                  index.doubleValue == Double(index.intValue), index.intValue >= 0 else { return nil }
-            return snapshot.element(at: index.intValue)
-        }
-
-        private func retainedBrowserActionIdentity(taskID: AgentTask.ID?, arguments: [String: Any]) -> String? {
-            guard let taskID, let tab = computerV2Sessions[taskID]?.browserTab,
-                  let id = arguments["snapshot_id"] as? String, let snapshotID = UUID(uuidString: id),
-                  let index = arguments["element_index"] as? NSNumber,
-                  CFGetTypeID(index) != CFBooleanGetTypeID(), index.doubleValue.isFinite,
-                  index.doubleValue == Double(index.intValue), index.intValue >= 0,
-                  let element = computerObservedActionIdentities[taskID]?.lookup(
-                    currentTargetID: computerEvidenceTarget(taskID: taskID, tool: "computer_v2_snapshot") + ":document:\(tab.documentEpoch)",
-                    snapshotID: snapshotID, elementIndex: index.intValue) else { return nil }
-            // Correlation only: stale snapshots still fail the action admission
-            // below and can never authorize dispatch against a current control.
-            return "node:\(element.backendNodeID)"
-        }
-
-        private func observedBrowserBindIdentity(taskID: AgentTask.ID?, arguments: [String: Any]) async -> String? {
-            guard let taskID, let session = computerV2Sessions[taskID],
-                  let context = try? requireBorrowedChromeContext(taskID: taskID, epoch: session.epoch),
-                  let tokenText = arguments["candidate_token"] as? String, let token = UUID(uuidString: tokenText),
-                  let candidate = try? await context.owner.observedCandidate(turn: context.turn, candidateToken: token) else { return nil }
-            return "browser-candidate:\(context.connectionID):\(candidate.targetID)"
         }
 
         private func observedNativeActionIdentity(taskID: AgentTask.ID?, arguments: [String: Any]) async -> String? {
@@ -4373,12 +3985,11 @@ private extension CodexAppServerRuntime {
                 throw ComputerExecutionFailure(message: "Wait for the current computer action before verifying its outcome.")
             }
             let verificationID = UUID()
-            let native = computerV2Sessions[taskID]?.browserTab == nil
-            guard !native || computerGlobalInFlight == nil else {
+            guard computerGlobalInFlight == nil else {
                 throw ComputerExecutionFailure(message: "Another native computer action is still pending.")
             }
             computerV2InFlight[taskID] = verificationID
-            if native { computerGlobalInFlight = verificationID }
+            computerGlobalInFlight = verificationID
             defer {
                 if computerV2InFlight[taskID] == verificationID { computerV2InFlight.removeValue(forKey: taskID) }
                 if computerGlobalInFlight == verificationID { computerGlobalInFlight = nil }
@@ -4413,38 +4024,8 @@ private extension CodexAppServerRuntime {
                 }
                 return try await observeAndVerifyNativeAction(taskID: taskID, epoch: session.epoch, operationID: request.operationID)
             }
-            if let operation = computerEvidence[taskID]?.operations.first(where: { $0.id == request.operationID }),
-               let plan = operation.verificationPlan {
-                // Compatibility for a model that still asks to verify. Its
-                // arguments cannot change the intent armed before dispatch.
-                guard request.expected == plan.expected else {
-                    throw ComputerExecutionFailure(message: "The expected outcome was fixed before dispatch and cannot be replaced. No input or verification read occurred.")
-                }
-                if operation.verification == nil {
-                    return try await observeAndVerifyBrowserAction(taskID: taskID, epoch: session.epoch,
-                                                                   operationID: request.operationID)
-                }
-                let content = try await computerV2Snapshot(read: SemanticReadRequest(), taskID: taskID, epoch: session.epoch)
-                try await registerComputerObservation(taskID: taskID)
-                let fresh = try computerV2Session(taskID: taskID, epoch: session.epoch)
-                guard let snapshot = fresh.browserSnapshot, let binding = fresh.browserTab else {
-                    throw ComputerExecutionFailure(message: "The previously verified browser target is not available.")
-                }
-                _ = try plan.evaluate(binding: binding, snapshot: snapshot)
-                return [textContent("VERIFIED_PROPERTY operation_id=\(request.operationID) snapshot_id=\(snapshot.id.uuidString). The original predeclared property is still observed. No input was repeated.")]
-                    + content
-            }
             var property = request.property
-            if let snapshot = session.browserSnapshot {
-                guard snapshot.id == request.snapshotID, let binding = session.browserTab else {
-                    throw ComputerExecutionFailure(message: "Outcome verification requires the current snapshot. Observe again; no action was replayed.")
-                }
-                try binding.lifetime.check()
-                if let index = arguments["element_index"] as? Int, let field = arguments["property"] as? String {
-                    guard let element = snapshot.element(at: index) else { throw ComputerExecutionFailure(message: "Verification element was not observed.") }
-                    property = "node:\(element.backendNodeID):\(field)"
-                }
-            } else if let background = session.backgroundAccessibility {
+            if let background = session.backgroundAccessibility {
                 _ = try await background.observedProperties(snapshotID: request.snapshotID)
                 guard let index = arguments["element_index"] as? Int, let field = arguments["property"] as? String else {
                     throw ComputerExecutionFailure(message: "Native verification requires an observed identifiable control.")
@@ -4467,25 +4048,17 @@ private extension CodexAppServerRuntime {
             try await registerComputerObservation(taskID: taskID)
             let fresh = try computerV2Session(taskID: taskID, epoch: session.epoch)
             let verifiedID: String
-            if let browser = fresh.browserSnapshot { verifiedID = browser.id.uuidString }
-            else if let background = fresh.backgroundAccessibility, let observation = try await background.currentObservedProperties() { verifiedID = observation.id.uuidString }
+            if let background = fresh.backgroundAccessibility, let observation = try await background.currentObservedProperties() { verifiedID = observation.id.uuidString }
             else if let native = fresh.accessibility { verifiedID = native.snapshot.id.uuidString }
             else { throw ComputerExecutionFailure(message: "No fresh post-action observation is available; the action was not repeated.") }
-            if let receipt = computerEvidence[taskID]?.operations.first(where: { $0.id == request.operationID })?.verification {
-                guard receipt.property == property, receipt.expectedValue == request.expected,
-                      let snapshot = fresh.browserSnapshot, browserEvidenceProperties(snapshot)[property] == request.expected else {
-                    throw ComputerExecutionFailure(message: "The previously verified property is not confirmed by the fresh observation.")
-                }
-            } else {
-                do {
-                    try computerEvidence[taskID]?.verify(operationID: request.operationID,
-                        observationID: verifiedID, property: property, expectedValue: request.expected)
-                } catch {
-                    let observationText = freshContent.compactMap { $0["text"] as? String }.joined(separator: "\n")
-                    throw ComputerExecutionFailure(message: error.localizedDescription
-                        + " Use property=value for value=, property=text for label=, or document_url for url=. "
-                        + "No input was repeated. Correct the verification arguments using this current observation:\n" + observationText)
-                }
+            do {
+                try computerEvidence[taskID]?.verify(operationID: request.operationID,
+                    observationID: verifiedID, property: property, expectedValue: request.expected)
+            } catch {
+                let observationText = freshContent.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                throw ComputerExecutionFailure(message: error.localizedDescription
+                    + " Use property=value for value=, property=text for label=, or document_url for url=. "
+                    + "No input was repeated. Correct the verification arguments using this current observation:\n" + observationText)
             }
             recoverComputerOperations(taskID: taskID, successor: request.operationID)
             return [textContent("VERIFIED_PROPERTY operation_id=\(request.operationID) snapshot_id=\(verifiedID). The exact rendered property matched after the action. This is not proof of an entire task or of absent search results.\n"
@@ -4610,41 +4183,14 @@ private extension CodexAppServerRuntime {
             if let model = apiModel(for: modelID), model.supportsImages, !model.supportsToolImages {
                 observationInstructions += "\nThis API accepts user image attachments, but image-bearing tool results are unavailable. For computer and browser tasks use the offered Accessibility and page-text tools; do not request screenshots or infer visual contents from encoded data."
             }
-            if !configuration.externalChromeToolsEnabled {
-                let limits = ComputerV2ToolContract.instructions(for: configuration.computerInteractionPolicy,
-                    externalChromeTools: false)
-                let references = referenceTools
-                    ? "Native apps use computer_v2_read_page, computer_v2_read_region(region_ref), and computer_v2_continue(cursor). Use only their current typed action_ref/field_ref/region_ref."
-                    : "Native apps use computer_v2_snapshot and only its current snapshot_id/element_index."
-                return configuration.baseInstructions + observationInstructions + "\n" + limits + "\n" + references + "\n" + """
-                Webpages use only Computa's offered browser_* tools. Browser references and cursors belong to those tools: browser_read(cursor=next_cursor) continues page content, browser_tabs(cursor=next_cursor) continues its inventory. Never pass them to computer_v2_continue or computer actions. browser_click/browser_fill use the current published snapshot_id and element_index, then read the resulting page to establish the outcome. Native computer references and actions remain separate.
-                Respect exact-target checks, native permissions and bounded verification. A dispatch receipt does not establish meaning. VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input; VERIFICATION_PENDING allows read-only recovery only. Filling a search field is not submission. Read actual results and message content before making claims about sender, incoming direction or latest ordering. An overview, selected conversation or captured no_matches does not prove completeness. Report the observed result or the actual blocker; do not replay unchanged failed operations.
-                """
-            }
-            if referenceTools {
-                let background = configuration.computerInteractionPolicy == .backgroundOnly
-                    ? "Background-only is enforced: no activation or global pointer/key input. Images grant no input authority."
-                    : "Use only tools offered for this model and respect each observation's input scope."
-                return configuration.baseInstructions + observationInstructions + "\n" + background + "\n" + """
-                Use computer_v2_read_page for a fresh page, computer_v2_read_region with an observed region_ref for a subtree, and computer_v2_continue with next_cursor. Never add snapshot_id or element_index to these calls. Copy the current typed reference: computer_v2_follow(link_ref), computer_v2_fill(field_ref,text), or computer_v2_press(action_ref,postcondition). A region_ref alone is readable context, not a press target. Fresh reads and action results replace all earlier references.
-                computer_v2_press on a Chrome page requires a postcondition declared BEFORE input unless its link destination is automatic through computer_v2_follow. If intending to open a same-page dialog, use {kind:dialog_opened}, with no expected text or result reference. For unknown future result text, use {kind:region_changed,region_ref:<observed candidate>}; it proves only displayed text changed. value/region_text require an observed result region_ref and exact expected value. Native detail_view needs an observed detail_ref for a separate pane; selection proves selection only. Built-in browser_click instead takes its published snapshot_id and element_index, returns dispatch evidence, and requires a subsequent read to verify the result. Runtime approval, exact-target checks, bounded verification and at-most-once dispatch always apply.
-                VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input or verification. VERIFICATION_PENDING permits read-only recovery, never a changed postcondition or replay. A host recovery read does not perform or prove the rejected action. Read new content to establish meaning and answer once supported. Filling a search field is not submission; search conclusions need observed query and actual results or a verified empty state. Captured no_matches and an overview do not prove document/account completeness. Never infer message sender, incoming direction or latest ordering from selection alone.
-                """
-            }
-            let groundingInstruction: String
-            if configuration.computerInteractionPolicy == .backgroundOnly {
-                groundingInstruction = ComputerV2ToolContract.instructions(for: .backgroundOnly)
-            } else if LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
-                groundingInstruction = ComputerV2ToolContract.visualGroundingInstructions
-            } else {
-                groundingInstruction = """
-                Visual grounding is not offered with this model because the resident \
-                sidecar would exceed this Mac's safe memory budget; use Accessibility.
-                """
-            }
-            return configuration.baseInstructions + observationInstructions + "\n" + groundingInstruction + "\n" + """
-                Computer action receipts are separate from outcomes. Browser actions are verified by the runtime against a postcondition declared BEFORE dispatch. Link destinations and set_text values are automatic; other browser presses require postcondition. For a row/card opening a detail view, detail_view expects an exact heading already observed within that target. For a control changing a field or status region with a known exact result, use value or region_text with the observed result element_index and exact expected text. For unknown future result text, use browser region_changed without expected. The outer element_index is the pressed control; postcondition.element_index is the separate observed result container. Complete shape: \(ComputerV2ToolContract.regionChangedPressArgumentShape). The host freezes that complete noneditable region before approval and verifies only a change there; read the new content to establish meaning. Never use the pressed control as its own result region or treat changed text as pagination/task success. Read before acting if that baseline is missing. VERIFIED_PROPERTY means that narrow check passed; do not verify or perform the action again. VERIFICATION_PENDING means do not repeat input or change the expected result after dispatch. Background native actions are also runtime-verified: selection and set_text are automatic when observed, otherwise declare the exact result region before input. Native detail_view additionally needs the observed detail_element_index of a separate pane. ALREADY_SATISFIED means no input was sent because the state already held. After VERIFIED_PROPERTY or ALREADY_SATISFIED, read the new content rather than clicking again. Snapshot indices are valid only in their own observation. A selected conversation does not certify its latest incoming message: sender, direction, ordering, and latest-message coverage need separate evidence. Filling a search box is not submission. For searches verify the requested query AND the results/explicit empty state; snapshot no_matches only describes captured elements. If a required operation failed or cannot be verified, report uncertainty, never invent a completed search. Respect runtime recovery instructions and user background-only scope.
-                """
+            let limits = ComputerV2ToolContract.instructions(for: configuration.computerInteractionPolicy)
+            let references = referenceTools
+                ? "Native apps use computer_v2_read_page, computer_v2_read_region(region_ref), and computer_v2_continue(cursor). Use only their current typed action_ref/field_ref/region_ref."
+                : "Native apps use computer_v2_snapshot and only its current snapshot_id/element_index."
+            return configuration.baseInstructions + observationInstructions + "\n" + limits + "\n" + references + "\n" + """
+            Webpages use only Computa's offered browser_* tools. Browser references and cursors belong to those tools: browser_read(cursor=next_cursor) continues page content, browser_tabs(cursor=next_cursor) continues its inventory. Never pass them to computer_v2_continue or computer actions. browser_click/browser_fill use the current published snapshot_id and element_index, then read the resulting page to establish the outcome. Native computer references and actions remain separate.
+            Respect exact-target checks, native permissions and bounded verification. A dispatch receipt does not establish meaning. VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input; VERIFICATION_PENDING allows read-only recovery only. Filling a search field is not submission. Read actual results and message content before making claims about sender, incoming direction or latest ordering. An overview, selected conversation or captured no_matches does not prove completeness. Report the observed result or the actual blocker; do not replay unchanged failed operations.
+            """
         }
 
         private func handleDynamicToolCall(
@@ -4658,15 +4204,16 @@ private extension CodexAppServerRuntime {
             // Capability admission precedes reference/target resolution and the
             // action ledger. A host-denied route never acquired action authority
             // and must not become an invented uncertain outcome obligation.
-            var policyAdmissionError: Error? = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID)
+            var policyAdmissionError: Error?
+            if tool.hasPrefix("computer_v2_"), tool != ComputerOutcomeToolContract.name,
+               ComputerV2ToolContract.Tool(rawValue: tool) == nil,
+               ComputerV2ToolContract.Alias(rawValue: tool) == nil {
+                policyAdmissionError = ComputerV2ToolContract.ValidationError.unknownTool(tool)
+            }
             var legacyProcessIdentity: NativeToolProcessIdentity?
             if policyAdmissionError == nil, let processID = legacyNativeProcessID(tool: tool, arguments: arguments) {
                 do {
                     legacyProcessIdentity = try await nativeToolProcessIdentity(processID: processID)
-                    if !configuration.externalChromeToolsEnabled,
-                       ComputaModelToolCatalog.isExternalChromeTarget(bundleID: legacyProcessIdentity?.bundleIdentifier) {
-                        policyAdmissionError = RuntimeError.serverError(ComputaModelToolCatalog.externalChromeUnavailableMessage)
-                    }
                 } catch { policyAdmissionError = error }
             }
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
@@ -4692,15 +4239,11 @@ private extension CodexAppServerRuntime {
                     switch alias {
                     case .readPage, .readRegion: tool = "computer_v2_snapshot"
                     case .press: tool = "computer_v2_ax"
-                    case .follow: tool = "computer_v2_follow_link"
                     case .fill: tool = "computer_v2_set_text"
                     }
                     if case ComputerModelReferences.ReferenceError.invalidReference = error {
-                        let readScope = computerV2Sessions[taskID]?.browserSnapshot.flatMap {
-                            browserReadCorrectionScope(taskID: taskID, snapshot: $0)
-                        }
                         referenceRoutingError = ComputerPreflightFailure(kind: .freshObservationRequired,
-                            message: error.localizedDescription, requiredReadScope: readScope)
+                            message: error.localizedDescription)
                     } else { referenceRoutingError = error }
                 }
             }
@@ -4713,18 +4256,15 @@ private extension CodexAppServerRuntime {
                         throw ComputerV2ToolContract.ValidationError.invalid("cursor")
                     }
                     let route = try session.readContinuations.resolve(cursor: cursor,
-                        inventoryScope: chromeConnection?.owner == nil ? nil : computerEvidenceTarget(taskID: taskID, tool: "computer_v2_tabs"),
                         pageScope: computerReadPageScope(taskID: taskID))
                     tool = route.toolName
                     arguments = route.arguments
                 } catch {
-                    let inventory = (error as? ComputerReadContinuation.Failure) == .inventoryScopeChanged
-                        || computerReadPageScope(taskID: taskID) == nil
                     // This operation can only read. A stale continuation is
                     // never an uncertain click or a reason to reconnect.
                     continuationError = ComputerPreflightFailure(
-                        kind: inventory ? .freshInventoryRequired : .freshObservationRequired,
-                        message: (error as? ComputerReadContinuation.Failure)?.message(externalChromeTools: configuration.externalChromeToolsEnabled)
+                        kind: .freshObservationRequired,
+                        message: (error as? ComputerReadContinuation.Failure)?.localizedDescription
                             ?? error.localizedDescription)
                 }
             }
@@ -4733,37 +4273,16 @@ private extension CodexAppServerRuntime {
             // Routing rejection occurs before a backend read is admitted.
             // Keep the tool error/retry budget, not a fictitious action debt.
             let tracked = isComputer && tool != ComputerOutcomeToolContract.name && continuationError == nil && policyAdmissionError == nil
-            let bindIdentity = policyAdmissionError == nil && (tool == "computer_v2_bind_tab" || tool == "computer_v2_create_workspace")
-                ? await observedBrowserBindIdentity(taskID: taskID, arguments: arguments) : nil
-            guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
-            var identityArguments = arguments
-            if let bindIdentity { identityArguments["observed_target_identity"] = bindIdentity }
-            let observedElement = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
-                ? observedBrowserActionElement(taskID: taskID, arguments: arguments) : nil
-            let nativeActionIdentity = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
+            let nativeActionIdentity = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_set_text"].contains(tool)
                 ? await observedNativeActionIdentity(taskID: taskID, arguments: arguments) : nil
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
-            let stableActionIdentity = observedElement.map { "node:\($0.backendNodeID)" }
-                ?? (policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
-                    ? retainedBrowserActionIdentity(taskID: taskID, arguments: arguments) : nil)
-                ?? nativeActionIdentity
-            let needsProof = ["computer_v2_follow_link", "computer_v2_ax", "computer_v2_set_text", "computer_v2_click", "computer_v2_pointer", "computer_v2_ground_click", "computer_v2_keypress", "computer_v2_type", "desktop_input", "desktop_perform_action", "desktop_set_text"].contains(tool)
-                || requestedAlias == .press || requestedAlias == .follow || requestedAlias == .fill
-            let browserMutation = policyAdmissionError == nil && needsProof && taskID.flatMap { computerV2Sessions[$0]?.browserTab } != nil
-            let recoveryScope: String? = taskID.flatMap { id in
-                guard browserMutation, let session = computerV2Sessions[id],
-                      let binding = session.browserTab, let snapshot = session.browserSnapshot else { return nil }
-                return BrowserActionVerification.recoveryScope(binding: binding, snapshot: snapshot)
-            }
-            let intentKey = ComputerUnchangedAttemptGuard.key(tool: tool, arguments: identityArguments,
+            let stableActionIdentity = nativeActionIdentity
+            let needsProof = ["computer_v2_ax", "computer_v2_set_text", "computer_v2_click", "computer_v2_pointer", "computer_v2_ground_click", "computer_v2_keypress", "computer_v2_type", "desktop_input", "desktop_perform_action", "desktop_set_text"].contains(tool)
+                || requestedAlias == .press || requestedAlias == .fill
+            let intentKey = ComputerUnchangedAttemptGuard.key(tool: tool, arguments: arguments,
                 observedElementIdentity: stableActionIdentity)
             let recoveryKey: String?
-            if browserMutation && recoveryScope == nil {
-                recoveryKey = nil
-            } else if tool == "computer_v2_ax", arguments["ax_action"] as? String == "AXPress",
-               let observedElement, observedElement.supportsSetText {
-                recoveryKey = "focus:node:\(observedElement.backendNodeID)"
-            } else if needsProof && stableActionIdentity == nil {
+            if needsProof && stableActionIdentity == nil {
                 // Coordinates/keys alone do not identify the intended control.
                 // They remain retry-budgeted, never correlated as safe recovery.
                 recoveryKey = nil
@@ -4779,9 +4298,8 @@ private extension CodexAppServerRuntime {
                 if tracked, let taskID {
                     guard computerEvidence[taskID] != nil else { throw ComputerExecutionFailure(message: "No active computer-use evidence context exists.", stop: true) }
                     try computerEvidence[taskID]?.begin(operationID: callID, tool: tool,
-                        targetID: bindIdentity ?? computerEvidenceTarget(taskID: taskID,
-                            tool: tool == "computer_v2_continue" && computerReadPageScope(taskID: taskID) == nil ? "computer_v2_tabs" : tool),
-                        recoveryKey: recoveryKey, requiresVerification: needsProof, recoveryScope: recoveryScope)
+                        targetID: computerEvidenceTarget(taskID: taskID, tool: tool),
+                        recoveryKey: recoveryKey, requiresVerification: needsProof)
                     guard computerActiveOperation[taskID] == nil, computerV2InFlight[taskID] == nil else {
                         throw ComputerExecutionFailure(message: "Another computer action is pending. Wait for its result before issuing the next action.")
                     }
@@ -4790,11 +4308,6 @@ private extension CodexAppServerRuntime {
                 if let referenceRoutingError { throw referenceRoutingError }
                 if let continuationError { throw continuationError }
                 #if DEBUG
-                if case .fixture = configuration.executable,
-                   configuration.fixtureChromeNavigationRecoveryFailure,
-                   tool == "computer_v2_open" {
-                    throw ExistingChromeError.navigationRecoveryRequired
-                }
                 if case .fixture = configuration.executable,
                    let pid = configuration.fixtureActivationFailurePID,
                    tool == "computer_v2_open" {
@@ -4819,18 +4332,11 @@ private extension CodexAppServerRuntime {
                         if operation.dispatch == .notDispatched {
                             try computerEvidence[taskID]?.recordDispatch(operationID: callID, state: .dispatched)
                         }
-                        if tool == "computer_v2_tabs", let observationID = computerV2Sessions[taskID]?.inventoryObservationID {
-                            try computerEvidence[taskID]?.recordObservation(id: observationID,
-                                targetID: computerEvidenceTarget(taskID: taskID, tool: tool),
-                                properties: ["inventory_read": "observed"],
-                                isLive: computerV2Sessions[taskID]?.inventoryObservationIsFresh == true)
-                        } else {
-                            try await registerComputerObservation(taskID: taskID)
-                        }
+                        try await registerComputerObservation(taskID: taskID)
                     }
                     recoverComputerOperations(taskID: taskID, successor: callID)
                     computerAttempts[taskID]?.succeeded(key: intentKey)
-                    if ["computer_v2_tabs", "computer_v2_snapshot"].contains(tool) {
+                    if tool == "computer_v2_snapshot" {
                         computerAttempts[taskID]?.succeeded(key: "read-continuation-routing")
                     }
                     if let receipt = computerEvidence[taskID]?.operations.first(where: { $0.id == callID }), receipt.requiresVerification {
@@ -4844,7 +4350,7 @@ private extension CodexAppServerRuntime {
                         contentItems.append(textContent("ACTION_EVIDENCE operation_id=\(callID). " + instruction + "\n"
                             + (try computerEvidence[taskID]?.checkpointText() ?? "")))
                     }
-                    if ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool),
+                    if ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text"].contains(tool),
                        computerSearchEvidence[taskID]?.completionDiagnostic != nil {
                         contentItems.append(textContent(computerSearchEvidence[taskID]?.checkpointText() ?? ""))
                     }
@@ -4887,8 +4393,7 @@ private extension CodexAppServerRuntime {
                 guard !Task.isCancelled,
                       !isShuttingDown,
                       generation == serverGeneration else { return }
-                var message = ComputerToolFailureEvidence.text(for: error, tool: tool,
-                    externalChromeTools: configuration.externalChromeToolsEnabled)
+                var message = ComputerToolFailureEvidence.text(for: error, tool: tool)
                 let failureDescription = message
                 var exhausted = false
                 if isComputer, let taskID {
@@ -4912,9 +4417,7 @@ private extension CodexAppServerRuntime {
                             try? computerEvidence[taskID]?.recordPreflightRejection(operationID: callID,
                                 kind: kind, code: "preflight_rejected", message: message,
                                 targetWasUnbound: error is ComputerV2ToolContract.ValidationError
-                                    && computerV2Sessions[taskID]?.application == nil,
-                                requiredReadScope: (error as? ComputerPreflightFailure)?.requiredReadScope,
-                                issue: (error as? ComputerPreflightFailure)?.issue)
+                                    && computerV2Sessions[taskID]?.application == nil)
                         } else {
                             try? computerEvidence[taskID]?.recordFailure(operationID: callID, code: "tool_failed", message: message, dispatch: operation.dispatch)
                         }
@@ -4934,7 +4437,6 @@ private extension CodexAppServerRuntime {
                 }
                 let terminal = ComputerToolFailureEvidence.terminalMessage(for: error)
                     ?? ((error as? NativeBackgroundAccessibility.Failure) == .focusChangedDuringAction ? error.localizedDescription : nil)
-                    ?? ((error as? ComputerRecoveryState.Rejection)?.shouldStop == true ? error.localizedDescription : nil)
                     ?? ((error as? ComputerExecutionFailure)?.stop == true ? error.localizedDescription : nil)
                     ?? (exhausted ? (error is ComputerInteractionPolicy.Violation
                         ? "Stopped repeated foreground-only requests. Background-only mode does not allow app activation or global input; screenshots cannot authorize clicks. The requested outcome remains unverified. This chat remains usable."
@@ -5034,7 +4536,7 @@ private extension CodexAppServerRuntime {
             }
             do {
                 let content = try await executeDynamicTool("computer_v2_snapshot",
-                    arguments: ["view": session.browserTab == nil ? "all" : "overview"], taskID: taskID)
+                    arguments: ["view": "all"], taskID: taskID)
                 try validateComputerV2Turn(taskID: taskID, epoch: epoch)
                 guard generation == serverGeneration, !isShuttingDown,
                       turnIdentity.activeTurnID(for: taskID) == turnID,
@@ -5066,10 +4568,8 @@ private extension CodexAppServerRuntime {
             if let failure = error as? ComputerPreflightFailure { return failure.kind }
             if case ComputerModelReferences.ReferenceError.invalidReference = error { return .freshObservationRequired }
             if error is ComputerV2ToolContract.ValidationError { return .invalidArguments }
-            if (error as? BorrowedChromeSessionOwnerError) == .invalidCursor { return .freshInventoryRequired }
             if case BrowserTabBrokerError.invalidRead = error { return .invalidArguments }
             if case BrowserTabBrokerError.staleSnapshot = error { return .freshObservationRequired }
-            if case BrowserActionVerification.Failure.baselineChanged = error { return .freshObservationRequired }
             if error is NativeActionVerification.Failure { return .freshObservationRequired }
             if error is NativeAccessibilityActionScope.ValidationError { return .freshObservationRequired }
             if (error as? NativeBackgroundAccessibility.Failure) == .staleObservation { return .freshObservationRequired }
@@ -5220,9 +4720,7 @@ private extension CodexAppServerRuntime {
             taskID: AgentTask.ID?,
             legacyProcessIdentity: NativeToolProcessIdentity? = nil
         ) async throws -> [[String: Any]] {
-            if let error = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID) {
-                throw error
-            }
+
             if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
             if tool.hasPrefix("browser_") {
                 return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID)
@@ -5233,8 +4731,7 @@ private extension CodexAppServerRuntime {
             // Persisted legacy tool schemas are not authority to bypass the
             // current host's capability ceiling. Reject before any approval.
             try configuration.computerInteractionPolicy.requireLegacy(tool: tool, arguments: arguments)
-            if let taskID, let violation = computerTaskScopes[taskID]?.toolViolation(tool: tool,
-                hasBorrowedBinding: computerV2Sessions[taskID]?.browserTab?.ownership == .borrowed) {
+            if let taskID, let violation = computerTaskScopes[taskID]?.toolViolation(tool: tool) {
                 throw ComputerExecutionFailure(message: violation)
             }
             if tool == ComputerOutcomeToolContract.name {
@@ -5314,16 +4811,11 @@ private extension CodexAppServerRuntime {
                 }
                 let application: ActivatedApplication
                 try markForegroundEffect(taskID: taskID, effect: .activationRequested)
-                if bundleIdentifier == "com.google.Chrome" {
-                    let chrome = await MainActor.run { ExistingChromeController() }
-                    application = try await chrome.open(url: url)
-                } else {
                     let controller = await MainActor.run { ComputerInputController() }
                     application = try await controller.launchOrActivateApplication(
                         bundleIdentifier: bundleIdentifier,
                         opening: url
                     )
-                }
                 try markForegroundEffect(taskID: taskID, effect: .activationCompleted)
                 return [textContent(
                     try encodeJSON(application)
@@ -5334,9 +4826,7 @@ private extension CodexAppServerRuntime {
                 let applications = await MainActor.run {
                     RunningApplicationCatalog().applications()
                 }
-                let visibleApplications = configuration.externalChromeToolsEnabled ? applications
-                    : applications.filter { !ComputaModelToolCatalog.isExternalChromeTarget(bundleID: $0.bundleIdentifier) }
-                return [textContent(try encodeJSON(visibleApplications))]
+                return [textContent(try encodeJSON(applications))]
 
             case "desktop_focused_window":
                 let window = try await MainActor.run {
@@ -5672,7 +5162,7 @@ private extension CodexAppServerRuntime {
                 epoch: epoch
             ).application else {
                 throw ComputerPreflightFailure(kind: .bindingRequired,
-                    message: ComputerV2ToolContract.unboundApplicationMessage(externalChromeTools: configuration.externalChromeToolsEnabled))
+                    message: ComputerV2ToolContract.unboundApplicationMessage)
             }
             let boundSession = try computerV2Session(taskID: taskID, epoch: epoch)
             #if DEBUG
@@ -5683,21 +5173,7 @@ private extension CodexAppServerRuntime {
                 return application
             }
             #endif
-            if let binding = boundSession.browserTab, binding.ownership == .borrowed {
-                // The owner revalidates its exact launch/listener/file authority
-                // around every protocol operation. Do not substitute a native
-                // foreground/catalog lookup for that retained connection.
-                let context = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                try binding.lifetime.check()
-                guard context.owner.application.processIdentifier == application.processIdentifier,
-                      context.owner.application.bundleIdentifier == application.bundleIdentifier,
-                      binding.processIdentifier == application.processIdentifier,
-                      binding.browserGeneration == context.owner.generation else {
-                    invalidateBorrowedComputerSession(taskID: taskID, epoch: epoch)
-                    throw RuntimeError.serverError("The borrowed browser identity changed. Observe and bind again.")
-                }
-                return application
-            }
+
             let running = await MainActor.run {
                 RunningApplicationCatalog().applications()
             }
@@ -5713,16 +5189,6 @@ private extension CodexAppServerRuntime {
                 computerV2Sessions[taskID]?.backgroundLifetime?.revoke()
                 computerV2Sessions[taskID]?.backgroundLifetime = nil
                 computerV2Sessions[taskID]?.capture = nil
-                computerV2Sessions[taskID]?.browserLifetime?.revoke()
-                if let binding = computerV2Sessions[taskID]?.browserTab {
-                    scheduleBrowserCleanup(taskID: taskID, binding: binding, borrowed: computerV2Sessions[taskID]?.borrowedChrome)
-                } else if let borrowed = computerV2Sessions[taskID]?.borrowedChrome {
-                    scheduleBrowserCleanup(taskID: taskID, binding: nil, borrowed: borrowed)
-                }
-                computerV2Sessions[taskID]?.borrowedChrome = nil
-                computerV2Sessions[taskID]?.browserLifetime = nil
-                computerV2Sessions[taskID]?.browserTab = nil
-                computerV2Sessions[taskID]?.browserSnapshot = nil
                 throw RuntimeError.serverError(
                     "The bound application changed or quit. Open it again before interacting."
                 )
@@ -5732,29 +5198,17 @@ private extension CodexAppServerRuntime {
 
         private func computerV2ApprovalDetails(
             arguments: [String: Any],
-            application: ActivatedApplication,
-            browserTab: BrowserTabBinding? = nil,
-            observedPageURL: URL? = nil
+            application: ActivatedApplication
         ) -> String {
-            var target: [String: Any] = [
+            let target: [String: Any] = [
                 "bundle_id": application.bundleIdentifier,
                 "process_id": application.processIdentifier,
             ]
-            if let browserTab {
-                target["tab_handle"] = browserTab.handle.uuidString
-                target["document_epoch"] = browserTab.documentEpoch.uuidString
-                if let observedPageURL {
-                    target["observed_page_url"] = observedPageURL.absoluteString
-                }
-            }
+
             return prettyJSON([
                 "model_arguments": arguments,
                 "resolved_target": target,
             ])
-        }
-
-        private func browserTaskKey(_ taskID: AgentTask.ID) -> String {
-            String(describing: taskID)
         }
 
         private func clearComputerV2Observation(
@@ -5773,7 +5227,6 @@ private extension CodexAppServerRuntime {
             session.accessibilityWindowIdentity = nil
             session.backgroundAccessibility = nil
             session.capture = nil
-            session.browserSnapshot = nil
             if resetProgress { session.semanticProgress.reset() }
             computerV2Sessions[taskID] = session
         }
@@ -5854,32 +5307,7 @@ private extension CodexAppServerRuntime {
                     ? "The native application's process or launch identity changed after the read. The observation was discarded and not published."
                     : "The admitted native application's process or launch identity changed. No new native observation was published.")
             }
-            if !configuration.externalChromeToolsEnabled,
-               ComputaModelToolCatalog.isExternalChromeTarget(bundleID: current.bundleIdentifier) {
-                throw RuntimeError.serverError(readCompleted
-                    ? "The native observation is unavailable under the current browser policy after the read. The observation was discarded and not published."
-                    : ComputaModelToolCatalog.externalChromeUnavailableMessage)
-            }
-        }
 
-        /// The same native-only ceiling applies to retained tool schemas and
-        /// legacy native calls. It never clears admitted action evidence.
-        private func externalChromeAdmissionError(tool: String, arguments: [String: Any],
-                                                   taskID: AgentTask.ID?) -> RuntimeError? {
-            guard !configuration.externalChromeToolsEnabled,
-                  tool.hasPrefix("computer_v2_") || tool == "computer" || tool.hasPrefix("desktop_") else { return nil }
-            let parameters = tool == "computer"
-                ? (try? ComputerToolArgumentContract.parameters(in: arguments)) ?? arguments : arguments
-            let nativeChromeTarget = ComputaModelToolCatalog.isExternalChromeTarget(bundleID: parameters["bundle_id"] as? String)
-            let retainedChromeBinding = tool.hasPrefix("computer_v2_")
-                && taskID.flatMap { computerV2Sessions[$0]?.browserTab } != nil
-                && !["computer_v2_open", "computer_v2_status", "computer_v2_apps"].contains(tool)
-            guard ComputaModelToolCatalog.externalChromeToolNames.contains(tool)
-                    || parameters["browser_mode"] != nil
-                    || nativeChromeTarget
-                    || tool == "computer_v2_open" && parameters["url"] != nil
-                    || retainedChromeBinding else { return nil }
-            return .serverError(ComputaModelToolCatalog.externalChromeUnavailableMessage)
         }
 
         private func executeComputerV2(
@@ -5893,11 +5321,7 @@ private extension CodexAppServerRuntime {
             // LM Studio currently accepts strict JSON schemas but can still
             // emit missing fields. Validation here, before approval, is the
             // actual enforcement boundary.
-            if let error = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID) {
-                // Old native threads retain schemas. Reject before permissions,
-                // connection restoration, approvals, or any Chrome operation.
-                throw error
-            }
+
             let call = try ComputerV2ToolContract.validate(
                 tool: tool,
                 arguments: arguments
@@ -5908,18 +5332,8 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.serverError("This browser model receives text observations only. Screenshots cannot be attached through this transport. Use the offered Accessibility or built-in browser page-text observations.")
             }
             try configuration.computerInteractionPolicy.requireV2(call)
-            if configuration.externalChromeToolsEnabled,
-               let epoch = computerV2Sessions[taskID]?.epoch,
-               computerV2Sessions[taskID]?.application == nil,
-               [.snapshot, .ax, .setText].contains(call.tool) {
-                let restored = try await restoreBrowserContinuation(taskID: taskID, epoch: epoch)
-                if restored && (call.tool != .snapshot || call.semanticRead.cursor != nil || call.semanticRead.snapshotID != nil) {
-                    throw ComputerPreflightFailure(kind: .bindingRequired,
-                        message: "The previous Chrome tab was reacquired without activation or input. Old element references and cursors are invalid. Call \(usesReferenceGuidance(taskID: taskID) ? "computer_v2_read_page(view=overview)" : "computer_v2_snapshot(view=overview)"), then select a fresh element. The requested action was not dispatched or replayed.")
-                }
-            }
-            if let violation = computerTaskScopes[taskID]?.toolViolation(tool: tool,
-                hasBorrowedBinding: computerV2Sessions[taskID]?.browserTab?.ownership == .borrowed) {
+
+            if let violation = computerTaskScopes[taskID]?.toolViolation(tool: tool) {
                 throw ComputerExecutionFailure(message: violation)
             }
             if [.ax, .setText, .click, .pointer, .groundClick, .keypress, .type, .open].contains(call.tool),
@@ -5941,9 +5355,7 @@ private extension CodexAppServerRuntime {
                     "Another computer action is still pending for this task."
                 )
             }
-            let borrowedSemantic = computerV2Sessions[taskID]?.browserTab?.ownership == .borrowed
-                && [.snapshot, .ax, .setText].contains(call.tool)
-            let needsDesktopIsolation = ![.status, .apps, .tabs, .bindTab].contains(call.tool) && !borrowedSemantic
+            let needsDesktopIsolation = ![.status, .apps].contains(call.tool)
             guard !needsDesktopIsolation || computerGlobalInFlight == nil else {
                 throw RuntimeError.serverError(
                     "Another computer action is still pending. Try again after it completes."
@@ -5961,13 +5373,7 @@ private extension CodexAppServerRuntime {
                 if computerGlobalInFlight == operationID {
                     computerGlobalInFlight = nil
                 }
-                if let session = computerV2Sessions[taskID], let context = session.borrowedChrome {
-                    observeBorrowedFailure(taskID: taskID, epoch: session.epoch, context: context)
-                }
-                if let connection = chromeConnection {
-                    do { try connection.request.consent.check() }
-                    catch { invalidateChromeConnection() }
-                }
+
             }
             guard let epoch = computerV2Sessions[taskID]?.epoch else {
                 throw RuntimeError.serverError(
@@ -5982,21 +5388,11 @@ private extension CodexAppServerRuntime {
                     + "no foreground activation or global input fallback was performed."
                 )
             }
-            if computerV2Sessions[taskID]?.browserTab?.ownership == .borrowed,
-               call.tool.requiresGlobalInput || call.tool == .capture {
-                throw RuntimeError.serverError(
-                    "This borrowed Chrome tab permits background snapshot, ax and set_text only. "
-                    + "No foreground, screenshot, pointer or keyboard fallback was performed."
-                )
-            }
 
             switch call.tool {
             case .status:
                 return [textContent(try encodeJSON(PermissionInspector().current())
-                    + (configuration.externalChromeToolsEnabled
-                        ? "\nchrome_connection=" + (chromeConnection?.owner == nil ? "unavailable" : "connected")
-                            + "; only a native user-approved connection enables computer_v2_tabs and computer_v2_bind_tab."
-                        : "\nbrowser_route=computa_builtin external_chrome_tools=hidden. Native app reads require computer_v2_open with a supported bundle_id first; webpages use browser_tabs, browser_open and browser_read."))]
+                    + "\nbrowser_route=computa_builtin. Native app reads require computer_v2_open with a supported bundle_id first; webpages use browser_tabs, browser_open and browser_read.")]
 
             case .apps:
                 let applications = await MainActor.run {
@@ -6004,25 +5400,17 @@ private extension CodexAppServerRuntime {
                 }
                 _ = try computerV2Session(taskID: taskID, epoch: epoch)
                 return [textContent(ComputerV2ToolContract.appInventory(
-                    applications, query: arguments["query"] as? String,
-                    externalChromeTools: configuration.externalChromeToolsEnabled
+                    applications, query: arguments["query"] as? String
                 ))]
-
-            case .tabs:
-                return try await computerV2Tabs(call, taskID: taskID, epoch: epoch)
 
             case .continueRead:
                 // Continuations must be resolved before ledger admission so
                 // proof/retry accounting records the actual read primitive.
                 throw ComputerV2ToolContract.ValidationError.invalid("cursor: refresh the intended source")
 
-            case .bindTab, .createWorkspace:
-                return try await computerV2BindTab(call, taskID: taskID, epoch: epoch)
-
             case .open:
                 return try await computerV2Open(
                     arguments: arguments,
-                    browserMode: call.browserMode,
                     activationMode: call.activationMode,
                     taskID: taskID,
                     epoch: epoch
@@ -6037,7 +5425,7 @@ private extension CodexAppServerRuntime {
                     throw error
                 }
 
-            case .ax, .followLink, .setText:
+            case .ax, .setText:
                 return try await computerV2SemanticAction(
                     call,
                     taskID: taskID,
@@ -6074,269 +5462,6 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func requireBorrowedChromeContext(taskID: AgentTask.ID, epoch: UUID) throws -> BorrowedChromeContext {
-            let session = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard let context = session.borrowedChrome,
-                  let connection = chromeConnection, connection.request.id == context.connectionID,
-                  connection.owner === context.owner,
-                  context.turn.taskKey == browserTaskKey(taskID),
-                  turnIdentity.activeTurnID(for: taskID) == context.turn.turnID else {
-                throw RuntimeError.serverError("No current borrowed Chrome inventory exists. Use computer_v2_tabs through a native user-approved connection first.")
-            }
-            try connection.request.consent.check()
-            try context.turn.lifetime.check()
-            return context
-        }
-
-        private func borrowedChromeContextForInventory(taskID: AgentTask.ID, epoch: UUID) async throws -> BorrowedChromeContext {
-            if try computerV2Session(taskID: taskID, epoch: epoch).borrowedChrome != nil {
-                return try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-            }
-            guard let connection = chromeConnection, let owner = connection.owner,
-                  let turnID = turnIdentity.activeTurnID(for: taskID) else {
-                throw RuntimeError.serverError("Chrome is not connected for background access. This is a separate browser connection, not evidence that macOS computer-use permission was denied. Do not retry computer_v2_tabs until the user connects Chrome. Ask them to use Computa's Connect Chrome menu → Connect existing Chrome… → Connect. Only the native user can approve that connection; the model cannot grant it. No settings were changed; computer_v2_open remains available for explicit native app use.")
-            }
-            try connection.request.consent.check()
-            let turn = try await owner.beginTurn(taskKey: browserTaskKey(taskID), turnID: turnID)
-            do {
-                var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                guard turnIdentity.activeTurnID(for: taskID) == turnID,
-                      chromeConnection?.attemptID == connection.attemptID,
-                      chromeConnection?.owner === owner, session.borrowedChrome == nil else {
-                    throw CancellationError()
-                }
-                let context = BorrowedChromeContext(connectionID: connection.request.id, owner: owner, turn: turn)
-                session.borrowedChrome = context
-                computerV2Sessions[taskID] = session
-                return context
-            } catch {
-                turn.lifetime.revoke()
-                await owner.revoke(turn: turn)
-                throw error
-            }
-        }
-
-        private func invalidateBorrowedComputerSession(taskID: AgentTask.ID, epoch: UUID) {
-            guard var session = computerV2Sessions[taskID], session.epoch == epoch,
-                  let context = session.borrowedChrome else { return }
-            context.turn.lifetime.revoke()
-            let binding = session.browserTab?.ownership == .borrowed ? session.browserTab : nil
-            binding?.lifetime.revoke()
-            if binding != nil {
-                session.application = nil
-                session.browserTab = nil
-                session.browserSnapshot = nil
-                session.browserLifetime = nil
-            }
-            session.borrowedChrome = nil
-            computerV2Sessions[taskID] = session
-            scheduleBrowserCleanup(taskID: taskID, binding: binding, borrowed: context)
-        }
-
-        private func observeBorrowedFailure(taskID: AgentTask.ID, epoch: UUID, context: BorrowedChromeContext) {
-            do { try context.turn.lifetime.check() }
-            catch {
-                if computerV2Sessions[taskID]?.borrowedChrome?.turn.lifetime === context.turn.lifetime {
-                    invalidateBorrowedComputerSession(taskID: taskID, epoch: epoch)
-                }
-            }
-            if let connection = chromeConnection, connection.owner === context.owner {
-                do { try connection.request.consent.check() }
-                catch { invalidateChromeConnection() }
-            }
-        }
-
-        private func computerV2Tabs(
-            _ call: ComputerV2ToolContract.ValidatedCall, taskID: AgentTask.ID, epoch: UUID
-        ) async throws -> [[String: Any]] {
-            if let denied = computerRecovery[taskID]?.admitInventory(connectionGeneration: chromeConnection?.request.id) { throw denied }
-            guard chromeConnection?.owner != nil else {
-                let failure = ComputerRecoveryState.Failure(code: .connectionLost,
-                    message: "Chrome is not connected for background access. This is not evidence that macOS computer-use permission was denied. Do not retry computer_v2_tabs until the existing authorized connection is restored through Connect Chrome menu.",
-                    recovery: .newConnection, connectionGeneration: chromeConnection?.request.id)
-                computerRecovery[taskID]?.record(failure)
-                throw ComputerExecutionFailure(message: failure.message)
-            }
-            let context = try await borrowedChromeContextForInventory(taskID: taskID, epoch: epoch)
-            do {
-                let cursor = (call.arguments["cursor"] as? String).flatMap(UUID.init(uuidString:))
-                let page = try await context.owner.listTabs(turn: context.turn, cursor: cursor, pageSize: call.tabPageSize,
-                                                            requestScope: computerTaskScopes[taskID])
-                _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                let inventoryScope = computerEvidenceTarget(taskID: taskID, tool: "computer_v2_tabs")
-                try computerV2Sessions[taskID]?.readContinuations.recordInventory(
-                    nextCursor: page.nextCursor, pageSize: call.tabPageSize,
-                    scope: inventoryScope, replacing: cursor == nil)
-                computerV2Sessions[taskID]?.inventoryObservationID = UUID().uuidString
-                computerV2Sessions[taskID]?.inventoryObservationIsFresh = cursor == nil
-                if cursor == nil {
-                    let available = try await context.owner.availableTargetIDs(turn: context.turn)
-                    computerRecovery[taskID]?.inventoryRefreshed(connectionGeneration: context.connectionID, availableTargets: available)
-                }
-                return [textContent(try BorrowedChromeInventoryPresentation.render(page))]
-            } catch {
-                recordBrowserRecovery(error, taskID: taskID, context: context, target: nil)
-                observeBorrowedFailure(taskID: taskID, epoch: epoch, context: context)
-                throw error
-            }
-        }
-
-        private func computerV2BindTab(
-            _ call: ComputerV2ToolContract.ValidatedCall, taskID: AgentTask.ID, epoch: UUID
-        ) async throws -> [[String: Any]] {
-            let workspace = call.tool == .createWorkspace
-            if workspace, chromeConnection?.request.consent.allowsTemporaryTabs != true {
-                throw ComputerPreflightFailure(kind: .bindingRequired,
-                    message: "Temporary background tabs have not been enabled in Computa's native Chrome menu. No tab was created. Existing-tab access is unchanged; the model cannot grant this capability.")
-            }
-            // Consult the retained original failure BEFORE a missing context
-            // can replace it with the generic inventory error.
-            if let denied = computerRecovery[taskID]?.admitBind(target: nil) { throw denied }
-            guard computerV2Sessions[taskID]?.borrowedChrome != nil else {
-                let failure = ComputerRecoveryState.Failure(code: .inventoryRequired,
-                    message: "No current borrowed Chrome inventory exists.", recovery: .refreshInventory,
-                    connectionGeneration: chromeConnection?.request.id)
-                computerRecovery[taskID]?.record(failure)
-                throw ComputerExecutionFailure(message: failure.message + " Refresh computer_v2_tabs before binding.")
-            }
-            let context = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-            guard let token = (call.arguments["candidate_token"] as? String).flatMap(UUID.init(uuidString:)) else {
-                throw RuntimeError.serverError("Use an observed candidate_token from this turn's Chrome inventory.")
-            }
-            let prior = try computerV2Session(taskID: taskID, epoch: epoch)
-            let binding: BrowserTabBinding
-            var selectedTarget: ComputerRecoveryState.Target?
-            var continuation: BrowserContinuationTarget?
-            do {
-                let candidate = try await context.owner.observedCandidate(turn: context.turn, candidateToken: token)
-                continuation = BrowserContinuationTarget(connectionID: context.connectionID,
-                    targetID: candidate.targetID, url: candidate.url)
-                let target = ComputerRecoveryState.Target(connectionGeneration: context.connectionID, targetID: candidate.targetID)
-                selectedTarget = target
-                if let denied = computerRecovery[taskID]?.admitBind(target: target) { throw denied }
-                if let violation = computerTaskScopes[taskID]?.candidateViolation(url: candidate.url, title: candidate.title) {
-                    throw ComputerExecutionFailure(message: violation)
-                }
-                // Admit the exact observed token before revoking any native or
-                // owned-browser capability. Invalid UUID tokens are not an
-                // instruction to close the user's current owned task tab.
-                if workspace {
-                    let approved = await requestComputerUseApproval(taskID: taskID,
-                        title: "Create a temporary background tab?",
-                        summary: "Open an inactive task tab without replacing your existing page",
-                        details: prettyJSON(["source_url": candidate.url.absoluteString,
-                                             "cleanup": "Only this task's still-owned temporary tab; never an existing user tab."]))
-                    guard approved else { throw ComputerExecutionFailure(message: "Temporary tab creation was declined. No tab was created.") }
-                    _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                    binding = try await context.owner.createWorkspace(turn: context.turn, sourceCandidateToken: token)
-                    // A temporary tab is cleaned up at task end; never store
-                    // its source as a follow-up target and mutate the user tab.
-                    continuation = nil
-                } else {
-                    binding = try await context.owner.bind(turn: context.turn, candidateToken: token)
-                }
-            } catch {
-                if !(error is ComputerRecoveryState.Rejection) && !(error is ComputerExecutionFailure) {
-                    recordBrowserRecovery(error, taskID: taskID, context: context, target: selectedTarget)
-                }
-                if let oldBinding = prior.browserTab, oldBinding.ownership == .borrowed {
-                    do { try oldBinding.lifetime.check() }
-                    catch { invalidateBorrowedComputerSession(taskID: taskID, epoch: epoch) }
-                }
-                observeBorrowedFailure(taskID: taskID, epoch: epoch, context: context)
-                throw error
-            }
-            do {
-                _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                try binding.lifetime.check()
-                var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                let ownedBinding = session.browserTab?.ownership == .owned ? session.browserTab : nil
-                ownedBinding?.lifetime.revoke()
-                session.backgroundLifetime?.revoke()
-                session.nonActivatingWindow = nil
-                session.accessibility = nil
-                session.accessibilityWindowIdentity = nil
-                session.backgroundAccessibility = nil
-                session.backgroundLifetime = nil
-                session.capture = nil
-                session.browserSnapshot = nil
-                session.application = ActivatedApplication(
-                    processIdentifier: context.owner.application.processIdentifier,
-                    bundleIdentifier: context.owner.application.bundleIdentifier, localizedName: "Google Chrome"
-                )
-                session.browserTab = binding
-                session.pendingBrowserContinuation = nil
-                session.browserLifetime = binding.lifetime
-                session.semanticProgress.reset()
-                computerV2Sessions[taskID] = session
-                browserContinuationTargets[taskID] = continuation
-                if let ownedBinding { await browserBroker.revoke(taskKey: browserTaskKey(taskID), binding: ownedBinding) }
-                _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                try binding.lifetime.check()
-                return [textContent(
-                    "BROWSER_TAB tab_handle=\(binding.handle.uuidString) document_epoch=\(binding.documentEpoch.uuidString) "
-                    + "ownership=borrowed scope=current_turn semantic_background_actions=true. "
-                    + (workspace
-                        ? "temporary_task_tab=true. Created and bound an inactive task-owned tab from the observed source URL; existing tabs are unchanged. The host cleans up only its still-owned temporary tab. "
-                        : "Bound the exact observed tab without activation, navigation or closing tabs. ")
-                    + "CONTENT_EVIDENCE=metadata_only; attachment does not verify page contents or relevance. "
-                    + "Start with \(usesReferenceGuidance(taskID: taskID) ? "computer_v2_read_page(view=overview)" : "computer_v2_snapshot(view=overview)") to discover observed page controls, navigation and headings. An overview covers only its selected interface elements, not the document body. Use view=content to read document text, or view=all for broader structure. Use computer_v2_continue(cursor=next_cursor) for more of the same selection. Cite observed document text and its URL before asserting a content match; sidebar/title matches alone are not proof. Then use \(usesReferenceGuidance(taskID: taskID) ? "the current typed follow, fill or press reference" : "ax or set_text with its fresh snapshot_id"); global input and capture are unavailable."
-                )]
-            } catch {
-                context.turn.lifetime.revoke()
-                if computerV2Sessions[taskID]?.borrowedChrome?.turn.lifetime === context.turn.lifetime {
-                    invalidateBorrowedComputerSession(taskID: taskID, epoch: epoch)
-                }
-                await context.owner.revoke(turn: context.turn)
-                observeBorrowedFailure(taskID: taskID, epoch: epoch, context: context)
-                throw error
-            }
-        }
-
-        /// Restore identity, not authority: no previous snapshot, cursor, input
-        /// or model-selected replacement is carried over to the new turn.
-        private func restoreBrowserContinuation(taskID: AgentTask.ID, epoch: UUID) async throws -> Bool {
-            guard let hint = browserContinuationTargets.removeValue(forKey: taskID) else { return false }
-            guard chromeConnection?.request.id == hint.connectionID else { return false }
-            if let denied = computerRecovery[taskID]?.admitInventory(connectionGeneration: hint.connectionID) { throw denied }
-            let context = try await borrowedChromeContextForInventory(taskID: taskID, epoch: epoch)
-            _ = try await context.owner.listTabs(turn: context.turn)
-            _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-            let available = try await context.owner.availableTargetIDs(turn: context.turn)
-            computerRecovery[taskID]?.inventoryRefreshed(connectionGeneration: context.connectionID, availableTargets: available)
-            guard let candidate = try await context.owner.continuationCandidate(turn: context.turn, targetID: hint.targetID),
-                  hint.matches(connectionID: context.connectionID, targetID: hint.targetID, url: candidate.url),
-                  candidate.availability != .busy,
-                  computerTaskScopes[taskID]?.candidateViolation(url: candidate.url, title: candidate.title) == nil else {
-                throw ComputerPreflightFailure(kind: .bindingRequired,
-                    message: "The previous tab cannot safely be resumed: it is absent, busy, changed site, or no longer matches this request. No replacement tab was selected and no input was sent. Inspect computer_v2_tabs and bind the intended available tab explicitly.")
-            }
-            let call = try ComputerV2ToolContract.validate(tool: ComputerV2ToolContract.Tool.bindTab.rawValue,
-                arguments: ["candidate_token": candidate.candidateToken.uuidString])
-            _ = try await computerV2BindTab(call, taskID: taskID, epoch: epoch)
-            var session = try computerV2Session(taskID: taskID, epoch: epoch)
-            session.pendingBrowserContinuation = hint
-            computerV2Sessions[taskID] = session
-            return true
-        }
-
-        private func recordBrowserRecovery(_ error: Error, taskID: AgentTask.ID,
-                                           context: BorrowedChromeContext, target: ComputerRecoveryState.Target?) {
-            let failure: ComputerRecoveryState.Failure
-            if let bridge = error as? ChromeBridgeIPC.Failure, case .targetBusy = bridge {
-                failure = .init(code: .targetBusy, message: bridge.localizedDescription, recovery: .targetAvailable, target: target)
-            } else if let bridge = error as? ChromeBridgeIPC.Failure, case .targetUnavailable = bridge {
-                failure = .init(code: .targetUnavailable, message: bridge.localizedDescription, recovery: .refreshInventory, target: target)
-            } else if (try? context.turn.lifetime.check()) == nil || chromeConnection?.owner == nil {
-                failure = .init(code: .connectionLost, message: Self.chromeFailureMessage(error), recovery: .newConnection,
-                    connectionGeneration: context.connectionID)
-            } else {
-                failure = .init(code: .staleInventory, message: "The browser binding/inventory operation failed. Refresh the observed inventory before trying again; the cause is not a permission diagnosis.",
-                    recovery: .refreshInventory, connectionGeneration: context.connectionID)
-            }
-            computerRecovery[taskID]?.record(failure)
-        }
-
         private func computerV2Snapshot(
             read: SemanticReadRequest,
             taskID: AgentTask.ID,
@@ -6361,71 +5486,6 @@ private extension CodexAppServerRuntime {
                     presentation: observation.presentation, taskID: taskID)]
             }
             #endif
-            if let browserTab = currentSession.browserTab {
-                // A first unfiltered browser read should expose the interface
-                // needed to choose a next step. Explicit views, literal queries,
-                // subtrees and retained continuations keep their own selection.
-                let read = read.requestedView == nil && read.query == nil && read.cursor == nil
-                    && read.snapshotID == nil && read.elementIndex == nil
-                    ? SemanticReadRequest(view: .overview) : read
-                let observation: BrowserTabObservation
-                if browserTab.ownership == .borrowed {
-                    let context = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                    do {
-                        observation = try await context.owner.snapshot(
-                            turn: context.turn, binding: browserTab, read: read
-                        )
-                    } catch {
-                        observeBorrowedFailure(taskID: taskID, epoch: epoch, context: context)
-                        throw error
-                    }
-                } else {
-                    observation = try await browserBroker.snapshot(
-                        taskKey: browserTaskKey(taskID), binding: browserTab, read: read
-                    )
-                }
-                _ = try await computerV2BoundApplication(
-                    taskID: taskID,
-                    epoch: epoch
-                )
-                var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                guard session.browserTab?.handle == browserTab.handle else {
-                    throw RuntimeError.serverError(
-                        "The bound browser tab changed during snapshot. Open it again."
-                    )
-                }
-                if let hint = session.pendingBrowserContinuation {
-                    // Inventory is not a document lock: navigation can occur
-                    // during attach. Check the first actual observation before
-                    // exposing content or granting fresh element references.
-                    guard let context = session.borrowedChrome,
-                          hint.matches(connectionID: context.connectionID,
-                            targetID: observation.binding.targetID, url: observation.snapshot.documentURL) else {
-                        browserContinuationTargets.removeValue(forKey: taskID)
-                        invalidateBorrowedComputerSession(taskID: taskID, epoch: epoch)
-                        throw ComputerPreflightFailure(kind: .bindingRequired,
-                            message: "The previous tab changed site while it was being reacquired. Its content was not returned and no input was sent. Refresh computer_v2_tabs and explicitly bind the intended tab.")
-                    }
-                    session.pendingBrowserContinuation = nil
-                }
-                if let violation = computerTaskScopes[taskID]?.siteViolation(url: observation.snapshot.documentURL) {
-                    // A page can navigate after inventory. Do not silently
-                    // repurpose the binding for another known service.
-                    throw ComputerExecutionFailure(message: violation)
-                }
-                session.browserTab = observation.binding
-                session.browserSnapshot = observation.snapshot
-                session.accessibility = nil
-                session.accessibilityWindowIdentity = nil
-                session.backgroundAccessibility = nil
-                session.capture = nil
-                let text = session.semanticProgress.observe(text: observation.snapshot.formattedText)
-                computerV2Sessions[taskID] = session
-                try registerReadContinuation(taskID: taskID, text: text, replacing: read.cursor == nil,
-                    browserCursor: observation.snapshot.nextCursor)
-                return [semanticTextContent(text, readReceipt: observation.snapshot.readReceipt,
-                    presentation: observation.snapshot.presentation, taskID: taskID)]
-            }
 
             let selectedWindow = try await MainActor.run {
                 try ApplicationWindowReader().selectedWindowObservation(processIdentifier: application.processIdentifier,
@@ -6528,7 +5588,6 @@ private extension CodexAppServerRuntime {
             session.backgroundLifetime = nil
             session.backgroundAccessibility = nil
             session.capture = nil
-            session.browserSnapshot = nil
             let text = session.semanticProgress.observe(text: result.observation.text)
             computerV2Sessions[taskID] = session
             try registerReadContinuation(taskID: taskID, text: text, replacing: read.cursor == nil)
@@ -6538,163 +5597,71 @@ private extension CodexAppServerRuntime {
 
         private func computerV2Open(
             arguments: [String: Any],
-            browserMode: ComputerV2ToolContract.BrowserMode?,
             activationMode: ComputerV2ToolContract.ActivationMode,
             taskID: AgentTask.ID,
             epoch: UUID
         ) async throws -> [[String: Any]] {
             if activationMode != .none { try configuration.computerInteractionPolicy.requireForeground() }
             let bundleID = try requiredString("bundle_id", in: arguments)
-            let url = try optionalOpenURL(arguments["url"])
-            if activationMode == .none, url != nil || browserMode == .isolated {
-                throw ComputerV2ToolContract.ValidationError.invalid("activation: native navigation requires explicit foreground mode")
-            }
-            let actionSummary = activationMode == .none
-                ? "Bind running \(bundleID) without activation" : url.map {
-                "Open \(bundleID) at \($0.absoluteString)"
-            } ?? "Launch or activate \(bundleID)"
-            let summary = actionSummary + (browserMode == .isolated ? " (separate isolated profile)" : "")
             let approved = await requestComputerUseApproval(
                 taskID: taskID,
                 title: "Allow an application action?",
-                summary: summary,
+                summary: activationMode == .none ? "Bind running \(bundleID) without activation" : "Launch or activate \(bundleID)",
                 details: prettyJSON(arguments)
             )
-            guard approved else {
-                throw RuntimeError.serverError("The user declined the application action.")
-            }
+            guard approved else { throw RuntimeError.serverError("The user declined the application action.") }
 
             var pendingSession = try computerV2Session(taskID: taskID, epoch: epoch)
-            // An approved explicit app/target switch supersedes the previous
-            // borrowed target even if opening the new app subsequently fails.
-            browserContinuationTargets.removeValue(forKey: taskID)
-            pendingSession.pendingBrowserContinuation = nil
             pendingSession.semanticProgress.reset()
             pendingSession.nativeEvidenceID = UUID()
             pendingSession.nativeEvidenceWindow = nil
             pendingSession.backgroundLifetime?.revoke()
             pendingSession.backgroundLifetime = nil
-            let oldBinding = pendingSession.browserTab
-            let oldBorrowed = pendingSession.borrowedChrome
-            oldBorrowed?.turn.lifetime.revoke()
-            pendingSession.browserLifetime?.revoke()
-            oldBinding?.lifetime.revoke()
             pendingSession.application = nil
             pendingSession.nonActivatingWindow = nil
             pendingSession.accessibility = nil
             pendingSession.accessibilityWindowIdentity = nil
             pendingSession.backgroundAccessibility = nil
             pendingSession.capture = nil
-            pendingSession.browserTab = nil
-            pendingSession.browserSnapshot = nil
-            pendingSession.borrowedChrome = nil
-            let lifetime = browserMode == .isolated && url != nil
-                ? BrowserTabLifetime() : nil
-            pendingSession.browserLifetime = lifetime
             computerV2Sessions[taskID] = pendingSession
-            if let oldBorrowed {
-                await oldBorrowed.owner.revoke(turn: oldBorrowed.turn)
-            }
-            if let oldBinding, oldBinding.ownership == .owned {
-                await browserBroker.revoke(taskKey: browserTaskKey(taskID), binding: oldBinding)
-            }
 
-            var createdBinding: BrowserTabBinding?
+            let application: ActivatedApplication
             var nonActivatingWindow: ApplicationWindowIdentity?
-            do {
+            if activationMode == .none {
+                let bound = try await RunningApplicationBinder().bindWhenReady(bundleIdentifier: bundleID)
                 _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                application = bound.application
+                nonActivatingWindow = bound.window.identity
+            } else {
                 let controller = await MainActor.run { ComputerInputController() }
                 _ = try computerV2Session(taskID: taskID, epoch: epoch)
-                let application: ActivatedApplication
-                if activationMode != .none { try markForegroundEffect(taskID: taskID, effect: .activationRequested) }
-                if activationMode == .none {
-                    let bound = try await RunningApplicationBinder().bindWhenReady(bundleIdentifier: bundleID)
-                    _ = try computerV2Session(taskID: taskID, epoch: epoch)
-                    application = bound.application
-                    nonActivatingWindow = bound.window.identity
-                } else if let lifetime, let url {
-                    let opened = try await browserBroker.open(
-                        taskKey: browserTaskKey(taskID), url: url, lifetime: lifetime
-                    )
-                    createdBinding = opened.binding
-                    _ = try computerV2Session(taskID: taskID, epoch: epoch)
-                    try lifetime.check()
-                    application = try await controller.activateApplication(
-                        processIdentifier: opened.application.processIdentifier
-                    )
-                } else if browserMode == .existing {
-                    let chrome: ExistingChromeController
-                    if let retained = try computerV2Session(taskID: taskID, epoch: epoch).existingChromeController {
-                        chrome = retained
-                    } else {
-                        let created = await MainActor.run { ExistingChromeController() }
-                        var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                        session.existingChromeController = created
-                        computerV2Sessions[taskID] = session
-                        chrome = created
-                    }
-                    application = try await chrome.open(url: url) {
-                        try await self.validateComputerV2Turn(taskID: taskID, epoch: epoch)
-                    }
-                } else {
-                    application = try await controller.launchOrActivateApplication(
-                        bundleIdentifier: bundleID, opening: url
-                    )
-                }
-                if activationMode != .none { try markForegroundEffect(taskID: taskID, effect: .activationCompleted) }
-                _ = try computerV2Session(taskID: taskID, epoch: epoch)
-                guard application.bundleIdentifier == bundleID,
-                      createdBinding == nil
-                        || createdBinding?.processIdentifier == application.processIdentifier else {
-                    throw RuntimeError.serverError(
-                        "The launched process did not match the approved application."
-                    )
-                }
-                let running = await MainActor.run {
-                    RunningApplicationCatalog().applications()
-                }
-                _ = try computerV2Session(taskID: taskID, epoch: epoch)
-                try lifetime?.check()
-                guard ComputerV2TargetContract.isRunning(application, in: running) else {
-                    throw RuntimeError.serverError("The approved application is no longer running.")
-                }
-                if let nonActivatingWindow {
-                    guard try await nonActivatingWindow.isStillSelected() else {
-                        throw RuntimeError.serverError("The selected background window changed during binding.")
-                    }
-                }
-                var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                session.application = application
-                session.nonActivatingWindow = nonActivatingWindow
-                session.browserTab = createdBinding
-                session.browserLifetime = lifetime
-                computerV2Sessions[taskID] = session
-                let browserNote = createdBinding.map {
-                    "\nBROWSER_TAB tab_handle=\($0.handle.uuidString) "
-                        + "document_epoch=\($0.documentEpoch.uuidString) "
-                        + "scope=current_task semantic_background_actions=true "
-                        + "profile=isolated ordinary_profile_access=false"
-                } ?? (browserMode == .existing
-                    ? ComputerV2ToolContract.browserSessionNote(activationMode: activationMode)
-                    : "")
-                let navigationNote = url == nil ? "" :
-                    " URL navigation may still be loading; if the first snapshot lacks page content, take another snapshot before acting."
-                return [textContent(
-                    try encodeJSON(application)
-                        + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
-                        + browserNote
-                        + (nonActivatingWindow == nil ? "" : "\nNATIVE_BINDING activation=none scope=exact_app_selected_window capabilities=snapshot,ax,set_text,image_observation. No launch, navigation or activation was performed. Images are read-only; foreground/global-input fallback is unavailable in this binding.")
-                        + navigationNote
-                )]
-            } catch {
-                lifetime?.revoke()
-                if let createdBinding {
-                    await browserBroker.revoke(
-                        taskKey: browserTaskKey(taskID), binding: createdBinding
-                    )
-                }
-                throw error
+                try markForegroundEffect(taskID: taskID, effect: .activationRequested)
+                application = try await controller.launchOrActivateApplication(bundleIdentifier: bundleID)
+                try markForegroundEffect(taskID: taskID, effect: .activationCompleted)
             }
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard application.bundleIdentifier == bundleID else {
+                throw RuntimeError.serverError("The launched process did not match the approved application.")
+            }
+            let running = await MainActor.run { RunningApplicationCatalog().applications() }
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard ComputerV2TargetContract.isRunning(application, in: running) else {
+                throw RuntimeError.serverError("The approved application is no longer running.")
+            }
+            if let nonActivatingWindow {
+                guard try await nonActivatingWindow.isStillSelected() else {
+                    throw RuntimeError.serverError("The selected background window changed during binding.")
+                }
+            }
+            var session = try computerV2Session(taskID: taskID, epoch: epoch)
+            session.application = application
+            session.nonActivatingWindow = nonActivatingWindow
+            computerV2Sessions[taskID] = session
+            return [textContent(
+                try encodeJSON(application)
+                    + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
+                    + (nonActivatingWindow == nil ? "" : "\nNATIVE_BINDING activation=none scope=exact_app_selected_window capabilities=snapshot,ax,set_text,image_observation. No launch, navigation or activation was performed. Images are read-only; foreground/global-input fallback is unavailable in this binding.")
+            )]
         }
 
         private func computerV2SemanticAction(
@@ -6710,18 +5677,7 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
-            if currentSession.browserTab != nil {
-                return try await computerV2BrowserSemanticAction(
-                    call,
-                    application: application,
-                    taskID: taskID,
-                    epoch: epoch
-                )
-            }
-            guard call.tool != .followLink else {
-                throw ComputerPreflightFailure(kind: .invalidArguments,
-                    message: "computer_v2_follow_link requires a bound browser tab and an observed navigation link. No approval or input occurred.")
-            }
+
             if let background = currentSession.backgroundAccessibility {
                 return try await computerV2BackgroundSemanticAction(
                     call, background: background, application: application,
@@ -7053,310 +6009,15 @@ private extension CodexAppServerRuntime {
             session.accessibilityWindowIdentity = focused.identity
             session.backgroundAccessibility = nil
             session.capture = nil
-            session.browserSnapshot = nil
             computerV2Sessions[taskID] = session
             try registerReadContinuation(taskID: taskID, text: observed.text, replacing: true)
             return (observed.text, observed.readReceipt, observed.presentation)
-        }
-
-        private func computerV2BrowserSemanticAction(
-            _ call: ComputerV2ToolContract.ValidatedCall,
-            application: ActivatedApplication,
-            taskID: AgentTask.ID,
-            epoch: UUID
-        ) async throws -> [[String: Any]] {
-            let current = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard let browserTab = current.browserTab,
-                  let browserSnapshot = current.browserSnapshot,
-                  let snapshotID = UUID(
-                      uuidString: try requiredString("snapshot_id", in: call.arguments)
-                  ),
-                  snapshotID == browserSnapshot.id,
-                  browserSnapshot.tabHandle == browserTab.handle,
-                  browserSnapshot.documentEpoch == browserTab.documentEpoch else {
-                throw ComputerPreflightFailure(kind: .freshObservationRequired,
-                    message: "The browser Accessibility snapshot is missing or stale. Capture a fresh overview and select an element from that observation; never reuse an old index with a new snapshot_id. No approval or input occurred.")
-            }
-
-            let index = try requiredIndex(call.arguments)
-            guard let element = browserSnapshot.element(at: index) else {
-                guard let scope = browserReadCorrectionScope(taskID: taskID, snapshot: browserSnapshot) else {
-                    throw ComputerExecutionFailure(message: "The browser element reference could not be scoped. No approval or input occurred.")
-                }
-                throw ComputerPreflightFailure(kind: .freshObservationRequired,
-                    message: "The browser Accessibility element was not exposed in the cited snapshot. No approval or input occurred. Read the same bound document again, then select an index exposed in that new snapshot. The rejected action was not performed.",
-                    requiredReadScope: scope)
-            }
-            let elementName = element.label.isEmpty
-                ? "\(element.role) element \(index)" : element.label
-
-            let summary: String
-            let title: String
-            let actionName: String?
-            let textValue: String?
-            // Admission uses the retained observation before asking the user.
-            // This does not authorize input or replace broker/transport checks:
-            // after approval they still revalidate the live document, element
-            // semantics, exact binding and one-use enqueue permit.
-            guard element.isEnabled else {
-                throw RuntimeError.serverError(
-                    "The observed browser element has enabled=false. No approval or action was requested. "
-                        + "Observe again when it becomes enabled."
-                )
-            }
-            if call.tool == .ax || call.tool == .followLink {
-                let requestedAction = call.tool == .followLink ? "AXPress" : try requiredString("ax_action", in: call.arguments)
-                if call.tool == .followLink,
-                   BrowserActionVerification.observedLinkDestination(element, at: browserSnapshot.documentURL) == nil {
-                    throw ComputerPreflightFailure(kind: .invalidArguments,
-                        message: "computer_v2_follow_link requires an enabled observed navigation link with a supported press and HTTP(S) destination. For other controls use an observed action and a supported verification predicate. No approval or input occurred.")
-                }
-                guard requestedAction == "AXPress", element.supportsPress else {
-                    let alternative = element.supportsSetText
-                        ? "This field has settable=true: use computer_v2_set_text directly with this snapshot_id and element_index; no focus or AXPress is needed."
-                        : "This target has no advertised press capability. Inspect its relevant subtree or another exact target with actions=[\"AXPress\"]. Do not request permission again or use screenshot/foreground fallback."
-                    throw RuntimeError.serverError(
-                        "That action is not advertised by this browser element. No approval or action was requested. " + alternative
-                    )
-                }
-                actionName = requestedAction
-                textValue = nil
-                summary = "\(requestedAction) on \(elementName)"
-                title = "Allow a desktop action?"
-            } else {
-                guard element.supportsSetText else {
-                    throw RuntimeError.serverError(
-                        "The observed browser element has settable=false. No approval or action was requested. "
-                            + "Use computer_v2_set_text only on an observed settable=true field."
-                    )
-                }
-                actionName = nil
-                textValue = try requiredString("text", in: call.arguments)
-                summary = "Set text on \(elementName)"
-                title = "Allow text entry?"
-            }
-
-            // Verification intent is fixed before approval and input. It is
-            // not guessed from arbitrary page changes after dispatch, and a
-            // model summary cannot rewrite it during compaction.
-            guard let operationID = computerActiveOperation[taskID] else {
-                throw ComputerExecutionFailure(message: "No action receipt exists; no browser input was dispatched.")
-            }
-            let verificationPlan: BrowserActionVerification.Plan
-            do {
-                guard let plan = try BrowserActionVerification.compile(
-                    request: call.tool == .followLink ? nil : ComputerV2ToolContract.browserPostcondition(in: call.arguments),
-                    action: textValue.map(BrowserActionVerification.Action.setText) ?? .press,
-                    elementIndex: index, snapshot: browserSnapshot, binding: browserTab
-                ) else {
-                    if referenceInterfaceTasks.contains(taskID) {
-                        throw ComputerPreflightFailure(kind: .invalidArguments,
-                            message: "A browser press requires postcondition before input. Use computer_v2_press with the current action_ref and a declared postcondition. "
-                                + "If you intend to open a same-page dialog, use postcondition={\"kind\":\"dialog_opened\"}; this verifies only that a dialog appeared. "
-                                + "For unknown changed text, use postcondition={\"kind\":\"region_changed\",\"region_ref\":\"<observed candidate region_ref>\"}. "
-                                + "For value/region_text, supply the observed result region_ref and exact expected value; detail_view needs an exact heading already observed in the selected target. "
-                                + "Do not invent future text or use readable context as an action_ref. No approval or input occurred.",
-                            issue: .browserPostconditionRequired)
-                    }
-                    throw ComputerPreflightFailure(kind: .invalidArguments,
-                        message: "A browser press without an observed link destination requires postcondition before input. "
-                            + "Inspect the intended result first, then provide value/region_text with its observed element_index and exact expected value, "
-                            + "or dialog_opened with no expected or result index for an intended same-page dialog, or detail_view with an exact expected heading already observed in the selected row/card. "
-                            + "When future result text is unknown, keep the outer element_index on the pressed control and put the observed result-container index inside postcondition.element_index. "
-                            + "Complete argument shape: " + ComputerV2ToolContract.regionChangedPressArgumentShape + ". "
-                            + "That verifies only a change in that region; read its new content to answer the task. No approval or input occurred.",
-                        issue: .browserPostconditionRequired)
-                }
-                verificationPlan = plan
-                try computerEvidence[taskID]?.armVerification(operationID: operationID, plan: plan)
-            } catch let failure as ComputerPreflightFailure { throw failure }
-            catch {
-                if (error as? BrowserActionVerification.Failure) == .dialogAlreadyOpen {
-                    throw ComputerPreflightFailure(kind: .invalidArguments,
-                        message: ComputerActionEvidence.PreflightIssue.browserDialogAlreadyOpen.guidance,
-                        issue: .browserDialogAlreadyOpen)
-                }
-                let recovery: String
-                if referenceInterfaceTasks.contains(taskID) {
-                    recovery = " Use computer_v2_follow only with an observed link_ref. For a press intended to open a same-page dialog use dialog_opened with no expected or region_ref. For region_changed choose an observed candidate region_ref; do not use a text child."
-                } else {
-                    recovery = BrowserActionVerification.observedLinkDestination(element, at: browserSnapshot.documentURL) != nil
-                        ? " This is an observed navigation link: use computer_v2_follow_link with the current snapshot_id and element_index only. It verifies the destination automatically."
-                        : " For a same-page dialog use dialog_opened without a result index or expected text. For region_changed inspect the complete noneditable result container; do not select a text child."
-                }
-                throw ComputerPreflightFailure(kind: .invalidArguments,
-                    message: "The browser postcondition could not be established before input: " + error.localizedDescription
-                        + " No approval or input occurred." + recovery,
-                    issue: .browserPostconditionInvalid)
-            }
-
-            let approved = await requestComputerUseApproval(
-                taskID: taskID,
-                title: title,
-                summary: summary,
-                details: computerV2ApprovalDetails(
-                    arguments: call.arguments,
-                    application: application,
-                    browserTab: browserTab,
-                    observedPageURL: browserSnapshot.documentURL
-                )
-            )
-            guard approved else {
-                throw RuntimeError.serverError("The user declined the browser action.")
-            }
-
-            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
-            let approvedSession = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard approvedSession.browserTab == browserTab,
-                  approvedSession.browserSnapshot == browserSnapshot else {
-                throw RuntimeError.serverError(
-                    "The approved browser target is no longer current."
-                )
-            }
-
-            try clearComputerV2Observation(taskID: taskID, epoch: epoch)
-            if let textValue, ComputerSearchEvidence.isSearchInput(role: element.semanticRole ?? element.role, label: element.label) {
-                try computerSearchEvidence[taskID]?.beginSearch(targetID: computerSearchEvidenceTarget(taskID: taskID),
-                    query: textValue, baselineDocumentURL: browserSnapshot.documentURL)
-            }
-            try markComputerDispatch(taskID: taskID, state: .unknown)
-            do {
-            if browserTab.ownership == .borrowed {
-                let context = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
-                do {
-                    if let actionName {
-                        try await context.owner.perform(
-                            turn: context.turn, binding: browserTab, snapshot: browserSnapshot,
-                            elementIndex: index, action: actionName, verificationPlan: verificationPlan
-                        )
-                    } else if let textValue {
-                        try await context.owner.setText(
-                            turn: context.turn, binding: browserTab, snapshot: browserSnapshot,
-                            elementIndex: index, text: textValue, verificationPlan: verificationPlan
-                        )
-                    }
-                } catch {
-                    observeBorrowedFailure(taskID: taskID, epoch: epoch, context: context)
-                    throw error
-                }
-            } else if let actionName {
-                try await browserBroker.perform(
-                    taskKey: browserTaskKey(taskID),
-                    binding: browserTab,
-                    snapshot: browserSnapshot,
-                    elementIndex: index,
-                    action: actionName,
-                    verificationPlan: verificationPlan
-                )
-            } else if let textValue {
-                try await browserBroker.setText(
-                    taskKey: browserTaskKey(taskID),
-                    binding: browserTab,
-                    snapshot: browserSnapshot,
-                    elementIndex: index,
-                    text: textValue,
-                    verificationPlan: verificationPlan
-                )
-            }
-            } catch {
-                // The document adapter knows whether the CDP mutation was
-                // queued; validation errors before that boundary sent no input.
-                let dispatch = (error as? BrowserMutationFailure)?.dispatchState ?? .notDispatched
-                try markComputerDispatch(taskID: taskID, state: dispatch)
-                if dispatch != .notDispatched {
-                    // A lost acknowledgement is not permission to click again.
-                    // Reconcile the original plan only, against the same tab.
-                    let observation = try await observeAndVerifyBrowserAction(
-                        taskID: taskID, epoch: epoch, operationID: operationID)
-                    if computerEvidence[taskID]?.operations.first(where: { $0.id == operationID })?.verification != nil {
-                        return [textContent("Input acknowledgement was unavailable; the declared postcondition was independently observed. No input was repeated.")]
-                            + observation
-                    }
-                }
-                throw error
-            }
-            try markComputerDispatch(taskID: taskID, state: .dispatched)
-            return [textContent("Requested \(summary) on the exact bound browser tab. Input was dispatched once.")]
-                + (try await observeAndVerifyBrowserAction(taskID: taskID, epoch: epoch, operationID: operationID))
         }
 
         /// One serialized action owns a small read-only verification budget.
         /// No model round trip, new turn, input replay, approval, or activation
         /// is involved. The host ledger retains plan, baseline and budget across
         /// same-turn compaction; ordinary new turns cannot replay this routine.
-        private func observeAndVerifyBrowserAction(
-            taskID: AgentTask.ID, epoch: UUID, operationID: String
-        ) async throws -> [[String: Any]] {
-            let generation = serverGeneration
-            try Task.checkCancellation()
-            try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-            guard !isShuttingDown else { throw CancellationError() }
-            var latestContent: [[String: Any]] = []
-            var lastIssue = "No fresh observation is available."
-            while let operation = computerEvidence[taskID]?.operations.first(where: { $0.id == operationID }),
-                  !operation.isResolved,
-                  let progress = operation.plannedVerificationProgress, progress.remainingAttempts > 0 {
-                try Task.checkCancellation()
-                try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-                guard generation == serverGeneration, !isShuttingDown else { throw CancellationError() }
-                if progress.attempts > 0 {
-                    try await Task.sleep(for: .milliseconds(progress.attempts == 1 ? 150 : 300))
-                    try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-                }
-                _ = try computerEvidence[taskID]?.beginPlannedVerificationAttempt(operationID: operationID)
-                defer {
-                    // Close an interrupted read without refunding its budget;
-                    // never write into a replacement turn or server generation.
-                    if generation == serverGeneration, computerV2Sessions[taskID]?.epoch == epoch {
-                        try? computerEvidence[taskID]?.recordPlannedVerificationReadFailure(operationID: operationID)
-                    }
-                }
-                do {
-                    latestContent = try await computerV2Snapshot(read: SemanticReadRequest(), taskID: taskID, epoch: epoch)
-                    try Task.checkCancellation()
-                    try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-                    guard generation == serverGeneration else { throw CancellationError() }
-                    try await registerComputerObservation(taskID: taskID)
-                    let fresh = try computerV2Session(taskID: taskID, epoch: epoch)
-                    guard let snapshot = fresh.browserSnapshot, let binding = fresh.browserTab else {
-                        throw ComputerExecutionFailure(message: "The exact browser binding is unavailable; no input was replayed.")
-                    }
-                    let verified = try computerEvidence[taskID]?.verifyPlanned(operationID: operationID,
-                        observationID: snapshot.id.uuidString, binding: binding, snapshot: snapshot)
-                    guard let verified else { throw ComputerExecutionFailure(message: "The action receipt is no longer active.") }
-                    recoverComputerOperations(taskID: taskID, successor: operationID)
-                    let resultMeaning = operation.verificationPlan?.kind == .regionChanged
-                        ? "Only the predeclared result region's displayed text changed. Read the returned content to establish what changed; this does not prove pagination or task success. "
-                        : "The predeclared postcondition matched a fresh observation. "
-                    return [textContent("VERIFIED_PROPERTY operation_id=\(operationID) snapshot_id=\(verified.observationID). "
-                        + resultMeaning + "No input was repeated. "
-                        + "This verifies only that property, not an entire task or absent search results.")]
-                        + latestContent
-                } catch is CancellationError {
-                    if generation == serverGeneration, computerV2Sessions[taskID]?.epoch == epoch {
-                        try? computerEvidence[taskID]?.recordPlannedVerificationReadFailure(operationID: operationID)
-                    }
-                    throw CancellationError()
-                }
-                catch {
-                    try Task.checkCancellation()
-                    try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-                    guard generation == serverGeneration, !isShuttingDown else { throw CancellationError() }
-                    lastIssue = error.localizedDescription
-                    // The evaluator records mismatches itself. This transition
-                    // applies only if the attempted read did not reach it.
-                    try? computerEvidence[taskID]?.recordPlannedVerificationReadFailure(operationID: operationID)
-                    if let failure = error as? BrowserActionVerification.Failure,
-                       failure == .wrongTarget || failure == .wrongDocument || failure == .invalidPlan { break }
-                    if computerV2Sessions[taskID]?.browserTab == nil { break }
-                }
-            }
-            try Task.checkCancellation()
-            try validateComputerV2Turn(taskID: taskID, epoch: epoch)
-            guard generation == serverGeneration, !isShuttingDown else { throw CancellationError() }
-            return [textContent("VERIFICATION_PENDING operation_id=\(operationID). The bounded read-only verification did not establish the declared result. "
-                + "No input was repeated. Do not change the postcondition or repeat the action. " + lastIssue)] + latestContent
-        }
 
         private func computerV2Capture(
             arguments: [String: Any],
@@ -7432,15 +6093,7 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
-            guard try computerV2Session(
-                taskID: taskID,
-                epoch: epoch
-            ).browserTab == nil else {
-                throw RuntimeError.serverError(
-                    "Screenshot and coordinate tools are unavailable for a brokered Chrome tab. "
-                        + "Use a semantic browser snapshot and action."
-                )
-            }
+
             let focusedObservation = try await computerV2FocusedWindowObservation()
             guard let focusedObservation else {
                 throw RuntimeError.serverError(
@@ -7629,12 +6282,7 @@ private extension CodexAppServerRuntime {
             }
             let application = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
             let observed = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard observed.browserTab == nil else {
-                throw RuntimeError.serverError(
-                    "Visual grounding is unavailable for a brokered Chrome tab. "
-                        + "Use its semantic browser snapshot and action."
-                )
-            }
+
             guard let capture = observed.capture else {
                 throw RuntimeError.serverError(
                     "A current screenshot is required before visual grounding."
@@ -7797,7 +6445,6 @@ private extension CodexAppServerRuntime {
             let validate = {
                 try self.validateComputerV2Turn(taskID: taskID, epoch: epoch)
                 guard try await self.computerV2BoundApplication(taskID: taskID, epoch: epoch) == application,
-                      try self.computerV2Session(taskID: taskID, epoch: epoch).browserTab == nil,
                       try await expectedWindowIdentity.isStillFocused() else {
                     throw RuntimeError.serverError("The acted-on window changed before image verification.")
                 }
@@ -7995,15 +6642,7 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
-            guard try computerV2Session(
-                taskID: taskID,
-                epoch: epoch
-            ).browserTab == nil else {
-                throw RuntimeError.serverError(
-                    "Coordinate and keyboard input are unavailable for a brokered Chrome tab. "
-                        + "Use a semantic browser snapshot and action."
-                )
-            }
+
             guard let capture = try computerV2Session(
                 taskID: taskID,
                 epoch: epoch
@@ -8116,15 +6755,7 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
-            guard try computerV2Session(
-                taskID: taskID,
-                epoch: epoch
-            ).browserTab == nil else {
-                throw RuntimeError.serverError(
-                    "Coordinate and keyboard input are unavailable for a brokered Chrome tab. "
-                        + "Use a semantic browser snapshot and action."
-                )
-            }
+
             let observation = try computerV2Session(taskID: taskID, epoch: epoch)
             guard observation.accessibility != nil || observation.capture != nil else {
                 throw RuntimeError.serverError(
@@ -8594,8 +7225,7 @@ private extension CodexAppServerRuntime {
             return active
         }
 
-        /// Restore only the inspected process. Chrome uses the same bounded,
-        /// exact-PID AX recovery for input as for open; no tab is created here.
+        /// Restore only the inspected process by its exact PID.
         /// Callers still validate their original window/control before dispatch.
         private func activateObservedApplication(
             processIdentifier: Int32,
@@ -8607,17 +7237,7 @@ private extension CodexAppServerRuntime {
             try Task.checkCancellation()
             try await beforeMutation()
             try markForegroundEffect(taskID: taskID, effect: .activationRequested)
-            if bundleIdentifier == "com.google.Chrome" {
-                let chrome = await MainActor.run { ExistingChromeController() }
-                let activated = try await chrome.activate(
-                    processIdentifier: processIdentifier,
-                    beforeMutation: beforeMutation
-                )
-                try markForegroundEffect(taskID: taskID, effect: .activationCompleted)
-                try Task.checkCancellation()
-                try await beforeMutation()
-                return activated
-            }
+
             let controller = await MainActor.run { ComputerInputController() }
             try Task.checkCancellation()
             try await beforeMutation()
@@ -8861,12 +7481,6 @@ private extension CodexAppServerRuntime {
             for taskID in threadForTask.keys where isRemoteInference(modelForTask[taskID] ?? "") {
                 scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             }
-            // The browser belongs to its explicit native authorization, not to
-            // an App Server process. Revoke action authority synchronously,
-            // then retain the wire only after old work is demonstrably drained.
-            let recoveryConnection = isShuttingDown ? nil : chromeConnection
-            let recoveryToken = recoveryConnection?.owner.flatMap { try? $0.suspendForRuntimeRecovery() }
-            if recoveryToken == nil { invalidateChromeConnection() }
             inferenceSelectionTask?.cancel()
             if let server = inferenceServer {
                 let retirement = UUID()
@@ -8886,11 +7500,7 @@ private extension CodexAppServerRuntime {
             for taskID in Array(computerV2Sessions.keys) {
                 discardComputerV2Session(taskID: taskID)
             }
-            if let connection = recoveryConnection, let token = recoveryToken,
-               chromeRecoveryAttemptID != connection.attemptID {
-                preserveChromeAfterRuntimeFailure(connection: connection, token: token,
-                    dynamicTasks: dynamicTasks, cleanupTasks: Array(browserCleanupTasks.values))
-            }
+
             if let child = process {
                 retiringChildren[child.processIdentifier] = child
                 Task {
@@ -9010,47 +7620,5 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func preserveChromeAfterRuntimeFailure(
-            connection: ChromeConnection, token: UUID,
-            dynamicTasks: [Task<Void, Never>], cleanupTasks: [Task<Void, Never>]
-        ) {
-            guard let owner = connection.owner else { return }
-            let cleanupID = UUID()
-            chromeRecoveryAttemptID = connection.attemptID
-            let recovery = Task<Void, Never> {
-                defer {
-                    if chromeRecoveryAttemptID == connection.attemptID {
-                        chromeRecoveryAttemptID = nil
-                        chromeRecoveryTask = nil
-                    }
-                    browserCleanupTasks.removeValue(forKey: cleanupID)
-                }
-                do {
-                    guard !isShuttingDown, chromeConnection?.attemptID == connection.attemptID,
-                          chromeConnection?.owner === owner else { throw CancellationError() }
-                    try await owner.quiesceForRuntimeRecovery(token) {
-                        for task in dynamicTasks { await task.value }
-                        for task in cleanupTasks { await task.value }
-                    }
-                    guard !isShuttingDown, chromeConnection?.attemptID == connection.attemptID,
-                          chromeConnection?.owner === owner else { throw CancellationError() }
-                    try connection.request.consent.check()
-                    try await owner.resumeAfterRuntimeRecovery(token)
-                    guard !isShuttingDown, chromeConnection?.attemptID == connection.attemptID,
-                          chromeConnection?.owner === owner else { throw CancellationError() }
-                } catch {
-                    // A late cleanup can close only its captured owner. It must
-                    // never revoke the consent or transport of a replacement.
-                    if chromeConnection?.attemptID == connection.attemptID,
-                       chromeConnection?.owner === owner {
-                        await invalidateChromeConnection()?.value
-                    } else {
-                        await owner.disconnect()
-                    }
-                }
-            }
-            chromeRecoveryTask = recovery
-            browserCleanupTasks[cleanupID] = recovery
-        }
     }
 }

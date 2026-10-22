@@ -45,7 +45,6 @@ pub struct ReadReceipt {
 pub enum ReferenceCapability {
     Action(String),
     Field,
-    Link,
     Region,
 }
 #[derive(Clone, Debug)]
@@ -74,10 +73,6 @@ pub enum ReadError {
     InvalidContinuation,
     #[error("Subtree reads require both the current snapshot_id and an exposed element_index.")]
     UnexposedSubtree,
-    #[error(
-        "overview is a browser-only view. Native apps support all, content, headings and links."
-    )]
-    NativeOverview,
     #[error("The semantic output budget is too small for a complete record.")]
     OutputBudget,
     #[error("The read request is invalid.")]
@@ -98,7 +93,6 @@ struct RetainedRead {
     fields: Vec<Field>,
     next: usize,
     cursor: Uuid,
-    browser: bool,
     root: Option<usize>,
     contexts: HashMap<usize, RowContext>,
     provenance: HashMap<usize, &'static str>,
@@ -119,30 +113,8 @@ impl SemanticReader {
         exposed: Option<&HashSet<usize>>,
         maximum_bytes: usize,
     ) -> Result<ReadPublication, ReadError> {
-        self.start_platform(snapshot, args, exposed, maximum_bytes, false)
-    }
-    pub fn start_browser(
-        &mut self,
-        snapshot: AxSnapshot,
-        args: ReadArgs,
-        exposed: Option<&HashSet<usize>>,
-        maximum_bytes: usize,
-    ) -> Result<ReadPublication, ReadError> {
-        self.start_platform(snapshot, args, exposed, maximum_bytes, true)
-    }
-    fn start_platform(
-        &mut self,
-        snapshot: AxSnapshot,
-        args: ReadArgs,
-        exposed: Option<&HashSet<usize>>,
-        maximum_bytes: usize,
-        browser: bool,
-    ) -> Result<ReadPublication, ReadError> {
         if args.cursor.is_some() {
             return Err(ReadError::InvalidContinuation);
-        }
-        if args.view == Some(ReadView::Overview) && !browser {
-            return Err(ReadError::NativeOverview);
         }
         if args
             .query
@@ -178,12 +150,6 @@ impl SemanticReader {
                 ReadView::Headings => node.is_heading(),
                 ReadView::Links => {
                     node.link_url.is_some() || node.role.as_deref() == Some("AXLink")
-                }
-                ReadView::Overview => {
-                    node.is_heading()
-                        || node.is_value_settable
-                        || !node.actions.is_empty()
-                        || node.link_url.is_some()
                 }
             })
             .filter(|node| {
@@ -292,7 +258,6 @@ impl SemanticReader {
             fields,
             next: 0,
             cursor: Uuid::new_v4(),
-            browser,
             root: presentation.root,
             contexts,
             provenance,
@@ -442,16 +407,6 @@ fn publish(
                 ))
             }
             let enabled = node.is_enabled != Some(false);
-            let follow_link = enabled
-                && retained.browser
-                && node.link_url.is_some()
-                && node.has_action("AXPress");
-            if follow_link {
-                addresses.push(format!(
-                    "link_ref={}",
-                    issue(ReferenceCapability::Link, "l")
-                ))
-            }
             if enabled && node.is_value_settable {
                 addresses.push(format!(
                     "field_ref={}",
@@ -469,7 +424,6 @@ fn publish(
                     "AXPick",
                 ]
                 .contains(&action.as_str())
-                    && !(follow_link && action == "AXPress")
                 {
                     addresses.push(format!(
                         "action_ref={} action={}",
@@ -784,7 +738,7 @@ mod tests {
         let value = node(3, Some(1), "AXStaticText", "Open account");
         snapshot.elements = vec![root, group, heading, value];
         let publication = SemanticReader::default()
-            .start_browser(
+            .start(
                 snapshot,
                 ReadArgs {
                     view: Some(ReadView::Content),
@@ -813,7 +767,7 @@ mod tests {
         assert!(publication.receipt.exposures.iter().all(|field|field.node_id==publication.snapshot.elements[3].identity.to_string()));
     }
     #[test]
-    fn proven_browser_links_have_one_navigation_choice() {
+    fn native_links_publish_only_observed_accessibility_actions() {
         let mut snapshot = fixtures::snapshot("");
         let link = &mut snapshot.elements[0];
         link.role = Some("AXLink".into());
@@ -821,14 +775,15 @@ mod tests {
         link.link_url = Some("https://example.test/account".into());
         link.actions = vec!["AXPress".into()];
         let publication = SemanticReader::default()
-            .start_browser(snapshot, ReadArgs::default(), None, 4096)
+            .start(snapshot, ReadArgs::default(), None, 4096)
             .unwrap();
         assert_eq!(publication.references.len(), 1);
         assert!(
             publication
                 .references
                 .values()
-                .all(|reference| reference.capability == ReferenceCapability::Link)
+                .all(|reference| reference.capability
+                    == ReferenceCapability::Action("AXPress".into()))
         );
     }
     #[test]

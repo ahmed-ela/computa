@@ -54,6 +54,34 @@ final class APIModelResponseCodecTests: XCTestCase {
             wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")]))
     }
 
+    func testCurrentOutcomeVerificationSurvivesRetiredChromeToolFiltering() throws {
+        let retired: [String: Any] = ["type": "function", "name": "computer_v2_tabs",
+                                      "inputSchema": ["type": "object", "properties": [:]]]
+        let verify = ComputerOutcomeToolContract.spec
+        for modelID in ["browser/chatgpt", "api/cerebras/gpt-oss-120b", "local-fixture"] {
+            let definitions: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [retired, verify]]]
+            let visible = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: modelID)
+            let children = try XCTUnwrap(visible.first?["tools"] as? [[String: Any]])
+            XCTAssertEqual(children.compactMap { $0["name"] as? String }, [ComputerOutcomeToolContract.name])
+            XCTAssertEqual(children.first as NSDictionary?, verify as NSDictionary)
+            XCTAssertEqual(ComputaModelToolCatalog.nativeToolDescriptions(modelID: modelID)[ComputerOutcomeToolContract.name],
+                           verify["description"] as? String)
+        }
+    }
+
+    func testRetiredToolFilteringPreservesEveryOfferedNativeToolForBothPolicies() {
+        for policy: ComputerInteractionPolicy in [.backgroundOnly, .foregroundAllowed] {
+            for modelID in ["browser/chatgpt", "api/cerebras/gpt-oss-120b", "local-fixture"] {
+                let offered = ComputerV2ToolContract.specs(for: modelID, interactionPolicy: policy)
+                    + ComputerV2ToolContract.referenceSpecs(for: modelID, interactionPolicy: policy)
+                    + [ComputerOutcomeToolContract.spec]
+                let visible = ComputaModelToolCatalog.visibleToolDefinitions(offered, modelID: modelID)
+                XCTAssertEqual(visible.compactMap { $0["name"] as? String },
+                               offered.compactMap { $0["name"] as? String })
+            }
+        }
+    }
+
     func testRestoredAppsSchemaRefreshReachesCerebrasWithoutRewritingFailedHistory() throws {
         let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
             baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,

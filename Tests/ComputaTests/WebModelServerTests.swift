@@ -22,7 +22,7 @@ final class WebModelServerTests: XCTestCase {
         }
         let input = [message("developer", "Synthetic native developer prelude"), message("user", environment),
             message("user", "Computa latency benchmark \(nonce). Reply with exactly HI. Do not use tools."
-                + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false))]
+                + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())]
         // The adversarial second reply is an inert protocol fixture. No command is
         // executed; it proves capture cannot bypass ordinary single-action selection.
         let replies = [#"{"type":"message","text":"HI"}"#,
@@ -1570,21 +1570,17 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 0)
     }
 
-    func testEveryWebsiteRequiresEmbeddedTransportEvenWhenChromeIsAvailable() async throws {
-        let chrome = FixtureWebModelTransport()
+    func testEveryWebsiteRequiresEmbeddedTransport() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.setTransportForTesting(chrome)
         for provider in ["chatgpt", "gemini", "claude"] {
             let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             do {
                 _ = try await server.fixtureInfer(input, taskID: provider)
-                XCTFail("Website models must not fall back to Chrome")
+                XCTFail("Website models require an embedded transport")
             } catch {
                 XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.embeddedRequired.localizedDescription)
             }
         }
-        let operations = await chrome.operations()
-        XCTAssertTrue(operations.isEmpty)
         _ = await server.shutdown()
     }
 
@@ -1695,48 +1691,7 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
-    func testChromeReplacementAndDisconnectLeavePendingEmbeddedStartAndItsSessionAlive() async throws {
-        for provider in ["chatgpt", "gemini", "claude"] {
-            let gate = WebListenerStartupGate()
-            let embedded = FixtureWebModelTransport(startGate: gate)
-            let chrome = FixtureWebModelTransport()
-            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded, defaultChatChoice: syntheticChatGPTChoice))
-            await server.setTransportForTesting(chrome)
-            let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
-            let inference = Task { try await server.fixtureInfer(input, taskID: provider) }
-            addTeardownBlock { inference.cancel(); await gate.resume() }
-            try await gate.waitUntilEntered()
-            let connection = ChromeConnectionRequest(
-                application: .init(processIdentifier: 123, bundleIdentifier: "com.google.Chrome",
-                    executableURL: URL(fileURLWithPath: "/fixture/Chrome")),
-                userDataDirectory: URL(fileURLWithPath: "/fixture/profile"),
-                consent: ChromeDebuggingConsent(approvedByUser: true))
-            await server.connect(connection)
-            let disconnected = await server.disconnect()
-            XCTAssertTrue(disconnected.isEmpty)
-            let chromeOperations = await chrome.operations()
-            XCTAssertTrue(chromeOperations.isEmpty)
-            let pendingOperations = await embedded.operations()
-            XCTAssertEqual(pendingOperations, ["webProviderStart"])
 
-            await gate.resume()
-            let first = try await inference.value
-            XCTAssertTrue(String(decoding: first, as: UTF8.self).contains("response.completed"))
-            // The final reply closed the first conversation. This fixture now
-            // starts an independent native turn, not an identical same-turn retry.
-            _ = try await server.fixtureInfer(input, taskID: provider, turnID: "after-chrome-replacement")
-            try await gate.requireHealthy()
-            let resumedOperations = await embedded.operations()
-            XCTAssertEqual(resumedOperations.filter { $0 == "webProviderStart" }.count, 2)
-            XCTAssertFalse(resumedOperations.contains("webProviderCancel"))
-            let issues = await server.shutdown()
-            XCTAssertTrue(issues.isEmpty)
-            let finalOperations = await embedded.operations()
-            XCTAssertEqual(finalOperations.filter { $0 == "webProviderFinish" }.count, 2)
-            XCTAssertFalse(finalOperations.contains("webProviderCancel"))
-        }
-    }
 
     func testUnverifiedCleanupIsReportedBeforeResponseAndRetriedWithoutReplay() async throws {
         let transport = FixtureWebModelTransport(cleanupFailsOnce: true)
@@ -1774,7 +1729,7 @@ final class WebModelServerTests: XCTestCase {
                 XCTFail("Expected a failed website snapshot")
             } catch {
                 XCTAssertEqual(error.localizedDescription,
-                               ExtensionChromeLink.operationFailure(errorCode: code).localizedDescription)
+                               WebsiteProviderFailure.from(errorCode: code)!.localizedDescription)
                 XCTAssertFalse(error.localizedDescription.contains(DiagnosticWebModelTransport.untrustedMessage))
             }
             _ = await server.shutdown()
@@ -1814,7 +1769,7 @@ final class WebModelServerTests: XCTestCase {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let error = try XCTUnwrap(body["error"] as? [String: Any])
         XCTAssertEqual(error["message"] as? String,
-                       ChromeBridgeIPC.Failure.websiteFailure(.promptNotInserted).localizedDescription)
+                       WebsiteProviderFailure.operation(.promptNotInserted).localizedDescription)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(DiagnosticWebModelTransport.untrustedMessage))
         _ = await server.shutdown()
     }
@@ -2356,7 +2311,7 @@ private actor DiagnosticWebModelTransport: WebModelTransport {
                 response = ["sessionToken": token, "state": point == .readinessPoll ? "loading" : "ready"]
             }
         case "webProviderSend":
-            if point == .sendThrown { throw ExtensionChromeLink.operationFailure(errorCode: code) }
+            if point == .sendThrown { throw (WebsiteProviderFailure.from(errorCode: code) as (any Error)?) ?? WebModelServer.Failure.providerFailed }
             response = point == .sendSnapshot ? failed : ["state": "running"]
         case "webProviderPoll":
             response = point == .readinessPoll || point == .responsePoll ? failed
@@ -2368,7 +2323,7 @@ private actor DiagnosticWebModelTransport: WebModelTransport {
                 cleanupFailure = nil
                 switch failure {
                 case .snapshot(let code): response = ["cleanup": "failed", "error": ["code": code, "message": Self.untrustedMessage]]
-                case .bridge(let code): throw ExtensionChromeLink.operationFailure(errorCode: code)
+                case .bridge(let code): throw (WebsiteProviderFailure.from(errorCode: code) as (any Error)?) ?? WebModelServer.Failure.providerFailed
                 case .untrusted: throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: Self.untrustedMessage])
                 }
             } else { response = ["cleanup": "not_created"] }

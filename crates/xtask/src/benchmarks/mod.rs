@@ -7,7 +7,6 @@ mod evidence_runner;
 mod fixtures;
 mod grounding_cascade;
 mod images;
-mod instruction_isolation;
 mod lifecycle;
 mod lookup_server;
 mod matrix;
@@ -43,9 +42,6 @@ pub use evidence_runner::{
 pub use fixtures::make_ax_fixtures;
 pub use grounding_cascade::{GroundingCascadeOptions, grounding_cascade};
 pub use images::{format_ocr_files, native_ocr, render_fixtures};
-pub use instruction_isolation::{
-    IsolationOptions, instruction_contamination, instruction_isolation,
-};
 pub use lifecycle::{
     ParentDeathOptions, ProcessIdentity, parent_death_probe, parent_death_supervisor,
     parse_process_identity, same_process_identity,

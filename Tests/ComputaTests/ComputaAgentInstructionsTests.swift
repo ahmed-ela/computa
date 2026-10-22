@@ -131,7 +131,6 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(contract.contains("Chrome"))
         XCTAssertTrue(contract.contains("browser_read(cursor=next_cursor)"))
         XCTAssertTrue(contract.contains("browser_tabs(cursor=next_cursor)"))
-        XCTAssertTrue(ComputaAgentInstructions.developerInstructions(externalChromeTools: true).contains("computer_v2_tabs"))
     }
     func testAppOwnedInstructionsPreservePermissionsAndEvidenceWithoutForeignPolicy() {
         let instructions = ComputaAgentInstructions.developerInstructions()
@@ -153,32 +152,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(instructions.contains("Permanent Non-Bypass Policy"))
     }
 
-    func testInitialBrowserOverviewDoesNotReplaceContentEvidenceOrNativeReads() {
-        let instructions = ComputaAgentInstructions.developerInstructions(externalChromeTools: true)
-        XCTAssertTrue(instructions.contains("computer_v2_read_page for a fresh read"))
-        XCTAssertTrue(instructions.contains("overview locates controls"))
-        XCTAssertTrue(instructions.contains("content reads the body"))
-        XCTAssertTrue(instructions.contains("computer_v2_follow(link_ref)"))
-        XCTAssertTrue(instructions.contains("dialog_opened"))
-        XCTAssertTrue(instructions.contains("all preserves structure"))
-        XCTAssertTrue(instructions.contains("Native apps use all or content"))
-        XCTAssertTrue(instructions.contains("short observed excerpt with its source URL"))
-    }
 
-    func testPaginationRequiresAnObservedResultPlanWithoutFutureTextGuessing() {
-        let instructions = ComputaAgentInstructions.developerInstructions(externalChromeTools: true)
-        XCTAssertTrue(instructions.contains("A Chrome computer_v2_press"))
-        XCTAssertTrue(instructions.contains("postcondition before input"))
-        XCTAssertTrue(instructions.contains("region_changed"))
-        XCTAssertTrue(instructions.contains("Both omit expected text"))
-        XCTAssertTrue(instructions.contains("observed eligible region_ref"))
-        XCTAssertTrue(instructions.contains("candidate is not authorization"))
-        XCTAssertTrue(instructions.contains("VERIFIED_PROPERTY proves only its declared property"))
-        XCTAssertTrue(instructions.contains("computer_v2_verify with the returned operation"))
-        XCTAssertTrue(instructions.contains("host budget is exhausted"))
-        XCTAssertFalse(instructions.contains("element_index"))
-        XCTAssertFalse(instructions.contains("computer_v2_snapshot"))
-    }
 
     func testReferenceInstructionsKeepReadOperationsSeparateAndBoundRecovery() {
         let instructions = ComputaAgentInstructions.developerInstructions()
@@ -195,11 +169,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
-        let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false, externalChromeTools: true)
-        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
-        XCTAssertTrue(legacy.contains("computer_v2_follow_link with only"))
-        XCTAssertTrue(legacy.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
-        XCTAssertTrue(legacy.contains("Being inside main does not make a toolbar or composer a"))
+        let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
+        XCTAssertEqual(legacy, ComputaAgentInstructions.nativeLegacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+        XCTAssertTrue(legacy.contains("computer_v2_snapshot(view=all or content)"))
+        XCTAssertFalse(legacy.contains("computer_v2_follow_link"))
+        XCTAssertTrue(legacy.contains("browser_read(cursor=next_cursor)"))
         XCTAssertFalse(legacy.contains("computer_v2_read_region"))
     }
 
@@ -239,7 +213,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("never bypass permissions, browser"))
             XCTAssertTrue(text.contains("Historical session IDs"))
         }
-        XCTAssertTrue(ComputaAgentInstructions.scope.contains("CLI commands require no app binding"))
+        XCTAssertTrue(ComputaAgentInstructions.nativeScope.replacingOccurrences(of: "\n", with: " ").contains("CLI commands require no app binding"))
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertTrue(base.contains("Native computer UI tasks bind each turn with computer_v2_open"))
         XCTAssertTrue(base.contains("CLI commands need no app binding"))
@@ -356,12 +330,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testBackgroundOnlyBrowserRecoveryKeepsSignInInTheBrowserWithoutInventingAnAccessBlock() {
         let checks = ComputaAgentInstructions.browserAddressChecks.replacingOccurrences(of: "\n", with: " ")
-        for externalChromeTools in [false, true] {
-            let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: externalChromeTools)
-            XCTAssertTrue(policy.contains("No native activation, focus theft or global input, including recovery"))
-            XCTAssertTrue(policy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
-            XCTAssertTrue(policy.contains("Full Access does not elevate this host policy"))
-        }
+        let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
+        XCTAssertTrue(policy.contains("No native activation, focus theft or global input, including recovery"))
+        XCTAssertTrue(policy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
+        XCTAssertTrue(policy.contains("Full Access does not elevate this host policy"))
         XCTAssertTrue(checks.contains("Empty/title/footer-only reads after navigation/sign-in are inconclusive"))
         XCTAssertTrue(checks.contains("bounded browser_wait, then fresh unfiltered browser_read"))
         XCTAssertTrue(checks.contains("If still empty, report unresolved loading, not absence/denial"))

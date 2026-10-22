@@ -55,7 +55,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         guard let tab = session.humanTab(id: id) else { return nil }
         return BrowserTarget(
             targetID: id.uuidString, instanceToken: id.uuidString, title: tab.title,
-            url: tab.url ?? URL(string: "about:blank")!, webSocketURL: nil)
+            url: tab.url ?? URL(string: "about:blank")!)
     }
 
     // General browser tools never activate/select a tab implicitly.

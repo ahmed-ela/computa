@@ -1626,7 +1626,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var observationWaiters = [CheckedContinuation<Void, Never>]()
     private var observationFailures = [BrowserTabBrokerError](), failureRedirect: URL?, replaceOnFailure = false, holdRead = false
 
-    init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!,webSocketURL:nil) }
+    init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
     func fieldValue() -> String { field }
     func setObservedResult(_ text: String) { result = text }
@@ -1637,23 +1637,23 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func failNextClose() { shouldFailClose = true }
     func addInventoryTarget(title:String,url:URL) -> String {
         let id=UUID().uuidString
-        targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:title,url:url,webSocketURL:nil)
+        targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:title,url:url)
         return id
     }
     func addLongInventory() {
         for index in 0..<12 {
             let id=UUID().uuidString
             targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:String(repeating:"🙂",count:200),
-                url:URL(string:"http://localhost:8123/\(index)?q=" + String(repeating:"x",count:1_800))!,webSocketURL:nil)
+                url:URL(string:"http://localhost:8123/\(index)?q=" + String(repeating:"x",count:1_800))!)
         }
         let id=UUID().uuidString
         targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:"Oversized URL",
-            url:URL(string:"http://localhost:8123/?q=" + String(repeating:"x",count:3_000))!,webSocketURL:nil)
+            url:URL(string:"http://localhost:8123/?q=" + String(repeating:"x",count:3_000))!)
     }
     func humanTargets() async throws -> [BrowserTarget] { Array(targets.values) }
     func createTarget(url:URL) async throws -> BrowserTarget {
         stats.creates += 1
-        let id=UUID().uuidString, target=BrowserTarget(targetID:id,instanceToken:id,title:"Flight fixture",url:url,webSocketURL:nil)
+        let id=UUID().uuidString, target=BrowserTarget(targetID:id,instanceToken:id,title:"Flight fixture",url:url)
         targets[id]=target; owned.insert(id)
         if holdCreate {
             createHeld=true; createWaiters.forEach { $0.resume() }; createWaiters.removeAll()
@@ -1707,7 +1707,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             }
         }
         if let redirect = pendingRedirect {
-            targets[target.targetID] = BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:redirect,webSocketURL:nil)
+            targets[target.targetID] = BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:redirect)
             pendingRedirect = nil
         }
         var nodes = [
@@ -1730,7 +1730,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         observation.semanticReadiness = semanticReadiness
         if driftAfterCapture {
             targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken,
-                title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!, webSocketURL: nil)
+                title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!)
         }
         return observation
     }
@@ -1743,7 +1743,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func setText(target:BrowserTarget,backendNodeID:Int64,text:String,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws { try permit.commit { stats.fills += 1; field=text; didInput(target) } }
     func navigate(target:BrowserTarget,url:URL,permit:BrowserMutationPermit) async throws {
-        try permit.commit { stats.navigations += 1; generation=UUID().uuidString; targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url,webSocketURL:nil) }
+        try permit.commit { stats.navigations += 1; generation=UUID().uuidString; targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url) }
     }
     func wait(target:BrowserTarget,text:String?,timeoutMS:Int) async throws -> Bool { text == nil || result.contains(text!) }
     func holdNextCreate() { holdCreate=true }
@@ -1785,14 +1785,14 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         for id in owned {
             guard let target = targets[id] else { continue }
             targets[id] = BrowserTarget(targetID:id,instanceToken:UUID().uuidString,title:target.title,
-                                        url:target.url,webSocketURL:nil)
+                                        url:target.url)
         }
     }
     func replaceOwnedTargetWithHumanIncarnation() {
         for id in Array(owned) {
             guard let target = targets[id] else { continue }
             targets[id] = BrowserTarget(targetID: id, instanceToken: UUID().uuidString,
-                title: "Replacement user tab", url: target.url, webSocketURL: nil)
+                title: "Replacement user tab", url: target.url)
             owned.remove(id)
         }
     }
@@ -1800,7 +1800,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         for id in owned {
             guard let target = targets[id] else { continue }
             targets[id] = BrowserTarget(targetID: id, instanceToken: target.instanceToken, title: target.title,
-                                        url: url, webSocketURL: nil)
+                                        url: url)
         }
     }
 }

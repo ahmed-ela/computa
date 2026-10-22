@@ -287,7 +287,7 @@ final class RuntimeStreamingTests: XCTestCase {
         try await withHarness(scenario: "command-progress") { harness in
             let state = AppState(tasks: [AgentTask(id: harness.taskID, title: "CLI", summary: "",
                 status: .draft, workspace: harness.root.path, model: harness.modelID)], runtime: harness.runtime,
-                preferences: isolatedTestPreferences(), enableChromeExtensionBridge: false)
+                preferences: isolatedTestPreferences())
             harness.audit.state = state
             try await harness.submit()
             try await self.waitFor("command output fence") { harness.audit.measuredTokens == 1_000 }

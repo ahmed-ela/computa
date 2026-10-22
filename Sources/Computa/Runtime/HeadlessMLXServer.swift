@@ -69,7 +69,7 @@ struct HeadlessMLXConfiguration: Sendable {
          "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
          "TOKENIZERS_PARALLELISM": "false", "HEYDASH_MLX_INSTANCE": instance]
         let visibility = (try? ComputaModelToolCatalog.localToolVisibilityEnvironment(modelID: LocalModelCatalog.options.first?.id ?? "native"))
-            ?? ["COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0"]
+            ?? ["COMPUTA_NATIVE_TOOL_OVERRIDES": "[]"]
         values.merge(visibility) { _, policy in policy }
         return values
     }

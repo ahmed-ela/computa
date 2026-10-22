@@ -10,7 +10,11 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         case cleanupUnverified = "cleanup_unverified", unsupportedRuntime = "unsupported_runtime"
     }
     enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude }
-    enum Route: String, Codable, Sendable { case embedded, chrome }
+    enum Route: String, Codable, Sendable {
+        case embedded
+        // Decode existing saved receipts without retaining a Chrome execution route.
+        case legacyChrome = "chrome"
+    }
     enum Trigger: String, Codable, Sendable { case automatic, manual, replacement, shutdown, inference }
 
     let schemaVersion: Int

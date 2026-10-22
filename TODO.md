@@ -1,5 +1,9 @@
 # Computa TODO and validation
 
+Chrome connection support and its implementation have been removed. Browser work
+uses the built-in browser. Earlier Chrome comparisons below are historical records,
+not remaining feature requirements or instructions to reconnect Chrome.
+
 ## Embedded browser: human pane first
 
 The initial browser delivery is the human-operated right pane: toggle/resize,

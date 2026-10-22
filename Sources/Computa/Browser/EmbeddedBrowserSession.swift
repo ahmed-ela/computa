@@ -23,7 +23,7 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate init(id: UUID = UUID(), isPopup: Bool = false) { self.id = id; self.isPopup = isPopup }
 }
 
-/// Browser views are independent of the privileged Octane UI WebView and Chrome.
+/// Browser views are independent of the privileged Octane UI WebView.
 /// Human views may detach when hidden; inference views return to a render host.
 /// Only close/shutdown destroys either session.
 @MainActor @Observable

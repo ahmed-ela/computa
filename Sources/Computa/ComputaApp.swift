@@ -31,7 +31,7 @@ enum ComputaLaunchMode: Equatable {
             // the privileged app UI remains in its separate WebView.
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
-                            browserSession: browser, enableChromeExtensionBridge: true)
+                            browserSession: browser)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
             // from reading or writing the application's saved access choice.

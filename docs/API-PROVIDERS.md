@@ -48,11 +48,13 @@ Admitted streaming requests now terminate with a standard Responses `response.fa
 
 The 35 affected native checks passed, including a real bundled-engine high-traffic regression proving one upstream POST, one credential read, zero tools/commands/approvals/file changes, and a clear capacity message. The private capture fixture uses a physical temporary-directory path so its intentional symlink prohibition remains intact.
 
-## Temporary built-in browser policy
+## Built-in browser policy
 
-Model-facing browser work now uses Computa's built-in `browser_*` tools. The external Chrome inventory, binding, workspace and link tools are hidden by default, and native `computer_v2_open` no longer advertises Chrome URL navigation. Native app tools, terminal commands, file editing and their permission controls remain available. The Chrome implementation is retained behind an internal compatibility flag for a later product decision.
+Model-facing browser work uses Computa's built-in `browser_*` tools. The external Chrome connection implementation, extension, native host, controls and tools have been removed. Native app tools, terminal commands, file editing and their permission controls remain available.
 
-Saved native threads retain their original tool catalogs. API, website and app-launched MLX inference therefore filter the current callable definitions as well as new-thread catalogs; they preserve historical call/output pairs. API tool identifiers retain their original mapping when a hidden definition is removed, so an old Chrome call cannot be attributed to a built-in browser tool. A native dispatch guard rejects retained Chrome calls before connection recovery, permissions or input. Built-in page cursors continue through `browser_read(cursor=next_cursor)` and tab inventory cursors through `browser_tabs(cursor=next_cursor)`; neither belongs to `computer_v2_continue`.
+Saved native threads retain their original tool catalogs. API, website and app-launched MLX inference therefore filter the current callable definitions as well as new-thread catalogs; they preserve historical call/output pairs. API tool identifiers retain their original mapping when a hidden definition is removed, so an old Chrome call cannot be attributed to a built-in browser tool. A native dispatch guard rejects retained Chrome calls before permissions or input. Built-in page cursors continue through `browser_read(cursor=next_cursor)` and tab inventory cursors through `browser_tabs(cursor=next_cursor)`; neither belongs to `computer_v2_continue`.
+
+The following build-80 qualification records predate removal of the retained Chrome implementation. They remain historical evidence.
 
 The reported email failure mixed these domains: Chrome inventory failed before dispatch, then a built-in page cursor was sent to the computer continuation tool. A later built-in continuation with that cursor succeeded. This policy prevents offering the unavailable Chrome route; it does not silently rewrite an old failed turn or replay the email task.
 

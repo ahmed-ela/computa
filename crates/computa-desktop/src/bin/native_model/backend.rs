@@ -1,17 +1,10 @@
 //! A test boundary around the actual native backend. Effects may target only
-//! the exact NSWorkspace-created fixture, or a separately owned Chrome child.
+//! the exact NSWorkspace-created fixture.
 use computa_macos::{
     qualification_fixture::{BUNDLE_ID, DIGIT_ID, DISPLAY_ID},
     *,
 };
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    future::Future,
-    path::{Path, PathBuf},
-    pin::Pin,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, future::Future, path::PathBuf, pin::Pin, rc::Rc};
 use uuid::Uuid;
 #[derive(Default)]
 pub struct Effects {
@@ -27,18 +20,13 @@ pub struct RestrictedBackend {
     pub pid: Option<i32>,
     pub executable: Option<PathBuf>,
     pub effects: Rc<RefCell<Effects>>,
-    pub allow_chrome: bool,
-    pub chrome_pid: Option<i32>,
     pub initial_foreground: Option<i32>,
 }
 impl RestrictedBackend {
     fn fixture(&self, b: &BoundApplication) -> Result<()> {
         let fixture = Some(b.application.process_identifier) == self.pid
             && b.application.bundle_identifier.as_deref() == Some(BUNDLE_ID);
-        let chrome = self.allow_chrome
-            && Some(b.application.process_identifier) == self.chrome_pid
-            && b.application.bundle_identifier.as_deref() == Some("com.google.Chrome");
-        if fixture || chrome {
+        if fixture {
             Ok(())
         } else {
             Err(AutomationError::TargetChanged)
@@ -96,40 +84,6 @@ impl MacosBackend for RestrictedBackend {
                 before()?;
                 self.native.bind_exact_process(pid, BUNDLE_ID)
             }
-        })
-    }
-    fn application_executable(&self, bundle: &str) -> Result<PathBuf> {
-        if self.allow_chrome && bundle == "com.google.Chrome" {
-            self.native.application_executable(bundle)
-        } else {
-            Err(AutomationError::TargetChanged)
-        }
-    }
-    fn bind_owned_process<'a>(
-        &'a mut self,
-        pid: i32,
-        path: &'a Path,
-        activate: bool,
-        before: &'a mut dyn FnMut() -> Result<()>,
-    ) -> Pin<Box<dyn Future<Output = Result<BoundApplication>> + 'a>> {
-        Box::pin(async move {
-            if !self.allow_chrome {
-                return Err(AutomationError::TargetChanged);
-            }
-            if self.native.application_executable("com.google.Chrome")? != path {
-                return Err(AutomationError::TargetChanged);
-            }
-            let binding = self
-                .native
-                .bind_owned_process(pid, path, activate, before)
-                .await?;
-            if binding.application.process_identifier != pid
-                || binding.application.bundle_identifier.as_deref() != Some("com.google.Chrome")
-            {
-                return Err(AutomationError::TargetChanged);
-            }
-            self.chrome_pid = Some(pid);
-            Ok(binding)
         })
     }
     fn validate(&self, b: &BoundApplication) -> Result<()> {

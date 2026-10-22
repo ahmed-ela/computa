@@ -198,7 +198,7 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
     func testNavigationRecoveryCannotDisguiseAnActivationSchema() throws {
         let store = try NativeFailureEvidenceStore(directory: directory)
         let substitutedRecovery = try withDiagnostic(fixture()) {
-            $0["error"] = ["code": "chrome_navigation_recovery_required", "message": ComputerToolFailureEvidence.navigationRecoveryDescription]
+            $0["error"] = ["code": "chrome_navigation_recovery_required", "message": "Historical navigation recovery failed."]
         }
         let substitutedActivation = try withDiagnostic(navigationRecoveryFixture()) {
             $0["error"] = ["code": "application_activation_failed", "message": "Application activation failed"]
@@ -355,11 +355,12 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
             diagnosticText: diagnosticText ?? ComputerToolFailureEvidence.text(for: error), timestamp: timestamp)
     }
 
+    /// Archived schema only: the removed Chrome route can never produce new records.
     private func navigationRecoveryFixture(toolName: String = "computer_v2_open", message: String? = nil) -> NativeFailureEvidenceStore.Record {
-        let error = ExistingChromeError.navigationRecoveryRequired
+        let diagnostic = #"{"type":"native_tool_failure","error":{"code":"chrome_navigation_recovery_required","message":"Historical navigation recovery failed."},"cause":"undetermined","website_status":"not_observed","action_outcome":"navigation_not_confirmed","tab_state":"preserved_if_created","retry_policy":"stop_for_turn","next_step":"Historical failure; no operation was replayed."}"#
         return .init(threadID: "thread-1", turnID: "turn-navigation", callID: "call-navigation", toolName: toolName,
-            message: message ?? ComputerToolFailureEvidence.terminalMessage(for: error)!,
-            diagnosticText: ComputerToolFailureEvidence.text(for: error), timestamp: Date(timeIntervalSinceReferenceDate: 123_457))
+            message: message ?? "Historical navigation recovery failed.",
+            diagnosticText: diagnostic, timestamp: Date(timeIntervalSinceReferenceDate: 123_457))
     }
 
     private func outcomeFixture(kind: ComputerOutcomeDiagnostic.Kind) throws -> NativeFailureEvidenceStore.Record {

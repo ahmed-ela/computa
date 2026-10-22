@@ -194,7 +194,7 @@ struct EmbeddedBrowserPane: View {
                 .foregroundStyle(.secondary)
             Text(hasTab ? "New tab" : "Your browser, inside Computa")
                 .font(.headline)
-            Text("Search or enter a website address to get started.\nSign in here separately from Chrome.")
+            Text("Search or enter a website address to get started.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

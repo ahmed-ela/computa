@@ -13,23 +13,13 @@ struct ComputerUnchangedAttemptGuard {
     static func key(tool: String, arguments: [String: Any], observedElementIdentity: String? = nil) -> String {
         // Capability refresh is not a new intent. Keep action/text/element,
         // but do not let fresh opaque IDs evade the no-progress budget.
-        var stable = arguments.filter { !["snapshot_id", "capture_id", "candidate_token", "cursor", "postcondition"].contains($0.key) }
-        // Page sizing (including an omitted default) cannot make another bad
-        // inventory cursor a distinct recovery attempt.
-        if tool == "computer_v2_tabs" { stable.removeValue(forKey: "page_size") }
+        var stable = arguments.filter { !["snapshot_id", "capture_id", "cursor", "postcondition"].contains($0.key) }
         if let observedElementIdentity {
             stable.removeValue(forKey: "element_index")
             stable["observed_element_identity"] = observedElementIdentity
         }
-        // The dedicated link tool and AXPress are the same physical intent.
-        // Changing the tool name must not bypass retries or recovery identity.
-        let intentTool: String
-        if tool == "computer_v2_follow_link" {
-            intentTool = "computer_v2_ax"
-            stable["ax_action"] = "AXPress"
-        } else { intentTool = tool }
         let data = try? JSONSerialization.data(withJSONObject: stable, options: [.sortedKeys])
-        return intentTool + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? "invalid")
+        return tool + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? "invalid")
     }
 
     mutating func failed(key: String) -> Bool {
@@ -45,7 +35,7 @@ enum ComputerOutcomeToolContract {
     static var spec: [String: Any] { [
         "type": "function",
         "name": name,
-        "description": "Read-only action receipt lookup or pending-outcome verification; never replays input. For an operation already verified or explicitly rejected before input, operation_id alone returns bounded HISTORICAL_ACTION_STATUS, never a live observation or proof of a newly requested property. Only current-task/current-turn receipts are available. Browser and background-native planned actions are verified automatically against intent fixed BEFORE dispatch. VERIFIED_PROPERTY needs no extra verify call; ALREADY_SATISFIED means the state was already present and no input occurred. For a pending armed plan, this tool can only recheck that original plan within its remaining read budget: it cannot replace the property or expected result after seeing the outcome. Copy operation_id from ACTION_EVIDENCE and the current snapshot_id. For legacy unplanned actions, property=value checks value=, property=text checks label= (NOT value=), and document_url checks url=; expected must be the exact nonempty observed value, changed from a known baseline. A verified property is not whole-task success or sender/message identity. Search conclusions separately require the requested query and actual results/explicit empty state; snapshot no_matches is NOT empty search results. A rejected undispatched request did not perform its action. Do not retry input to obtain verification.",
+        "description": "Read-only action receipt lookup or pending-outcome verification; never replays input. For an operation already verified or explicitly rejected before input, operation_id alone returns bounded HISTORICAL_ACTION_STATUS, never a live observation or proof of a newly requested property. Only current-task/current-turn receipts are available. Background-native planned actions are verified automatically against intent fixed BEFORE dispatch. VERIFIED_PROPERTY needs no extra verify call; ALREADY_SATISFIED means the state was already present and no input occurred. For a pending armed plan, this tool can only recheck that original plan within its remaining read budget: it cannot replace the property or expected result after seeing the outcome. Copy operation_id from ACTION_EVIDENCE and the current snapshot_id. For legacy unplanned actions, property=value checks value=, property=text checks label= (NOT value=), and document_url checks url=; expected must be the exact nonempty observed value, changed from a known baseline. A verified property is not whole-task success or sender/message identity. Search conclusions separately require the requested query and actual results/explicit empty state; snapshot no_matches is NOT empty search results. A rejected undispatched request did not perform its action. Do not retry input to obtain verification.",
         "inputSchema": [
             "type": "object", "additionalProperties": false,
             "properties": [

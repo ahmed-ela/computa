@@ -12,8 +12,8 @@ canonical conversation-key and history-off cookie families. Gemini and Claude
 use the shared profile. Gemini retains one owned page for a native turn;
 ChatGPT and Claude use a fresh page for each
 [inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Embedded ChatGPT
-still requires per-submission ownership. These paths work without Chrome;
-Chrome browser tools are hidden from model catalogs.
+still requires per-submission ownership. Browser tasks use this built-in browser;
+external Chrome connection code and controls have been removed.
 Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
 retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 

@@ -238,7 +238,7 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
     }
     func testSyntheticRequestAcceptsExactNativePolicyAsJoinedOrSeparateTextParts() throws {
         let environment = benchmarkMessage("user", benchmarkEnvironment)
-        let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+        let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
         let joined = benchmarkMessage("user", benchmarkText + "\n" + policy)
         var separate = benchmarkMessage("user", benchmarkText)
         separate["content"] = [["type": "input_text", "text": benchmarkText], ["type": "input_text", "text": policy]]
@@ -252,10 +252,11 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
 
     func testSyntheticRequestRejectsPolicyDriftExtraWhitespaceAndUnrecognizedParts() throws {
         let environment = benchmarkMessage("user", benchmarkEnvironment)
-        let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+        let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
         let wrongPolicies = [policy + " ", " " + policy, policy + "\n", policy + " extra user material",
             policy.replacingOccurrences(of: "No native activation", with: "Allow native activation"),
-            ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: true)]
+            policy.replacingOccurrences(of: "offered native background AX or built-in browser UI operations",
+                with: "offered background AX, external browser, or built-in browser UI operations")]
         for wrong in wrongPolicies {
             let joined = benchmarkMessage("user", benchmarkText + "\n" + wrong)
             var separate = benchmarkMessage("user", benchmarkText)
@@ -276,10 +277,8 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
 
     func testSharedRuntimePolicyPreservesTheCurrentNativeWireTextExactly() {
         let expected = "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
-        XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false).utf8.elementsEqual(expected.utf8))
-        let chrome = expected.replacingOccurrences(of: "offered native background AX or built-in browser UI operations",
-            with: "offered background AX, authorized Chrome, or built-in browser UI operations")
-        XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: true).utf8.elementsEqual(chrome.utf8))
+        XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.elementsEqual(expected.utf8))
+
     }
 
     private let benchmarkNonce = UUID(uuidString: "cccccccc-1111-4222-8333-dddddddddddd")!
@@ -380,7 +379,7 @@ private final class BenchmarkCaptureFixture: Sendable {
     }
     func request(nonce other: UUID? = nil) throws -> WebModelResponseCodec.Request {
         let text = "Computa latency benchmark \((other ?? nonce).uuidString.lowercased()). Reply with exactly HI. Do not use tools."
-            + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+            + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy()
         return try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID,
             "instructions": "Synthetic native contract 🧭 e\u{0301}\r\n", "tools": [], "input": [

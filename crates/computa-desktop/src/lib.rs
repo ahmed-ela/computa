@@ -1,8 +1,6 @@
 //! Migration in progress; this crate is not a qualified production replacement yet.
 pub mod assets;
 #[cfg(target_os = "macos")]
-pub mod chrome;
-#[cfg(target_os = "macos")]
 mod defaults;
 #[cfg(target_os = "macos")]
 mod executor;

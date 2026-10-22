@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const SOURCE_COMMIT: &str = "4607249e430dac1c961df4dc615beae88e33cec8";
-pub const PATCH_SHA256: &str = "0116caa8f6f1c7960c851c00621551ce03351bd6cdba86cf8753a052390d43d2";
+pub const PATCH_SHA256: &str = "8fc8e4835d0cfebf0cf1d79934b9699735708d3f7df710f4e88f2f8d232bd315";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
@@ -173,6 +173,20 @@ fn arm64_macho(h: &[u8], size: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_identity_matches_reviewed_source_lock_and_patch_bytes() {
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../../Runtime/codex-source.lock.json")).unwrap();
+        assert_eq!(lock["sourceCommit"], SOURCE_COMMIT);
+        assert_eq!(lock["patchSHA256"], PATCH_SHA256);
+        assert_eq!(
+            hex::encode(Sha256::digest(include_bytes!(
+                "../../../Runtime/patches/compaction-retention.patch"
+            ))),
+            PATCH_SHA256
+        );
+    }
+
     #[test]
     fn manifest_enforces_exact_upstream_patch() {
         let mut m: Manifest = serde_json::from_str(include_str!(

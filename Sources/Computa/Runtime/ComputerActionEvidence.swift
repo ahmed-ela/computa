@@ -25,38 +25,16 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         case invalidArguments
         case bindingRequired
         case freshObservationRequired
-        case freshInventoryRequired
         case pendingAction
-    }
-
-    /// Bounded host classifications, never page text or a model-authored
-    /// explanation. Persisting these keeps the actionable reason available
-    /// after subsequent reads and compaction without republishing private data.
-    enum PreflightIssue: String, Codable, Sendable {
-        case browserDialogAlreadyOpen
-        case browserPostconditionRequired
-        case browserPostconditionInvalid
-
-        var guidance: String {
-            switch self {
-            case .browserDialogAlreadyOpen:
-                "A dialog already existed before input; dialog_opened cannot verify this request. Inspect its current controls. Correct the same intended action using a supported postcondition, or report it unperformed. No approval or input occurred."
-            case .browserPostconditionRequired:
-                "This browser press requires a supported postcondition before input. Inspect the intended result and correct the same intended action using current references. No approval or input occurred."
-            case .browserPostconditionInvalid:
-                "The declared browser postcondition was not supported by the observed target. Inspect the intended result and correct the same intended action using a supported postcondition, or report it unperformed. No approval or input occurred."
-            }
-        }
     }
 
     enum PreflightCorrection: Sendable {
         case validatedArguments
         case freshBoundObservation(observationID: String, targetID: String)
-        case freshInventory(observationID: String, targetID: String)
     }
 
     struct PreflightCorrectionReceipt: Codable, Equatable, Sendable {
-        enum Kind: String, Codable, Sendable { case validatedArguments, freshBoundObservation, freshInventory }
+        enum Kind: String, Codable, Sendable { case validatedArguments, freshBoundObservation }
         let successorOperationID: String
         let kind: Kind
         let observationID: String?
@@ -114,9 +92,9 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let tool: String
         var targetID: String
         let recoveryKey: String?
-        /// Optional host-owned document scope. Native/older receipts may omit
-        /// it, but a scoped browser intent cannot correlate with another
-        /// document merely because backend node IDs happen to be reused.
+        /// Optional host-owned document scope. Older receipts may omit it,
+        /// but scoped intents cannot correlate across documents merely because
+        /// an element identifier happens to be reused.
         let recoveryScope: String?
         let requiresVerification: Bool
         /// Hashes avoid retaining a second copy of private pre-action content.
@@ -129,23 +107,21 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         var verification: Verification?
         var recoveredBy: String?
         var preflightRejection: PreflightRejection?
-        var preflightIssue: PreflightIssue?
         /// Host-classified schema rejection occurred before any application
         /// was bound. Optional for compatibility with earlier saved receipts.
         var preflightTargetWasUnbound: Bool?
-        /// Host-owned hash of the exact browser read selection. A replacement
+        /// Host-owned hash of the exact read selection. A replacement
         /// read corrects this prerequisite only when that source is complete.
         var requiredReadScope: String?
         var preflightCorrection: PreflightCorrectionReceipt?
         /// Armed from a fresh observation before dispatch. It owns its bounded
         /// baseline independently of the progressive 128-property cache above.
-        var verificationPlan: BrowserActionVerification.Plan?
         var nativeVerificationPlan: NativeActionVerification.Plan?
         var plannedVerificationProgress: PlannedVerificationProgress?
         var alreadySatisfied: AlreadySatisfiedReceipt?
         var pendingActionRejection: PendingActionRejectionReceipt?
 
-        var hasVerificationPlan: Bool { verificationPlan != nil || nativeVerificationPlan != nil }
+        var hasVerificationPlan: Bool { nativeVerificationPlan != nil }
 
         var isResolved: Bool {
             recoveredBy != nil || verification != nil || preflightCorrection != nil || alreadySatisfied != nil
@@ -252,21 +228,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     /// Establish intent while input is still known not to have been sent.
     /// Re-arming after seeing a result would turn unrelated page changes into
     /// apparent proof, so even a second identical plan is rejected.
-    mutating func armVerification(operationID: String, plan: BrowserActionVerification.Plan) throws {
-        let index = try unresolvedIndex(operationID)
-        let operation = operations[index]
-        guard operation.requiresVerification,
-              ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(operation.tool),
-              operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
-              operation.failureCode == nil, operation.preflightRejection == nil,
-              !operation.hasVerificationPlan else { throw Failure.invalidTransition }
-        guard operation.tool != "computer_v2_follow_link" || plan.kind == .documentURL else { throw Failure.invalidTransition }
-        try plan.validate()
-        guard plan.scope.evidenceTargetID == operation.targetID else { throw Failure.wrongTarget }
-        operations[index].verificationPlan = plan
-        operations[index].plannedVerificationProgress = PlannedVerificationProgress()
-    }
-
     mutating func armNativeVerification(operationID: String, plan: NativeActionVerification.Plan) throws {
         let index = try unresolvedIndex(operationID)
         let operation = operations[index]
@@ -307,45 +268,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         guard progress.outcome == .observing else { throw Failure.invalidTransition }
         progress.outcome = .observationUnavailable
         operations[index].plannedVerificationProgress = progress
-    }
-
-    /// Only host-owned browser observations can satisfy an armed plan. The
-    /// bounded baseline/selector is stored in the plan, not supplied after the
-    /// action by a model or inferred from an arbitrary changed property.
-    @discardableResult
-    mutating func verifyPlanned(operationID: String, observationID: String,
-                               binding: BrowserTabBinding, snapshot: BrowserTabSnapshot) throws -> Verification {
-        let index = try unresolvedIndex(operationID)
-        guard let plan = operations[index].verificationPlan,
-              var progress = operations[index].plannedVerificationProgress else { throw Failure.missingVerificationPlan }
-        guard progress.outcome == .observing, let attemptAfter = progress.attemptAfterSequence else {
-            throw Failure.invalidTransition
-        }
-        do {
-            guard let observation = observations.first(where: { $0.id == observationID }) else { throw Failure.missingObservation }
-            guard observationID == snapshot.id.uuidString,
-                  observation.isLive, snapshot.isLiveObservation,
-                  observation.sequence > operations[index].observationAfter,
-                  observation.sequence > attemptAfter else { throw Failure.staleObservation }
-            guard observation.targetID == operations[index].targetID,
-                  plan.scope.evidenceTargetID == operations[index].targetID else { throw Failure.wrongTarget }
-            guard operations[index].dispatch != .notDispatched,
-                  operations[index].preflightRejection == nil else { throw Failure.invalidTransition }
-            let proof = try plan.evaluate(binding: binding, snapshot: snapshot)
-            guard proof.observationID == snapshot.id,
-                  proof.property == plan.property, proof.expectedValue == plan.expected else { throw Failure.propertyMismatch }
-            let receipt = Verification(operationID: operationID, observationID: observationID,
-                                       property: proof.property, expectedValue: proof.expectedValue)
-            operations[index].verification = receipt
-            progress.outcome = .verified
-            operations[index].plannedVerificationProgress = progress
-            resolvePendingActionRejections(originalOperationID: operationID)
-            return receipt
-        } catch {
-            progress.outcome = .postconditionMismatch
-            operations[index].plannedVerificationProgress = progress
-            throw error
-        }
     }
 
     @discardableResult
@@ -502,7 +424,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     /// must use recordFailure instead.
     mutating func recordPreflightRejection(operationID: String, kind: PreflightRejection,
                                           code: String, message: String, targetWasUnbound: Bool = false,
-                                          requiredReadScope: String? = nil, issue: PreflightIssue? = nil) throws {
+                                          requiredReadScope: String? = nil) throws {
         try Self.identity(code)
         if let requiredReadScope { try Self.readScopeIdentity(requiredReadScope) }
         let index = try unresolvedIndex(operationID)
@@ -510,12 +432,9 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               operations[index].foregroundEffect == nil,
               operations[index].preflightRejection == nil,
               kind != .pendingAction,
-              kind != .freshInventoryRequired || !operations[index].requiresVerification,
               !targetWasUnbound || kind == .invalidArguments,
-              issue == nil || kind == .invalidArguments,
               requiredReadScope == nil || kind == .freshObservationRequired else { throw Failure.invalidTransition }
         operations[index].preflightRejection = kind
-        operations[index].preflightIssue = issue
         operations[index].preflightTargetWasUnbound = targetWasUnbound ? true : nil
         operations[index].requiredReadScope = requiredReadScope
         operations[index].failureCode = code
@@ -557,22 +476,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 throw Failure.wrongTarget
             }
             receipt = .init(successorOperationID: successorID, kind: .freshBoundObservation,
-                            observationID: observationID, observationTargetID: targetID,
-                            observationSequence: observation.sequence, observationReadScope: observation.readScope,
-                            observationSourceComplete: observation.sourceComplete)
-        case .freshInventory(let observationID, let targetID):
-            guard successor.tool == "computer_v2_tabs", !successor.requiresVerification,
-                  successor.foregroundEffect == nil else { throw Failure.invalidRecovery }
-            guard let observation = observations.first(where: { $0.id == observationID }) else {
-                throw Failure.missingObservation
-            }
-            guard observation.isLive, observation.sequence > successor.observationAfter else {
-                throw Failure.staleObservation
-            }
-            guard targetID == successor.targetID, observation.targetID == targetID else {
-                throw Failure.wrongTarget
-            }
-            receipt = .init(successorOperationID: successorID, kind: .freshInventory,
                             observationID: observationID, observationTargetID: targetID,
                             observationSequence: observation.sequence, observationReadScope: observation.readScope,
                             observationSourceComplete: observation.sourceComplete)
@@ -724,15 +627,10 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let unresolved = unresolvedOutcomeOperations
         let failures = unresolved.filter { $0.failureCode != nil }.count
         let blocked = unresolvedBlockedInputCount
-        let preflightGuidance = unresolved.compactMap { operation -> String? in
-            guard let issue = operation.preflightIssue else { return nil }
-            return "operation=\(operation.id) issue=\(issue.rawValue): \(issue.guidance)"
-        }.prefix(3)
         return "Computer-use outcome not verified: \(unresolved.count) operation(s) remain unresolved"
             + (failures == 0 ? "." : ", including \(failures) failed operation(s).")
             + (blocked == 0 ? "" : " \(blocked) subsequent input request(s) were blocked before dispatch; they are not additional uncertain actions.")
             + " This attempt does not establish that the requested action completed or that a search found no results."
-            + (preflightGuidance.isEmpty ? "" : " Rejected before input: " + preflightGuidance.joined(separator: " "))
     }
 
     /// A compact, app-authored reminder suitable for compaction. It deliberately
@@ -744,7 +642,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 + ($0.foregroundEffect.map { " foreground_effect=\($0.rawValue)" } ?? "")
                 + " status=\($0.failureCode == nil ? "unverified" : "failed")"
                 + ($0.preflightRejection.map { " preflight_rejection=\($0.rawValue)" } ?? "")
-                + ($0.preflightIssue.map { " preflight_issue=\($0.rawValue) correction=\($0.guidance)" } ?? "")
                 + ($0.plannedVerificationProgress.map {
                     " verification=\($0.outcome.rawValue) verification_reads=\($0.attempts)/\(Self.maximumPlannedVerificationAttempts)"
                 } ?? "")
@@ -775,6 +672,13 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
 
     static func restore(_ data: Data, turnID: String) throws -> Self {
         guard data.count <= maximumCheckpointBytes else { throw Failure.capacityExceeded }
+        // Removed verification paths cannot be ignored as unknown Codable
+        // fields: doing so would silently discard their unresolved obligations.
+        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let savedOperations = object["operations"] as? [[String: Any]],
+           savedOperations.contains(where: { $0["verificationPlan"] != nil || $0["preflightIssue"] != nil }) {
+            throw Failure.invalidCheckpoint
+        }
         let value = try JSONDecoder().decode(Self.self, from: data)
         guard value.turnID == turnID else { throw Failure.invalidCheckpoint }
         try value.validate()
@@ -824,11 +728,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             return original.scope.evidenceTargetID == replacement.scope.evidenceTargetID
                 && original.property == replacement.property && original.expected == replacement.expected
         }
-        guard let original = failed.verificationPlan else { return true }
-        guard let replacement = successor.verificationPlan else { return false }
-        return original.scope.evidenceTargetID == replacement.scope.evidenceTargetID
-            && original.kind == replacement.kind && original.property == replacement.property
-            && original.expected == replacement.expected
+        return true
     }
 
     private static func isValidPreflightCorrection(failed: Operation, successor: Operation,
@@ -846,7 +746,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         }
         switch receipt.kind {
         case .validatedArguments:
-            guard rejection != .freshInventoryRequired else { return false }
             if failed.requiresVerification, failed.recoveryScope != successor.recoveryScope { return false }
             if rejection == .invalidArguments, failed.requiresVerification {
                 // A successful action on another control does not repair a
@@ -858,18 +757,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                       let key = failed.recoveryKey, key == successor.recoveryKey,
                       successor.requiresVerification, successor.verification != nil else { return false }
             }
-            if failed.tool != successor.tool {
-                // Two tool names may express the same observed link press.
-                // Only a verified host-owned URL plan can correct the other
-                // spelling's undispatched argument rejection, on the exact
-                // target and observed input identity. Never clear unrelated debt.
-                guard rejection == .invalidArguments,
-                      Set([failed.tool, successor.tool]) == Set(["computer_v2_ax", "computer_v2_follow_link"]),
-                      failed.targetID == successor.targetID,
-                      let key = failed.recoveryKey, key == successor.recoveryKey,
-                      successor.verificationPlan?.kind == .documentURL,
-                      successor.verification != nil else { return false }
-            }
+            guard failed.tool == successor.tool else { return false }
             let hasObservedTarget = receipt.observationID?.isEmpty == false
                 && receipt.observationTargetID == successor.targetID
                 && (receipt.observationSequence ?? 0) > successor.observationAfter
@@ -897,19 +785,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                   let sequence = receipt.observationSequence, sequence > successor.observationAfter else { return false }
             return rejection == .bindingRequired
                 || (rejection == .freshObservationRequired && failed.targetID == successor.targetID)
-        case .freshInventory:
-            // Inventory identity includes the runtime's connection and turn.
-            // Refreshing another inventory, observing page content, or merely
-            // correcting call arguments cannot repair this read prerequisite.
-            return rejection == .freshInventoryRequired && !failed.requiresVerification
-                && failed.foregroundEffect == nil
-                && successor.tool == "computer_v2_tabs" && !successor.requiresVerification
-                && successor.foregroundEffect == nil
-                && failed.targetID == successor.targetID
-                && successor.observationAfter > failed.observationAfter
-                && receipt.observationID?.isEmpty == false
-                && receipt.observationTargetID == successor.targetID
-                && (receipt.observationSequence ?? 0) > successor.observationAfter
+
         }
     }
 
@@ -938,9 +814,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 try Self.readScopeIdentity(scope)
                 guard operation.preflightRejection == .freshObservationRequired else { throw Failure.invalidCheckpoint }
             }
-            if operation.preflightIssue != nil {
-                guard operation.preflightRejection == .invalidArguments else { throw Failure.invalidCheckpoint }
-            }
             if let baseline = operation.baselineProperties {
                 guard baseline.count <= Self.maximumProperties,
                       baseline.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 256
@@ -951,19 +824,13 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             guard operation.observationAfter <= sequence else { throw Failure.invalidCheckpoint }
             if let code = operation.failureCode { try Self.identity(code) }
             guard (operation.failureMessage?.count ?? 0) <= 512 else { throw Failure.invalidCheckpoint }
-            guard operation.verificationPlan == nil || operation.nativeVerificationPlan == nil else { throw Failure.invalidCheckpoint }
-            if let plan = operation.verificationPlan { try plan.validate() }
-            if operation.tool == "computer_v2_follow_link", operation.hasVerificationPlan {
-                guard operation.verificationPlan?.kind == .documentURL,
-                      operation.nativeVerificationPlan == nil else { throw Failure.invalidCheckpoint }
-            }
             if let plan = operation.nativeVerificationPlan { try plan.validate() }
-            let plannedTarget = operation.verificationPlan?.scope.evidenceTargetID ?? operation.nativeVerificationPlan?.scope.evidenceTargetID
-            let plannedProperty = operation.verificationPlan?.property ?? operation.nativeVerificationPlan?.property
-            let plannedExpected = operation.verificationPlan?.expected ?? operation.nativeVerificationPlan?.expected
+            let plannedTarget = operation.nativeVerificationPlan?.scope.evidenceTargetID
+            let plannedProperty = operation.nativeVerificationPlan?.property
+            let plannedExpected = operation.nativeVerificationPlan?.expected
             if let plannedTarget {
                 guard operation.requiresVerification,
-                      ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(operation.tool),
+                      ["computer_v2_ax", "computer_v2_set_text"].contains(operation.tool),
                       plannedTarget == operation.targetID,
                       let progress = operation.plannedVerificationProgress,
                       (0 ... Self.maximumPlannedVerificationAttempts).contains(progress.attempts) else {
@@ -1011,7 +878,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             }
             if let receipt = operation.alreadySatisfied {
                 guard let plan = operation.nativeVerificationPlan, plan.baselineSatisfied,
-                      operation.verificationPlan == nil, operation.requiresVerification,
+                      operation.requiresVerification,
                       operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
                       operation.failureCode == nil, operation.failureMessage == nil,
                       operation.verification == nil, operation.recoveredBy == nil,
@@ -1032,9 +899,6 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                       operation.foregroundEffect == nil,
                       operation.verification == nil, operation.recoveredBy == nil,
                       operation.alreadySatisfied == nil else { throw Failure.invalidCheckpoint }
-                if operation.preflightRejection == .freshInventoryRequired {
-                    guard !operation.requiresVerification else { throw Failure.invalidCheckpoint }
-                }
             }
             if let receipt = operation.pendingActionRejection {
                 guard let index = operations.firstIndex(where: { $0.id == operation.id }),
@@ -1088,7 +952,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                               retained.sourceComplete == correction.observationSourceComplete else {
                             throw Failure.invalidCheckpoint
                         }
-                    } else if correction.kind == .freshInventory || operation.requiredReadScope != nil {
+                    } else if operation.requiredReadScope != nil {
                         // A durable correction may outlive the bounded read
                         // cache, but a supposedly recent missing observation
                         // cannot be explained by normal oldest-first eviction.

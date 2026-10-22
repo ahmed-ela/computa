@@ -18,7 +18,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let snapshot = observation.snapshot
         let presentation = try XCTUnwrap(snapshot.presentation)
         XCTAssertEqual(presentation.rows.map(\.text),
@@ -69,7 +69,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let snapshot = observation.snapshot
         let presentation = try XCTUnwrap(snapshot.presentation)
         let rows = snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }.map(String.init)
@@ -108,7 +108,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let overview = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         XCTAssertEqual(overview.snapshot.elements.prefix(3).map(\.semanticRole), ["button", "heading", "link"])
         for label in ["Open panel", "Find records", "Custom action", "Observed heading"] {
             XCTAssertTrue(overview.snapshot.elements.contains { $0.label == label })
@@ -122,7 +122,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertFalse(receipt.exposures.contains { ["backend:1", "backend:202"].contains($0.nodeID) })
         XCTAssertTrue(overview.snapshot.elements.contains { $0.label == "Custom action" && $0.supportsPress })
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: overview.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         XCTAssertEqual(all.snapshot.elements.first?.label, body, "Explicit all retains original source order and full internal fields.")
         let controlIndex = try XCTUnwrap(overview.snapshot.elements.first { $0.label == "Open panel" }?.index)
         await assertBrowserError(.staleSnapshot) {
@@ -130,7 +130,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 snapshot: overview.snapshot, elementIndex: controlIndex, action: "AXPress")
         }
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.first?.label, body)
         XCTAssertEqual(content.snapshot.readReceipt?.view, .content)
         XCTAssertNotEqual(content.snapshot.readReceipt?.sourceID, receipt.sourceID)
@@ -153,7 +153,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let nodes = weak + semantic + headings + navigation
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         XCTAssertEqual(page.snapshot.elements.prefix(3).map(\.semanticRole), ["button", "heading", "link"])
         XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Find records" && $0.supportsPress })
         XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Record query" && $0.supportsSetText })
@@ -170,7 +170,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             seen += page.snapshot.elements.map(\.backendNodeID)
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         let weakIDs = Set(weak.compactMap(\.backendNodeID))
         let semanticIDs = Set(semantic.compactMap(\.backendNodeID))
@@ -191,7 +191,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let nodes = controls + headings + links + [semanticNode(300, role: "StaticText", name: "Body remains unread")]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes, sourceTruncated: true)
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
         try await fixture.transport.replaceNodes(targetID: page.binding.targetID, nodes: [semanticNode(400, role: "button", name: "Later live control")])
         var seen = [Int64]()
@@ -209,7 +209,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             seen += page.snapshot.elements.map(\.backendNodeID)
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(seen.count, 76)
         XCTAssertEqual(Set(seen).count, 76)
@@ -224,7 +224,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "link", name: label, link: url)])
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         var labelBytes = 0, urlBytes = 0
         var reconstructedLabel = "", reconstructedURL = ""
         repeat {
@@ -252,7 +252,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             }
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(reconstructedLabel, label)
         XCTAssertEqual(reconstructedURL, url)
@@ -266,13 +266,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "StaticText", name: "Observed body fact")])
         let overview = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         XCTAssertTrue(overview.snapshot.elements.isEmpty)
         XCTAssertEqual(overview.snapshot.readReceipt?.selectedElementCount, 0)
         XCTAssertNil(overview.snapshot.nextCursor)
         XCTAssertTrue(overview.snapshot.formattedText.contains("document_content_exhaustive=false"))
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: overview.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.map(\.label), ["Observed body fact"])
         await fixture.assertNoInput()
     }
@@ -292,7 +292,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
         XCTAssertEqual(rows.count, 3)
         XCTAssertTrue(observation.snapshot.formattedText.contains("scope=document"))
@@ -334,7 +334,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(3, role: "button", name: "Next records", parent: "n0"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
         XCTAssertTrue(rows[1].contains("semantic_role=\"StaticText\""))
         XCTAssertTrue(rows[1].contains("parent_index=2"))
@@ -358,7 +358,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         // The display marker cannot make this snapshot usable after a fresh read.
         _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         await assertBrowserError(.staleSnapshot) {
             try await fixture.broker.perform(taskKey: "task-a", binding: observation.binding,
                 snapshot: observation.snapshot, elementIndex: 3, action: "AXPress", verificationPlan: plan)
@@ -380,7 +380,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: nodes, sourceTruncated: variant == "clipped")
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
             XCTAssertFalse(observation.snapshot.formattedText.contains("region_changed_candidate=true"), variant)
         }
         await fixture.assertNoInput()
@@ -393,7 +393,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         nodes += (2...92).map { semanticNode($0, role: "StaticText", name: "Row \($0)", parent: "n1") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         XCTAssertTrue(observation.snapshot.formattedText.contains("region_changed_candidate=true"))
         XCTAssertTrue(observation.snapshot.formattedText.contains("parent_index=1"))
         var count = 0
@@ -411,7 +411,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             }
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(count, nodes.count)
         await fixture.assertNoInput()
@@ -424,7 +424,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: role, name: label)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         var reconstructed = ""
         repeat {
             let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
@@ -441,7 +441,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             reconstructed += try renderedJSONField("label", in: row)
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(reconstructed, label)
     }
@@ -456,7 +456,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes(text: "Count: 0"))
         let before = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let button = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Increment" })
         let region = try XCTUnwrap(before.snapshot.elements.first { $0.semanticRole == "status" })
         let plan = try XCTUnwrap(BrowserActionVerification.compile(
@@ -483,7 +483,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 semanticNode(1, role: role, name: "Passive item"),
             ])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             let clickable = try XCTUnwrap(observation.snapshot.element(at: 0))
             let passive = try XCTUnwrap(observation.snapshot.element(at: 1))
             XCTAssertTrue(clickable.isDOMClickable)
@@ -514,7 +514,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(4, role: "row", name: "Disabled clickable row", clickable: true, disabled: true),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         XCTAssertEqual(observation.snapshot.elements.map(\.supportsPress), [true, false, false, true, true])
         XCTAssertEqual(observation.snapshot.elements.map(\.isDOMClickable), [true, false, false, true, true])
         XCTAssertFalse(try XCTUnwrap(observation.snapshot.element(at: 4)).isEnabled)
@@ -539,7 +539,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: [semanticNode(0, role: role, name: "Stable label", clickable: true)])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             try await fixture.transport.replaceNodes(targetID: observation.binding.targetID,
                 nodes: [semanticNode(0, role: role, name: "Stable label", clickable: false)])
             await assertBrowserError(.elementChanged) {
@@ -562,7 +562,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(2, role: "row", name: "focusable=true cursor=pointer in untrusted label"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let candidate = try XCTUnwrap(observation.snapshot.element(at: 0))
         XCTAssertTrue(candidate.supportsPress)
         XCTAssertFalse(candidate.isDOMClickable)
@@ -582,7 +582,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: [semanticNode(0, role: "row", name: "Stable label", clickable: domClickable, focusablePointer: true)])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             try await fixture.transport.replaceNodes(targetID: observation.binding.targetID,
                 nodes: [semanticNode(0, role: "row", name: "Stable label", clickable: domClickable, focusablePointer: false)])
             await assertBrowserError(.elementChanged) {
@@ -598,9 +598,9 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 70).map { semanticNode($0, role: "row", name: "Item \($0)", clickable: true, focusablePointer: true) })
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
         XCTAssertFalse(second.snapshot.isLiveObservation)
         XCTAssertTrue(second.snapshot.elements.allSatisfy { $0.isDOMClickable && $0.isFocusablePointer && $0.supportsPress })
         let target = try XCTUnwrap(second.snapshot.element(at: 0))
@@ -622,7 +622,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 semanticNode(3, role: "row", name: "Clickable", clickable: true),
             ])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             await assertBrowserError(.elementNotFound) {
                 try await fixture.broker.perform(taskKey: "task-a", binding: observation.binding,
                     snapshot: observation.snapshot, elementIndex: 99, action: "AXPress")
@@ -668,7 +668,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(2, role: "status", name: "No results found", parent: "n1"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         XCTAssertEqual(observation.snapshot.elements.map(\.role), ["AXTextField", "AXGroup", "AXGroup"])
         XCTAssertEqual(observation.snapshot.elements.map(\.semanticRole), ["searchbox", "region", "status"])
         let input = try XCTUnwrap(observation.snapshot.elements.first)
@@ -682,7 +682,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "textbox", name: "Text")])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "searchbox", name: "Text")])
         await assertBrowserError(.elementChanged) {
@@ -704,7 +704,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             nodes: [semanticNode(0, role: "link", name: "Read exact destination", link: longURL)]
         )
         let result = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         XCTAssertTrue(result.snapshot.formattedText.contains("url_omitted=1"))
         XCTAssertTrue(result.snapshot.formattedText.contains("href_omitted=1"))
@@ -731,7 +731,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: wrappers + headings)
         var observation = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(view: .headings)
         )
         var labels = observation.snapshot.elements.map(\.label)
@@ -742,7 +742,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertLessThanOrEqual(observation.snapshot.formattedText.utf8.count, 16_384)
         while let cursor = observation.snapshot.nextCursor {
             observation = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: observation.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: cursor)
             )
             labels.append(contentsOf: observation.snapshot.elements.map(\.label))
@@ -769,7 +769,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(9, role: "article", name: label, parent: "n8"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(query: label, view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(query: label, view: .all))
         XCTAssertEqual(observation.snapshot.elements.map(\.label), Array(repeating: label, count: 5))
         XCTAssertEqual(observation.snapshot.elements.map(\.contentScope), [.navigation, .main, .article, .navigation, .complementary])
         XCTAssertEqual(observation.snapshot.elements.map(\.supportsPress), [true, false, false, true, false],
@@ -795,7 +795,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(6, role: "StaticText", name: "Ambiguous parent", parent: "n5"),
         ], sourceTruncated: true)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(view: .content))
         XCTAssertEqual(observation.snapshot.elements.count, 4)
         XCTAssertTrue(observation.snapshot.elements.allSatisfy { $0.contentScope == .unknown && $0.contentKind == .readable })
         XCTAssertTrue(observation.snapshot.formattedText.contains("document_content_shown=0"))
@@ -818,7 +818,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                                                  nodes: nodes, sourceTruncated: true)
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(view: .content))
         var allElements = [BrowserTabElement]()
         var pages = 0
         while true {
@@ -838,7 +838,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             pages += 1
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(cursor: cursor))
         }
         XCTAssertGreaterThan(pages, 1)
         XCTAssertEqual(allElements.count, 73)
@@ -855,7 +855,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             nodes: [semanticNode(0, role: "heading", name: "A real title")], sourceTruncated: true
         )
         let result = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(query: "video title")
         )
         XCTAssertTrue(result.snapshot.elements.isEmpty)
@@ -877,10 +877,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let first = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         let expanded = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(snapshotID: first.snapshot.id, elementIndex: 0)
         )
         XCTAssertEqual(expanded.snapshot.elements.map(\.label), ["First card", "Exact title", "Publisher"])
@@ -890,7 +890,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(expanded.snapshot.readReceipt?.subtreeNodeID, "n0")
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(snapshotID: first.snapshot.id, elementIndex: 0)
             )
         }
@@ -902,24 +902,24 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
             let first = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(view: .links)
             )
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             switch cause {
             case "reuse":
                 _ = try await fixture.broker.snapshot(
-                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     read: SemanticReadRequest(cursor: cursor)
                 )
             case "new_read":
-                _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+                _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             default:
                 try await fixture.transport.navigate(targetID: first.binding.targetID, url: URL(string: "https://example.test/new")!, loaderID: "new-loader")
             }
             await assertBrowserError(.staleSnapshot) {
                 _ = try await fixture.broker.snapshot(
-                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     read: SemanticReadRequest(cursor: cursor)
                 )
             }
@@ -932,10 +932,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
             let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(
                     query: options == "query" || options == "both" ? " Item\n" : nil,
                     view: options == "view" || options == "both" ? .links : nil, cursor: cursor))
             XCTAssertEqual(second.snapshot.totalMatches, 140)
@@ -946,7 +946,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertTrue(firstLabels.isDisjoint(with: secondLabels))
             await assertBrowserError(.staleSnapshot) {
                 _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: second.binding,
-                    bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links, cursor: cursor))
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links, cursor: cursor))
             }
             await fixture.assertNoInput()
         }
@@ -958,7 +958,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") })
             let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             let request = SemanticReadRequest(query: change == "query" ? "Different" : "Item",
                 view: change == "view" ? .content : .links, cursor: cursor,
@@ -966,7 +966,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 elementIndex: change == "index" || change == "subtree" ? 0 : nil)
             do {
                 _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                    bundleIdentifier: "com.google.Chrome", read: request)
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: request)
                 XCTFail("Conflicting continuation must fail: \(change)")
             } catch let error as BrowserTabBrokerError {
                 guard case .invalidRead = error else { return XCTFail("Expected invalidRead, got \(error)") }
@@ -980,13 +980,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") })
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
         let cursor = try XCTUnwrap(first.snapshot.nextCursor)
         try await fixture.transport.navigate(targetID: first.binding.targetID,
             url: URL(string: "https://example.test/replaced")!, loaderID: "replaced-loader")
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links, cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links, cursor: cursor))
         }
         await fixture.assertNoInput()
     }
@@ -995,12 +995,12 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         try await fixture.transport.replaceNodes(
             targetID: first.binding.targetID, nodes: nodes + [semanticNode(999, role: "heading", name: "Clock changed")]
         )
         let second = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(cursor: try XCTUnwrap(first.snapshot.nextCursor))
         )
         XCTAssertEqual(second.snapshot.totalMatches, 140, "One observation must not splice in the new clock.")
@@ -1019,20 +1019,20 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let changedIndex = first.snapshot.elements.count
         var changedNodes = nodes
         changedNodes[changedIndex] = semanticNode(changedIndex, role: "link", name: "Replacement destination")
         try await fixture.transport.replaceNodes(targetID: first.binding.targetID, nodes: changedNodes)
         let second = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(cursor: try XCTUnwrap(first.snapshot.nextCursor))
         )
         await assertBrowserError(.elementChanged) {
             try await fixture.broker.perform(taskKey: "task-a", binding: second.binding, snapshot: second.snapshot, elementIndex: 0, action: "AXPress")
         }
         let fresh = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: second.binding, bundleIdentifier: "com.google.Chrome", query: "Replacement destination"
+            taskKey: "task-a", binding: second.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: "Replacement destination"
         )
         XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Replacement destination"])
         XCTAssertTrue(fresh.snapshot.formattedText.contains("observation=live"))
@@ -1045,14 +1045,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         )
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: first.snapshot.nextCursor)
             )
         }
-        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome", query: "Item 139")
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: "Item 139")
         XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Item 139"])
     }
 
@@ -1062,11 +1062,11 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         )
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let other = try await fixture.broker.open(taskKey: "task-b", processIdentifier: 60, url: URL(string: "https://example.test/other")!)
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-b", binding: other, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-b", binding: other, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: first.snapshot.nextCursor)
             )
         }
@@ -1093,13 +1093,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(8, role: "StaticText", name: "Sidebar phrase", parent: "n7"),
         ])
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.map(\.label), ["Actual document detail", "Readable without landmarks"])
         XCTAssertEqual(content.snapshot.elements.map(\.contentScope), [.main, .unknown])
         XCTAssertEqual(content.snapshot.elements.map(\.supportsPress), [false, true])
         XCTAssertTrue(content.snapshot.formattedText.contains("document_content_shown=1"))
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         XCTAssertEqual(all.snapshot.elements.map(\.contentKind),
             [.metadata, .control, .control, .control, .readable, .metadata, .readable, .navigation, .navigation])
         let button = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "button" })
@@ -1123,7 +1123,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: nodes, semanticReadiness: .ready)
             let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
             let lines = content.snapshot.formattedText.split(separator: "\n").map(String.init)
             XCTAssertTrue(lines[1].contains("view=content")); XCTAssertTrue(lines[1].contains("semantic_readiness=ready"))
             XCTAssertTrue(lines[1].contains("source_truncated=0"))
@@ -1135,7 +1135,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic menu preview"))
             XCTAssertTrue(lines[1].contains(includeHeading ? "no_matches=0" : "no_matches=1"))
             let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
             XCTAssertFalse(all.snapshot.formattedText.contains("CONTENT_VIEW_SCOPE"))
             let item = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "menuitem" })
             XCTAssertTrue(item.isEnabled); XCTAssertTrue(item.supportsPress)
@@ -1165,7 +1165,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 semanticNode(6, role: "StaticText", name: "Read-only detail", parent: "n5"),
             ], semanticReadiness: .ready)
             let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
             XCTAssertEqual(content.snapshot.elements.map(\.label),
                 ["Selectable result", "Result detail", "Read-only result", "Read-only detail"])
             XCTAssertEqual(content.snapshot.elements.map(\.contentKind), Array(repeating: .control, count: 4))
@@ -1214,7 +1214,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(16, role: "StaticText", name: "Nested button text", parent: "n15"),
         ])
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.map(\.label), ["Result"])
         XCTAssertEqual(content.snapshot.elements.first?.contentKind, .control)
         await fixture.assertNoInput()
@@ -1237,7 +1237,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
             let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
             XCTAssertTrue(content.snapshot.elements.isEmpty)
             await fixture.assertNoInput()
         }
@@ -1251,7 +1251,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: options.compactMap(\.nodeID)),
         ] + options, sourceTruncated: true)
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let cursor = try XCTUnwrap(first.snapshot.nextCursor)
         let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
         XCTAssertTrue(firstReceipt.sourceTruncated); XCTAssertEqual(firstReceipt.selectedElementCount, 140)
@@ -1262,7 +1262,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 elementIndex: 100, action: "AXPress")
         }
         let next = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         XCTAssertEqual(next.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
         XCTAssertTrue(next.snapshot.readReceipt?.sourceTruncated == true)
         XCTAssertTrue(next.snapshot.elements.allSatisfy { $0.contentKind == .control && $0.contentScope == .complementary })
@@ -1290,7 +1290,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(1003, role: "StaticText", name: "A distinct supporting passage.", parent: "n1000"),
         ])
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(Array(content.snapshot.elements.prefix(3).map(\.nodeID)), ["n1001", "n1002", "n1003"])
         XCTAssertTrue(content.snapshot.elements.prefix(3).allSatisfy { $0.contentKind == .readable && $0.contentScope == .main })
         let option = try XCTUnwrap(content.snapshot.elements.first { $0.semanticRole == "option" })
@@ -1306,7 +1306,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let pressed = await fixture.transport.pressedNodeIDs(targetID: content.binding.targetID)
         XCTAssertEqual(pressed, [3], "Reordering changes only the published index, never the exact target")
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         XCTAssertEqual(Array(all.snapshot.elements.prefix(3).map(\.nodeID)), ["n0", "n1", "n2"])
     }
 
@@ -1323,18 +1323,18 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let unselected = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(unselected.snapshot.elements.map(\.label),
             [duplicate, duplicate, "Distinct detail absent from the option label"])
         XCTAssertEqual(unselected.snapshot.elements.map(\.supportsPress), [true, false, false])
         let body = semanticNode(6, role: "StaticText", name: "Opened document passage", parent: "n5")
         try await fixture.transport.replaceNodes(targetID: unselected.binding.targetID, nodes: nodes + [body])
         let selected = try await fixture.broker.snapshot(taskKey: "task-a", binding: unselected.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(selected.snapshot.elements.map(\.label),
             ["Opened document passage", duplicate, duplicate, "Distinct detail absent from the option label"])
         let query = try await fixture.broker.snapshot(taskKey: "task-a", binding: selected.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(query: "Distinct detail", view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Distinct detail", view: .content))
         XCTAssertEqual(query.snapshot.elements.map(\.nodeID), ["n4"])
         XCTAssertEqual(query.snapshot.elements.first?.contentKind, .control)
         XCTAssertFalse(query.snapshot.elements.first?.supportsPress ?? true)
@@ -1354,7 +1354,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: original, sourceTruncated: true)
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
         XCTAssertEqual(Array(first.snapshot.elements.prefix(2).map(\.nodeID)), ["n1001", "n1002"])
         XCTAssertEqual(firstReceipt.selectedElementCount, 92); XCTAssertTrue(firstReceipt.sourceTruncated)
@@ -1373,7 +1373,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         var cursor: String? = firstCursor
         while let next = cursor {
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: next))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: next))
             pages += 1; XCTAssertLessThan(pages, 12)
             XCTAssertEqual(page.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
             XCTAssertTrue(page.snapshot.readReceipt?.sourceTruncated == true)
@@ -1387,7 +1387,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 elementIndex: 0, action: "AXPress")
         }
         let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["New live passage"])
         await fixture.assertNoInput()
     }
@@ -1401,7 +1401,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "StaticText", name: text)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let source = try XCTUnwrap(observation.snapshot.readReceipt).sourceID
         var reconstructed = ""
         var end = 0
@@ -1432,7 +1432,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertTrue(receipt.fieldTruncated)
             XCTAssertTrue(receipt.outputTruncated)
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while pages < 20
         XCTAssertGreaterThan(pages, 2)
         XCTAssertEqual(reconstructed, text)
@@ -1448,7 +1448,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "textbox", name: "Observed label", link: link, value: value)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         var values = "", links = ""
         var pages = 0
         while true {
@@ -1473,7 +1473,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             guard let cursor = observation.snapshot.nextCursor else { break }
             guard pages < 20 else { return XCTFail("Continuation failed to make progress") }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         }
         XCTAssertEqual(values, value)
         XCTAssertEqual(links, link)
@@ -1489,9 +1489,9 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "button", name: label)])
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
         await assertBrowserError(.staleSnapshot) {
             try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
                 elementIndex: 0, action: "AXPress")
@@ -1512,10 +1512,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(1, role: "StaticText", name: "First mounted row", parent: "n0"),
         ], sourceTruncated: true)
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
         let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content, snapshotID: first.snapshot.id, elementIndex: 0))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content, snapshotID: first.snapshot.id, elementIndex: 0))
         let subtreeReceipt = try XCTUnwrap(subtree.snapshot.readReceipt)
         XCTAssertEqual(subtreeReceipt.sourceID, firstReceipt.sourceID)
         XCTAssertEqual(subtreeReceipt.subtreeNodeID, "n0")
@@ -1525,7 +1525,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: first.binding.targetID,
             nodes: [semanticNode(2, role: "StaticText", name: "Different mounted row")])
         let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let freshReceipt = try XCTUnwrap(fresh.snapshot.readReceipt)
         XCTAssertNotEqual(freshReceipt.sourceID, firstReceipt.sourceID)
         XCTAssertEqual(freshReceipt.targetGeneration, firstReceipt.targetGeneration)
@@ -1574,7 +1574,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-b",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: "Mark this tab complete"
             )
             XCTFail("A cross-task browser handle must fail closed.")
@@ -1598,7 +1598,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let observation = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         try await transport.navigate(
@@ -1625,7 +1625,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await broker.snapshot(
             taskKey: "task-a",
             binding: observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         XCTAssertNotEqual(
@@ -1650,13 +1650,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let first = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         _ = try await broker.snapshot(
             taskKey: "task-a",
             binding: first.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
 
@@ -1693,7 +1693,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-a",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
             XCTFail("A closed tab must reject before any input.")
@@ -1719,7 +1719,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-a",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
             XCTFail("A target-ID reuse must not resurrect the opaque handle.")
@@ -1742,7 +1742,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let observationA = try await broker.snapshot(
             taskKey: "task-a",
             binding: bindingA,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         let targetB = try await transport.createForegroundTarget(
@@ -1779,7 +1779,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1787,7 +1787,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1843,7 +1843,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 let refreshed = try await fixture.broker.snapshot(
                     taskKey: "task-a",
                     binding: fixture.observation.binding,
-                    bundleIdentifier: "com.google.Chrome",
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     query: nil
                 )
                 XCTAssertNotEqual(
@@ -1861,7 +1861,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 _ = try await fixture.broker.snapshot(
                     taskKey: "task-a",
                     binding: fixture.observation.binding,
-                    bundleIdentifier: "com.google.Chrome",
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     query: nil
                 )
             }
@@ -1869,7 +1869,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await fixture.broker.snapshot(
             taskKey: "task-a",
             binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         XCTAssertNotEqual(refreshed.snapshot.id, fixture.observation.snapshot.id)
@@ -1888,7 +1888,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1942,7 +1942,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await fixture.broker.snapshot(
             taskKey: "task-a",
             binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         let field = try XCTUnwrap(refreshed.snapshot.element(at: 1))
@@ -1991,7 +1991,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertNil(targetA)
         let observationB = try await fixture.broker.snapshot(
             taskKey: "task-b", binding: bindingB,
-            bundleIdentifier: "com.google.Chrome", query: nil
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         try await fixture.broker.setText(
             taskKey: "task-b", binding: observationB.binding,
@@ -2067,86 +2067,11 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(values, ["updated"], "Closing a fake target must not erase evidence of input.")
     }
 
-    func testSuccessfulPressWaitsForIndependentProofBeforeReturning() async throws {
-        let fixture = try await BrowserBrokerTestFixture.make()
-        let pause = BrowserPressBoundaryPause()
-        let chrome = pressBoundaryBroker(fixture, pause: pause)
-        let action = Task {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-            await pause.returned()
-        }
-        await pause.waitUntilEntered()
-        let held = await pause.snapshot()
-        XCTAssertEqual(held.events, ["proof_started"])
-        XCTAssertEqual(held.handle, fixture.observation.binding.handle)
-        XCTAssertEqual(held.snapshotID, fixture.observation.snapshot.id)
-        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
-        XCTAssertEqual(count, 1)
 
-        // The successful action consumed its snapshot before reaching the proof.
-        // A retry cannot dispatch again or create a second proof callback.
-        do {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-            XCTFail("A consumed snapshot must fail even while proof is suspended.")
-        } catch {
-            XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot)
-        }
-        await pause.release()
-        try await action.value
-        let completed = await pause.snapshot()
-        XCTAssertEqual(completed.events, ["proof_started", "proof_completed", "press_returned"])
-        let report = await chrome.shutdown()
-        XCTAssertTrue(report.succeeded)
-    }
 
-    func testShutdownRevokesWhileReadOnlyPressProofIsSuspended() async throws {
-        let fixture = try await BrowserBrokerTestFixture.make()
-        let pause = BrowserPressBoundaryPause()
-        let chrome = pressBoundaryBroker(fixture, pause: pause)
-        let action = Task {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-        }
-        await pause.waitUntilEntered()
-        let report = await chrome.shutdown()
-        XCTAssertTrue(report.succeeded)
-        XCTAssertThrowsError(try fixture.observation.binding.lifetime.check())
-        let held = await pause.snapshot()
-        XCTAssertEqual(held.events, ["proof_started"])
-        await pause.release()
-        try await action.value // The earlier press happened; no second input is authorized.
-        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
-        XCTAssertEqual(count, 1)
-        let ownership = await chrome.ownership()
-        XCTAssertNil(ownership)
-        let repeated = await chrome.shutdown()
-        XCTAssertEqual(repeated, report)
-    }
 
-    private func pressBoundaryBroker(
-        _ fixture: BrowserBrokerTestFixture, pause: BrowserPressBoundaryPause
-    ) -> ChromeTabBroker {
-        let initial = ChromeTabBroker.BrowserProcess(
-            process: BrowserPressBoundaryChild(processIdentifier: fixture.observation.binding.processIdentifier),
-            dataDirectory: URL(fileURLWithPath: "/not-created/LocalCodexBrowserBroker-proof-test"),
-            generation: fixture.observation.binding.browserGeneration,
-            transport: SystemChromeDevToolsTransport(port: 1), sessions: fixture.broker
-        )
-        return ChromeTabBroker(
-            initialBrowser: initial, removeProfile: { _ in nil },
-            didPerformPress: { binding, snapshot in
-                await pause.enter(handle: binding.handle, snapshotID: snapshot.id)
-            }
-        )
-    }
+
+
 }
 
 private struct BrowserBrokerTestFixture: Sendable {
@@ -2169,7 +2094,7 @@ private struct BrowserBrokerTestFixture: Sendable {
         let observation = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         return BrowserBrokerTestFixture(
@@ -2479,9 +2404,8 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         BrowserTarget(
             targetID: targetID,
             instanceToken: instanceToken,
-            title: "Safe computer-use benchmark - Google Chrome",
-            url: url,
-            webSocketURL: URL(string: instanceToken)!
+            title: "Safe computer-use benchmark - Computa",
+            url: url
         )
     }
 
@@ -2491,7 +2415,7 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
     ) -> BrowserDocumentObservation {
         BrowserDocumentObservation(
             loaderID: loaderID,
-            title: "Safe computer-use benchmark - Google Chrome",
+            title: "Safe computer-use benchmark - Computa",
             url: url,
             nodes: [
                 BrowserDocumentNode(

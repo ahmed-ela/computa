@@ -18,19 +18,11 @@ pub enum ActivationMode {
     Foreground,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserMode {
-    Existing,
-    Isolated,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadView {
     #[default]
     All,
-    Overview,
     Content,
     Headings,
     Links,
@@ -73,11 +65,8 @@ impl AxAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostconditionKind {
-    DocumentUrl,
     Value,
     RegionText,
-    RegionChanged,
-    DialogOpened,
     DetailView,
     Selection,
 }
@@ -110,27 +99,12 @@ pub struct OpenArgs {
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
-    pub browser_mode: Option<BrowserMode>,
-    #[serde(default)]
     pub activation: ActivationMode,
-}
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TabsArgs {
-    #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub page_size: Option<usize>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CursorArgs {
     pub cursor: String,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CandidateArgs {
-    pub candidate_token: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,12 +119,6 @@ pub struct ReadArgs {
     pub snapshot_id: Option<String>,
     #[serde(default)]
     pub element_index: Option<usize>,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ElementArgs {
-    pub snapshot_id: String,
-    pub element_index: usize,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,11 +218,6 @@ pub struct PressArgs {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FollowArgs {
-    pub link_ref: String,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReferencePostcondition {
     pub kind: PostconditionKind,
     #[serde(default)]
@@ -289,12 +252,8 @@ pub enum ToolCall {
     Status,
     Apps(AppsArgs),
     Open(OpenArgs),
-    Tabs(TabsArgs),
     Continue(CursorArgs),
-    BindTab(CandidateArgs),
-    CreateWorkspace(CandidateArgs),
     Snapshot(ReadArgs),
-    FollowLink(ElementArgs),
     Ax(ActionArgs),
     SetText(SetTextArgs),
     Capture(CaptureArgs),
@@ -306,7 +265,6 @@ pub enum ToolCall {
     ReadPage(ReadArgs),
     ReadRegion(RegionArgs),
     Press(PressArgs),
-    Follow(FollowArgs),
     Fill(FillArgs),
     Verify(VerifyArgs),
 }
@@ -336,12 +294,8 @@ pub fn parse_tool(name: &str, arguments: Value) -> Result<ToolCall, ToolValidati
         }
         "computer_v2_apps" => ToolCall::Apps(read(arguments)?),
         "computer_v2_open" => ToolCall::Open(read(arguments)?),
-        "computer_v2_tabs" => ToolCall::Tabs(read(arguments)?),
         "computer_v2_continue" => ToolCall::Continue(read(arguments)?),
-        "computer_v2_bind_tab" => ToolCall::BindTab(read(arguments)?),
-        "computer_v2_create_workspace" => ToolCall::CreateWorkspace(read(arguments)?),
         "computer_v2_snapshot" => ToolCall::Snapshot(read(arguments)?),
-        "computer_v2_follow_link" => ToolCall::FollowLink(read(arguments)?),
         "computer_v2_ax" => ToolCall::Ax(read(arguments)?),
         "computer_v2_set_text" => ToolCall::SetText(read(arguments)?),
         "computer_v2_capture" => ToolCall::Capture(read(arguments)?),
@@ -365,7 +319,6 @@ pub fn parse_tool(name: &str, arguments: Value) -> Result<ToolCall, ToolValidati
         }
         "computer_v2_read_region" => ToolCall::ReadRegion(read(arguments)?),
         "computer_v2_press" => ToolCall::Press(read(arguments)?),
-        "computer_v2_follow" => ToolCall::Follow(read(arguments)?),
         "computer_v2_fill" => ToolCall::Fill(read(arguments)?),
         "computer_v2_verify" => ToolCall::Verify(read(arguments)?),
         _ => return Err(ToolValidationError::Unknown(name.into())),
@@ -392,31 +345,13 @@ pub fn tool_specs(policy: InteractionPolicy, browser_model: bool) -> Vec<Value> 
         (
             "computer_v2_open",
             "Bind an already-running app without activation. Exact bundle_id required. No navigation or new tabs in background mode.",
-            json!({"bundle_id":{"type":"string","maxLength":255},"activation":{"type":"string","enum":["none","foreground"]},"url":string,"browser_mode":{"type":"string","enum":["existing","isolated"]}}),
+            json!({"bundle_id":{"type":"string","maxLength":255},"activation":{"type":"string","enum":["none","foreground"]},"url":string}),
             vec!["bundle_id"],
         ),
         (
-            "computer_v2_tabs",
-            "Enumerate approved Chrome tabs. Exhaust next_cursor before claiming a tab is absent.",
-            json!({"cursor":reference,"page_size":{"type":"integer","minimum":1,"maximum":100}}),
-            vec![],
-        ),
-        (
-            "computer_v2_bind_tab",
-            "Bind an observed candidate_token from this turn. Preserves tabs and logins without activation.",
-            json!({"candidate_token":reference}),
-            vec!["candidate_token"],
-        ),
-        (
-            "computer_v2_create_workspace",
-            "Create an inactive temporary copy of an observed candidate only with an explicit temporary-tab grant.",
-            json!({"candidate_token":reference}),
-            vec!["candidate_token"],
-        ),
-        (
             "computer_v2_read_page",
-            "Read the bound app or page. Browser overview is discovery, not exhaustive content. Continue with next_cursor; only exposed references grant actions. Truncated reads cannot prove absence.",
-            json!({"query":{"type":"string","maxLength":200},"view":{"type":"string","enum":["all","overview","content","headings","links"]}}),
+            "Read the bound native app. Continue with next_cursor; only exposed references grant actions. Truncated reads cannot prove absence.",
+            json!({"query":{"type":"string","maxLength":200},"view":{"type":"string","enum":["all","content","headings","links"]}}),
             vec![],
         ),
         (
@@ -427,27 +362,21 @@ pub fn tool_specs(policy: InteractionPolicy, browser_model: bool) -> Vec<Value> 
         ),
         (
             "computer_v2_continue",
-            "Continue exactly the retained read or tab inventory using next_cursor. No changed filters or guessed cursors.",
+            "Continue exactly the retained read using next_cursor. No changed filters or guessed cursors.",
             json!({"cursor":reference}),
             vec!["cursor"],
         ),
         (
             "computer_v2_verify",
             "Read-only receipt lookup or bounded verification. Planned actions retain their original intended result. For unplanned foreground input, supply the current snapshot_id, exposed element_index, property=text for label or value for value, and exact expected: proof requires a changed property on the same control from a known pre-input baseline. No input is replayed. Historical status and a verified property do not prove whole-task completion.",
-            json!({"operation_id":reference,"snapshot_id":reference,"property":{"type":"string","enum":["text","value","document_url"]},"element_index":{"type":"integer","minimum":0},"expected":{"type":"string","maxLength":8192}}),
+            json!({"operation_id":reference,"snapshot_id":reference,"property":{"type":"string","enum":["text","value"]},"element_index":{"type":"integer","minimum":0},"expected":{"type":"string","maxLength":8192}}),
             vec!["operation_id"],
         ),
         (
             "computer_v2_press",
             "Press an observed action_ref once. Its host-owned postcondition must be verified. Dispatch is not success; do not replay uncertain actions.",
-            json!({"action_ref":reference,"postcondition":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["document_url","value","region_text","region_changed","dialog_opened","detail_view","selection"]},"expected":{"type":"string","maxLength":4096},"region_ref":reference,"detail_ref":reference},"required":["kind"]}}),
+            json!({"action_ref":reference,"postcondition":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["value","region_text","detail_view","selection"]},"expected":{"type":"string","maxLength":4096},"region_ref":reference,"detail_ref":reference},"required":["kind"]}}),
             vec!["action_ref"],
-        ),
-        (
-            "computer_v2_follow",
-            "Follow an observed link_ref; exact destination verification is automatic. Read the destination before claiming task completion.",
-            json!({"link_ref":reference}),
-            vec!["link_ref"],
         ),
         (
             "computer_v2_fill",
@@ -461,9 +390,9 @@ pub fn tool_specs(policy: InteractionPolicy, browser_model: bool) -> Vec<Value> 
         .find(|entry| entry.0 == "computer_v2_open")
     {
         if policy == InteractionPolicy::BackgroundOnly {
-            open.2 = json!({"bundle_id":{"type":"string","minLength":1,"maxLength":255},"activation":{"type":"string","enum":["none"]},"browser_mode":{"type":"string","enum":["existing"]}});
+            open.2 = json!({"bundle_id":{"type":"string","minLength":1,"maxLength":255},"activation":{"type":"string","enum":["none"]}});
         } else {
-            open.1 = "Bind or launch an exact application after native approval. Navigation/isolated Chrome require foreground mode; opening does not prove the destination loaded.";
+            open.1 = "Bind or launch an exact application after native approval. Navigation requires foreground mode; opening does not prove the destination loaded.";
         }
     }
     if !browser_model {
@@ -488,6 +417,60 @@ pub fn tool_specs(policy: InteractionPolicy, browser_model: bool) -> Vec<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_external_browser_commands_are_not_advertised_or_accepted() {
+        for policy in [
+            InteractionPolicy::BackgroundOnly,
+            InteractionPolicy::Foreground,
+        ] {
+            for website_model in [false, true] {
+                let specs = tool_specs(policy, website_model);
+                for name in [
+                    "computer_v2_tabs",
+                    "computer_v2_bind_tab",
+                    "computer_v2_create_workspace",
+                    "computer_v2_follow",
+                    "computer_v2_follow_link",
+                ] {
+                    assert!(!specs.iter().any(|spec| spec["name"] == name));
+                    assert!(matches!(
+                        parse_tool(name, json!({})),
+                        Err(ToolValidationError::Unknown(_))
+                    ));
+                }
+                let open = specs
+                    .iter()
+                    .find(|spec| spec["name"] == "computer_v2_open")
+                    .unwrap();
+                assert!(
+                    open["inputSchema"]["properties"]
+                        .get("browser_mode")
+                        .is_none()
+                );
+            }
+        }
+        assert!(
+            parse_tool(
+                "computer_v2_open",
+                json!({"bundle_id":"example.app", "browser_mode":"isolated"})
+            )
+            .is_err()
+        );
+        assert!(parse_tool("computer_v2_open", json!({"bundle_id":"example.app"})).is_ok());
+        assert!(parse_tool("computer_v2_read_page", json!({"view":"overview"})).is_err());
+        for kind in ["document_url", "region_changed", "dialog_opened"] {
+            assert!(
+                parse_tool(
+                    "computer_v2_press",
+                    json!({
+                        "action_ref":"current-reference", "postcondition":{"kind":kind}
+                    })
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn wire_decoder_rejects_boolean_indices_extra_fields_and_bad_actions() {
         assert!(

@@ -52,42 +52,18 @@ extension WebModelTransport {
     func interruptPostBlockObservation(sessionToken: String) async {}
 }
 
-private struct ChromeWebModelTransport: WebModelTransport {
-    let connection: ChromeConnectionRequest
-
-    func request(operation: String, params: Data) async throws -> Data {
-        // Revoking inference access must still allow disposal of the exact
-        // session we created. Cleanup cannot submit or inspect another tab.
-        let cleanup = ["webProviderFinish", "webProviderCancel"].contains(operation)
-        if !cleanup { try connection.consent.check() }
-        guard let admission = connection.extensionAdmission else {
-            throw WebModelServer.Failure.chromeRequired
-        }
-        try admission.check()
-        // Cancellation never tears down the shared computer-use connection.
-        // Each extension operation is bounded; cancellation is checked between operations.
-        let operationTask = Task {
-            try await admission.link.request(operation: operation, params: params,
-                                            generation: admission.generation.uuidString,
-                                            consent: cleanup ? nil : connection.consent)
-        }
-        return try await operationTask.value
-    }
-}
-
 /// An authenticated, loopback-only Responses endpoint consumed by our owned
 /// App Server. The App Server keeps its normal tools, approvals and local SQLite/
 /// rollout persistence; only model inference goes through the website.
 actor WebModelServer {
     private static let promptLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsitePrompt")
     enum Failure: LocalizedError {
-        case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
+        case embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch, productModeUnverified
         case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed, turnLimit, requestMetadataUnavailable
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
             switch self {
-            case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
             case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
             case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
@@ -110,16 +86,12 @@ actor WebModelServer {
         }
     }
 
-    private enum Route: Equatable, Sendable {
-        case embedded, chrome
-    }
-
     // Native-turn bounds survive physical website-page replacement. Every
     // inference still receives the complete canonical local request.
     static let maximumTurnInferences = 16
     static let maximumTurnPromptUTF8Bytes = 1_048_576
-    private static func requiresNativeContinuationProof(provider: String, route: Route) -> Bool {
-        provider == "gemini" || (provider == "chatgpt" && route == .embedded)
+    private static func requiresNativeContinuationProof(provider: String) -> Bool {
+        provider == "gemini" || provider == "chatgpt"
     }
 
     private struct Session: Sendable {
@@ -127,7 +99,6 @@ actor WebModelServer {
         let provider: String
         let modelID: String
         let modelChoice: WebsiteModelChoice?
-        let route: Route
         let transport: any WebModelTransport
         var inferenceID: UUID
         let context: InferenceContext
@@ -212,12 +183,10 @@ actor WebModelServer {
         let context: InferenceContext
         let provider: String
         let modelID: String
-        let route: Route
     }
 
     private struct ActiveRequest: Sendable {
         let id: UUID
-        let route: Route
         let operation: Task<InferenceResult, Error>
     }
 
@@ -233,7 +202,6 @@ actor WebModelServer {
     private var listener: NWListener?
     private var baseURL: URL?
     private var starting: Task<URL, Error>?
-    private var transport: (any WebModelTransport)?
     private var embeddedTransport: (any WebModelTransport)?
     private var embeddedTransportGeneration = UUID()
     private var embeddedTransportIdentity: AnyObject?
@@ -441,7 +409,7 @@ actor WebModelServer {
             turnID: session?.context.turnID ?? cleanupTurns[canonicalTask],
             runtimeGeneration: session?.context.runtimeGeneration ?? runtimeGeneration, outcome: outcome,
             provider: session.flatMap { WebsiteSessionCleanupReceipt.Provider(rawValue: $0.provider) },
-            route: session.map { $0.route == .embedded ? .embedded : .chrome }, modelID: session?.modelID,
+            route: session.map { _ in .embedded }, modelID: session?.modelID,
             reason: reason, trigger: trigger, inferenceID: session?.inferenceID.uuidString.lowercased(),
             sessionToken: session?.token)
     }
@@ -523,11 +491,6 @@ actor WebModelServer {
         return url
     }
 
-    func connect(_ request: ChromeConnectionRequest) async {
-        _ = await disconnect()
-        if request.extensionAdmission != nil { transport = ChromeWebModelTransport(connection: request) }
-    }
-
     func configureEmbeddedTransport(_ value: any WebModelTransport) {
         let identity = value as AnyObject
         if embeddedTransportIdentity === identity { return }
@@ -537,9 +500,7 @@ actor WebModelServer {
         embeddedTransportGeneration = UUID()
     }
 
-    // Also permits a deterministic transport in tests without touching Chrome.
     #if DEBUG
-    func setTransportForTesting(_ value: any WebModelTransport) { transport = value }
     func setTimeoutsForTesting(readiness: Duration, response: Duration) {
         readinessTimeout = max(.milliseconds(1), min(.seconds(45), readiness))
         responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
@@ -561,16 +522,6 @@ actor WebModelServer {
         contextWaiters[UUID(uuidString: taskID)?.uuidString.lowercased() ?? taskID] != nil
     }
     #endif
-
-    @discardableResult
-    func disconnect() async -> [String] {
-        transport = nil
-        let ids = Set(sessions.filter { $0.value.route == .chrome }.keys)
-            .union(active.filter { $0.value.route == .chrome }.keys)
-        var issues: [String] = []
-        for id in ids { issues += await cancel(taskID: id) }
-        return issues
-    }
 
     func finish(taskID: String, runtimeGeneration: UUID? = nil) async -> [String] {
         let taskID = UUID(uuidString: taskID)?.uuidString.lowercased() ?? taskID
@@ -608,7 +559,6 @@ actor WebModelServer {
         shuttingDown = true
         starting?.cancel()
         listener?.cancel(); listener = nil; baseURL = nil
-        transport = nil
         embeddedTransport = nil
         embeddedTransportIdentity = nil
         let ids = Set(sessions.keys).union(active.keys).union(pendingClosedTransactions.keys).union(unresolvedStartAttempts.keys)
@@ -630,7 +580,7 @@ actor WebModelServer {
                 threadID: attempt.context.threadID, turnID: attempt.context.turnID,
                 runtimeGeneration: attempt.context.runtimeGeneration, outcome: .unconfirmed,
                 provider: WebsiteSessionCleanupReceipt.Provider(rawValue: attempt.provider),
-                route: attempt.route == .embedded ? .embedded : .chrome, modelID: attempt.modelID,
+                route: .embedded, modelID: attempt.modelID,
                 reason: .cleanupUnverified, trigger: trigger,
                 inferenceID: attempt.inferenceID.uuidString.lowercased())
             receipt.receiptSaved = true
@@ -704,7 +654,7 @@ actor WebModelServer {
         }
         do {
             var params = ["sessionToken": session.token]
-            if cancel, session.route == .embedded { params["cleanupCause"] = cleanupCause.rawValue }
+            if cancel { params["cleanupCause"] = cleanupCause.rawValue }
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
                 params: params)
@@ -725,7 +675,7 @@ actor WebModelServer {
             await cleanupReceiptObserver?(receipt)
             // Preserve only the existing finite bridge diagnostic, never raw
             // transport text, in the user-facing warning.
-            let detail = error as? ChromeBridgeIPC.Failure
+            let detail = error as? WebsiteProviderFailure
             let issues = detail.map { [Failure.cleanupFailed.localizedDescription + " " + $0.localizedDescription] }
                 ?? [Failure.cleanupFailed.localizedDescription]
             return CleanupResult(receipt: receipt, issues: issues)
@@ -799,9 +749,7 @@ actor WebModelServer {
             throw Failure.modelNotFound
         }
         let provider = selection.provider
-        // All catalog website models use the app-owned browser. The Chrome
-        // connection is an independent computer-tool capability.
-        let route: Route = .embedded
+        // All catalog website models use the app-owned browser.
         guard let transport = embeddedTransport else { throw Failure.embeddedRequired }
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard pendingClosedTransactions[taskID] == nil,
@@ -809,19 +757,19 @@ actor WebModelServer {
               !failedClosedHandoffs.contains(taskID) else { throw Failure.cleanupFailed }
         guard unresolvedStartAttempts[taskID] == nil else { throw Failure.startOwnershipUnconfirmed }
         let generation = embeddedTransportGeneration
-        let operation = Task { try await self.perform(request, provider: provider, route: route,
+        let operation = Task { try await self.perform(request, provider: provider,
             taskID: taskID, identity: identity, transport: transport, transportGeneration: generation) }
         let id = UUID()
-        active[taskID] = ActiveRequest(id: id, route: route, operation: operation)
+        active[taskID] = ActiveRequest(id: id, operation: operation)
         defer { if active[taskID]?.id == id { active.removeValue(forKey: taskID) } }
         return try await operation.value
     }
 
     private func perform(_ request: WebModelResponseCodec.Request, provider: String,
-                         route: Route, taskID: String, identity: NativeRequestIdentity,
+                         taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
-        if provider == "chatgpt", route == .embedded {
+        if provider == "chatgpt" {
             // Finite sizes only: no prompt, account data, URLs or authority tokens.
             // Presentation measurements do not change admission or tool policy.
             Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
@@ -876,7 +824,7 @@ actor WebModelServer {
                 if var previous = lease {
                     guard let yielded, yielded.inferenceID == previous.inferenceID,
                           previous.context == context, previous.provider == provider,
-                          previous.modelID == request.model, previous.modelChoice == choice, previous.route == route,
+                          previous.modelID == request.model, previous.modelChoice == choice,
                           previous.transportGeneration == transportGeneration,
                           let completedCount = previous.completedResponseCount,
                           let completedText = previous.completedText,
@@ -891,7 +839,7 @@ actor WebModelServer {
                     prompt = request.prompt
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: previous.token, phase: "continuation_requested",
-                        sequence: previous.sequence + 1, baseline: completedCount, route: route, turnScoped: previous.retainsConversation)
+                        sequence: previous.sequence + 1, baseline: completedCount, turnScoped: previous.retainsConversation)
                     let observed = try await call(previous.transport, operation: "webProviderPoll", params: ["sessionToken": previous.token])
                     try requireCurrentContext()
                     guard observed["state"] as? String == "complete" else { throw Self.snapshotFailure(observed) }
@@ -910,7 +858,7 @@ actor WebModelServer {
                     lease = session
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: session.token, phase: "continued",
-                        sequence: session.sequence, baseline: session.baselineResponseCount, route: route, turnScoped: session.retainsConversation)
+                        sequence: session.sequence, baseline: session.baselineResponseCount, turnScoped: session.retainsConversation)
                 } else {
                     guard yielded == nil else { throw Failure.invalidRequest }
                     let closed = closedHandoff
@@ -919,7 +867,7 @@ actor WebModelServer {
                               !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
                         try closed.continuation.validate(next: request)
                     }
-                    let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider, route: route)
+                    let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider)
                     if provesNativeContinuation { try WebsiteTurnContinuation.validateRequest(request) }
                     if provider == "chatgpt", provesNativeContinuation {
                         guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
@@ -933,11 +881,11 @@ actor WebModelServer {
                         params["modelChoice"] = encoded
                     }
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                        provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested", route: route,
+                        provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested",
                         turnScoped: retainsConversation(provider: provider))
                     unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
-                        provider: provider, modelID: request.model, route: route)
-                    if correctionTicket == nil, provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                        provider: provider, modelID: request.model)
+                    if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
                        let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
                        let turn = UUID(uuidString: context.turnID),
                        let directory = rejectedReplyDirectory?.deletingLastPathComponent()
@@ -958,7 +906,7 @@ actor WebModelServer {
                     }
                     let advertised = reply["turnContinuationCapability"]
                     session = Session(token: rawToken, provider: provider, modelID: request.model,
-                        modelChoice: choice, route: route, transport: transport, inferenceID: inferenceID,
+                        modelChoice: choice, transport: transport, inferenceID: inferenceID,
                         context: context, transportGeneration: transportGeneration,
                         provesNativeContinuation: provesNativeContinuation,
                         retainsConversation: retainsConversation(provider: provider))
@@ -973,7 +921,7 @@ actor WebModelServer {
                         unresolvedStartAttempts.removeValue(forKey: taskID)
                     }
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                        provider: provider, modelID: request.model, sessionToken: session.token, phase: "started", route: route, turnScoped: session.retainsConversation)
+                        provider: provider, modelID: request.model, sessionToken: session.token, phase: "started", turnScoped: session.retainsConversation)
                     guard usedSessionTokens[taskID, default: []].insert(token.uuidString.lowercased()).inserted else { throw Failure.invalidRequest }
                     try requireCurrentContext()
                     if let closed {
@@ -981,7 +929,7 @@ actor WebModelServer {
                               closedTurns[taskID]?.ambiguousHandoff == false else { throw Failure.inferenceContextRequired }
                     }
                     guard ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
-                    if provider == "chatgpt", route == .embedded, advertised != nil,
+                    if provider == "chatgpt", advertised != nil,
                        advertised as? String != "per_submission_ownership_v1" { throw Failure.invalidRequest }
                     if session.provesNativeContinuation {
                         guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
@@ -1019,7 +967,7 @@ actor WebModelServer {
                 }
                 // No wire/model-tool grant. A same-UID manual arm scopes one current
                 // native turn; it is not authentication of the person who wrote it.
-                if correctionTicket == nil, provider == "chatgpt", route == .embedded, inspectorAuthorizations[taskID] == nil,
+                if correctionTicket == nil, provider == "chatgpt", inspectorAuthorizations[taskID] == nil,
                    let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
                    let turn = UUID(uuidString: context.turnID),
                    let directory = rejectedReplyDirectory?.deletingLastPathComponent().appendingPathComponent("WebsiteInspectorDiagnostics-v1"),
@@ -1051,7 +999,7 @@ actor WebModelServer {
                 session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
                 sessions[taskID] = session
                 lease = session
-                if provider == "chatgpt", route == .embedded, responseDeadline == nil {
+                if provider == "chatgpt", responseDeadline == nil {
                     // Include the first Send await in the one absolute correction
                     // budget; a rejected reply never renews this deadline.
                     responseDeadline = ContinuousClock.now + responseTimeout
@@ -1080,7 +1028,7 @@ actor WebModelServer {
                 }
                 sessions[taskID] = session
                 lease = session
-                let responseProfile = provider == "chatgpt" && route == .embedded
+                let responseProfile = provider == "chatgpt"
                     ? WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session.token,
                         sequence: session.sequence, inferenceID: inferenceID) : nil
                 responseProfile?.mark(.serverSendAcknowledged)
@@ -1113,18 +1061,14 @@ actor WebModelServer {
                         responseProfile?.mark(.codecStart)
                         do {
                             defer { responseProfile?.mark(.codecEnd) }
-                            reply = try session.route == .embedded
-                                ? WebModelResponseCodec.parseEmbeddedReply(text, request: request)
-                                : WebModelResponseCodec.parseReply(text, request: request)
+                            reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request)
                         } catch {
-                            let diagnostic = session.route == .embedded
-                                ? WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
-                                : WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: false)
+                            let diagnostic = WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
                             if let diagnostic {
                                 captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                                 if diagnostic.reason == .invalidJSON, correctionTicket == nil,
-                                   provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                                   provider == "chatgpt", !context.isMaintenance,
                                    session.provesNativeContinuation, !session.retainsConversation,
                                    session.sequence == 1, session.baselineResponseCount == 0,
                                    session.resolvedModel != nil,
@@ -1196,7 +1140,7 @@ actor WebModelServer {
                         // selecting a native action. No unselected call is queued.
                         responseProfile?.mark(.encodeStart)
                         let selection = try WebsiteToolCallSelection.select(validatedReply: reply,
-                            singleAction: request.singleActionRelay && provider == "chatgpt" && route == .embedded)
+                            singleAction: request.singleActionRelay && provider == "chatgpt")
                         let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                         let encoded = try request.stream
                             ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
@@ -1302,7 +1246,7 @@ actor WebModelServer {
                     if let lease { await lease.transport.revokeRequestMetadata(sessionToken: lease.token) }
                 }
                 let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
-                if provider == "chatgpt", route == .embedded,
+                if provider == "chatgpt",
                    (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
                    (try? requireCurrentContext()) != nil, let lease, lease.context == context,
                    sessions[taskID]?.token == lease.token {
@@ -1327,7 +1271,7 @@ actor WebModelServer {
                         provider: provider, modelID: request.model, sessionToken: lease?.token,
                         phase: error is CancellationError ? "cancelled" : "failed",
                         errorCode: Self.errorPresentation(for: error).code,
-                        sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease?.retainsConversation,
+                        sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, turnScoped: lease?.retainsConversation,
                         submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
                 }
                 throw error
@@ -1356,7 +1300,7 @@ actor WebModelServer {
            try await session.transport.waitForChange(sessionToken: session.token, after: revision, until: deadline) != nil {
             return
         }
-        // The Chrome extension retains its current polling contract. Embedded
+        // Deterministic test transports may omit notifications. Production
         // WebKit supplies versioned notifications and never takes this fallback.
         let remaining = deadline - .now
         if remaining > .zero { try await Task.sleep(for: min(.milliseconds(500), remaining)) }
@@ -1370,7 +1314,7 @@ actor WebModelServer {
         guard snapshot["modelVerificationPending"] == nil, snapshot["pendingSubmissionContext"] == nil else {
             throw Failure.modelUnverified
         }
-        if session.route == .embedded, session.provider == "chatgpt" {
+        if session.provider == "chatgpt" {
             guard (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
                 throw Failure.productModeUnverified
             }
@@ -1473,7 +1417,7 @@ actor WebModelServer {
         if pendingModel {
             guard let flag = snapshot["modelVerificationPending"] as? NSNumber,
                   CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
-                  session.route == .embedded, session.provider == "chatgpt",
+                  session.provider == "chatgpt",
                   session.modelChoice?.chatGPTPower != nil, session.resolvedModel != nil,
                   !session.submittedPromptFingerprint.isEmpty,
                   snapshot["state"] as? String == "running",
@@ -1514,27 +1458,27 @@ actor WebModelServer {
 
     private func recordTransactionEvidence(taskID: String, inferenceID: UUID, context: InferenceContext,
                                            provider: String, modelID: String, sessionToken: String?, phase: String, errorCode: String? = nil,
-                                           sequence: Int = 0, baseline: Int = 0, route: Route = .embedded, turnScoped: Bool? = nil,
+                                           sequence: Int = 0, baseline: Int = 0, turnScoped: Bool? = nil,
                                            submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
-            provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, route: route, turnScoped: turnScoped)
+            provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, turnScoped: turnScoped)
         record["sequence"] = sequence
         record["baselineResponseCount"] = baseline
         if let errorCode { record["errorCode"] = errorCode }
-        if phase == "failed", provider == "chatgpt", route == .embedded, let submissionDiagnostic {
+        if phase == "failed", provider == "chatgpt", let submissionDiagnostic {
             record["submissionFailureDiagnostic"] = submissionDiagnostic.dictionary
         }
         try appendEvidence(record, taskID: taskID)
     }
 
     private func transactionEvidenceRecord(taskID: String, inferenceID: UUID, context: InferenceContext,
-                                            provider: String, modelID: String, sessionToken: String?, phase: String, route: Route, turnScoped: Bool?) -> [String: Any] {
+                                            provider: String, modelID: String, sessionToken: String?, phase: String, turnScoped: Bool?) -> [String: Any] {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let policy: Bool?
         if let turnScoped { policy = turnScoped }
-        else if provider == "chatgpt", route == .embedded { policy = nil }
-        else { policy = Self.requiresNativeContinuationProof(provider: provider, route: route) }
+        else if provider == "chatgpt" { policy = nil }
+        else { policy = Self.requiresNativeContinuationProof(provider: provider) }
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
             "transactionMode": policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending",
             "transactionVersion": policy.map { $0 ? 2 : 1 } ?? 0,
@@ -1553,7 +1497,7 @@ actor WebModelServer {
         try Self.verifyInferenceSnapshot(snapshot, session: &checkedSession)
         guard let context = snapshot["modelProofContext"] as? [String: Any] else { throw Failure.invalidRequest }
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: session.context,
-            provider: session.provider, modelID: session.modelID, sessionToken: session.token, phase: phase, route: session.route, turnScoped: session.retainsConversation)
+            provider: session.provider, modelID: session.modelID, sessionToken: session.token, phase: phase, turnScoped: session.retainsConversation)
         for key in ["responseCount", "baselineResponseCount", "firstUserFingerprint"] {
             record[key] = context[key]
         }
@@ -1565,7 +1509,7 @@ actor WebModelServer {
         if let cleanupAttemptID { record["cleanupAttemptID"] = cleanupAttemptID }
         if let errorCode { record["errorCode"] = errorCode }
         if let evidence { record["modelEvidence"] = evidence.dictionary }
-        if session.provider == "chatgpt", session.route == .embedded,
+        if session.provider == "chatgpt",
            let product = try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true) {
             record["productModeEvidence"] = product.dictionary
         }
@@ -1674,7 +1618,7 @@ actor WebModelServer {
         // A successful bridge frame can carry a failed provider snapshot. Use
         // the same finite native reasons as ok:false replies, never page copy.
         let code = (value["error"] as? [String: Any])?["code"] as? String
-        if let failure = ChromeBridgeIPC.Failure.websiteOperationFailure(errorCode: code) { return failure }
+        if let failure = WebsiteProviderFailure.from(errorCode: code) { return failure }
         return fallback
     }
 
@@ -1826,7 +1770,7 @@ actor WebModelServer {
             case .productModeUnverified: return .init(status: "500 Internal Server Error", type: "model_error", code: "product_mode_unverified")
             case .busy: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_busy")
             case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
-            case .chromeRequired, .embeddedRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "provider_unavailable")
+            case .embeddedRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "provider_unavailable")
             case .malformedReply: return .init(status: "500 Internal Server Error", type: "model_error", code: "malformed_website_reply")
             case .inferenceContextRequired: return .init(status: "409 Conflict", type: "invalid_request", code: "native_turn_mismatch")
             case .persistenceRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "inference_evidence_unsaved")
@@ -1835,7 +1779,7 @@ actor WebModelServer {
             default: return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error")
             }
         }
-        if error is ChromeBridgeIPC.Failure { return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error") }
+        if error is WebsiteProviderFailure { return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error") }
         return .init(status: "500 Internal Server Error", type: "server_error", code: "internal_error")
     }
 
@@ -1848,7 +1792,7 @@ actor WebModelServer {
         // Arbitrary NSError descriptions and other transport prose cannot be
         // promoted into an authoritative local model diagnostic.
         error is Failure || error is WebModelResponseCodec.Failure || error is WebsiteTurnContinuation.Failure
-            || error is EmbeddedWebModelTransport.Failure || error is ChromeBridgeIPC.Failure
+            || error is EmbeddedWebModelTransport.Failure || error is WebsiteProviderFailure
     }
 
     /// Only native finite classifications can add recovery metadata. Website
@@ -2561,7 +2505,7 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
               matchesEnvironmentFragment(environment[0]),
               let user = parts(input[preludeCount + 1], role: "user") else { return false }
         let expected = "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
-        let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+        let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
         // The native host appends one exact policy text item; the engine can
         // join it to the user text with LF. Accept only those byte-exact forms,
         // plus the original bare synthetic form. No generic trimming/joining.

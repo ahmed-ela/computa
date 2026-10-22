@@ -2542,7 +2542,7 @@ function modelEditorDifference(actual, expected) {
   return { firstDifference: Math.min(firstDifference, 360_000), actualScalar: scalarAt(actual), expectedScalar: scalarAt(expected) };
 }
 
-// Fixed ChatGPT DOM adapter derived from BrowserExtension/web-providers.js.
+// Fixed ChatGPT DOM adapter for the app-owned embedded browser.
 // Runs in a private WebKit content world; input arrives as structured arguments.
 function chatGPTMessageRoots(role) {
   const selector = `[data-message-author-role="${role}"], [data-markdown-text-style="${role}-message"], article[data-turn="${role}"]`
