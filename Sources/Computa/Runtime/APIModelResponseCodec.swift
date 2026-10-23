@@ -272,17 +272,45 @@ enum APIModelResponseCodec {
     }
     private static let maximumText = 2_000_000
 
+    enum HostProjectionPurpose: Equatable, Sendable {
+        case ordinaryInference
+        case nativeCompaction
+    }
+
     /// Called only by the native server after current-turn admission. Appending
     /// to the translated provider body keeps engine history, tool declarations,
     /// capsules and echoed response configuration unchanged.
-    static func appendingHostDeveloperMessage(_ text: String, to original: Request, userInputs: [String] = []) throws -> Request {
+    static func appendingHostDeveloperMessage(_ text: String, to original: Request, userInputs: [String] = [],
+                                             purpose: HostProjectionPurpose = .ordinaryInference) throws -> Request {
         guard !text.isEmpty, text.utf8.count <= 16_384,
               userInputs.count <= 1_024, userInputs.allSatisfy({ !$0.isEmpty }),
               userInputs.reduce(0, { $0 + $1.utf8.count }) <= maximumText,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any] else { throw Failure.invalidRequest }
+        if purpose == .nativeCompaction {
+            guard original.tools.isEmpty, original.allowedTools.isEmpty, !original.requiredTool else { throw Failure.invalidRequest }
+        }
+        func removeMaintenanceTail(from items: inout [[String: Any]]) throws -> [String: Any]? {
+            guard purpose == .nativeCompaction else { return nil }
+            // Purpose comes from admitted native metadata, never this text.
+            // Validate only the pinned engine's structural maintenance boundary
+            // and keep its entire final message unchanged and last.
+            guard let tail = items.last, (tail["type"] as? String ?? "message") == "message",
+                  tail["role"] as? String == "user" else { throw Failure.invalidRequest }
+            if let content = tail["content"] as? String {
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw Failure.invalidRequest }
+            } else if let content = tail["content"] as? [[String: Any]], !content.isEmpty {
+                guard content.allSatisfy({ item in
+                    guard let type = item["type"] as? String, ["text", "input_text"].contains(type),
+                          let text = item["text"] as? String else { return false }
+                    return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }) else { throw Failure.invalidRequest }
+            } else { throw Failure.invalidRequest }
+            return items.removeLast()
+        }
         switch original.provider.wireAPI {
         case .chatCompletions:
             guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
+            let maintenance = try removeMaintenanceTail(from: &messages)
             // Preserve the provider's template after adding trusted host text.
             // Qwen requires its system instructions in one opening message;
             // merely mapping developer to system would create a late system
@@ -290,6 +318,7 @@ enum APIModelResponseCodec {
             let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
             messages.append(["role": role, "content": text])
             messages += userInputs.map { ["role": "user", "content": $0] }
+            if let maintenance { messages.append(maintenance) }
             body["messages"] = try chatTemplateMessages(messages,
                 selection: .init(provider: original.provider, model: original.model))
         case .responses:
@@ -297,8 +326,10 @@ enum APIModelResponseCodec {
             if let input = body["input"] as? String { items = [["role": "user", "content": input]] }
             else if let input = body["input"] as? [[String: Any]] { items = input }
             else { throw Failure.invalidRequest }
+            let maintenance = try removeMaintenanceTail(from: &items)
             items.append(["type": "message", "role": "developer", "content": [["type": "input_text", "text": text]]])
             items += userInputs.map { ["type": "message", "role": "user", "content": [["type": "input_text", "text": $0]]] }
+            if let maintenance { items.append(maintenance) }
             body["input"] = items
         }
         let bytes = try json(body)

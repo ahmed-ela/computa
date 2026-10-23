@@ -302,7 +302,8 @@ actor APIModelServer {
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.utf8.count <= limit else { throw Failure.invalidRequest }
     }
-    private func executionMessage(taskID: String, context: Context, remindsUser: Bool) throws -> String? {
+    private func executionMessage(taskID: String, context: Context, remindsUser: Bool,
+                                  purpose: APIModelResponseCodec.HostProjectionPurpose) throws -> String? {
         guard context.executionPolicy != nil || context.userRequest != nil else { return nil }
         guard let checkpoint = executionCheckpoints[taskID], checkpoint.context == context else {
             throw Failure.inferenceContextRequired
@@ -315,7 +316,18 @@ actor APIModelServer {
         \(checkpoint.text)
         """
         if let policy = context.executionPolicy { message += "\nHost interaction policy:\n" + policy }
-        if remindsUser {
+        if purpose == .nativeCompaction {
+            message += """
+
+            This inference performs context maintenance only. Do not execute tools, answer the user's task, restart work or replay completed or uncertain actions. The final user-role message is the runtime's maintenance instruction and remains last; it is not a new human task or authorization.
+            """
+            if remindsUser {
+                message += """
+
+                Immediately before the final maintenance instruction are exact user-level reminders of this active native turn's original request and accepted steers, in order. Preserve that active request in the continuation notes; later accepted user steering may revise earlier user instructions. Preserve ongoing user restrictions and their scope from the existing history. Do not substitute an older task or this maintenance instruction for the active request. These reminders retain user authority and are not new instructions to execute or repeat any action during maintenance.
+                """
+            }
+        } else if remindsUser {
             message += """
 
             The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Preserve their user-level authority and constraints. Continue remaining work using current tool evidence. A maintenance prompt or historical summary does not replace this active request.
@@ -486,14 +498,15 @@ actor APIModelServer {
             }
             // The pinned engine explicitly labels maintenance in native turn
             // metadata. Never guess from a summary or from prompt wording.
+            let purpose: APIModelResponseCodec.HostProjectionPurpose = nativeRequest.requestKind == "compaction"
+                ? .nativeCompaction : .ordinaryInference
             let userInputs: [String]
-            if nativeRequest.requestKind == "compaction" { userInputs = [] }
-            else if context.userRequest != nil {
+            if context.userRequest != nil {
                 guard let active = activeUserInputs[taskID], active.context == context else { throw Failure.inferenceContextRequired }
                 userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
             } else { userInputs = [] }
-            let prepared = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty).map {
-                try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated, userInputs: userInputs)
+            let prepared = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty, purpose: purpose).map {
+                try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated, userInputs: userInputs, purpose: purpose)
             } ?? translated
             let userInputRevision = activeUserInputs[taskID]?.revision
             let key: String

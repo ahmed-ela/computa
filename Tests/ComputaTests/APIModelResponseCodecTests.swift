@@ -1986,6 +1986,70 @@ final class APIModelResponseCodecTests: XCTestCase {
             }
         }
     }
+    func testCompactionUserRemindersPreserveMaintenanceTailHistoryAndToolAuthority() throws {
+        let profiles = [provider,
+            APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+                wireAPI: .responses, models: provider.models),
+            APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
+                wireAPI: .chatCompletions, models: [.init(id: "qwen-3.8-27b", name: "Qwen")])]
+        let maintenance = "  Native maintenance text may be configured independently.\nWrite notes only.  "
+        let active = "  Read cafe\u{301} announcements.\nNever send or delete anything.  "
+        let steer = "Report titles only; keep the read-only restriction."
+        let host = "Native compaction checkpoint: preserve the following active user request in notes; execute no tools."
+        let history: [[String: Any]] = [
+            ["type": "message", "role": "user", "content": "Older ongoing restriction: do not change settings."],
+            ["type": "function_call", "id": "fc-receipt", "call_id": "read-receipt", "name": "browser_read", "arguments": "{}"],
+            ["type": "function_call_output", "id": "fco-receipt", "call_id": "read-receipt", "output": "Genuine earlier read; not a current search result."],
+            ["type": "message", "role": "assistant", "content": "Historical summary incorrectly names a different task."],
+            ["type": "message", "role": "user", "content": [["type": "input_text", "text": maintenance]]]
+        ]
+        func text(_ item: [String: Any]) -> String? {
+            (item["content"] as? String) ?? ((item["content"] as? [[String: Any]])?.first?["text"] as? String)
+        }
+        for profile in profiles {
+            let original = try request(["input": history, "tools": [], "tool_choice": "auto"], provider: profile)
+            let originalBytes = original.body
+            let projected = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original,
+                userInputs: [active, steer], purpose: .nativeCompaction)
+            let key = profile.wireAPI == .chatCompletions ? "messages" : "input"
+            var before = try XCTUnwrap(JSONSerialization.jsonObject(with: original.body) as? [String: Any])
+            var after = try XCTUnwrap(JSONSerialization.jsonObject(with: projected.body) as? [String: Any])
+            let oldItems = try XCTUnwrap(before.removeValue(forKey: key) as? [[String: Any]])
+            let newItems = try XCTUnwrap(after.removeValue(forKey: key) as? [[String: Any]])
+            XCTAssertEqual(before as NSDictionary, after as NSDictionary)
+            XCTAssertEqual(original.body, originalBytes)
+            XCTAssertEqual(try XCTUnwrap(newItems.last) as NSDictionary, try XCTUnwrap(oldItems.last) as NSDictionary,
+                "The entire original maintenance message must remain unchanged and last.")
+            XCTAssertEqual(newItems.suffix(3).compactMap(text).map { Data($0.utf8) },
+                [active, steer, maintenance].map { Data($0.utf8) })
+            XCTAssertTrue(newItems.suffix(3).allSatisfy { $0["role"] as? String == "user" })
+            if profile.isCerebrasInference {
+                XCTAssertEqual(newItems.first?["role"] as? String, "system")
+                XCTAssertEqual(newItems.filter { $0["role"] as? String == "system" }.count, 1)
+                XCTAssertFalse(text(try XCTUnwrap(newItems.first))?.contains(active) == true)
+                XCTAssertFalse(text(try XCTUnwrap(newItems.first))?.contains(steer) == true)
+                XCTAssertEqual(Array(newItems.dropFirst().dropLast(3)) as NSArray, Array(oldItems.dropFirst().dropLast()) as NSArray)
+            } else {
+                XCTAssertEqual(Array(newItems.dropLast(4)) as NSArray, Array(oldItems.dropLast()) as NSArray)
+                XCTAssertEqual(newItems[newItems.count - 4]["role"] as? String, "developer")
+                XCTAssertEqual(text(newItems[newItems.count - 4]), host)
+            }
+            XCTAssertTrue(projected.tools.isEmpty)
+            XCTAssertTrue(projected.allowedTools.isEmpty)
+            XCTAssertFalse(projected.requiredTool)
+            XCTAssertEqual(projected.historyCallIDs, original.historyCallIDs)
+            XCTAssertEqual(projected.responseConfiguration as NSDictionary, original.responseConfiguration as NSDictionary)
+            let noActiveRequest = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original, purpose: .nativeCompaction)
+            let noActiveBody = try XCTUnwrap(JSONSerialization.jsonObject(with: noActiveRequest.body) as? [String: Any])
+            let noActiveItems = try XCTUnwrap(noActiveBody[key] as? [[String: Any]])
+            XCTAssertEqual(text(try XCTUnwrap(noActiveItems.last)), maintenance,
+                "Standalone/pre-turn maintenance has no canonical user request but still keeps its final instruction last.")
+        }
+        let ordinaryTools = try request(["input": [["role": "user", "content": maintenance]]])
+        XCTAssertThrowsError(try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: ordinaryTools,
+            userInputs: [active], purpose: .nativeCompaction))
+    }
+
     func testNativeResponsesOpaqueReasoningIsSealedBoundAndUnwrappedOnlyForItsThread() throws {
         let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
         let prepared = try request(provider: p)

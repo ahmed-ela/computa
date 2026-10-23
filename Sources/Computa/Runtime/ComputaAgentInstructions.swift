@@ -63,13 +63,13 @@ enum ComputaAgentInstructions {
     """
 
     static let browserSearchEvidence = """
-    Use website Search with short distinctive terms, not the whole request. Read
-    its submitted query and actual result/message content. Overview/navigation,
-    truncation or local-filter counts alone never establish zero results. Refine
-    or broaden irrelevant results. browser_read(query) filters captured UI, including
-    input echoes; its counts are not site results. Report observed positives with
-    their scope; a negative needs relevant site-result evidence, otherwise explain
-    what remains unverified.
+    Search with short distinctive terms, not the whole request. Filling a query
+    does not prove submission: inspect actual results/message content. Broaden
+    unrelated results before claiming absence. Continue partial content with its
+    next_cursor instead of restarting the same view. browser_read(query) filters
+    captured UI, including input echoes; its counts are not site results. Report
+    observed positives with their scope; a negative needs relevant site-result
+    evidence. Partial reads or narrow-query misses leave absence unverified.
     """
 
     /// Exact user-input suffix emitted by the native host. Kept shared with

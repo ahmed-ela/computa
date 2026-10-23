@@ -61,9 +61,11 @@ their exact text at **user** authority. These reminders come from native submiss
 state, not from parsing summaries or promoting user text into developer policy.
 They preserve the active task through compaction without authorizing replay of
 completed or uncertain actions. Engine history and current tool schemas are unchanged.
-The engine's native `request_kind=compaction` metadata suppresses these reminders
-during maintenance; prompt wording and summary prefixes do not determine request
-purpose. Conflicting native identities/purposes and maintenance with offered tools
+The engine's native `request_kind=compaction` metadata places these reminders
+immediately before the final maintenance instruction, which remains last, with
+guidance to preserve the active request in notes without executing it. Ordinary
+inference keeps the reminders at the end. Prompt wording and summary prefixes do
+not determine request purpose. Conflicting native identities/purposes and maintenance with offered tools
 are rejected before contacting the provider.
 
 Steering stages a bounded native update before sending `turn/steer`. New inference

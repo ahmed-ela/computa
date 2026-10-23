@@ -1188,6 +1188,8 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 turn = UUID().uuidString, preparation = UUID()
             let original = "  Read ODE cafe\u{301} announcements.\nDo not send or delete anything.  "
             let steer = "Only report the attachment title; keep the original read-only restriction."
+            let historicalRestriction = "Ongoing restriction from an earlier turn: never change account settings."
+            let historicalTask = "Earlier completed task: find a different attachment."
             try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
                 executionPolicy: "Host policy stays unchanged.", userRequest: original)
             try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
@@ -1195,7 +1197,9 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 var request = try localRequest(base: base, token: server.bearerToken, task: task,
                     thread: thread, turn: turn, provider: p)
                 var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
-                body["input"] = [["type": "message", "role": "user", "content": [["type": "input_text", "text": input]]]]
+                body["input"] = [historicalRestriction, historicalTask, input].map { text -> [String: Any] in
+                    ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]
+                }
                 body["tools"] = [Any]()
                 if let kind {
                     // The compatibility header contains identity only; native
@@ -1209,6 +1213,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let all = await records.snapshot(), upstream = try XCTUnwrap(all.last)
                 let forwarded = try XCTUnwrap(JSONSerialization.jsonObject(with: upstream.body) as? [String: Any])
                 XCTAssertNil(forwarded["client_metadata"])
+                XCTAssertTrue((forwarded["tools"] as? [Any] ?? []).isEmpty)
                 return try XCTUnwrap(forwarded[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
             }
             func text(_ message: [String: Any]) -> String? {
@@ -1224,10 +1229,19 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
                 preparationID: preparation, ticket: ticket, accepted: true)
             let maintenance = try await infer(kind: "compaction", input: ComputaAgentInstructions.compactionPrompt)
-            XCTAssertEqual(maintenance.last?["role"] as? String, "developer")
-            XCTAssertTrue(maintenance.contains { text($0) == ComputaAgentInstructions.compactionPrompt })
-            XCTAssertFalse(maintenance.contains { text($0) == original || text($0) == steer })
-            XCTAssertFalse(text(try XCTUnwrap(maintenance.last))?.contains("The following user messages") == true)
+            XCTAssertEqual(maintenance.suffix(3).compactMap(text).map { Data($0.utf8) },
+                [original, steer, ComputaAgentInstructions.compactionPrompt].map { Data($0.utf8) })
+            XCTAssertTrue(maintenance.suffix(3).allSatisfy { $0["role"] as? String == "user" })
+            XCTAssertEqual(maintenance.prefix(2).compactMap(text), [historicalRestriction, historicalTask])
+            let maintenanceHost = try XCTUnwrap(maintenance.last { $0["role"] as? String == "developer" })
+            XCTAssertTrue(text(maintenanceHost)?.contains("context maintenance only") == true)
+            XCTAssertTrue(text(maintenanceHost)?.contains("Do not execute tools") == true)
+            XCTAssertFalse(text(maintenanceHost)?.contains(original) == true)
+            XCTAssertFalse(text(maintenanceHost)?.contains(steer) == true)
+            let customMaintenance = "Produce continuation notes using this separately configured maintenance instruction."
+            let customized = try await infer(kind: "compaction", input: customMaintenance)
+            XCTAssertEqual(customized.suffix(3).compactMap(text), [original, steer, customMaintenance],
+                "Explicit native purpose, not equality to a prompt constant, selects maintenance placement.")
             let resumed = try await infer(kind: "turn", input: stale)
             XCTAssertEqual(resumed.suffix(2).compactMap(text), [original, steer])
             XCTAssertTrue(resumed.suffix(2).allSatisfy { $0["role"] as? String == "user" })
@@ -1264,6 +1278,48 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         }
         let count = await records.count(); XCTAssertEqual(count, 0)
         await server.shutdown()
+    }
+
+    func testNativeMaintenanceRequiresFinalTextUserInstructionBeforeCredentialsOrProviderAccess() async throws {
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let records = APIRequestRecorder(), reply = response()
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }
+            defer { remote.stop() }
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture", supportsImages: true)])
+            let credentials = APICredentialCounter()
+            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)))
+            try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                turn = UUID().uuidString, preparation = UUID()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                userRequest: "Keep the current task read-only.")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            let badInputs: [[[String: Any]]] = [
+                [],
+                [["role": "assistant", "content": "This assistant message is not a maintenance instruction."]],
+                [["role": "user", "content": " \n\t "]],
+                [["type": "function_call", "name": "browser_read", "arguments": "{}", "call_id": "retained-read"],
+                 ["type": "function_call_output", "call_id": "retained-read", "output": "A tool result must not become the maintenance instruction."]],
+                [["role": "user", "content": [["type": "input_text", "text": "text"],
+                    ["type": "input_image", "image_url": "https://example.invalid/inert-image.png"]]]]
+            ]
+            for input in badInputs {
+                var request = try localRequest(base: base, token: server.bearerToken, task: task,
+                    thread: thread, turn: turn, provider: p)
+                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+                body["input"] = input; body["tools"] = [Any](); body["tool_choice"] = "auto"
+                let metadata = try JSONSerialization.data(withJSONObject: ["thread_id": thread, "turn_id": turn, "request_kind": "compaction"])
+                body["client_metadata"] = ["x-codex-turn-metadata": String(decoding: metadata, as: UTF8.self)]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (_, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            }
+            let count = await records.count()
+            XCTAssertEqual(count, 0)
+            XCTAssertEqual(credentials.counts().reads, 0)
+            await server.shutdown()
+        }
     }
 
     #if DEBUG

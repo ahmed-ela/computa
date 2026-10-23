@@ -60,8 +60,12 @@ old stop notice was appended after every subsequent turn, making it appear curre
   exact original request and accepted in-turn user messages outside compacted
   history. Ordinary API inferences repeat these as user messages, with host
   guidance to continue unfinished work without replaying completed actions.
-  Explicit native `request_kind=compaction` metadata suppresses this reminder
-  during maintenance itself; prompt wording is never used to guess the purpose.
+  Explicit native `request_kind=compaction` metadata keeps maintenance distinct
+  from task execution; prompt wording is never used to guess the purpose. During
+  maintenance, exact active user inputs appear immediately before the final
+  runtime maintenance instruction, which remains last. This keeps older tasks
+  from displacing the current request while preserving historical restrictions
+  and user-level authority. Maintenance still has no tools and only writes notes.
   Steering gates new inference admission until its acknowledgment is validated.
   An uncertain acknowledgment retires the turn rather than reopening inference
   with an outdated restriction. Stop, turn replacement and shutdown discard the
@@ -74,6 +78,11 @@ old stop notice was appended after every subsequent turn, making it appear curre
   establish readiness; search-field echoes and navigation controls cannot.
   Broad reads, continuations and input preflight retain their existing behavior.
   Deadline expiration remains an incomplete observation, never proof of absence.
+- Fill receipts distinguish replacing a field and dispatching its input/change
+  events from pressing Enter or a submit control. A separate observed submit
+  control remains available within the user's scope. No-replay guidance refers
+  to the same input, so it does not discourage a needed Search after field entry.
+  Page event handlers may still react to a fill; observed outcomes remain required.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host

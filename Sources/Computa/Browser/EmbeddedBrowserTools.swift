@@ -83,7 +83,7 @@ enum EmbeddedBrowserTools {
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
-                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting, and use its new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
+                "Replace one observed field with enabled=true and settable=true and dispatch input/change events; no Enter key or submit-control click is sent. Page handlers may react to these events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting. A distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Use only new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
                 mutation.merging(["text": ["type": "string", "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it."]], uniquingKeysWith: { _, right in right }),
                 ["snapshot_id", "element_index", "text"]),
             specification(
@@ -526,7 +526,8 @@ actor EmbeddedBrowserToolController {
             }
             // Input has already completed. Observation failure must not turn
             // that dispatch into an apparent input failure that invites replay.
-            return try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope)
+            return try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                                               wasFill: tool == "browser_fill")
         case "browser_navigate":
             let binding = try bound(taskKey, contextID)
             let destination = URL(string: object["url"] as! String)!
@@ -757,15 +758,22 @@ actor EmbeddedBrowserToolController {
         return observation.snapshot
     }
 
-    private func postInputResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?) async throws -> String {
-        var result: [String: Any] = ["dispatched": true, "no_replay": true, "result_verified": false]
+    private func postInputResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?, wasFill: Bool) async throws -> String {
+        var result: [String: Any] = ["dispatched": true, "no_replay": true, "result_verified": false,
+                                     "input_kind": wasFill ? "fill" : "click"]
+        let effect = wasFill
+            ? "Field replacement and input/change events were dispatched; no Enter key or submit-control click was sent. Page handlers may react."
+            : "Click already dispatched."
         do {
             let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
                 scope: scope, read: SemanticReadRequest(view: .overview))
             result["current_observation"] = ["status": "available", "view": "overview",
                 "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]
             result["action_references"] = ["consumed": true, "next": "current_observation"]
-            result["next"] = "Recheck each current row's label/action; indices change. Use only its new references; prior references remain consumed. Input already dispatched: if the page is unchanged, wait/read instead of clicking again."
+            result["next"] = "Recheck each current row's label/action; indices change. Use only its new references; prior references remain consumed. " + effect
+                + (wasFill
+                    ? " Compare the observed field value with the complete requested value; a distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Do not repeat this fill."
+                    : " If the page is unchanged, wait/read instead of repeating this same click.")
             let encoded = try json(result)
             // JSON quoting can expand an already bounded read. Never truncate
             // a capability-bearing snapshot or publish a partial observation.
@@ -775,7 +783,7 @@ actor EmbeddedBrowserToolController {
             if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
             result["action_references"] = ["consumed": true, "next": "browser_read"]
-            result["next"] = "Input was dispatched. Do not repeat it. Use browser_read for current evidence and new references if the bound tab is still available."
+            result["next"] = effect + " Do not repeat this input. Use browser_read for current evidence and new references if the bound tab is still available."
             return try json(result)
         }
     }
