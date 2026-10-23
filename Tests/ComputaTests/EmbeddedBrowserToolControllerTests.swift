@@ -2240,7 +2240,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertTrue(guidance.contains("current turn"))
             if name == "browser_read" {
                 XCTAssertTrue(guidance.contains("latest page"))
-                XCTAssertTrue(guidance.contains("without view/query"))
+                XCTAssertTrue(guidance.contains("Prefer cursor alone"))
+                XCTAssertTrue(guidance.contains("repeated view/query must match the captured filters"))
                 XCTAssertTrue(guidance.contains("successful continuation, fresh read or current_observation replaces older cursors"))
                 XCTAssertTrue(guidance.contains("admitted input invalidates them"))
             }

@@ -142,6 +142,8 @@ enum APIModelResponseCodec {
         case schemaMismatch = "schema_mismatch", missingRequired = "missing_required"
         case typeMismatch = "type_mismatch", unexpectedFields = "unexpected_fields"
         case arrayBounds = "array_bounds"
+        // Retained for decoding existing finite diagnostic journals. Current
+        // read schemas leave cursor/filter consistency to the native controller.
         case readModeConflict = "read_mode_conflict"
     }
     enum SchemaPathPart: Equatable, Sendable { case property(String), items }
@@ -311,14 +313,6 @@ enum APIModelResponseCodec {
             if let properties = schema["properties"] as? [String: Any], properties.count <= 16, properties.keys.allSatisfy({ $0.utf8.count <= 128 }) { record["declared_fields"] = properties.keys.sorted() }
             if strictBool(schema["additionalProperties"]) == false { record["additional_fields_allowed"] = false }
             if schema["enum"] != nil { record["follow_offered_enum"] = true }
-            if disjointBrowserReadHistorySchema(tool) != nil {
-                // Native constants explain the recognized composition without
-                // copying rejected values or arbitrary schema prose.
-                record["allowed_forms"] = [
-                    "Fresh: omit cursor or use null; view/query are optional.",
-                    "Continuation: only cursor, a nonempty string; omit view/query.",
-                ]
-            }
             records.append(record)
         }
         guard !records.isEmpty, let bytes = try? json(records), bytes.count <= 1_536,
@@ -1448,11 +1442,6 @@ enum APIModelResponseCodec {
         }
         return nil
     }
-    private static func disjointBrowserReadHistorySchema(_ tool: Tool) -> [String: Any]? {
-        guard !tool.custom, tool.name == "browser_read", tool.schema["oneOf"] != nil else { return nil }
-        return ComputaModelToolCatalog.browserCursorSchemaVariants(name: tool.name,
-            namespace: tool.namespace, schema: tool.schema)?.historical
-    }
     private static func validatedArguments(_ text: String, tool: Tool,
                                            onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil,
                                            onSchemaMismatch: ((SchemaViolation) -> Void)? = nil) throws -> [String: Any] {
@@ -1468,26 +1457,15 @@ enum APIModelResponseCodec {
         guard matches(object, schema: tool.schema, root: tool.schema, depth: 0) else {
             if let onSchemaMismatch {
                 var nodes = 0
-                // The authoritative disjoint schema already rejected the call.
-                // The frozen flat form proves every individual field valid;
-                // only then can this exact native composition be identified as
-                // a read-mode conflict. This never admits or rewrites a call.
-                let flat = disjointBrowserReadHistorySchema(tool)
-                if let flat, let cursor = object["cursor"] as? String, !cursor.isEmpty,
-                   object["view"] != nil || object["query"] != nil,
-                   matches(object, schema: flat, root: flat, depth: 0) {
-                    onSchemaMismatch(.init(constraint: .readModeConflict, path: [], actualType: .object))
-                } else {
-                    var violation = localizeSchemaFailure(object, schema: flat ?? tool.schema, depth: 0, path: [], nodes: &nodes)
-                        ?? .init(constraint: .schemaMismatch, path: [])
-                    // The parsed root is known even when the failing constraint
-                    // is not localized. Exact native-schema checks still decide
-                    // whether this finite fact can name a built-in tool.
-                    if violation.constraint == .schemaMismatch, violation.path.isEmpty, violation.actualType == nil {
-                        violation = .init(constraint: .schemaMismatch, path: [], actualType: .object)
-                    }
-                    onSchemaMismatch(violation)
+                var violation = localizeSchemaFailure(object, schema: tool.schema, depth: 0, path: [], nodes: &nodes)
+                    ?? .init(constraint: .schemaMismatch, path: [])
+                // The parsed root is known even when the failing constraint
+                // is not localized. Exact native-schema checks still decide
+                // whether this finite fact can name a built-in tool.
+                if violation.constraint == .schemaMismatch, violation.path.isEmpty, violation.actualType == nil {
+                    violation = .init(constraint: .schemaMismatch, path: [], actualType: .object)
                 }
+                onSchemaMismatch(violation)
             }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments
         }

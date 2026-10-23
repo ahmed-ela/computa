@@ -478,9 +478,18 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             }
         }
     }
-    func testBrowserReadMixedFormsPreserveWireCorrectionPolicyAndHistoricalBytes() async throws {
+    func testBrowserReadFlatFormsPreserveCorrectionPolicyAndComposedHistoricalBytes() async throws {
         for wire in APIProviderDefinition.WireAPI.allCases {
-            for invalid in [#"{"cursor":"issued","view":"content"}"#, #"{"cursor":"issued","query":"needle"}"#] {
+            let forms: [(String, Bool)] = [
+                (#"{"cursor":"issued","view":"content"}"#, true),
+                (#"{"cursor":"issued","query":"needle"}"#, true),
+                (#"{"cursor":"issued","view":"links","query":"changed"}"#, true),
+                (#"{"cursor":null,"view":"content"}"#, true),
+                (#"{"cursor":"issued"}"#, true), ("{}", true),
+                (#"{"cursor":"issued","view":null}"#, false),
+                (#"{"cursor":"issued","query":false}"#, false),
+            ]
+            for (initialArguments, initiallyValid) in forms {
                 let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let accounting = root.appendingPathComponent("accounting")
@@ -493,8 +502,8 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     let offered = (body["tools"] as! [[String: Any]])[0]
                     let name = wire == .chatCompletions
                         ? (offered["function"] as! [String: Any])["name"] as! String : offered["name"] as! String
-                    let arguments = ordinal == 1 ? invalid : corrected
-                    let callID = ordinal == 1 ? "rejected-mixed-call" : "corrected-cursor-call"
+                    let arguments = ordinal == 1 ? initialArguments : corrected
+                    let callID = ordinal == 1 ? "initial-read-call" : "corrected-cursor-call"
                     let envelope: [String: Any]
                     if wire == .chatCompletions {
                         envelope = ["id": "read-form-\(ordinal)", "object": "chat.completion", "model": "fixture-model",
@@ -523,17 +532,24 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
                     var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: provider)
                     var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                    // Saved 231–233 schema, deliberately independent of the
+                    // now-flat definition. Native state alone checks filters.
+                    let view: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
                     let saved: [String: Any] = ["type": "object", "properties": [
-                        "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
-                        "query": ["type": "string"], "cursor": ["type": "string"]],
-                        "required": [String](), "additionalProperties": false]
+                        "view": view, "query": ["type": "string"], "cursor": ["type": ["string", "null"]]],
+                        "required": [String](), "additionalProperties": false, "oneOf": [
+                            ["type": "object", "properties": ["view": view, "query": ["type": "string"], "cursor": ["type": "null"]],
+                             "required": [String](), "additionalProperties": false],
+                            ["type": "object", "properties": ["cursor": ["type": "string"]],
+                             "required": ["cursor"], "additionalProperties": false],
+                        ]]
                     raw["tools"] = [["type": "function", "name": "browser_read", "parameters": saved]]
                     raw["input"] = [["role": "user", "content": "Continue reading the observed page."],
                         ["type": "function_call", "call_id": "old-read", "name": "browser_read", "arguments": historical],
                         ["type": "function_call_output", "call_id": "old-read", "output": "Earlier observation"]]
                     request.httpBody = try JSONSerialization.data(withJSONObject: raw)
                     var (bytes, response) = try await URLSession.shared.data(for: request)
-                    if wire == .responses {
+                    if wire == .responses && !initiallyValid {
                         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
                         let rejected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
                         let error = try XCTUnwrap(rejected["error"] as? [String: Any])
@@ -548,30 +564,31 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     }
                     XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: bytes, as: UTF8.self))
                     let completed = try completedResponse(bytes), output = try XCTUnwrap(completed["output"] as? [[String: Any]])
-                    XCTAssertEqual(output.compactMap { $0["call_id"] as? String }, ["corrected-cursor-call"])
-                    XCTAssertEqual((output.first?["arguments"] as? String).map { Data($0.utf8) }, Data(corrected.utf8))
-                    XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("rejected-mixed-call"))
-                    if wire == .chatCompletions {
+                    XCTAssertEqual(output.compactMap { $0["call_id"] as? String }, [initiallyValid ? "initial-read-call" : "corrected-cursor-call"])
+                    XCTAssertEqual((output.first?["arguments"] as? String).map { Data($0.utf8) },
+                        Data((initiallyValid ? initialArguments : corrected).utf8), "Never drop or normalize requested filters")
+                    if !initiallyValid { XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("initial-read-call")) }
+                    if wire == .chatCompletions && !initiallyValid {
                         let correction = try XCTUnwrap(completed["x_computa_correction"] as? [String: Any])
                         XCTAssertEqual(correction["recovered"] as? Bool, true)
                         XCTAssertEqual((correction["known_billable_usage"] as? [String: Any])?["input_tokens"] as? Int, 20)
                     } else { XCTAssertNil(completed["x_computa_correction"]) }
                     let requests = await recorder.snapshot()
-                    XCTAssertEqual(requests.count, 2)
-                    XCTAssertEqual(credentials.counts().reads, wire == .chatCompletions ? 1 : 2)
+                    XCTAssertEqual(requests.count, initiallyValid ? 1 : 2, "Valid flat forms must not consume a correction")
+                    XCTAssertEqual(credentials.counts().reads, initiallyValid || wire == .chatCompletions ? 1 : 2)
                     for upstream in requests {
                         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: upstream.body) as? [String: Any])
                         let offered = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first)
                         let function = try XCTUnwrap(wire == .chatCompletions ? offered["function"] as? [String: Any] : offered)
                         let schema = try XCTUnwrap(function["parameters"] as? [String: Any])
-                        XCTAssertEqual((schema["oneOf"] as? [[String: Any]])?.count, 2)
+                        XCTAssertNil(schema["oneOf"], "Saved composed catalogs must advertise the current flat contract")
                         let history = try XCTUnwrap(body[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
                         let historyArguments = wire == .chatCompletions
                             ? history.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }.compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
                             : history.filter { $0["type"] as? String == "function_call" }.compactMap { $0["arguments"] as? String }
                         XCTAssertEqual(historyArguments.map { Data($0.utf8) }, [Data(historical.utf8)])
                     }
-                    if wire == .chatCompletions {
+                    if wire == .chatCompletions && !initiallyValid {
                         let records = try correctionRecords(accounting)
                         XCTAssertEqual(records.count, 3)
                         XCTAssertTrue(records.allSatisfy { $0.firstValidation?.reason == .schemaMismatch && $0.firstValidation?.rejectedCount == 1 })

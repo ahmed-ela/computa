@@ -211,6 +211,21 @@ final class APIModelResponseCodecTests: XCTestCase {
         return ["type": "object", "properties": properties, "required": [String](), "additionalProperties": false]
     }
 
+    /// Independently describes the saved 231–233 composition; never derive it
+    /// from today's definition or migration code.
+    private func savedDisjointBrowserReadSchema() -> [String: Any] {
+        let view: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
+        let query: [String: Any] = ["type": "string", "minLength": 1]
+        return ["type": "object", "properties": ["view": view, "query": query,
+            "cursor": ["type": ["string", "null"], "minLength": 1]],
+            "required": [String](), "additionalProperties": false, "oneOf": [
+                ["type": "object", "properties": ["view": view, "query": query, "cursor": ["type": "null"]],
+                 "required": [String](), "additionalProperties": false],
+                ["type": "object", "properties": ["cursor": ["type": "string", "minLength": 1]],
+                 "required": ["cursor"], "additionalProperties": false],
+            ]]
+    }
+
     func testNullableBrowserCursorsPreserveRawCallsAndCompletedHistoryUnderSavedCatalogs() throws {
         let providers = [provider, APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
             wireAPI: .responses, models: provider.models)]
@@ -254,7 +269,7 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testBrowserReadFormsRejectMixedCurrentCallsButPreserveCompletedFlatHistoryOnBothWires() throws {
+    func testBrowserReadFlatFormsPreserveNativeFilterChecksAndCompletedHistoryOnBothWires() throws {
         let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }?["inputSchema"] as? [String: Any])
         func engineThin(_ value: Any) -> Any {
             if let object = value as? [String: Any] {
@@ -267,8 +282,8 @@ final class APIModelResponseCodecTests: XCTestCase {
         var flatProperties = try XCTUnwrap(nullableFlat["properties"] as? [String: [String: Any]])
         flatProperties["cursor"]?["type"] = ["string", "null"]
         nullableFlat["properties"] = flatProperties
-        let schemas = [try savedBrowserCursorSchema(), nullableFlat, current,
-                       try XCTUnwrap(engineThin(current) as? [String: Any])]
+        let schemas = [try savedBrowserCursorSchema(), nullableFlat, current, savedDisjointBrowserReadSchema(),
+                       try XCTUnwrap(engineThin(savedDisjointBrowserReadSchema()) as? [String: Any])]
         let providers = [provider, APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
             wireAPI: .responses, models: provider.models)]
         let historicalArguments = " { \"cursor\" : \"prior-issued\", \"view\":\"content\", \"query\": \"café é\" } "
@@ -293,13 +308,17 @@ final class APIModelResponseCodecTests: XCTestCase {
                 XCTAssertEqual(arguments.map { Data($0.utf8) }, Data(historicalArguments.utf8))
                 for valid in ["{}", #"{"view":"content","query":"café"}"#,
                               #"{"cursor":null,"view":"content","query":"café"}"#,
-                              #"{"cursor":"exact-next-cursor"}"#] {
+                              #"{"cursor":"exact-next-cursor"}"#,
+                              #"{"cursor":"exact-next-cursor","view":"content"}"#,
+                              #"{"cursor":"exact-next-cursor","query":"café"}"#,
+                              historicalArguments] {
+                    // Syntax preserves the exact requested filters; only the
+                    // native retained cursor can decide whether they match.
                     let reply = try browserMutationReply(valid, request: prepared)
                     XCTAssertEqual(((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String).map { Data($0.utf8) }, Data(valid.utf8))
                 }
-                for invalid in [#"{"cursor":"exact-next-cursor","view":"content"}"#,
-                                #"{"cursor":"exact-next-cursor","query":"café"}"#,
-                                historicalArguments, #"{"cursor":""}"#] {
+                for invalid in [#"{"cursor":"","view":"content"}"#, #"{"cursor":"issued","query":null}"#,
+                                #"{"cursor":"issued","view":"unknown"}"#, #"{"cursor":false}"#] {
                     XCTAssertThrowsError(try browserMutationReply(invalid, request: prepared)) {
                         XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
                     }
@@ -309,7 +328,7 @@ final class APIModelResponseCodecTests: XCTestCase {
     }
 
     func testModifiedBrowserReadCompositionIsNeverMigratedAsAnAppContract() throws {
-        let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }?["inputSchema"] as? [String: Any])
+        let current = savedDisjointBrowserReadSchema()
         var stringRoot = current
         var properties = try XCTUnwrap(current["properties"] as? [String: [String: Any]])
         properties["cursor"]?["type"] = "string"; stringRoot["properties"] = properties
@@ -1124,38 +1143,35 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: prepared), "Diagnostics grant no normal reply or tool publication")
         return try XCTUnwrap(observed?.schemaFailures?.first)
     }
-    func testReadModeConflictRequiresOtherwiseValidFieldsAndRecognizedCurrentComposition() throws {
+    func testFlatReadFiltersNeedNoAPIRepairWhileForeignCompositionsStillReject() throws {
         let browser = try diagnosticBrowserDefinition()
         for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
             let prepared = try request(["tools": [function, browser]], toolNaming: naming)
             for arguments in [#"{"cursor":"PRIVATE_CURSOR","view":"content"}"#,
                               #"{"cursor":"PRIVATE_CURSOR","query":"PRIVATE_QUERY"}"#,
                               #"{"cursor":"PRIVATE_CURSOR","view":"all","query":"PRIVATE_QUERY"}"#] {
-                let failure = try observedSchemaFailure(prepared, arguments: arguments, toolIndex: 1)
-                XCTAssertEqual(failure.toolIndex, 1)
-                XCTAssertEqual(failure.constraint, .readModeConflict)
-                XCTAssertEqual(failure.location, .init(tool: .browserRead, schemaPath: [], expectedType: .object, actualType: .object))
-                let encoded = try JSONEncoder().encode(failure)
-                XCTAssertEqual(try JSONDecoder().decode(APIModelResponseCodec.FiniteSchemaFailure.self, from: encoded), failure)
-                let finiteText = String(decoding: encoded, as: UTF8.self)
-                for privateText in ["PRIVATE_CURSOR", "PRIVATE_QUERY", prepared.tools[1].wireName] {
-                    if privateText != "browser_read" { XCTAssertFalse(finiteText.contains(privateText)) }
-                }
+                var rejected: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+                guard case let .reply(reply) = try APIModelResponseCodec.decodeForCorrection(
+                    correctionResult(prepared, arguments: arguments, toolIndex: 1), request: prepared,
+                    onArgumentRejection: { rejected.append($0) }) else { return XCTFail("Native state owns filter consistency") }
+                XCTAssertTrue(rejected.isEmpty)
+                XCTAssertEqual(((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String).map { Data($0.utf8) }, Data(arguments.utf8))
             }
             for arguments in [#"{"cursor":"","view":"content"}"#, #"{"cursor":false,"view":"content"}"#,
                               #"{"cursor":"issued","view":null}"#, #"{"cursor":"issued","query":""}"#,
                               #"{"cursor":"issued","view":"unknown"}"#, #"{"cursor":"issued","query":null}"#,
                               #"{"cursor":"issued","query":"valid","PRIVATE_EXTRA":true}"#] {
-                XCTAssertNotEqual(try observedSchemaFailure(prepared, arguments: arguments, toolIndex: 1).constraint, .readModeConflict,
-                                  "A separate field error must not be mislabeled as only a mode conflict")
+                let failure = try observedSchemaFailure(prepared, arguments: arguments, toolIndex: 1)
+                XCTAssertNotEqual(failure.constraint, .readModeConflict)
+                XCTAssertFalse(String(decoding: try JSONEncoder().encode(failure), as: UTF8.self).contains("PRIVATE_EXTRA"))
             }
         }
-        // A foreign or narrowed same-name composition must never receive the
-        // app-owned classification or allowed-form instructions.
-        var narrowed = browser, schema = try XCTUnwrap(browser["parameters"] as? [String: Any])
+        // Compositions outside the exact saved app contract are still enforced.
+        var legacy = browser; legacy["parameters"] = savedDisjointBrowserReadSchema()
+        var narrowed = legacy, schema = savedDisjointBrowserReadSchema()
         var properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
         properties["cursor"]?["type"] = "string"; schema["properties"] = properties; narrowed["parameters"] = schema
-        let catalogs: [[[String: Any]]] = [[narrowed], [["type": "namespace", "name": "mcp_external", "tools": [browser]]]]
+        let catalogs: [[[String: Any]]] = [[narrowed], [["type": "namespace", "name": "mcp_external", "tools": [legacy]]]]
         for catalog in catalogs {
             let prepared = try request(["tools": catalog])
             let arguments = #"{"cursor":"PRIVATE_CURSOR","view":"content"}"#
@@ -1176,34 +1192,35 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
         let foreign = try request(["tools": [["type": "namespace", "name": "mcp_external", "tools": [browser]]]])
         XCTAssertNil(try observedSchemaFailure(foreign, arguments: #"{"view":"PRIVATE_UNKNOWN_VIEW"}"#).location)
-        var narrowed = browser, schema = try XCTUnwrap(browser["parameters"] as? [String: Any])
+        var narrowed = browser, schema = savedDisjointBrowserReadSchema()
         var properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
         properties["cursor"]?["type"] = "string"; schema["properties"] = properties; narrowed["parameters"] = schema
         let modified = try request(["tools": [narrowed]])
         let failure = try observedSchemaFailure(modified, arguments: #"{"cursor":null}"#)
         XCTAssertEqual(failure.constraint, .schemaMismatch); XCTAssertNil(failure.location)
     }
-    func testReadModeCorrectiveFeedbackUsesOnlyBoundedNativeAllowedForms() throws {
+    func testReadFieldCorrectionIsBoundedAndDoesNotReintroduceRetiredDisjointForms() throws {
         let prepared = try request(["tools": [diagnosticBrowserDefinition()]])
-        let arguments = #"{"cursor":"PRIVATE_CURSOR","view":"content","query":"PRIVATE_QUERY"}"#
+        let arguments = #"{"cursor":"PRIVATE_CURSOR","query":false}"#
         let details = try rejectedDetails(prepared, arguments: arguments)
-        XCTAssertEqual(details.first?.constraint, .readModeConflict)
+        XCTAssertEqual(details.first?.constraint, .typeMismatch)
         let (records, text) = try schemaFeedback(prepared, details: details)
         XCTAssertEqual(records.count, 1)
-        XCTAssertEqual(records.first?["constraint"] as? String, "read_mode_conflict")
-        XCTAssertEqual(records.first?["schema_path"] as? [String], [])
-        XCTAssertEqual(records.first?["allowed_forms"] as? [String], [
-            "Fresh: omit cursor or use null; view/query are optional.",
-            "Continuation: only cursor, a nonempty string; omit view/query.",
-        ])
+        XCTAssertEqual(records.first?["constraint"] as? String, "type_mismatch")
+        XCTAssertEqual(records.first?["schema_path"] as? [String], ["properties", "query"])
+        XCTAssertEqual(records.first?["expected_types"] as? [String], ["string"])
+        XCTAssertNil(records.first?["allowed_forms"])
         XCTAssertLessThanOrEqual(text.utf8.count, 1_536)
-        XCTAssertFalse(text.contains("PRIVATE_CURSOR")); XCTAssertFalse(text.contains("PRIVATE_QUERY"))
+        XCTAssertFalse(text.contains("PRIVATE_CURSOR")); XCTAssertFalse(text.contains("read_mode_conflict"))
         let corrected = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: details)
         XCTAssertEqual(corrected.tools.first?.schema as? NSDictionary, prepared.tools.first?.schema as? NSDictionary)
-        XCTAssertThrowsError(try browserMutationReply(arguments, request: corrected), "Feedback never normalizes or admits the invalid combination")
-        XCTAssertNoThrow(try browserMutationReply(#"{"cursor":"PRIVATE_CURSOR"}"#, request: corrected))
-        XCTAssertNoThrow(try browserMutationReply(#"{"cursor":null,"view":"content","query":"PRIVATE_QUERY"}"#, request: corrected))
-        let (overflowRecords, overflowText) = try schemaFeedback(prepared, details: Array(repeating: details[0], count: 8))
+        XCTAssertThrowsError(try browserMutationReply(arguments, request: corrected), "Feedback never normalizes wrong field types")
+        for valid in [#"{"cursor":"PRIVATE_CURSOR"}"#,
+                      #"{"cursor":"PRIVATE_CURSOR","view":"content","query":"PRIVATE_QUERY"}"#,
+                      #"{"cursor":null,"view":"content","query":"PRIVATE_QUERY"}"#] {
+            XCTAssertNoThrow(try browserMutationReply(valid, request: corrected))
+        }
+        let (overflowRecords, overflowText) = try schemaFeedback(prepared, details: Array(repeating: details[0], count: 32))
         XCTAssertTrue(overflowRecords.isEmpty)
         XCTAssertTrue(overflowText.contains(APIModelResponseCodec.correctiveFeedback))
         XCTAssertFalse(overflowText.contains(APIModelResponseCodec.schemaFeedbackMarker), "Optional details keep the existing byte cap")

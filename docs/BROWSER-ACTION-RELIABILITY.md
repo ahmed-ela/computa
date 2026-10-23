@@ -635,3 +635,41 @@ conflict exhausted the existing correction allowance. Compaction retained all
 20 prior call/result pairs and the exact latest observation. This identifies a
 separate contract/usability failure; it does not establish the rejected filter
 values. The diagnostic tab was explicitly closed after testing.
+
+
+## Read schema and stateful validation
+
+The publication-order follow-up passed 574 unique Swift tests with no failures
+or skips and 20 version/product-identity tests. Build 233 was signed, installed
+and checked against source `1af8376`. Its fresh Outlook task reached the mailbox
+through the previously refreshed shared sign-in session, without account-picker
+or scope-denial events. That is not a live reproduction of the fixed race.
+The task failed after 15.528 seconds and 18 native calls, with one compaction:
+one `browser_read` mode conflict was corrected and a second exhausted the
+existing allowance. No attachment filename was verified. Cleanup closed one
+owned tab and preserved existing user tabs.
+
+The disjoint API schema was stricter than the stateful browser contract: it
+rejected every cursor-plus-filter call, including repeated filters that the
+controller safely accepts. The next bounded experiment restores the flat read
+schema. Field types remain validated before dispatch. Native validation still
+checks the exact retained cursor, document/lease authority and captured filters.
+Changed-filter continuations remain explicit failures with existing bounded
+fresh-observation recovery; no arguments are rewritten and no allowance grows.
+
+Exact legacy disjoint schemas are recognized against frozen branches, rather
+than whichever definition is currently offered. Completed history stays intact;
+foreign, narrowed or modified schemas do not migrate. The finite historical
+`read_mode_conflict` journal vocabulary remains readable. This experiment removes
+a proven schema/controller mismatch, but the rejected live arguments were not
+retained, so it does not establish whether either live call repeated or changed
+its filters. A new continuation tool would require saved-catalog and runtime
+receipt migration and is outside this small contract correction.
+
+
+The flat-schema source passed 574 unique Swift cases across the same twelve
+suites, including the both-wire HTTP matrix and three enabled bundled-engine
+cases, with no skips. The first run passed 573 cases and found one obsolete
+guidance-string assertion. Only that assertion changed; its targeted rerun
+passed with all production hashes unchanged. Both logs are retained. Version
+and product identity checks passed 20 tests. Live qualification remains separate.

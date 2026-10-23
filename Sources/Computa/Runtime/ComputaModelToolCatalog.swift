@@ -10,9 +10,8 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
-    /// App-owned reads distinguish fresh observations from cursor-only continuation.
-    /// Recognize complete native versions only; preserve a frozen flat history
-    /// contract, including completed old calls with repeated filters, byte-for-byte.
+    /// Recognize complete app-owned read versions only. Native cursor state
+    /// decides whether repeated filters match; historical calls stay byte-exact.
     static func browserCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
         -> (historical: [String: Any], current: [String: Any])? {
         var canonical: [String: [String: Any]] = ["cursor": ["type": ["string", "null"], "minLength": 1]]
@@ -44,10 +43,21 @@ enum ComputaModelToolCatalog {
             }
         }
         if let variants = schema["oneOf"] {
+            // Freeze the 231–233 contract independently of today's flat schema.
+            // Only those exact branches may be migrated; a narrowed or foreign
+            // composition must never acquire the app's more permissive contract.
+            let expected: [[String: Any]] = [
+                ["type": "object", "properties": [
+                    "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
+                    "query": ["type": "string", "minLength": 1], "cursor": ["type": "null"]],
+                 "required": [String](), "additionalProperties": false],
+                ["type": "object", "properties": ["cursor": ["type": "string", "minLength": 1]],
+                 "required": ["cursor"], "additionalProperties": false],
+            ]
             guard name == "browser_read", let actual = variants as? [[String: Any]],
                   let cursorTypes = properties["cursor"]?["type"] as? [String],
                   cursorTypes.count == 2, Set(cursorTypes) == ["string", "null"],
-                  let expected = current["oneOf"] as? [[String: Any]], actual.count == expected.count else { return nil }
+                  actual.count == expected.count else { return nil }
             // The pinned engine may omit scalar constraints and descriptions,
             // but must retain each branch's fields, types, required and closure.
             func matchesBranch(_ actual: [String: Any], _ expected: [String: Any]) -> Bool {
@@ -66,8 +76,8 @@ enum ComputaModelToolCatalog {
             }
             guard zip(actual, expected).allSatisfy({ matchesBranch($0.0, $0.1) }) else { return nil }
         }
-        // Only exact recognized versions reach this point. Both use the frozen
-        // flat fields above for history; new calls use the disjoint current form.
+        // Only exact recognized versions reach this point. Historical and
+        // current flat schemas leave cursor/filter consistency to native state.
         var historical = schema, historicalProperties = properties
         historicalProperties["cursor"]?["type"] = ["string", "null"]
         historical["properties"] = historicalProperties
