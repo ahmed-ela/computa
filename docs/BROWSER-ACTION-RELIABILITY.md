@@ -946,9 +946,9 @@ browser mutations. Existing edit, command, reasoning, rate-limit and correction
 coverage also passed. Both final Swift runs recorded unchanged source.
 
 Final runtime patch SHA-256 is
-`c1d9a916ec665601a811b42aee956b82cdebb8cf486489f39919d235a887ef8f`;
+`7b9a8323cbc848c82b3c7bd388f61dd8be1f905be4f5d4c6b1cdc6f15025525b`;
 binary SHA-256 is
-`fb02b8498b2b0359829923fce055ccc5d6cde9979c0acdd28e2c81d4db9edcab`.
+`5e442cf64a8f48c562f015f1deadf2573bff5562e6c7c0dbe0fad29de29afcc1`.
 Validation receipts are retained under the task's
 `work/action-reliability-20261023/` evidence directory.
 
@@ -964,3 +964,11 @@ Installation and live model acceptance are still pending at this checkpoint.
 Build 239's account-picker, ODE follow-up and same-chat send failures are not
 claimed fixed by source tests. The split removes a known invalid-argument choice;
 live evidence must establish whether it improves task completion.
+
+The final packaging check also caught stale generated protocol exports. The real
+source generator refreshed exactly five files: the TypeScript enum, two visible
+JSON schemas and both embedded export archives. Decoded archive comparison proved
+that only `continue_v1` was added, including the stable internal rollout schema.
+Four schema consistency tests and three actual protocol decoder/serialization
+tests passed. The runtime was rebuilt with those exports and its final identity
+is recorded above; the initial pre-schema artifact and receipts are preserved.
