@@ -1226,3 +1226,63 @@ cleanup reports are in `audits243/`. The goal remains unresolved: correct delive
 alone does not satisfy current-record evidence, exact copying, task focus,
 mailbox search or useful diagnostic acceptance. Earlier failures remain preserved,
 and no execution, retention, retry, permission or approval limit was raised.
+
+### Build 244: observations after browser lifecycle operations
+
+The candidate returns one bounded current overview after successful
+`browser_open`, `browser_bind` or `browser_navigate`. The existing fresh-read path
+supplies it on the same owned or borrowed binding, including its existing bounded
+stale-document recovery. It never repeats the lifecycle operation. This removes
+the need for a separate read merely to observe the page reached by that operation;
+it does not establish that the user’s website task succeeded.
+
+The host enables this behavior only when the verified runtime manifest declares
+`browserLifecycleObservationsV1`. Older runtimes retain their metadata-only
+responses. An available overview is sized with its completion cue and full
+envelope before references or a continuation are published. The runtime preserves
+the newest complete browser observation byte-for-byte, including when a later
+nonbrowser result or inventory follows it. Older lifecycle observations use the
+existing whole-row historical representation while retaining the genuine
+function name, call ID, raw arguments and completion cue. Lifecycle operations
+never receive `nativeRead` provenance and cannot enter the successful-read ledger.
+
+Stop, cancellation, lease retirement, scope and publication fences remain in
+force. If the operation completes but its following capture fails, a live result
+keeps the completion cue and reports the observation unavailable; references are
+retired and the operation must not be replayed. A retired or cancelled result is
+suppressed at the existing host publication fence. A held capture can leave
+cleanup temporarily uncertain under the existing cleanup contract; this change
+does not convert that state into confirmed cleanup.
+
+Limits remain unchanged: 4,096 text bytes and 4,608 serialized native observation
+bytes, 12 KiB provider / 24 KiB canonical retained receipts, thirty-two completed
+calls, existing reference and recovery budgets, approvals and permissions.
+
+Validation before installation:
+
+- 429 distinct targeted Swift cases passed across the main run and its focused
+  68-case rerun, including real isolated WebKit cases. The only changes between
+  those runs were the new bundled runtime/manifest and a test-only expectation
+  for the deliberately held capture's existing pending-cleanup report. Sources
+  were stable within each run; the initial compile error and failed assertion
+  are preserved in the task evidence.
+- Five actual bundled-engine loopback integration cases passed with zero skips.
+  The new case exercises four real compactions and a cold restart, checking the
+  latest page bytes, genuine function name/call ID/raw arguments, absence from
+  the successful-read ledger, and no replay. Existing patch/command, continuation,
+  failed-batch and upstream-429 cases also pass.
+- The actual-source isolated native retention suite passed 71 cases; direct tests
+  of the complete Rust artifact validator passed all three cases. The isolated
+  retention harness omits one private-export test and is supplementary to the
+  bundled-engine integration, not a full upstream test-suite claim.
+- All 29 runtime-source, product-identity and version Bun checks passed after
+  packaging. The prepackaging mismatch against runtime14 remains recorded.
+- Runtime15 uses patch `083202ea2ca3485652b2dd9e1356addde30e0a80cc8e3878eb477ec164a31af7`
+  and packaged binary `74f7b89e6b23276f6795b8fa377019b73bc5d5ebe8b8f92436f978076fcbd96f`
+  (292,294,624 bytes), schema2, declaring only `browserLifecycleObservationsV1`.
+  The source pin and exact patch were checked before and after the build.
+
+Native installation and live 244 qualification are pending. The 243 live failures
+remain unresolved. This changes observation delivery and retention; the checks
+above do not establish that current-record association, literal copying, task
+focus, mailbox search or diagnostics are repaired.
