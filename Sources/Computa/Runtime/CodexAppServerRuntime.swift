@@ -4890,13 +4890,12 @@ private extension CodexAppServerRuntime {
                 throw recovery
             }
             try observeReadScope(result.readFailureScope)
-            // Keep the bounded historical dispatch cue in a distinct first
-            // item. The native compactor budgets items individually; joining
-            // these strings would lose the clicked target label again.
-            let receipt = result.completeObservation
-                ? [textContent(BrowserCompleteObservation.marker)]
-                : result.actionReceipt.map { [textContent($0.compactText)] } ?? []
-            return receipt + [textContent(result.response)]
+            // Preserve the complete latest observation atomically. Historical
+            // retention keeps the dispatch cue separate from a typed excerpt of
+            // complete observed rows, without old pagination metadata.
+            let marker = result.completeObservation ? [textContent(BrowserCompleteObservation.marker)] : []
+            let receipt = result.actionReceipt.map { [textContent($0.compactText)] } ?? []
+            return marker + receipt + [textContent(result.response)]
         }
 
         private func executeDynamicTool(

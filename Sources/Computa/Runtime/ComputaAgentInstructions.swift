@@ -61,7 +61,7 @@ enum ComputaAgentInstructions {
     are invalid; task-owned pages may be closed. Reopen a needed task page at its
     supplied or previously observed URL and obtain fresh targets. Missing/closed tabs
     and empty inventory are not access denial. Never replay uncertain input.
-    Use browser_click(click_ref) or browser_fill(fill_ref,text) with refs in the current read.
+    Use browser_click(click_ref) or browser_fill(fill_ref,text) with currently published refs.
     """
 
     static let browserSearchEvidence = """
@@ -301,14 +301,15 @@ enum ComputaAgentInstructions {
     """
 
     static let builtInBrowser = """
-    Computa browser: browser_tabs then browser_bind(observed tab_id) for existing pages.
+    browser_tabs then browser_bind(observed tab_id).
     browser_open creates AND binds a task-owned page; read directly without another bind.
     Model inference pages are separate and cannot be targeted.
     \(browserTurnLifecycle)
     \(browserSearchEvidence)
     \(browserAddressChecks)
-    Copy complete click_ref or fill_ref from the intended row.
-    Each read replaces the action menu; use only its published refs, even if a token repeats.
+    Copy complete click_ref or fill_ref from the intended row; these are not computer_v2 references.
+    Continuation pages retain earlier refs in the same capture (120-ref FIFO limit).
+    Fresh reads replace the menu; omitted/changed refs expire.
     An admitted click or fill consumes all refs. At most one input action per tool-call batch.
     Never batch fill and click. Use available current_observation from input or stale rejection;
     otherwise browser_read. Never reuse consumed targets.
@@ -316,7 +317,7 @@ enum ComputaAgentInstructions {
     browser_click needs the exact row's published click_ref; never infer a clickable parent.
     browser_fill needs the exact field's published fill_ref, not an adjacent label's.
     Never invent or interchange reference types.
-    These are not computer_v2 references. Recheck the current row's label/action against the intended operation.
+    Recheck the observed label/action against the intended operation.
     If dispatched input leaves the page unchanged,
     wait/read. Never repeat uncertain input.
     Input is not outcome proof. Inspect current observation; browser_read or

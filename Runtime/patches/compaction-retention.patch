@@ -2650,10 +2650,10 @@ index 0000000..f24d6ff
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..550661c
+index 0000000..e4db142
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,487 @@
+@@ -0,0 +1,675 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
@@ -2690,6 +2690,17 @@ index 0000000..550661c
 +// it can only prevent lossy continuation; target validation stays with the host.
 +const COMPLETE_BROWSER_OBSERVATION_MARKER: &str =
 +    r#"{"retention":"complete_browser_observation_v1"}"#;
++const HISTORICAL_BROWSER_OBSERVATION_MARKER: &str =
++    r#"{"retention":"browser_observation_excerpt_v1"}"#;
++const HISTORICAL_BROWSER_ROW_DEFAULTS: &str = "ROW_DEFAULTS enabled=true settable=false actions=[]";
++const HISTORICAL_BROWSER_NOTICE: &str =
++    "Historical excerpt; incomplete, no pagination. Revalidate refs.";
++
++struct BrowserObservationRetention {
++    complete: bool,
++    cue: Option<String>,
++    lines: Vec<String>,
++}
 +// Every result keeps a genuine excerpt rather than dropping older actions. Give the latest
 +// completed observation more room before shrinking it: a uniform cap can erase the newest
 +// observation's header/identity while retaining stale identifiers from older observations.
@@ -2778,13 +2789,13 @@ index 0000000..550661c
 +            "function call has no completed current-turn output",
 +        ));
 +    }
-+    let mut complete_browser_outputs = HashSet::new();
++    let mut browser_outputs = HashMap::new();
 +    for &(_, call, output_index, envelope) in &pairs {
 +        let ResponseItem::FunctionCallOutput { output, .. } = &envelope.item else {
 +            unreachable!("validated function output");
 +        };
-+        if is_complete_browser_observation(&call.item, output)? {
-+            complete_browser_outputs.insert(output_index);
++        if let Some(observation) = browser_observation_retention(&call.item, output, Some(output_index) == pairs.last().map(|pair| pair.2))? {
++            browser_outputs.insert(output_index, observation);
 +        }
 +    }
 +    // Do not erase an observation before continuation can consume it. Only the final completed
@@ -2803,7 +2814,7 @@ index 0000000..550661c
 +    };
 +    let latest_output_index = pairs.last().map(|(_, _, index, _)| *index);
 +    let latest_is_complete_browser_observation =
-+        latest_output_index.is_some_and(|index| complete_browser_outputs.contains(&index));
++        latest_output_index.is_some_and(|index| browser_outputs.get(&index).is_some_and(|value| value.complete));
 +    // Try all bounded historical excerpts before reducing the latest observation. No receipt
 +    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
 +    for (latest_text_cap, older_text_cap) in
@@ -2849,13 +2860,10 @@ index 0000000..550661c
 +                // keep a continuation cursor that skips the removed rows. Keep
 +                // the producer's complete page, or fail within existing bounds.
 +                output.clone()
++            } else if let Some(observation) = browser_outputs.get(&output_index) {
++                historical_browser_output(output, observation, text_cap)
 +            } else {
-+                bounded_output(
-+                    output,
-+                    text_cap,
-+                    keep_image,
-+                    complete_browser_outputs.contains(&output_index),
-+                )?
++                bounded_output(output, text_cap, keep_image)?
 +            };
 +            let text_bytes = output_text_bytes(&output.body);
 +            let receipt = ResponseItemEnvelope {
@@ -2930,46 +2938,233 @@ index 0000000..550661c
 +    }))
 +}
 +
-+fn is_complete_browser_observation(
++fn browser_observation_retention(
 +    call: &ResponseItem,
 +    output: &FunctionCallOutputPayload,
-+) -> Result<bool> {
-+    // Custom/MCP tools and ordinary unmarked results retain generic behavior.
-+    // The marker is an intentionally conservative opt-in, not a content-prefix
-+    // heuristic or proof of successful website action.
-+    if !matches!(call, ResponseItem::FunctionCall { name, namespace: None, .. }
-+        if name == "browser_read")
-+    {
-+        return Ok(false);
-+    }
-+    let marked = match &output.body {
-+        FunctionCallOutputBody::Text(text) => text == COMPLETE_BROWSER_OBSERVATION_MARKER,
-+        FunctionCallOutputBody::ContentItems(items) => matches!(items.first(),
-+            Some(FunctionCallOutputContentItem::InputText { text })
-+                if text == COMPLETE_BROWSER_OBSERVATION_MARKER),
++    latest: bool,
++) -> Result<Option<BrowserObservationRetention>> {
++    // Only paired native tools opt in. The marker grants no authority and never
++    // changes custom/MCP or unmarked output behavior.
++    let tool = match call {
++        ResponseItem::FunctionCall { name, namespace: None, .. }
++            if matches!(name.as_str(), "browser_read" | "browser_click" | "browser_fill") => name.as_str(),
++        _ => return Ok(None),
 +    };
-+    if !marked {
-+        return Ok(false);
++    let marker = match &output.body {
++        FunctionCallOutputBody::Text(text) => Some(text.as_str()),
++        FunctionCallOutputBody::ContentItems(items) => match items.first() {
++            Some(FunctionCallOutputContentItem::InputText { text }) => Some(text.as_str()),
++            _ => None,
++        },
++    };
++    let complete = match marker {
++        Some(COMPLETE_BROWSER_OBSERVATION_MARKER) => true,
++        Some(HISTORICAL_BROWSER_OBSERVATION_MARKER) => false,
++        _ => return Ok(None),
++    };
++    let invalid = || receipt_error("the marked browser observation has an invalid result shape or failure status");
++    // Persisted genuine outputs can have None, but explicit failures never opt in.
++    if output.success == Some(false) { return Err(invalid()); }
++    let FunctionCallOutputBody::ContentItems(items) = &output.body else { return Err(invalid()); };
++    let (cue, body) = match items.as_slice() {
++        [FunctionCallOutputContentItem::InputText { .. },
++         FunctionCallOutputContentItem::InputText { text }] if tool == "browser_read" => (None, text.as_str()),
++        [FunctionCallOutputContentItem::InputText { .. },
++         FunctionCallOutputContentItem::InputText { text: cue },
++         FunctionCallOutputContentItem::InputText { text: body }]
++            if tool != "browser_read" && valid_browser_dispatch_cue(tool, cue) => (Some(cue.clone()), body.as_str()),
++        _ => return Err(invalid()),
++    };
++    if body.trim().is_empty() { return Err(invalid()); }
++    let lines = if complete {
++        let page = if tool == "browser_read" {
++            body.to_string()
++        } else {
++            if !complete_browser_action_observation(tool, cue.as_deref().unwrap_or_default(), body) {
++                return Err(invalid());
++            }
++            serde_json::from_str::<serde_json::Value>(body).ok()
++                .and_then(|body| body.get("current_observation")?.get("text")?.as_str().map(str::to_owned))
++                .ok_or_else(invalid)?
++        };
++        // The latest complete output is retained exactly, never excerpted.
++        if latest { Vec::new() } else { historical_browser_lines(&page)? }
++    } else {
++        let mut lines = body.split('\n');
++        if lines.next() != Some(HISTORICAL_BROWSER_NOTICE) { return Err(invalid()); }
++        let lines: Vec<String> = lines.map(str::to_owned).collect();
++        validate_historical_browser_lines(&lines)?;
++        lines.into_iter().filter(|line| line != HISTORICAL_BROWSER_ROW_DEFAULTS).collect()
++    };
++    Ok(Some(BrowserObservationRetention { complete, cue, lines }))
++}
++
++// Parse the native key=value line format without interpreting or stripping page
++// prose. JSON strings may contain escaped newlines/quotes; they remain one field
++// and one atomic row. Reject malformed rows rather than preserve orphan refs.
++fn native_browser_fields(line: &str) -> Option<Vec<(&str, &str)>> {
++    let mut fields = Vec::new();
++    let mut rest = line;
++    while !rest.trim_start_matches(' ').is_empty() {
++        rest = rest.trim_start_matches(' ');
++        let (key, value) = rest.split_once('=')?;
++        if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit())
++            || fields.iter().any(|(previous, _)| *previous == key) { return None; }
++        let mut quoted = false;
++        let mut escaped = false;
++        let mut end = value.len();
++        for (index, byte) in value.bytes().enumerate() {
++            if byte.is_ascii_control() { return None; }
++            if escaped { escaped = false; continue; }
++            if quoted && byte == b'\\' { escaped = true; continue; }
++            if byte == b'"' { quoted = !quoted; continue; }
++            if !quoted && byte == b' ' { end = index; break; }
++        }
++        if quoted || escaped || end == 0 { return None; }
++        let raw = &value[..end];
++        if raw.starts_with('"') {
++            serde_json::from_str::<String>(raw).ok()?;
++        } else if raw.starts_with('[') {
++            serde_json::from_str::<Vec<String>>(raw).ok()?;
++        } else if raw.contains(['"', '\\']) { return None; }
++        fields.push((key, raw));
++        rest = &value[end..];
 +    }
-+    // `success` is not persisted in the output body's wire representation, so a
-+    // resumed genuine result may have None. Never reinterpret an explicit failure.
-+    let valid = output.success != Some(false)
-+        && matches!(&output.body, FunctionCallOutputBody::ContentItems(items)
-+            if matches!(items.as_slice(), [FunctionCallOutputContentItem::InputText { .. },
-+                FunctionCallOutputContentItem::InputText { text }] if !text.trim().is_empty()));
-+    if !valid {
-+        return Err(receipt_error(
-+            "the marked complete browser observation has an invalid result shape or failure status",
-+        ));
++    Some(fields)
++}
++
++fn valid_native_browser_row(line: &str) -> bool {
++    let Some((index, rest)) = line.strip_prefix('#').and_then(|line| line.split_once(' ')) else { return false };
++    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
++    let Some(fields) = native_browser_fields(rest) else { return false };
++    matches!(fields.first(), Some(("role", value)) if serde_json::from_str::<String>(value).is_ok())
++        && ["content_scope", "content_kind"].iter().all(|key| fields.iter().any(|(name, _)| name == key))
++        && fields.iter().any(|(key, value)| matches!(*key, "label" | "value" | "href" | "href_fragment")
++            && serde_json::from_str::<String>(value).is_ok())
++        && fields.iter().filter(|(key, _)| matches!(*key, "click_ref" | "fill_ref"))
++            .all(|(_, value)| serde_json::from_str::<String>(value).is_ok())
++}
++
++fn historical_browser_lines(page: &str) -> Result<Vec<String>> {
++    let mut result = Vec::new();
++    // Retain only whole quoted URL/title fields, with historical names. No old
++    // snapshot IDs, count/completeness claims, or pagination cursor survives.
++    if let Some(header) = page.lines().next().and_then(|line| line.strip_prefix("AXSNAPSHOT "))
++        && let Some(fields) = native_browser_fields(header)
++    {
++        for key in ["url", "title"] {
++            if let Some((_, value)) = fields.iter().find(|(name, value)| *name == key && serde_json::from_str::<String>(value).is_ok()) {
++                result.push(format!("{}={value}", if key == "title" { "observed_title_fragment" } else { "observed_url" }));
++            }
++        }
 +    }
-+    Ok(true)
++    for line in page.split('\n').filter(|line| line.starts_with('#')) {
++        if !valid_native_browser_row(line) {
++            return Err(receipt_error("the marked browser observation contains a malformed native row"));
++        }
++        result.push(line.to_string());
++    }
++    Ok(result)
++}
++
++fn validate_historical_browser_lines(lines: &[String]) -> Result<()> {
++    let mut metadata = HashSet::new();
++    let mut saw_row = false;
++    let mut defaults = false;
++    for line in lines {
++        if line == HISTORICAL_BROWSER_ROW_DEFAULTS && !defaults && !saw_row {
++            defaults = true;
++        } else if defaults && line.starts_with('#') && valid_native_browser_row(line) {
++            saw_row = true;
++        } else if !defaults && ["observed_url=", "observed_title_fragment="].iter().any(|prefix| {
++            line.strip_prefix(prefix).is_some_and(|value| serde_json::from_str::<String>(value).is_ok())
++                && metadata.insert(*prefix)
++        }) {
++        } else {
++            return Err(receipt_error("the historical browser observation has an invalid row or metadata shape"));
++        }
++    }
++    if defaults != saw_row {
++        return Err(receipt_error("the historical browser observation has inconsistent row defaults"));
++    }
++    Ok(())
++}
++
++fn historical_browser_output(
++    source: &FunctionCallOutputPayload,
++    observation: &BrowserObservationRetention,
++    text_cap: usize,
++) -> FunctionCallOutputPayload {
++    let mut items = vec![FunctionCallOutputContentItem::InputText {
++        text: HISTORICAL_BROWSER_OBSERVATION_MARKER.to_string(),
++    }];
++    if let Some(cue) = &observation.cue {
++        items.push(FunctionCallOutputContentItem::InputText { text: cue.clone() });
++    }
++    // The marker, cue, notice, and real item separators all consume the same
++    // existing text budget. Whole lines may be omitted; no line is ever sliced.
++    let mut used = HISTORICAL_BROWSER_OBSERVATION_MARKER.len()
++        + observation.cue.as_ref().map_or(0, String::len) + items.len()
++        + HISTORICAL_BROWSER_NOTICE.len();
++    let mut body = HISTORICAL_BROWSER_NOTICE.to_string();
++    let mut defaults = false;
++    for line in &observation.lines {
++        let add_defaults = line.starts_with('#') && !defaults;
++        let added = 1 + line.len() + if add_defaults { 1 + HISTORICAL_BROWSER_ROW_DEFAULTS.len() } else { 0 };
++        if used.saturating_add(added) <= text_cap {
++            if add_defaults {
++                body.push('\n');
++                body.push_str(HISTORICAL_BROWSER_ROW_DEFAULTS);
++                defaults = true;
++            }
++            body.push('\n');
++            body.push_str(line);
++            used += added;
++        }
++    }
++    items.push(FunctionCallOutputContentItem::InputText { text: body });
++    FunctionCallOutputPayload { body: FunctionCallOutputBody::ContentItems(items), success: source.success }
++}
++
++fn valid_browser_dispatch_cue(tool: &str, receipt: &str) -> bool {
++    // The small native dispatch cue remains a separate item. It confirms input
++    // dispatch only, never that the website accepted or completed the action.
++    // Retention validates the producer contract; it grants no target authority.
++    if receipt.len() > 128 {
++        return false;
++    }
++    let Ok(cue) = serde_json::from_str::<serde_json::Value>(receipt) else { return false };
++    let Some(cue) = cue.as_object() else { return false };
++    if cue.len() != 5
++        || cue.get("kind").and_then(serde_json::Value::as_str) != tool.strip_prefix("browser_")
++        || cue.get("label").and_then(serde_json::Value::as_str).is_none()
++        || cue.get("partial").and_then(serde_json::Value::as_bool).is_none()
++        || cue.get("dispatched").and_then(serde_json::Value::as_bool) != Some(true)
++        || cue.get("outcome").and_then(serde_json::Value::as_str) != Some("unverified")
++    {
++        return false;
++    }
++    true
++}
++
++fn complete_browser_action_observation(tool: &str, receipt: &str, observation: &str) -> bool {
++    if !valid_browser_dispatch_cue(tool, receipt) { return false; }
++    let Ok(body) = serde_json::from_str::<serde_json::Value>(observation) else { return false };
++    body.get("dispatched").and_then(serde_json::Value::as_bool) == Some(true)
++        && body.get("input_kind").and_then(serde_json::Value::as_str) == tool.strip_prefix("browser_")
++        && body.get("no_replay").and_then(serde_json::Value::as_bool) == Some(true)
++        && body.get("result_verified").and_then(serde_json::Value::as_bool) == Some(false)
++        && body.get("current_observation").is_some_and(|current| {
++            current.get("status").and_then(serde_json::Value::as_str) == Some("available")
++                && current.get("text").and_then(serde_json::Value::as_str)
++                    .is_some_and(|text| !text.trim().is_empty())
++        })
 +}
 +
 +fn bounded_output(
 +    source: &FunctionCallOutputPayload,
 +    text_cap: usize,
 +    keep_image: bool,
-+    historical_complete_browser_observation: bool,
 +) -> Result<FunctionCallOutputPayload> {
 +    let mut omitted_images = 0usize;
 +    let mut image_markers = Vec::new();
@@ -2978,13 +3173,6 @@ index 0000000..550661c
 +        FunctionCallOutputBody::ContentItems(items) => {
 +            let mut text_items = Vec::new();
 +            for (index, item) in items.iter().enumerate() {
-+                // Older receipts remain genuine, bounded tool evidence. Remove
-+                // only the host completeness claim before taking an excerpt;
-+                // otherwise a truncated historical body would still claim to be
-+                // an intact page. Calls, identities and failure state stay exact.
-+                if index == 0 && historical_complete_browser_observation {
-+                    continue;
-+                }
 +                match item {
 +                    FunctionCallOutputContentItem::InputText { text }
 +                        if index == 0 && is_image_omission_marker(text) =>
@@ -3143,10 +3331,10 @@ index 0000000..550661c
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..43b34fe
+index 0000000..7b5dfc2
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,1245 @@
+@@ -0,0 +1,1579 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -3877,6 +4065,339 @@ index 0000000..43b34fe
 +    history
 +}
 +
++fn complete_browser_action_pair(id: &str, kind: &str, page: &str) -> Vec<ResponseItemEnvelope> {
++    let mut history = complete_browser_pair(id, page);
++    if let ResponseItem::FunctionCall { name, arguments, .. } = &mut history[0].item {
++        *name = format!("browser_{kind}");
++        *arguments = if kind == "fill" {
++            json!({"fill_ref":"bfill_current", "text":"exact input e\u{301} 😀"}).to_string()
++        } else {
++            json!({"click_ref":"bclick_current"}).to_string()
++        };
++    }
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++        output.body = FunctionCallOutputBody::ContentItems(vec![
++            FunctionCallOutputContentItem::InputText { text: COMPLETE_BROWSER_OBSERVATION_MARKER.to_string() },
++            FunctionCallOutputContentItem::InputText { text: json!({
++                "kind":kind, "label":"Subject", "partial":false,
++                "dispatched":true, "outcome":"unverified"
++            }).to_string() },
++            FunctionCallOutputContentItem::InputText { text: json!({
++                "dispatched":true, "no_replay":true, "result_verified":false, "input_kind":kind,
++                "current_observation":{"status":"available", "text":page}
++            }).to_string() },
++        ]);
++    }
++    history
++}
++
++fn native_browser_row(index: usize, label: &str, token: &str) -> String {
++    format!("#{index} role=\"AXButton\" label={} content_scope=document content_kind=control actions=[\"AXPress\"] click_ref=\"bclick_{token}\"", serde_json::to_string(label).unwrap())
++}
++
++fn native_browser_page(rows: &[String]) -> String {
++    format!("AXSNAPSHOT id=old-snapshot tab_handle=old-tab source=dom url=\"https://example.test/account\" title=\"Account test 😀\"\nREAD view=overview matches=40 shown=3 next_cursor=old-next source_truncated=1 metadata_truncated=1\nSCOPE not proof of absence\n{}\nContinue with cursor only.", rows.join("\n"))
++}
++
++#[test]
++fn historical_browser_rows_remain_atomic_with_escaped_labels_and_tighter_recompaction() {
++    let escaped = native_browser_row(0, "Send e\u{301} 😀\n#99 role=\"AXButton\" click_ref=\"fake\"\n\\quoted", "real-send");
++    let long = native_browser_row(1, &"oversized label ".repeat(300), "must-omit-entirely");
++    let later = native_browser_row(2, "Sent", "sent-folder");
++    for kind in ["read", "click", "fill"] {
++        let mut history = if kind == "read" {
++            complete_browser_pair("old", &native_browser_page(&[escaped.clone(), long.clone(), later.clone()]))
++        } else {
++            complete_browser_action_pair("old", kind, &native_browser_page(&[escaped.clone(), long.clone(), later.clone()]))
++        };
++        history.extend(complete_browser_pair("latest", "exact current page and cursor"));
++        for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++            assert_receipt_identity(&history, &retained);
++            assert_eq!(retained.last(), history.last());
++            let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else { unreachable!() };
++            let mut previous = output.clone();
++            for cap in [1536, 1024, 768, 512, 384, 256] {
++                let observation = browser_observation_retention(&history[0].item, &previous, false).unwrap().unwrap();
++                let shrunk = historical_browser_output(&previous, &observation, cap);
++                assert!(output_text_bytes(&shrunk.body) <= cap);
++                let items = shrunk.content_items().unwrap();
++                let FunctionCallOutputContentItem::InputText { text } = items.last().unwrap() else { unreachable!() };
++                assert!(!text.contains("next_cursor=") && !text.contains("source_truncated=") && !text.contains("old-snapshot"));
++                assert!(!text.contains("must-omit-entirely"));
++                for line in text.split('\n').filter(|line| line.starts_with('#')) {
++                    assert!(line == escaped || line == later, "only exact complete native rows may survive");
++                }
++                if text.contains("bclick_real-send") { assert!(text.contains(&escaped)); }
++                if text.contains("bclick_sent-folder") { assert!(text.contains(&later)); }
++                if cap == 1536 {
++                    assert!(text.contains(&escaped) && text.contains(&later));
++                    assert!(text.contains("observed_url=\"https://example.test/account\""));
++                    assert!(text.contains("observed_title_fragment="));
++                    assert_eq!(text.lines().filter(|line| line.starts_with('#')).count(), 2);
++                }
++                let again = browser_observation_retention(&history[0].item, &shrunk, false).unwrap().unwrap();
++                assert_eq!(historical_browser_output(&shrunk, &again, cap), shrunk);
++                if kind != "read" { assert_eq!(items[1], previous.content_items().unwrap()[1]); }
++                previous = shrunk;
++            }
++            assert_external_receipt_bounds(&retained);
++            assert_eq!(super::current_turn_receipts(&retained, "current", provider).unwrap(), retained);
++        }
++    }
++}
++
++#[test]
++fn historical_browser_excerpt_survives_aggregate_pressure_without_partial_rows() {
++    let rows: Vec<_> = (0..8).map(|index| native_browser_row(index, &format!("Row {index} {}", "detail ".repeat(16)), &format!("row-{index}"))).collect();
++    let mut history = complete_browser_action_pair("old", "click", &native_browser_page(&rows));
++    history.extend(pair("new", "current", "newest generic output"));
++    let first = current_turn_receipts(&history, "current").unwrap();
++    let ResponseItem::FunctionCallOutput { output: old, .. } = &first[1].item else { unreachable!() };
++    let old_size = output_text_bytes(&old.body);
++    let mut extended = first;
++    for index in 0..14 {
++        extended.extend(pair(&format!("later-{index}"), "current", &"later actual evidence ".repeat(300)));
++    }
++    let reduced = current_turn_receipts(&extended, "current").unwrap();
++    assert_receipt_identity(&extended, &reduced);
++    let ResponseItem::FunctionCallOutput { output, .. } = &reduced[1].item else { unreachable!() };
++    assert!(output_text_bytes(&output.body) < old_size);
++    let FunctionCallOutputContentItem::InputText { text } = output.content_items().unwrap().last().unwrap() else { unreachable!() };
++    assert!(text.lines().filter(|line| line.starts_with('#')).all(|line| rows.iter().any(|row| row == line)));
++    assert!(!text.contains("next_cursor="));
++    assert_eq!(current_turn_receipts(&reduced, "current").unwrap(), reduced);
++    assert_receipt_bounds(&reduced);
++}
++
++#[test]
++fn historical_browser_maximum_dispatch_cue_fits_existing_minimum_text_cap() {
++    for kind in ["click", "fill"] {
++        let mut history = complete_browser_action_pair("old", kind, &native_browser_page(&[native_browser_row(0, "Send", "send")]));
++        let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++        let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++        let FunctionCallOutputContentItem::InputText { text: cue } = &mut items[1] else { unreachable!() };
++        let mut value: serde_json::Value = serde_json::from_str(cue).unwrap();
++        value["label"] = json!("");
++        let label_len = 128 - value.to_string().len();
++        value["label"] = json!("a".repeat(label_len));
++        *cue = value.to_string();
++        assert_eq!(cue.len(), 128);
++        let expected_cue = cue.clone();
++        let ResponseItem::FunctionCallOutput { output, .. } = &history[1].item else { unreachable!() };
++        let observation = browser_observation_retention(&history[0].item, output, false).unwrap().unwrap();
++        let shrunk = historical_browser_output(output, &observation, 256);
++        assert!(output_text_bytes(&shrunk.body) <= 256);
++        assert_eq!(shrunk.content_items().unwrap()[1], FunctionCallOutputContentItem::InputText { text: expected_cue });
++        let repeated = browser_observation_retention(&history[0].item, &shrunk, false).unwrap().unwrap();
++        assert_eq!(historical_browser_output(&shrunk, &repeated, 256), shrunk);
++        assert!(matches!(shrunk.content_items().unwrap().last().unwrap(), FunctionCallOutputContentItem::InputText { text } if text == HISTORICAL_BROWSER_NOTICE));
++    }
++}
++
++#[test]
++fn malformed_historical_browser_shapes_fail_closed_and_foreign_outputs_remain_generic() {
++    let row = native_browser_row(0, "Send", "send");
++    for kind in ["read", "click", "fill"] {
++        let mut original = if kind == "read" { complete_browser_pair("old", &native_browser_page(&[row.clone()])) }
++            else { complete_browser_action_pair("old", kind, &native_browser_page(&[row.clone()])) };
++        original.extend(pair("new", "current", "latest"));
++        let retained = current_turn_receipts(&original, "current").unwrap();
++        for variant in ["missing_notice", "pagination", "partial_row", "unquoted_role", "missing_defaults", "unknown_line", "duplicate_url", "failure", "extra_item", "missing_cue"] {
++            let mut invalid = retained.clone();
++            let ResponseItem::FunctionCallOutput { output, .. } = &mut invalid[1].item else { unreachable!() };
++            if variant == "failure" { output.success = Some(false); }
++            let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++            if variant == "extra_item" { items.push(observation_image()); }
++            else if variant == "missing_cue" { items.remove(1); }
++            else {
++                let FunctionCallOutputContentItem::InputText { text } = items.last_mut().unwrap() else { unreachable!() };
++                match variant {
++                    "missing_notice" => *text = text.replacen(HISTORICAL_BROWSER_NOTICE, "complete page", 1),
++                    "pagination" => text.push_str("\nnext_cursor=old-next"),
++                    "partial_row" => text.push_str("\n#1 role=\"AXButton\" label=\"partial"),
++                    "unquoted_role" => *text = text.replace("role=\"AXButton\"", "role=AXButton"),
++                    "missing_defaults" => *text = text.replace(&format!("{}\n", HISTORICAL_BROWSER_ROW_DEFAULTS), ""),
++                    "unknown_line" => text.push_str("\ncomplete browser prose"),
++                    "duplicate_url" => *text = text.replacen("observed_url=", "observed_url=\"one\"\nobserved_url=", 1),
++                    _ => {},
++                }
++            }
++            assert!(current_turn_receipts(&invalid, "current").is_err(), "{kind} {variant}");
++        }
++        // Marker text in a custom tool or namespace cannot opt into this parser.
++        for foreign in [false, true] {
++            let mut custom = retained.clone();
++            if let ResponseItem::FunctionCall { name, namespace, .. } = &mut custom[0].item {
++                if foreign { *namespace = Some("mcp_custom".to_string()); }
++                else { *name = "custom_observation".to_string(); }
++            }
++            let ResponseItem::FunctionCallOutput { output, .. } = &custom[1].item else { unreachable!() };
++            assert!(browser_observation_retention(&custom[0].item, output, false).unwrap().is_none());
++            let actual = current_turn_receipts(&custom, "current").unwrap();
++            assert_receipt_identity(&custom, &actual);
++        }
++    }
++    // A malformed native row in an older complete result cannot become a safe excerpt.
++    let mut invalid = complete_browser_pair("old", "#0 role=\"AXButton\" label=\"cut off");
++    invalid.extend(pair("new", "current", "latest"));
++    assert!(current_turn_receipts(&invalid, "current").unwrap_err().to_string().contains("malformed native row"));
++}
++
++#[test]
++fn complete_latest_browser_input_keeps_dispatch_cue_and_all_postinput_targets_exact() {
++    let page = format!(
++        "READ source=immutable next_cursor=exact-next\n{}\n\
++         #10 label=Send-message click_ref=send-message-ref\n\
++         #11 label=Sent click_ref=sent-folder-ref\n",
++        "observed e\u{301} 😀 ".repeat(100)
++    );
++    for kind in ["click", "fill"] {
++        for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++            let mut history: Vec<_> = (0..3)
++                .flat_map(|index| pair(&format!("old-{index}"), "current", &"old evidence ".repeat(500)))
++                .collect();
++            history.extend(complete_browser_action_pair("input", kind, &page));
++            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++            assert_receipt_identity(&history, &retained);
++            assert_eq!(retained.last(), history.last());
++            assert_eq!(super::current_turn_receipts(&retained, "current", provider).unwrap(), retained);
++            assert_external_receipt_bounds(&retained);
++            // Persisted output bodies omit the in-memory success field. A real
++            // resumed action must retain the same atomic evidence and cue.
++            let mut resumed = retained.clone();
++            if let ResponseItem::FunctionCallOutput { output, .. } = &mut resumed.last_mut().unwrap().item {
++                output.success = None;
++            }
++            assert_eq!(super::current_turn_receipts(&resumed, "current", provider).unwrap(), resumed);
++        }
++    }
++}
++
++#[test]
++fn complete_browser_input_respects_existing_raw_serialized_and_aggregate_caps() {
++    for kind in ["click", "fill"] {
++        let empty = complete_browser_action_pair("boundary", kind, "");
++        let ResponseItem::FunctionCallOutput { output, .. } = &empty[1].item else { unreachable!() };
++        let available = MAX_LATEST_OUTPUT_TEXT_BYTES - output_text_bytes(&output.body);
++        let exact = complete_browser_action_pair("boundary", kind, &"x".repeat(available));
++        assert_eq!(current_turn_receipts(&exact, "current").unwrap(), exact);
++        let oversized = complete_browser_action_pair("boundary", kind, &"x".repeat(available + 1));
++        assert!(current_turn_receipts(&oversized, "current").unwrap_err().to_string()
++            .contains("complete latest browser observation"));
++        let escaped = complete_browser_action_pair("escaped", kind, &"\\".repeat(1_800));
++        let ResponseItem::FunctionCallOutput { output, .. } = &escaped[1].item else { unreachable!() };
++        assert!(output_text_bytes(&output.body) <= MAX_LATEST_OUTPUT_TEXT_BYTES);
++        assert!(current_turn_receipts(&escaped, "current").unwrap_err().to_string()
++            .contains("complete latest browser observation"));
++        let mut demonstrated = false;
++        for count in 1..MAX_PAIRS {
++            let mut history: Vec<_> = (0..count).flat_map(|index| {
++                let mut previous = pair(&format!("old-{index}"), "current", "actual prior result");
++                if let ResponseItem::FunctionCall { arguments, .. } = &mut previous[0].item {
++                    *arguments = json!({"payload":"a".repeat(200)}).to_string();
++                }
++                previous
++            }).collect();
++            history.extend(complete_browser_action_pair("latest", kind, &"x".repeat(3_500)));
++            let mut generic = history.clone();
++            if let ResponseItem::FunctionCall { name, .. } = &mut generic[count * 2].item {
++                *name = "generic_action".to_string();
++            }
++            if super::current_turn_receipts(&generic, "current", ReceiptProvider::External).is_ok()
++                && let Err(error) = super::current_turn_receipts(&history, "current", ReceiptProvider::External)
++            {
++                assert!(error.to_string().contains("complete latest browser observation"));
++                demonstrated = true;
++                break;
++            }
++        }
++        assert!(demonstrated, "atomic input observations must stop instead of deleting any action or target");
++    }
++}
++
++#[test]
++fn malformed_marked_browser_inputs_never_gain_complete_observation_retention() {
++    for kind in ["click", "fill"] {
++        for variant in ["failure", "missing_cue", "extra_item", "wrong_kind", "cue_extra_field",
++                        "cue_too_large", "label_type", "partial_type", "not_dispatched", "verified_cue",
++                        "invalid_json", "body_wrong_kind", "body_not_dispatched", "replay", "verified_result", "unavailable", "empty_page"] {
++            let mut history = complete_browser_action_pair("invalid", kind, "actual post-input page");
++            let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++            if variant == "failure" { output.success = Some(false); }
++            let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++            if variant == "missing_cue" { items.remove(1); }
++            else if variant == "extra_item" { items.push(observation_image()); }
++            else {
++                let FunctionCallOutputContentItem::InputText { text: cue_text } = &mut items[1] else { unreachable!() };
++                let mut cue: serde_json::Value = serde_json::from_str(cue_text).unwrap();
++                match variant {
++                    "wrong_kind" => cue["kind"] = json!(if kind == "click" { "fill" } else { "click" }),
++                    "cue_extra_field" => cue["extra"] = json!(true),
++                    "cue_too_large" => cue["label"] = json!("x".repeat(129)),
++                    "label_type" => cue["label"] = json!(null),
++                    "partial_type" => cue["partial"] = json!("false"),
++                    "not_dispatched" => cue["dispatched"] = json!(false),
++                    "verified_cue" => cue["outcome"] = json!("verified"),
++                    _ => {},
++                }
++                *cue_text = cue.to_string();
++                let FunctionCallOutputContentItem::InputText { text: body_text } = &mut items[2] else { unreachable!() };
++                let mut body: serde_json::Value = serde_json::from_str(body_text).unwrap();
++                match variant {
++                    "body_wrong_kind" => body["input_kind"] = json!(if kind == "click" { "fill" } else { "click" }),
++                    "body_not_dispatched" => body["dispatched"] = json!(false),
++                    "replay" => body["no_replay"] = json!(false),
++                    "verified_result" => body["result_verified"] = json!(true),
++                    "unavailable" => body["current_observation"]["status"] = json!("unavailable"),
++                    "empty_page" => body["current_observation"]["text"] = json!(" \n\t"),
++                    _ => {},
++                }
++                *body_text = if variant == "invalid_json" { "{broken".to_string() } else { body.to_string() };
++            }
++            assert!(current_turn_receipts(&history, "current").unwrap_err().to_string()
++                .contains("invalid result shape or failure status"), "{kind} {variant}");
++        }
++        for foreign in [false, true] {
++            let mut ordinary = complete_browser_action_pair("foreign", kind, &"large page ".repeat(800));
++            if let ResponseItem::FunctionCall { name, namespace, .. } = &mut ordinary[0].item {
++                if foreign { *namespace = Some("mcp_custom".to_string()); }
++                else { *name = "custom_action".to_string(); }
++            }
++            let retained = current_turn_receipts(&ordinary, "current").unwrap();
++            assert_receipt_identity(&ordinary, &retained);
++            assert_ne!(retained[1].item, ordinary[1].item);
++        }
++    }
++}
++
++#[test]
++fn older_complete_browser_inputs_keep_historical_rows_and_dispatch_cue() {
++    for kind in ["click", "fill"] {
++        for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++            let mut history = complete_browser_action_pair("old-input", kind, &native_browser_page(&[native_browser_row(0, "Send message", "send-message"), native_browser_row(1, "Sent", "sent-folder")]));
++            let ResponseItem::FunctionCallOutput { output, .. } = &history[1].item else { unreachable!() };
++            let cue = output.content_items().unwrap()[1].clone();
++            history.extend(complete_browser_pair("latest-read", "READ current page\n#0 current target ref\n"));
++            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++            assert_receipt_identity(&history, &retained);
++            let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else { unreachable!() };
++            let items = output.content_items().unwrap();
++            assert_eq!(items[0], FunctionCallOutputContentItem::InputText { text: HISTORICAL_BROWSER_OBSERVATION_MARKER.to_string() });
++            assert_eq!(items[1], cue);
++            let FunctionCallOutputContentItem::InputText { text } = &items[2] else { unreachable!() };
++            assert!(text.contains(&native_browser_row(0, "Send message", "send-message")));
++            assert!(text.contains(&native_browser_row(1, "Sent", "sent-folder")));
++            assert!(!text.contains("next_cursor="));
++            assert!(!text.contains("current_observation"));
++            assert!(!items.iter().any(|item| matches!(item,
++                FunctionCallOutputContentItem::InputText { text } if text == COMPLETE_BROWSER_OBSERVATION_MARKER)));
++            assert_eq!(retained.last(), history.last());
++            assert_eq!(super::current_turn_receipts(&retained, "current", provider).unwrap(), retained);
++        }
++    }
++}
++
 +#[test]
 +fn complete_latest_browser_page_keeps_every_target_and_cursor_exact_across_compactions() {
 +    let page = format!(
@@ -4009,18 +4530,19 @@ index 0000000..43b34fe
 +}
 +
 +#[test]
-+fn older_browser_excerpt_removes_completeness_marker_and_preserves_latest_image() {
-+    let mut history = complete_browser_pair("old-page", &"old observed row ".repeat(220));
++fn older_browser_excerpt_keeps_whole_rows_and_preserves_latest_image() {
++    let short = native_browser_row(1, "Earlier visible target", "earlier-page");
++    let long = native_browser_row(0, &"old observed row ".repeat(220), "omitted-long-row");
++    let mut history = complete_browser_pair("old-page", &native_browser_page(&[long, short.clone()]));
 +    history.extend(image_pair("latest-image", "current image observation"));
 +    let retained = current_turn_receipts(&history, "current").unwrap();
 +    assert_receipt_identity(&history, &retained);
 +    let ResponseItem::FunctionCallOutput { output: old, .. } = &retained[1].item else { unreachable!() };
 +    let FunctionCallOutputBody::ContentItems(items) = &old.body else { unreachable!() };
-+    assert_eq!(items.len(), 1);
-+    assert!(!items.iter().any(|item| matches!(item,
-+        FunctionCallOutputContentItem::InputText { text } if text == COMPLETE_BROWSER_OBSERVATION_MARKER)));
-+    assert!(matches!(&items[0], FunctionCallOutputContentItem::InputText { text }
-+        if text.starts_with("old observed row") && text.contains("truncated")));
++    assert_eq!(items.len(), 2);
++    assert_eq!(items[0], FunctionCallOutputContentItem::InputText { text: HISTORICAL_BROWSER_OBSERVATION_MARKER.to_string() });
++    assert!(matches!(&items[1], FunctionCallOutputContentItem::InputText { text }
++        if text.contains(&short) && !text.contains("omitted-long-row") && !text.contains("next_cursor=")));
 +    let ResponseItem::FunctionCallOutput { output: latest, .. } = &retained.last().unwrap().item else { unreachable!() };
 +    assert_eq!(latest_observation_image(latest).unwrap(), Some(&observation_image()));
 +    assert_eq!(current_turn_receipts(&retained, "current").unwrap(), retained);

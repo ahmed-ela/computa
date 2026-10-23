@@ -737,7 +737,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("browser_click(click_ref) or browser_fill(fill_ref,text)"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
-        XCTAssertTrue(browser.contains("Recheck the current row's label/action against the intended operation"))
+        XCTAssertTrue(browser.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
@@ -767,11 +767,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(instructions.contains(browser))
             let text = instructions.replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(text.contains("creates AND binds a task-owned page; read directly without another bind"))
-            XCTAssertTrue(text.contains("Each read replaces the action menu; use only its published refs, even if a token repeats"))
+            XCTAssertTrue(text.contains("Continuation pages retain earlier refs in the same capture (120-ref FIFO limit)"))
+            XCTAssertTrue(text.contains("Fresh reads replace the menu; omitted/changed refs expire"))
             XCTAssertTrue(text.contains("An admitted click or fill consumes all refs"))
             XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
             XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
-            XCTAssertTrue(text.contains("Recheck the current row's label/action against the intended operation"))
+            XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
             XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
@@ -798,7 +799,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
-        XCTAssertTrue(text.contains("Recheck the current row's label/action against the intended operation"))
+        XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
@@ -806,7 +807,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testBrowserTypedInputReferencesStayFreshWithoutChangingNativeOrSubtreeContracts() {
-        let calls = "Use browser_click(click_ref) or browser_fill(fill_ref,text) with refs in the current read."
+        let calls = "Use browser_click(click_ref) or browser_fill(fill_ref,text) with currently published refs."
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
         let fresh = ComputaAgentInstructions.webResponseContract(
             offeredToolNames: ["functions.browser_click", "functions.browser_fill"],

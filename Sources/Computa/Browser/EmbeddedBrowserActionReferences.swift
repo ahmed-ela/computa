@@ -38,6 +38,8 @@ struct EmbeddedBrowserActionReferences: Sendable {
             return result
         }
 
+        var witness: BrowserPublishedActionWitness? { target?.witness }
+
         func matches(taskKey: String, contextID: UUID, tool: String, arguments: [String: Any]) -> Bool {
             self.taskKey == taskKey && self.contextID == contextID && kind.tool == tool
                 && arguments[kind.argument] as? String == reference
@@ -45,18 +47,19 @@ struct EmbeddedBrowserActionReferences: Sendable {
         }
     }
 
-    fileprivate struct Target: Sendable {
+    fileprivate struct Target: Equatable, Sendable {
         let kind: Kind
-        let snapshotID: UUID
-        let bindingHandle: UUID
-        let instance: String
-        let committedDocumentID: UUID?
-        let loaderID: String
-        let epoch: UUID
-        let url: URL
-        let element: BrowserTabElement
-        let label: String
-        let exposures: [SemanticReadFieldExposure]
+        let witness: BrowserPublishedActionWitness
+        var snapshotID: UUID { witness.snapshotID }
+        var bindingHandle: UUID { witness.bindingHandle }
+        var instance: String { witness.targetInstanceToken }
+        var committedDocumentID: UUID? { witness.committedDocumentID }
+        var loaderID: String { witness.loaderID }
+        var epoch: UUID { witness.documentEpoch }
+        var url: URL { witness.documentURL }
+        var element: BrowserTabElement { witness.element }
+        var label: String { witness.label }
+        var exposures: [SemanticReadFieldExposure] { witness.exposures }
 
         var intentIdentity: String {
             // Native target incarnation survives rebinds. A new snapshot,
@@ -85,14 +88,21 @@ struct EmbeddedBrowserActionReferences: Sendable {
 
     private struct Tombstone: Sendable { let kind: Kind; let snapshotID: UUID; let identity: String }
     private var current = [String: Target]()
+    private var currentOrder = [String]()
+    private var publishedPageID: UUID?
+    private var sourceID: UUID?
+    private var selectionID: UUID?
+    private var bindingHandle: UUID?
     private var retired = [String: Tombstone]()
     private var retiredOrder = [String]()
-    static let maximumCurrent = 120 // Two action kinds for at most 60 published rows.
+    static let maximumCurrent = 120 // Unchanged bound, shared across continuation pages.
     static let maximumRetired = 256
 
     mutating func retireCurrent() {
         for (token, target) in current { retire(token, target) }
         current.removeAll()
+        currentOrder.removeAll()
+        publishedPageID = nil; sourceID = nil; selectionID = nil; bindingHandle = nil
     }
 
     private mutating func retire(_ token: String, _ target: Target) {
@@ -104,33 +114,66 @@ struct EmbeddedBrowserActionReferences: Sendable {
     }
 
     /// Call on a value copy, then commit only alongside its complete bounded
-    /// output. Only exact rows of this published page receive capabilities.
+    /// output. Only emitted rows receive capabilities. Cursor continuation can
+    /// retain earlier publications of this exact immutable selection, bounded
+    /// by the same token cap; republishing never renews FIFO age or the witness.
     mutating func publish(snapshot: BrowserTabSnapshot, binding: BrowserTabBinding) -> [Int: String] {
-        var next = [String: Target](), suffixes = [Int: String]()
         guard let receipt = snapshot.readReceipt, receipt.id == snapshot.id,
+              let selected = snapshot.actionSelectionID,
               let presentation = snapshot.presentation, presentation.snapshotID == snapshot.id else {
             retireCurrent(); return [:]
         }
+        let continuing = snapshot.isActionContinuation && sourceID == receipt.sourceID
+            && selectionID == selected && bindingHandle == binding.handle
+        var next = continuing ? current : [:], nextOrder = continuing ? currentOrder : []
+        var suffixes = [Int: String](), publishedTokens = Set<String>()
         for row in presentation.rows {
             guard let element = snapshot.element(at: row.index), element.isEnabled,
-                  let label = EmbeddedBrowserTargetAssertion.exposedLabel(snapshot: snapshot, element: element) else { continue }
-            let exposures = receipt.exposures.filter { $0.nodeID == "backend:\(element.backendNodeID)" }
+                  let witness = snapshot.actionWitnesses[row.index], witness.snapshotID == snapshot.id,
+                  witness.sourceID == receipt.sourceID, witness.selectionID == selected,
+                  witness.bindingHandle == binding.handle, witness.targetInstanceToken == binding.targetInstanceToken,
+                  witness.element == element else { continue }
             for kind in [Kind.click, .fill] {
-                guard kind == .click ? element.supportsPress : element.supportsSetText,
-                      next.count < Self.maximumCurrent else { continue }
-                let target = Target(kind: kind, snapshotID: snapshot.id, bindingHandle: binding.handle,
-                    instance: binding.targetInstanceToken, committedDocumentID: snapshot.evidenceDocument?.committedDocumentID,
-                    loaderID: snapshot.loaderID, epoch: snapshot.documentEpoch, url: snapshot.documentURL,
-                    element: element, label: label, exposures: exposures)
-                let token = current.first { !next.keys.contains($0.key) && $0.value.canRepublish(as: target) }?.key
+                guard kind == .click ? element.supportsPress : element.supportsSetText else { continue }
+                let target = Target(kind: kind, witness: witness)
+                let token = currentOrder.first { !publishedTokens.contains($0)
+                    && current[$0]?.canRepublish(as: target) == true }
                     ?? kind.prefix + UUID().uuidString
-                next[token] = target
+                if next[token] == nil {
+                    while next.count >= Self.maximumCurrent,
+                          let oldestIndex = nextOrder.firstIndex(where: { !publishedTokens.contains($0) }) {
+                        let oldest = nextOrder.remove(at: oldestIndex)
+                        if let old = next.removeValue(forKey: oldest) { retire(oldest, old) }
+                    }
+                    guard next.count < Self.maximumCurrent else { continue }
+                    nextOrder.append(token)
+                }
+                // An already published same-capture witness stays frozen even
+                // if an identical fragment appears on a later continuation.
+                if !continuing || next[token] == nil { next[token] = target }
+                publishedTokens.insert(token)
                 suffixes[row.index, default: ""] += " \(kind.argument)=\"\(token)\""
             }
         }
         for (token, target) in current where next[token] == nil { retire(token, target) }
         current = next
+        currentOrder = nextOrder
+        publishedPageID = snapshot.id; sourceID = receipt.sourceID
+        selectionID = selected; bindingHandle = binding.handle
         return suffixes
+    }
+
+    /// Membership is checked without re-resolving an approved target. A fresh
+    /// publication may reuse the token, but cannot replace this frozen witness;
+    /// FIFO eviction also revokes a prepared-but-not-dispatched action.
+    func admits(_ prepared: Prepared, snapshot: BrowserTabSnapshot?) -> Bool {
+        guard let target = prepared.target, current[prepared.reference] == target,
+              let snapshot, snapshot.id == publishedPageID,
+              snapshot.actionSelectionID == selectionID,
+              snapshot.readReceipt?.sourceID == sourceID,
+              target.witness.selectionID == selectionID,
+              target.witness.sourceID == sourceID else { return false }
+        return true
     }
 
     func prepare(taskKey: String, contextID: UUID, tool: String, arguments: [String: Any],
@@ -138,9 +181,12 @@ struct EmbeddedBrowserActionReferences: Sendable {
         guard let kind = Kind(tool: tool), let token = arguments[kind.argument] as? String else { throw Failure.invalidReference }
         let text = arguments["text"] as? String
         if let target = current[token], target.kind == kind {
-            return Prepared(taskKey: taskKey, contextID: contextID, kind: kind, reference: token, text: text,
+            let prepared = Prepared(taskKey: taskKey, contextID: contextID, kind: kind, reference: token, text: text,
                 snapshotID: target.snapshotID, intentIdentity: target.intentIdentity,
-                target: target.snapshotID == snapshot?.id ? target : nil)
+                target: target)
+            return admits(prepared, snapshot: snapshot) ? prepared : Prepared(
+                taskKey: taskKey, contextID: contextID, kind: kind, reference: token, text: text,
+                snapshotID: target.snapshotID, intentIdentity: target.intentIdentity, target: nil)
         }
         if let old = retired[token], old.kind == kind {
             return Prepared(taskKey: taskKey, contextID: contextID, kind: kind, reference: token, text: text,

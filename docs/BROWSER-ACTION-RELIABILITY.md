@@ -164,19 +164,21 @@ old stop notice was appended after every subsequent turn, making it appear curre
   not retry. A second failure remains an unavailable observation. The input is
   never replayed, and a recovered observation does not verify its outcome.
 - Overview interleaves controls, headings, readable main/article body text, and
-  navigation in one captured selection. It keeps the existing 18-row and
-  6,000-byte row budget, exact field exposures, and immutable continuation.
+  navigation in one captured selection. It keeps the existing 18-row maximum,
+  exact field exposures, and immutable continuation. Compact pages also fit the
+  existing complete-observation envelope limits before publication.
   A long sidebar cannot by itself hide all document text; a heading does not
   substitute for the body. Selection uses observed structure, never success
   keywords. This is a bounded sample, not complete document coverage or proof
   that an action succeeded. Additional evidence may still require a read.
-- Successful click/fill tool outputs begin with a separate compact dispatch
+- Successful click/fill tool outputs include a separate compact dispatch
   receipt. It preserves the operation and the control label through item-wise
   history truncation; snapshot IDs and indices alone cannot explain an older
   action. The serialized receipt fits 128 UTF-8 bytes, including JSON escaping,
   and copies only a label span already exposed by the validated input snapshot.
-  A partial flag identifies clipped or unavailable labels. The full post-input
-  observation remains the second item. Failed dispatches have no such receipt,
+  A partial flag identifies clipped or unavailable labels. A complete post-input
+  output contains the retention marker, dispatch receipt and observation as
+  separate items. Failed dispatches have no such receipt,
   and existing turn, lease and generation checks still gate publication. This
   historical cue provides no new action reference and explicitly leaves the
   outcome unverified. Compaction's total history limits are unchanged.
@@ -190,10 +192,14 @@ old stop notice was appended after every subsequent turn, making it appear curre
   of requiring the model to copy a long label and a separate snapshot/index.
   An absent label is not an explicitly empty label, and a continuation grants
   only its exposed fragment. References never search for a substitute target.
-- Each read replaces the reference menu. A token survives only when that read
+- Each fresh read replaces the reference menu. A token survives only when that read
   explicitly republishes the same native node with identical field exposures
   and action semantics in the same binding and committed document/generation/URL.
-  Changed or omitted rows expire; admitted input consumes all current refs.
+  Fresh reads retire changed or omitted rows; admitted input consumes all refs.
+  Cursor-only continuation within the same immutable capture retains already
+  exposed targets within the existing 120-reference FIFO limit. A broker-minted
+  witness preserves the original row, exposure spans and target semantics;
+  neither pagination nor approval renews its original capture lifetime.
   The target is frozen before approval and retry accounting, then checked again
   before dispatch. A later read cannot silently update an approved target.
   Existing physical checks, permissions and outcome verification remain intact;
@@ -272,3 +278,44 @@ URL, response text or content hash. Maintenance and correction requests cannot
 consume that arm; cancellation or a superseded user revision suppresses
 publication. The diagnostic is inactive unless explicitly armed. A matching
 request and validated response still do not verify the requested task outcome.
+
+## Build 226 failures and follow-up
+
+The controlled build-226 tests used remote Cerebras GPT-OSS120b at medium effort.
+They did not qualify the requested tasks, despite passing the native tests.
+
+- A resumed Outlook chat refused without tools even though an exact-task private
+  projection diagnostic confirmed fresh developer guidance and the active human
+  request in the actual provider body. A fresh chat selected the matching account,
+  searched and exposed attachment evidence, but stopped at the unchanged 32-call
+  limit before answering. Three rejected references had been exposed earlier in
+  the same immutable read, then retired solely because continuation omitted them.
+- Both documentation cases exhausted the existing receipt limits. The fresh case
+  performed broad recursive scans, including saved session transcripts, and used
+  malformed paths. Neither produced a supported answer. Exit code 1 or a local
+  search miss is not evidence that a product setting does not exist.
+- The synthetic read stopped after a narrow search miss instead of refining it.
+  In the same-chat send, all three fields were filled, but compaction shortened
+  the last post-fill observation from 5,917 to 3,904 bytes. It removed the
+  **Send message** label and reference while preserving an unlabeled **Sent**
+  navigation reference. The model selected that dangling reference. The fixture
+  recorded zero POSTs; the final claim of a send attempt was incorrect.
+
+The follow-up treats ordinary and post-input browser observations as complete,
+bounded evidence. The broker sizes the actual post-input JSON envelope, separate
+dispatch cue, marker and reference reservations before publishing a page or
+advancing its cursor. The native runtime retains the latest marked observation
+intact through compaction. Historical excerpts retain whole native rows and a
+separate dispatch cue, without old cursors or completeness claims. Their distinct
+retention marker keeps subsequent compactions from splicing rows into dangling
+references. An unavailable post-input observation still reports the dispatched
+input without inviting replay. Nested JSON escaping reduces the row allowance
+gradually within the same captured position, so an oversized first candidate does
+not discard a smaller valid page or advance past unexposed bytes.
+The existing text, serialized-output, receipt, reference and retry limits remain
+unchanged. Exact-target validation and original capture expiry still apply before
+input, including after an approval wait.
+
+These changes address observed host failures. They do not turn a model's final
+answer, search interpretation or selected control into verified task success.
+Live qualification must still check actual outcomes and preserve failed attempts.

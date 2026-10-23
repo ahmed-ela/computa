@@ -1870,6 +1870,8 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content, snapshotID: first.snapshot.id, elementIndex: 0))
         let subtreeReceipt = try XCTUnwrap(subtree.snapshot.readReceipt)
         XCTAssertEqual(subtreeReceipt.sourceID, firstReceipt.sourceID)
+        XCTAssertNotEqual(subtree.snapshot.actionSelectionID, first.snapshot.actionSelectionID)
+        XCTAssertFalse(subtree.snapshot.isActionContinuation)
         XCTAssertEqual(subtreeReceipt.subtreeNodeID, "n0")
         XCTAssertEqual(subtreeReceipt.view, .content)
         XCTAssertEqual(subtreeReceipt.selectedElementCount, 1)
@@ -2311,6 +2313,96 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testEarlierActionWitnessCannotFollowSubtreeSelectionOfSameCapture() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "article", name: "Card", children: ["n1"]),
+            semanticNode(1, role: "button", name: "Intended action", parent: "n0"),
+        ])
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let witness = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .all, snapshotID: first.snapshot.id, elementIndex: 0))
+        XCTAssertEqual(subtree.snapshot.readReceipt?.sourceID, first.snapshot.readReceipt?.sourceID)
+        XCTAssertNotEqual(subtree.snapshot.actionSelectionID, witness.selectionID)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: subtree.binding, witness: witness)
+        }
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: subtree.binding, witness: witness, action: "AXPress")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testMutationPermitChecksCaptureDeadlineInsideCommit() throws {
+        var inputs = 0
+        let expired = BrowserMutationPermit(deadline: .now - .milliseconds(1))
+        XCTAssertThrowsError(try expired.commit { inputs += 1 }) { error in
+            XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot)
+        }
+        XCTAssertEqual(inputs, 0)
+        let current = BrowserMutationPermit(deadline: .now + .seconds(10))
+        try current.commit { inputs += 1 }
+        XCTAssertEqual(inputs, 1)
+    }
+
+    func testRepublishedOldestReferenceCannotBeEvictedByLaterRowsOnItsCurrentPage() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let nodes = (0..<220).map { semanticNode($0, role: "button", name: "Control \($0)") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: fixture.observation.binding.targetID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let presentation = try XCTUnwrap(first.snapshot.presentation)
+        XCTAssertGreaterThan(presentation.rows.count, 2)
+        var registry = EmbeddedBrowserActionReferences()
+        // Model a bounded native publication exposing only the first original
+        // row. Its witness and every later test row are broker-minted, unchanged.
+        var oldestPage = first.snapshot
+        oldestPage.presentation = .init(snapshotID: first.snapshot.id, rows: [presentation.rows[0]])
+        let firstSuffix = try XCTUnwrap(registry.publish(snapshot: oldestPage, binding: first.binding)[0])
+        let oldest = try renderedJSONField("click_ref", in: firstSuffix)
+        let contextID = UUID()
+        let frozen = try registry.prepare(taskKey: "task-a", contextID: contextID, tool: "browser_click",
+            arguments: ["click_ref": oldest], snapshot: oldestPage)
+        var page = first
+        var exposed = 1
+        // Add exactly 119 other references, retaining the original issuance age.
+        while exposed < 120 {
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(page.snapshot.nextCursor)))
+            var limited = page.snapshot
+            let rows = Array(try XCTUnwrap(limited.presentation).rows.prefix(120 - exposed))
+            limited.presentation = .init(snapshotID: limited.id, rows: rows)
+            _ = registry.publish(snapshot: limited, binding: page.binding)
+            exposed += rows.count
+        }
+        XCTAssertEqual(registry.countsForTesting.current, 120)
+        // Re-publish the oldest row followed by one previously withheld row.
+        // Eviction must skip this page's printed token without renewing its age.
+        var mixed = first.snapshot
+        mixed.isActionContinuation = true
+        mixed.presentation = .init(snapshotID: mixed.id, rows: Array(presentation.rows.prefix(2)))
+        let suffixes = registry.publish(snapshot: mixed, binding: first.binding)
+        XCTAssertEqual(try renderedJSONField("click_ref", in: XCTUnwrap(suffixes[0])), oldest)
+        XCTAssertTrue(registry.admits(frozen, snapshot: mixed))
+        for suffix in suffixes.values {
+            let token = try renderedJSONField("click_ref", in: suffix)
+            let prepared = try registry.prepare(taskKey: "task-a", contextID: contextID, tool: "browser_click",
+                arguments: ["click_ref": token], snapshot: mixed)
+            XCTAssertTrue(registry.admits(prepared, snapshot: mixed))
+        }
+        XCTAssertEqual(registry.countsForTesting.current, 120)
+        // A later publication can evict that old token: republication did not
+        // promote it to the back of the FIFO or renew its immutable witness.
+        mixed.presentation = .init(snapshotID: mixed.id, rows: [presentation.rows[2]])
+        _ = registry.publish(snapshot: mixed, binding: first.binding)
+        XCTAssertFalse(registry.admits(frozen, snapshot: mixed))
+        await fixture.assertNoInput()
+    }
+
     func testMutationPermitRevocationAndSingleUse() throws {
         var sends = 0
         let revoked = BrowserMutationPermit()
@@ -2548,6 +2640,12 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
             nodes: nodes, sourceTruncated: sourceTruncated
         )
         state.document.semanticReadiness = semanticReadiness
+        states[targetID] = state
+    }
+
+    func setCommittedDocumentID(targetID: String) throws {
+        guard var state = states[targetID] else { throw BrowserTabBrokerError.targetClosed }
+        state.document.committedDocumentID = UUID()
         states[targetID] = state
     }
 

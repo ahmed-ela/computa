@@ -3,7 +3,7 @@ import ApplicationServices
 import AutomationCore
 import Foundation
 
-/// A complete ordinary browser-read page, including its reference menu, must
+/// A complete browser observation, including its reference menu, must
 /// fit atomically in the pinned runtime's existing latest-receipt budget.
 enum BrowserCompleteObservation {
     static let marker = #"{"retention":"complete_browser_observation_v1"}"#
@@ -15,7 +15,7 @@ enum BrowserCompleteObservation {
         var metadata: [String: Any] = [
             "consumed_by_admitted_input": true,
             "next_after_input": "Use current_observation or browser_read; never replay.",
-            "references": "Only this page's refs are current; fresh filtered read for earlier targets.",
+            "references": "Refs from the same capture survive continuation within the 120-ref FIFO limit; fresh reads replace the menu.",
             "literal_copy_guidance": "Copy observed values verbatim, preserving Unicode and whitespace.",
         ]
         if let cursor { metadata["continuation"] = ["tool": "browser_read", "arguments": ["cursor": cursor]] }
@@ -23,10 +23,40 @@ enum BrowserCompleteObservation {
         return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
     }
 
-    static func excessBytes(_ text: String, referenceReserve: Int = 0) throws -> Int {
-        let items = [["type": "inputText", "text": marker], ["type": "inputText", "text": text]]
+    /// Size the actual post-input envelope before advancing a read cursor. A
+    /// dispatch receipt remains separate from the observation through compaction.
+    enum Encoding: Sendable {
+        case read
+        case input(wasFill: Bool, receipt: String)
+
+        var actionReceipt: String? {
+            if case let .input(_, receipt) = self { return receipt }
+            return nil
+        }
+
+        func encode(_ text: String, snapshotID: UUID) throws -> String {
+            guard case let .input(wasFill, _) = self else { return text }
+            let effect = wasFill
+                ? "Fill dispatched; no Enter or submit click. Page handlers may react. Compare the complete field value before a distinct submit action."
+                : "Click dispatched. If unchanged, wait/read."
+            let result: [String: Any] = [
+                "dispatched": true, "no_replay": true, "result_verified": false,
+                "input_kind": wasFill ? "fill" : "click",
+                "current_observation": ["status": "available", "view": "overview",
+                    "snapshot_id": snapshotID.uuidString, "text": text],
+                "action_references": ["consumed": true, "next": "current_observation"],
+                "next": effect + " Recheck current labels/actions. Prior refs are consumed; do not repeat input. Verify a new outcome."
+            ]
+            let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    static func excessBytes(_ text: String, referenceReserve: Int = 0, actionReceipt: String? = nil) throws -> Int {
+        let parts = [marker] + (actionReceipt.map { [$0] } ?? []) + [text]
+        let items = parts.map { ["type": "inputText", "text": $0] }
         let serialized = try JSONSerialization.data(withJSONObject: items, options: [.sortedKeys])
-        return max(0, max(marker.utf8.count + 1 + text.utf8.count + referenceReserve - maximumTextBytes,
+        return max(0, max(parts.reduce(parts.count - 1) { $0 + $1.utf8.count } + referenceReserve - maximumTextBytes,
                           serialized.count + referenceReserve - maximumSerializedItemsBytes))
     }
 }
@@ -257,6 +287,43 @@ struct BrowserTabElement: Equatable, Sendable {
     var constraintValidation: BrowserConstraintValidation? = nil
 }
 
+/// Minted only by this broker from a bounded, emitted row. It identifies one
+/// exposed target inside the retained immutable selection, never a whole page
+/// or a model-supplied node. The controller publishes its opaque reference only
+/// after the complete output fits; holding this value alone grants no input.
+struct BrowserPublishedActionWitness: Equatable, Sendable {
+    let sourceID: UUID
+    let selectionID: UUID
+    let snapshotID: UUID
+    let bindingHandle: UUID
+    let targetInstanceToken: String
+    let committedDocumentID: UUID?
+    let loaderID: String
+    let documentEpoch: UUID
+    let documentURL: URL
+    let element: BrowserTabElement
+    let label: String
+    let exposures: [SemanticReadFieldExposure]
+    fileprivate let selectedIndex: Int
+    fileprivate let deadline: ContinuousClock.Instant
+
+    func checkCaptureAge() throws {
+        guard ContinuousClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
+    }
+
+    fileprivate init(sourceID: UUID, selectionID: UUID, snapshot: BrowserTabSnapshot,
+                     binding: BrowserTabBinding, element: BrowserTabElement, label: String,
+                     exposures: [SemanticReadFieldExposure], selectedIndex: Int,
+                     deadline: ContinuousClock.Instant) {
+        self.sourceID = sourceID; self.selectionID = selectionID; snapshotID = snapshot.id
+        bindingHandle = binding.handle; targetInstanceToken = binding.targetInstanceToken
+        committedDocumentID = snapshot.evidenceDocument?.committedDocumentID
+        loaderID = snapshot.loaderID; documentEpoch = snapshot.documentEpoch; documentURL = snapshot.documentURL
+        self.element = element; self.label = label; self.exposures = exposures
+        self.selectedIndex = selectedIndex; self.deadline = deadline
+    }
+}
+
 struct BrowserTabSnapshot: Equatable, Sendable {
     let id: UUID
     let tabHandle: UUID
@@ -277,6 +344,11 @@ struct BrowserTabSnapshot: Equatable, Sendable {
     /// Exact published row text; full retained fields above must not be used
     /// to reconstruct a model-facing reference menu.
     var presentation: SemanticReadPresentation? = nil
+    /// A subtree may share sourceID, but only cursor continuation retains this
+    /// selection identity and can retain previously published input references.
+    var actionSelectionID: UUID? = nil
+    var isActionContinuation = false
+    var actionWitnesses: [Int: BrowserPublishedActionWitness] = [:]
 
     func element(at index: Int) -> BrowserTabElement? {
         guard elements.indices.contains(index), elements[index].index == index else {
@@ -388,9 +460,11 @@ final class BrowserMutationPermit: @unchecked Sendable {
     private let lock = NSLock()
     private var available = true
     private let lifetime: BrowserTabLifetime?
+    private let deadline: ContinuousClock.Instant?
 
-    init(lifetime: BrowserTabLifetime? = nil) {
+    init(lifetime: BrowserTabLifetime? = nil, deadline: ContinuousClock.Instant? = nil) {
         self.lifetime = lifetime
+        self.deadline = deadline
     }
 
     func revoke() {
@@ -414,6 +488,7 @@ final class BrowserMutationPermit: @unchecked Sendable {
             throw BrowserTabBrokerError.staleSnapshot
         }
         try Task.checkCancellation()
+        if let deadline, ContinuousClock.now >= deadline { throw BrowserTabBrokerError.staleSnapshot }
         available = false
         try enqueue()
     }
@@ -455,6 +530,7 @@ actor BrowserTabSessionBroker {
         let request: SemanticReadRequest
         let scopeNodeID: String?
         let sourceID: UUID
+        let selectionID: UUID
         let nextPosition: ReadPosition
         let nextCursor: String?
         let snapshotID: UUID
@@ -671,7 +747,8 @@ actor BrowserTabSessionBroker {
         bundleIdentifier: String,
         read: SemanticReadRequest,
         replacingCursor: String? = nil,
-        compact: Bool = false
+        compact: Bool = false,
+        compactEncoding: BrowserCompleteObservation.Encoding = .read
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -805,6 +882,7 @@ actor BrowserTabSessionBroker {
             BrowserActionVerification.observedLinkDestination($0, at: document.url) != nil
         }.map(\.backendNodeID))
         let sourceID = retainingObservation ? priorRead!.sourceID : UUID()
+        let selectionID = read.cursor != nil ? priorRead!.selectionID : UUID()
         let continuationID = UUID().uuidString
         var bodyLimit = compact ? 3_000 : (effectiveRead.view == .overview ? 6_000 : 10_000)
         var page: ReadPage
@@ -834,13 +912,19 @@ actor BrowserTabSessionBroker {
                 retainedObservation: retainingObservation, compact: compact)
             if !compact { break }
             let withFooter = formatted + (try BrowserCompleteObservation.footer(cursor: nextCursor))
-            let excess = try BrowserCompleteObservation.excessBytes(withFooter,
-                referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) })
+            let encoded = try compactEncoding.encode(withFooter, snapshotID: snapshotID)
+            let excess = try BrowserCompleteObservation.excessBytes(encoded,
+                referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) },
+                actionReceipt: compactEncoding.actionReceipt)
             if excess == 0 { break }
             // This can fail even with zero rows when the host metadata itself
             // cannot fit. Do not publish any partial page or reference menu.
-            let nextLimit = bodyLimit - max(64, excess)
-            guard !page.elements.isEmpty, nextLimit > 0 else {
+            // `excess` includes the envelope and JSON's nested escaping, so
+            // it can exceed the entire unescaped row allowance. Reduce by at
+            // most half and rebuild the same position before declaring that
+            // even one field fragment cannot fit.
+            let nextLimit = max(bodyLimit / 2, bodyLimit - max(64, excess))
+            guard !page.elements.isEmpty, nextLimit > 0, nextLimit < bodyLimit else {
                 throw BrowserTabBrokerError.invalidRead("The complete browser observation exceeds its bounded output. Use a narrower view or query; no partial page was published.")
             }
             bodyLimit = nextLimit
@@ -849,7 +933,7 @@ actor BrowserTabSessionBroker {
         guard formatted.utf8.count <= 16_384 else {
             throw BrowserTabBrokerError.invalidRead("the observed snapshot metadata exceeds the bounded read output")
         }
-        let snapshot = BrowserTabSnapshot(
+        var snapshot = BrowserTabSnapshot(
             id: snapshotID,
             tabHandle: currentBinding.handle,
             documentEpoch: currentBinding.documentEpoch,
@@ -863,15 +947,81 @@ actor BrowserTabSessionBroker {
             isLiveObservation: !retainingObservation,
             evidenceDocument: document,
             readReceipt: receipt,
-            presentation: .init(snapshotID: snapshotID, rows: page.presentedRows)
+            presentation: .init(snapshotID: snapshotID, rows: page.presentedRows),
+            actionSelectionID: selectionID,
+            isActionContinuation: read.cursor != nil
         )
+        // Build witnesses from this final internally constructed page, after
+        // both output budgets have passed. Never mint from arbitrary retained
+        // document nodes or from a caller-supplied snapshot.
+        for row in page.presentedRows {
+            guard let element = snapshot.element(at: row.index), element.isEnabled,
+                  element.supportsPress || element.supportsSetText,
+                  let label = EmbeddedBrowserTargetAssertion.exposedLabel(snapshot: snapshot, element: element) else { continue }
+            let matches = selected.enumerated().filter { $0.element.backendNodeID == element.backendNodeID }
+            guard matches.count == 1, let selectedElement = matches.first,
+                  reindexed(selectedElement.element, index: element.index) == element else { continue }
+            snapshot.actionWitnesses[row.index] = BrowserPublishedActionWitness(
+                sourceID: sourceID, selectionID: selectionID, snapshot: snapshot, binding: currentBinding,
+                element: element, label: label,
+                exposures: receipt.exposures.filter { $0.nodeID == "backend:\(element.backendNodeID)" },
+                selectedIndex: selectedElement.offset, deadline: capturedAt + readLifetime)
+        }
         entry.activeSnapshot = snapshot
         entry.readState = ReadState(
             document: document, capturedAt: capturedAt, selected: selected, request: effectiveRead, scopeNodeID: scopeNodeID,
-            sourceID: sourceID, nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
+            sourceID: sourceID, selectionID: selectionID,
+            nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
         )
         entries[suppliedBinding.handle] = entry
         return BrowserTabObservation(binding: currentBinding, snapshot: snapshot)
+    }
+
+    private enum CapturedTarget {
+        case snapshot(BrowserTabSnapshot, Int)
+        case published(BrowserPublishedActionWitness)
+    }
+
+    /// Read-only preapproval validation. The witness is not refreshed: it must
+    /// still identify the original retained selection and capture deadline.
+    func validatePublishedAction(taskKey: String, binding: BrowserTabBinding,
+                                 witness: BrowserPublishedActionWitness) throws {
+        try beginOperation(taskKey: taskKey)
+        defer { tasksInFlight.remove(taskKey) }
+        let current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        _ = try approvedTarget(.published(witness), entry: current, binding: binding)
+        try Task.checkCancellation()
+    }
+
+    private func approvedTarget(_ captured: CapturedTarget, entry: Entry, binding: BrowserTabBinding)
+        throws -> (element: BrowserTabElement, deadline: ContinuousClock.Instant) {
+        guard let active = entry.activeSnapshot, let read = entry.readState,
+              read.snapshotID == active.id,
+              active.documentEpoch == entry.documentEpoch,
+              active.loaderID == entry.loaderID, active.documentURL == entry.documentURL else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        let deadline = read.capturedAt + readLifetime
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
+        switch captured {
+        case let .snapshot(snapshot, index):
+            guard active == snapshot else { throw BrowserTabBrokerError.staleSnapshot }
+            guard let element = snapshot.element(at: index) else { throw BrowserTabBrokerError.elementNotFound }
+            return (element, deadline)
+        case let .published(witness):
+            guard witness.sourceID == read.sourceID, witness.selectionID == read.selectionID,
+                  active.actionSelectionID == witness.selectionID,
+                  witness.bindingHandle == binding.handle,
+                  witness.targetInstanceToken == entry.targetInstanceToken,
+                  witness.committedDocumentID == read.document.committedDocumentID,
+                  witness.loaderID == entry.loaderID, witness.documentURL == entry.documentURL,
+                  witness.documentEpoch == entry.documentEpoch, witness.deadline == deadline,
+                  read.selected.indices.contains(witness.selectedIndex),
+                  reindexed(read.selected[witness.selectedIndex], index: witness.element.index) == witness.element else {
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+            return (witness.element, deadline)
+        }
     }
 
     func perform(
@@ -882,6 +1032,18 @@ actor BrowserTabSessionBroker {
         action: String,
         verificationPlan: BrowserActionVerification.Plan? = nil
     ) async throws {
+        try await perform(taskKey: taskKey, binding: suppliedBinding,
+            captured: .snapshot(suppliedSnapshot, elementIndex), action: action, verificationPlan: verificationPlan)
+    }
+
+    func perform(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
+                 action: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws {
+        try await perform(taskKey: taskKey, binding: binding, captured: .published(witness),
+                          action: action, verificationPlan: verificationPlan)
+    }
+
+    private func perform(taskKey: String, binding suppliedBinding: BrowserTabBinding, captured: CapturedTarget,
+                         action: String, verificationPlan: BrowserActionVerification.Plan?) async throws {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
         guard action == "AXPress" else {
@@ -892,16 +1054,7 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: true
         )
-        guard entry.activeSnapshot?.id == suppliedSnapshot.id,
-              entry.activeSnapshot == suppliedSnapshot,
-              suppliedSnapshot.documentEpoch == entry.documentEpoch,
-              suppliedSnapshot.loaderID == entry.loaderID,
-              suppliedSnapshot.documentURL == entry.documentURL else {
-            throw BrowserTabBrokerError.staleSnapshot
-        }
-        guard let approvedElement = suppliedSnapshot.element(at: elementIndex) else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
+        let (approvedElement, deadline) = try approvedTarget(captured, entry: entry, binding: suppliedBinding)
         guard approvedElement.supportsPress, approvedElement.isEnabled else {
             throw BrowserTabBrokerError.unsupportedAction(action)
         }
@@ -911,7 +1064,7 @@ actor BrowserTabSessionBroker {
         entry.activeSnapshot = nil
         entries[suppliedBinding.handle] = entry
 
-        let permit = BrowserMutationPermit(lifetime: entry.lifetime)
+        let permit = BrowserMutationPermit(lifetime: entry.lifetime, deadline: deadline)
         pendingMutations[suppliedBinding.handle] = permit
         defer {
             permit.revoke()
@@ -943,6 +1096,7 @@ actor BrowserTabSessionBroker {
         guard sameApprovedSemantics(currentElement, approvedElement) else {
             throw BrowserTabBrokerError.elementChanged
         }
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
 
         try verificationPlan?.revalidateBaseline(binding: suppliedBinding, document: currentDocument)
         var dispatchedDocument = currentDocument
@@ -964,6 +1118,18 @@ actor BrowserTabSessionBroker {
         text: String,
         verificationPlan: BrowserActionVerification.Plan? = nil
     ) async throws {
+        try await setText(taskKey: taskKey, binding: suppliedBinding,
+            captured: .snapshot(suppliedSnapshot, elementIndex), text: text, verificationPlan: verificationPlan)
+    }
+
+    func setText(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
+                 text: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws {
+        try await setText(taskKey: taskKey, binding: binding, captured: .published(witness),
+                          text: text, verificationPlan: verificationPlan)
+    }
+
+    private func setText(taskKey: String, binding suppliedBinding: BrowserTabBinding, captured: CapturedTarget,
+                         text: String, verificationPlan: BrowserActionVerification.Plan?) async throws {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
         var entry = try entry(
@@ -971,23 +1137,14 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: true
         )
-        guard entry.activeSnapshot?.id == suppliedSnapshot.id,
-              entry.activeSnapshot == suppliedSnapshot,
-              suppliedSnapshot.documentEpoch == entry.documentEpoch,
-              suppliedSnapshot.loaderID == entry.loaderID,
-              suppliedSnapshot.documentURL == entry.documentURL else {
-            throw BrowserTabBrokerError.staleSnapshot
-        }
-        guard let approvedElement = suppliedSnapshot.element(at: elementIndex) else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
+        let (approvedElement, deadline) = try approvedTarget(captured, entry: entry, binding: suppliedBinding)
         guard approvedElement.supportsSetText, approvedElement.isEnabled else {
             throw BrowserTabBrokerError.unsupportedAction("set text")
         }
         entry.activeSnapshot = nil
         entries[suppliedBinding.handle] = entry
 
-        let permit = BrowserMutationPermit(lifetime: entry.lifetime)
+        let permit = BrowserMutationPermit(lifetime: entry.lifetime, deadline: deadline)
         pendingMutations[suppliedBinding.handle] = permit
         defer {
             permit.revoke()
@@ -1019,6 +1176,7 @@ actor BrowserTabSessionBroker {
         guard sameApprovedSemantics(currentElement, approvedElement) else {
             throw BrowserTabBrokerError.elementChanged
         }
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
 
         try verificationPlan?.revalidateBaseline(binding: suppliedBinding, document: currentDocument)
         var dispatchedDocument = currentDocument
@@ -1399,6 +1557,16 @@ actor BrowserTabSessionBroker {
         return fields
     }
 
+    private func reindexed(_ original: BrowserTabElement, index: Int) -> BrowserTabElement {
+        BrowserTabElement(index: index, backendNodeID: original.backendNodeID, role: original.role,
+            label: original.label, value: original.value, isEnabled: original.isEnabled,
+            supportsPress: original.supportsPress, supportsSetText: original.supportsSetText,
+            isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
+            nodeID: original.nodeID, parentNodeID: original.parentNodeID, childNodeIDs: original.childNodeIDs,
+            linkURL: original.linkURL, semanticRole: original.semanticRole, contentScope: original.contentScope,
+            contentKind: original.contentKind, constraintValidation: original.constraintValidation)
+    }
+
     private func makePage(selected: [BrowserTabElement], position: ReadPosition,
                           regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false,
                           bodyByteLimit: Int, compact: Bool = false) throws -> ReadPage {
@@ -1410,16 +1578,7 @@ actor BrowserTabSessionBroker {
         // fragment. Only the current page's original elements authorize input.
         while page.nextPosition.element < selected.count, page.elements.count < maximumElements {
             let original = selected[page.nextPosition.element]
-            let element = BrowserTabElement(
-                index: page.elements.count, backendNodeID: original.backendNodeID, role: original.role,
-                label: original.label, value: original.value, isEnabled: original.isEnabled,
-                supportsPress: original.supportsPress, supportsSetText: original.supportsSetText,
-                isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
-                nodeID: original.nodeID, parentNodeID: original.parentNodeID,
-                childNodeIDs: original.childNodeIDs, linkURL: original.linkURL,
-                semanticRole: original.semanticRole, contentScope: original.contentScope, contentKind: original.contentKind,
-                constraintValidation: original.constraintValidation
-            )
+            let element = reindexed(original, index: page.elements.count)
             // A parent can occur later on this page. Reserve the largest
             // possible page index now, then resolve actual page membership.
             let reservedParentIndex = element.parentNodeID == nil ? nil : maximumElements - 1

@@ -98,7 +98,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let bodyRow = try XCTUnwrap(rows.first { $0.contains("label=\"\(receipt)\"") })
         XCTAssertEqual(Data(try exposedField("label", in: bodyRow).utf8), Data(receipt.utf8))
         XCTAssertTrue(bodyRow.contains("content_scope=main content_kind=readable"))
-        XCTAssertTrue(bodyRow.contains("settable=false actions=[]"))
+        XCTAssertTrue(read.contains("Omitted row flags: enabled=true settable=false actions=[]"))
+        XCTAssertFalse(bodyRow.contains("click_ref=")); XCTAssertFalse(bodyRow.contains("fill_ref="))
         XCTAssertFalse(read.contains("SIDEBAR_BODY_SENTINEL")); XCTAssertFalse(read.contains("HIDDEN_BODY_SENTINEL"))
         XCTAssertLessThanOrEqual(rows.count, 18)
         XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 }, 6_000)
@@ -116,6 +117,44 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             arguments: JSONSerialization.data(withJSONObject: inputReference(read, label: "Inspect record")))
         let counters = try await script(view, "return {submits:window.submits,inspections:window.inspections};")
         XCTAssertEqual(try JSONSerialization.jsonObject(with: counters) as? [String: Int], ["submits": 1, "inspections": 1])
+        _ = await controller.shutdown()
+    }
+
+    func testRealWebKitEarlierPageReferenceWorksAfterImmutableContinuationOnceOnly() async throws {
+        let controls = (0..<70).map { "<button onclick='window.other++'>Other control \($0)</button>" }.joined()
+        let html = """
+        <!doctype html><body><main><button id="first" onclick="window.first++">First intended control</button>
+        \(controls)</main><script>window.first=0;window.other=0;</script></body>
+        """
+        let session = EmbeddedBrowserSession(persistent: false)
+        let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/paged-controls"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        _ = try await controller.execute(taskKey: "paged", tool: "browser_tabs", arguments: Data("{}".utf8))
+        _ = try await controller.execute(taskKey: "paged", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let first = try await controller.execute(taskKey: "paged", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
+        let arguments = try JSONSerialization.data(withJSONObject: inputReference(first, label: "First intended control"))
+        let frozen = try await controller.prepareMutation(taskKey: "paged", tool: "browser_click", arguments: arguments)
+        try await controller.preflightMutation(taskKey: "paged", tool: "browser_click", arguments: arguments, prepared: frozen)
+        let cursorStart = try XCTUnwrap(first.range(of: "next_cursor="))
+        let cursor = String(first[cursorStart.upperBound...].prefix { !$0.isWhitespace })
+        let next = try await controller.execute(taskKey: "paged", tool: "browser_read",
+            arguments: JSONSerialization.data(withJSONObject: ["cursor": cursor]))
+        XCTAssertFalse(next.contains("label=\"First intended control\""))
+        let result = try await controller.executeResult(taskKey: "paged", tool: "browser_click", arguments: arguments, prepared: frozen)
+        XCTAssertTrue(result.completeObservation)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.response.utf8)) as? [String: Any])
+        XCTAssertEqual(response["dispatched"] as? Bool, true); XCTAssertEqual(response["result_verified"] as? Bool, false)
+        let actual = try await script(view, "return {first:window.first,other:window.other};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: actual) as? [String: Int], ["first": 1, "other": 0])
+        do {
+            _ = try await controller.executeResult(taskKey: "paged", tool: "browser_click", arguments: arguments, prepared: frozen)
+            XCTFail("The input consumed the entire paged capture")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
         _ = await controller.shutdown()
     }
 
@@ -287,7 +326,9 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 arguments: Data(#"{"view":"content"}"#.utf8))
             let container = try reference(content, role: "gridcell")
             let row = try XCTUnwrap(content.split(separator: "\n").first { $0.contains("semantic_role=\"gridcell\"") })
-            XCTAssertTrue(row.contains("actions=[]")); XCTAssertTrue(row.contains("enabled=true"))
+            XCTAssertTrue(content.contains("Omitted row flags: enabled=true settable=false actions=[]"))
+            XCTAssertFalse(row.contains("click_ref=")); XCTAssertFalse(row.contains("fill_ref="))
+            XCTAssertFalse(row.contains("enabled=false"))
             XCTAssertFalse(content.contains("semantic_role=\"link\""), "Content and action views are distinct")
             let containerData = try JSONSerialization.data(withJSONObject: container)
             do {
@@ -607,7 +648,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let popup = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("label=\"Sign in\"") })
         let ordinary = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("label=\"Continue\"") })
         XCTAssertTrue(popup.contains("href=\"http://localhost:8123/sign-in?return=%2Fmail%2F&literal=A-B\""))
-        XCTAssertTrue(popup.contains("enabled=true")); XCTAssertTrue(popup.contains("actions=[]"))
+        XCTAssertTrue(read.contains("Omitted row flags: enabled=true settable=false actions=[]"))
+        XCTAssertFalse(popup.contains("enabled=false")); XCTAssertFalse(popup.contains("click_ref="))
         XCTAssertFalse(popup.contains("follow_link=true"))
         XCTAssertTrue(ordinary.contains("actions=[\"AXPress\"]")); XCTAssertTrue(ordinary.contains("follow_link=true"))
         func arguments(_ row: Substring) throws -> Data {
