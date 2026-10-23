@@ -481,6 +481,10 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
     case mutationRejected(String)
     case ownershipMismatch
     case invalidRead(String)
+    // Post-input observation diagnostics must distinguish host policy from
+    // output packing without inferring either from private error text.
+    case scopeDenied(String)
+    case outputLimit(String)
 
     var errorDescription: String? {
         switch self {
@@ -514,7 +518,7 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
             "The browser rejected the approved browser action: \(detail)"
         case .ownershipMismatch:
             "The browser tab operation does not match this broker's ownership policy."
-        case .invalidRead(let detail):
+        case .invalidRead(let detail), .scopeDenied(let detail), .outputLimit(let detail):
             "The browser read request is invalid: \(detail)"
         }
     }
@@ -1028,13 +1032,13 @@ actor BrowserTabSessionBroker {
             // even one field fragment cannot fit.
             let nextLimit = max(bodyLimit / 2, bodyLimit - max(64, excess))
             guard !page.elements.isEmpty, nextLimit > 0, nextLimit < bodyLimit else {
-                throw BrowserTabBrokerError.invalidRead("The complete browser observation exceeds its bounded output. Use a narrower view or query; no partial page was published.")
+                throw BrowserTabBrokerError.outputLimit("The complete browser observation exceeds its bounded output. Use a narrower view or query; no partial page was published.")
             }
             bodyLimit = nextLimit
         }
         let elements = page.elements
         guard formatted.utf8.count <= 16_384 else {
-            throw BrowserTabBrokerError.invalidRead("the observed snapshot metadata exceeds the bounded read output")
+            throw BrowserTabBrokerError.outputLimit("the observed snapshot metadata exceeds the bounded read output")
         }
         var snapshot = BrowserTabSnapshot(
             id: snapshotID,
@@ -1718,7 +1722,7 @@ actor BrowserTabSessionBroker {
             }
             guard !fragments.isEmpty else {
                 if page.elements.isEmpty {
-                    throw BrowserTabBrokerError.invalidRead(compact
+                    throw BrowserTabBrokerError.outputLimit(compact
                         ? "The observed element metadata exceeds the bounded read output. Use a narrower view or query; no partial page was published."
                         : "the observed element metadata exceeds the bounded read output")
                 }

@@ -458,3 +458,42 @@ cases. An earlier run before the lifecycle wording change passed the same 281;
 the unique count is 281, not 562. Version/product-identity checks passed 20 tests.
 The runtime remains the identical pinned mactopus-10 artifact from build 228.
 Installed live qualification for this follow-up is recorded separately.
+
+
+### Build 229 live checks and observation-failure follow-up
+
+Controlled 0.7.0 (229), source `fb65bf5`, was Developer ID signed, installed and
+verified against its executable and resources. Retrying the original failed
+Outlook chat successfully dispatched `browser_tabs({"cursor":null})` under its
+saved string-only catalog. The next inference timed out in request transport:
+142.857 seconds for the user turn, 136.062 seconds after inventory output. It
+opened no tab and produced no attachment answer. This verifies the nullable
+catalog repair, not the complete task or the cause of the transport stall.
+
+A fresh Outlook control took 32.792 seconds and made five native calls without a
+schema rejection or compaction. It clicked the observed matching account once;
+the attached observation reported `read_not_authorized`. An explicit fresh read
+then succeeded and exposed the account picker again. The model nevertheless
+claimed a password/possible MFA and permission barrier without observing one.
+The owned tab closed. This completed UI turn is a semantic failure.
+
+Direct inspection in one owned normal Computa browser tab reached the mailbox by
+clicking the same existing-account selector once, without a password or MFA.
+The diagnostic tab was closed and the pane hidden again. This manual action
+refreshed the shared sign-in session; later tests must disclose that condition.
+It neither establishes autonomous sign-in success nor recovers the exact cause
+of the earlier unavailable observation.
+
+The error classification itself is incorrect: every generic `invalidRead` was
+reported as `read_not_authorized`, including output-packing failures. The next
+follow-up introduces typed scope-denial and output-limit causes, with fixed
+`scope_denied`, `output_limit` and `invalid_read` observation reasons. This does
+not change permission checks, dispatch, replay policy or output/recovery budgets.
+
+The typed-cause follow-up passed 344 selected Swift tests without failures or
+skips, including three enabled bundled API-engine integration cases. Native
+preflight classification retains the original treatment for all three causes,
+and regressions verify the existing three-failure stop without automatic reads
+or additional approvals. Version/product-identity tests passed 20 checks. The
+source-pinned mactopus-10 runtime is unchanged. Live installation is separate
+from these selected regression results.

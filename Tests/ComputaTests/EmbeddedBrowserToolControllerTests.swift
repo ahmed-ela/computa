@@ -227,6 +227,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(body["result_verified"] as? Bool, false)
         let observation = try XCTUnwrap(body["current_observation"] as? [String: Any])
         XCTAssertEqual(observation["status"] as? String, "unavailable")
+        XCTAssertEqual(observation["reason"] as? String, "output_limit", "Actual packing failure is not an authorization or sign-in failure")
+        XCTAssertFalse(result.response.contains("read_not_authorized"))
         XCTAssertNil(observation["text"]); XCTAssertNil(observation["snapshot_id"])
         XCTAssertFalse(result.response.contains("click_ref=")); XCTAssertFalse(result.response.contains("fill_ref="))
         do {
@@ -913,7 +915,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         var output: String?
         do { output = try await call(controller, "browser_read", ["view": "all"]); XCTFail("A complete page cannot silently omit metadata") }
         catch {
-            XCTAssertTrue(error is BrowserTabBrokerError)
+            guard let failure = error as? BrowserTabBrokerError, case .outputLimit = failure else {
+                return XCTFail("Expected a typed output limit from actual packing, got \(error)")
+            }
             XCTAssertTrue(error.localizedDescription.contains("bounded"))
             XCTAssertTrue(error.localizedDescription.contains("narrower view or query"))
         }
@@ -1094,7 +1098,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     }
 
     func testPostInputObservationFailuresPreserveDispatchAndExposeNoCapabilityOrPrivateError() async throws {
-        for scenario in ["read_failed", "no_read_authority", "redirect", "replaced", "protected"] {
+        for scenario in ["read_failed", "invalid_read", "redirect", "replaced", "protected"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
             let scope = ComputerTaskScope(userPrompt: "Check http://localhost:8123/flight only.")
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
@@ -1117,6 +1121,11 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertTrue(next.contains("Use browser_read for current evidence and new references"))
             let observation = try XCTUnwrap(result["current_observation"] as? [String: Any])
             XCTAssertEqual(observation["status"] as? String, "unavailable", scenario)
+            let reasons = ["read_failed": "read_failed", "invalid_read": "invalid_read", "redirect": "scope_denied",
+                           "replaced": "target_unavailable", "protected": "target_unavailable"]
+            XCTAssertEqual(observation["reason"] as? String, reasons[scenario], scenario)
+            XCTAssertFalse(fill.contains("read_not_authorized"), "An unavailable read cannot establish an authentication challenge")
+            XCTAssertFalse(filled.completeObservation)
             XCTAssertNil(observation["snapshot_id"]); XCTAssertNil(observation["text"])
             XCTAssertFalse(fill.contains("PRIVATE_READ_ERROR")); XCTAssertFalse(fill.contains("AXSNAPSHOT"))
             do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(original), "element_index": 1], scope: scope); XCTFail("Failed observation must not resurrect consumed input") }
@@ -1125,6 +1134,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
             if ["redirect", "replaced", "protected"].contains(scenario) {
                 XCTAssertEqual(counts.observes, 3, "After-input target denial must precede another observation")
+            } else {
+                XCTAssertEqual(counts.observes, 4, "A generic read failure does not authorize a retry")
             }
             if scenario == "read_failed" {
                 let fresh = try await call(controller, "browser_read", scope: scope)
@@ -1172,7 +1183,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 
     func testPostInputReadStopsAfterSecondNavigationRaceAndNeverRetriesOtherFailures() async throws {
         for scenario in ["generation_drift_twice", "generation_drift_offscope", "generation_drift_replaced",
-                         "read_failed", "no_read_authority"] {
+                         "read_failed", "invalid_read"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
             let scope = ComputerTaskScope(userPrompt: "Use only http://localhost:8123/flight for the requested action.")
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
@@ -1425,7 +1436,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             do { _ = try await call(controller, "browser_read", scope: scope); XCTFail("Changed target or scope must fail") }
             catch {
                 if replaced { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
-                else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Scope still rejects the redirect. */ }
+                else if let failure = error as? BrowserTabBrokerError, case .scopeDenied = failure { /* Scope still rejects the redirect. */ }
                 else { XCTFail("Expected a scope failure, got \(error)") }
             }
             let after = await backend.counts()
@@ -2517,7 +2528,12 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 if scenario == "foreign_inventory" { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
                 else if scenario == "released" { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
                 else if scenario == "replaced" { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
-                else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Exact observed target or scope denied. */ }
+                else if scenario == "redirected" || scenario == "changed_scope" {
+                    guard let failure = error as? BrowserTabBrokerError, case .scopeDenied = failure else {
+                        return XCTFail("Expected typed scope denial, got \(error)")
+                    }
+                }
+                else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Exact observed target denied. */ }
                 else { XCTFail("Unexpected error for \(scenario): \(error)") }
             }
             let after = await backend.counts()
@@ -3191,7 +3207,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             let scenario = afterInputScenario
             afterInputScenario = nil
             if scenario == "read_failed" { throw BrowserTabBrokerError.browserUnavailable("PRIVATE_READ_ERROR") }
-            if scenario == "no_read_authority" { throw BrowserTabBrokerError.invalidRead("PRIVATE_READ_ERROR") }
+            if scenario == "invalid_read" { throw BrowserTabBrokerError.invalidRead("PRIVATE_READ_ERROR") }
             driftAfterCapture = scenario == "drift_after_capture"
             if scenario == "hold_observation" || scenario == "hold_generation_drift" {
                 observationHeld = true

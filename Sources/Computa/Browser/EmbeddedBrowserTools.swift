@@ -431,13 +431,13 @@ actor EmbeddedBrowserToolController {
             throw BrowserTabBrokerError.invalidRead("Captured-target preflight requires browser_click or browser_fill.")
         }
         if let violation = scope?.embeddedBrowserToolViolation() {
-            throw BrowserTabBrokerError.invalidRead(violation)
+            throw BrowserTabBrokerError.scopeDenied(violation)
         }
         guard inFlight.insert(taskKey).inserted else { throw BrowserTabBrokerError.operationInProgress }
         defer { inFlight.remove(taskKey) }
         guard let context = contexts[taskKey] else { throw EmbeddedBrowserBindingRequiredFailure() }
         guard context.scope == scope else {
-            throw BrowserTabBrokerError.invalidRead("The host browser scope changed within this turn; start a new turn.")
+            throw BrowserTabBrokerError.scopeDenied("The host browser scope changed within this turn; start a new turn.")
         }
         let invocation = try prepared ?? prepareMutation(taskKey: taskKey, tool: tool, arguments: arguments)
         guard invocation.matches(taskKey: taskKey, contextID: context.id, tool: tool, arguments: object) else {
@@ -468,13 +468,13 @@ actor EmbeddedBrowserToolController {
         }
         try EmbeddedBrowserTools.validate(tool: tool, arguments: object)
         if let violation = scope?.embeddedBrowserToolViolation() {
-            throw BrowserTabBrokerError.invalidRead(violation)
+            throw BrowserTabBrokerError.scopeDenied(violation)
         }
         guard inFlight.insert(taskKey).inserted else { throw BrowserTabBrokerError.operationInProgress }
         defer { inFlight.remove(taskKey) }
         if contexts[taskKey] == nil { contexts[taskKey] = Context(scope: scope) }
         guard contexts[taskKey]?.scope == scope else {
-            throw BrowserTabBrokerError.invalidRead(
+            throw BrowserTabBrokerError.scopeDenied(
                 "The host browser scope changed within this turn; start a new turn.")
         }
         let contextID = contexts[taskKey]!.id
@@ -1108,7 +1108,9 @@ actor EmbeddedBrowserToolController {
         case .handleMissing, .crossTaskHandle, .browserGenerationChanged, .ownershipMismatch: return "binding_unavailable"
         case .targetClosed, .targetReplaced: return "target_unavailable"
         case .staleDocument, .staleSnapshot: return "document_changed"
-        case .invalidRead: return "read_not_authorized"
+        case .scopeDenied: return "scope_denied"
+        case .outputLimit: return "output_limit"
+        case .invalidRead: return "invalid_read"
         default: return "read_failed"
         }
     }
@@ -1206,7 +1208,7 @@ actor EmbeddedBrowserToolController {
         } else {
             violation = scope?.siteViolation(url: url)
         }
-        if let violation { throw BrowserTabBrokerError.invalidRead(violation) }
+        if let violation { throw BrowserTabBrokerError.scopeDenied(violation) }
     }
 
     private func currentTarget(binding: BrowserTabBinding, scope: ComputerTaskScope?) async throws

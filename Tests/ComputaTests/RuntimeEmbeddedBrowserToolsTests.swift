@@ -236,6 +236,35 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testTypedBrowserReadCausesPreserveNativePreflightAndRepeatedFailureStop() async throws {
+        for failure in [BrowserTabBrokerError.invalidRead("Synthetic read failure"),
+                        .scopeDenied("Synthetic read failure"), .outputLimit("Synthetic read failure")] {
+            let process = LegacyPIDFixture(bundleID: "com.example.native-pid-fixture", replacement: nil,
+                                           readFailure: failure)
+            try await withHarness(legacyPIDFixture: process) { harness in
+                let call: [String: Any] = ["tool": "desktop_snapshot_app", "arguments": ["pid": LegacyPIDFixture.processID]]
+                try await harness.submit(Array(repeating: call, count: 4))
+                try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .waiting }
+                let rows = try harness.rows()
+                XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == false })
+                for row in rows {
+                    let text = try XCTUnwrap(row["text"] as? String)
+                    XCTAssertTrue(text.contains("dispatch=not_dispatched"))
+                    XCTAssertTrue(text.contains("preflight_rejection=invalidArguments"))
+                    XCTAssertFalse(text.contains("HOST_READ_RECOVERY"))
+                }
+                let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+                    harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+                XCTAssertEqual(requests.count, 3, "Typed observation causes must not refund the unchanged failure budget")
+                let counts = await process.counts()
+                XCTAssertEqual(counts.reads, 3, "No automatic read or input may be added by diagnostic classification")
+                XCTAssertTrue(harness.audit.approvals.isEmpty)
+                XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+                XCTAssertFalse(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+            }
+        }
+    }
+
     func testLegacyPIDReadsTreatBrowsersAsOrdinaryNativeApps() async throws {
         for bundleID in ["com.example.native-pid-fixture", "com.google.Chrome"] {
             let process = LegacyPIDFixture(bundleID: bundleID, replacement: nil)
@@ -1130,13 +1159,16 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         private let identity: NativeToolProcessIdentity
         private let replacement: Replacement?
         private let replaceAfterRead: Bool
+        private let readFailure: BrowserTabBrokerError?
         private var lookups = 0, reads = 0
 
-        init(bundleID: String, replacement: Replacement?, replaceAfterRead: Bool = false) {
+        init(bundleID: String, replacement: Replacement?, replaceAfterRead: Bool = false,
+             readFailure: BrowserTabBrokerError? = nil) {
             identity = NativeToolProcessIdentity(processIdentifier: Self.processID, bundleIdentifier: bundleID,
                 launchDate: Date(timeIntervalSince1970: 1_700_000_000))
             self.replacement = replacement
             self.replaceAfterRead = replaceAfterRead
+            self.readFailure = readFailure
         }
         func resolve(_ processID: Int32) -> NativeToolProcessIdentity? {
             lookups += 1
@@ -1153,6 +1185,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         func read(_ admitted: NativeToolProcessIdentity) throws -> String {
             guard admitted == identity else { throw NativeBackgroundAccessibility.Failure.targetChanged }
             reads += 1
+            if let readFailure { throw readFailure }
             return "OWNED_NATIVE_PID_OBSERVATION"
         }
         func counts() -> Counts { Counts(lookups: lookups, reads: reads) }

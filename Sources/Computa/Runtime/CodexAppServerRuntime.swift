@@ -4731,8 +4731,15 @@ private extension CodexAppServerRuntime {
             if let failure = error as? ComputerPreflightFailure { return failure.kind }
             if case ComputerModelReferences.ReferenceError.invalidReference = error { return .freshObservationRequired }
             if error is ComputerV2ToolContract.ValidationError { return .invalidArguments }
-            if case BrowserTabBrokerError.invalidRead = error { return .invalidArguments }
-            if case BrowserTabBrokerError.staleSnapshot = error { return .freshObservationRequired }
+            if let browser = error as? BrowserTabBrokerError {
+                switch browser {
+                // These typed causes previously used invalidRead. More precise
+                // observation feedback must not alter preflight recovery policy.
+                case .invalidRead, .scopeDenied, .outputLimit: return .invalidArguments
+                case .staleSnapshot: return .freshObservationRequired
+                default: break
+                }
+            }
             if error is NativeActionVerification.Failure { return .freshObservationRequired }
             if error is NativeAccessibilityActionScope.ValidationError { return .freshObservationRequired }
             if (error as? NativeBackgroundAccessibility.Failure) == .staleObservation { return .freshObservationRequired }
