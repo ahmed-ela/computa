@@ -122,7 +122,7 @@ describe("rename compatibility contracts", () => {
 
   test("a product rename does not relabel or replace the pinned agent runtime", () => {
     const pin = JSON.parse(read("Runtime/codex-source.lock.json"));
-    expect(pin.runtimeVersion).toBe("mactopus-14");
+    expect(pin.runtimeVersion).toBe("mactopus-15");
     // The verified binary/manifest are intentionally not committed. Also check
     // an already-built artifact when present, without making it a test prerequisite.
     if (existsSync(resolve(root, "Sources/Computa/Resources/AgentRuntime/manifest.json"))) {

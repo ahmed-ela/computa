@@ -211,6 +211,57 @@ final class BrowserCompleteObservationEncodingTests: XCTestCase {
         XCTAssertEqual(Array(try XCTUnwrap(observation["text"] as? String).utf8), Array(escaped.utf8))
     }
 
+    func testLifecycleEnvelopesKeepTypedCompletionSeparateFromInputAndOutcomeEvidence() throws {
+        let receipts: [BrowserCompleteObservation.LifecycleReceipt] = [
+            .bound(wasOpen: true, targetID: "tab-e\u{301}🙂\\\"", handle: snapshotID, owned: true),
+            .bound(wasOpen: false, targetID: "human", handle: snapshotID, owned: false),
+            .bound(wasOpen: false, targetID: "owned", handle: snapshotID, owned: true, alreadyBound: true),
+            .navigation]
+        let page = "AXSNAPSHOT id=\(snapshotID)\nREAD next_cursor=cursor-literal\n#0 role=\"AXButton\" label=\"e\u{301}🙂\\\"\"\nBROWSER_ACTION_REFERENCES {}"
+        for receipt in receipts {
+            let cue = try object(receipt.compactText)
+            XCTAssertEqual(Set(cue.keys), ["kind", "completed", "outcome"])
+            XCTAssertEqual(cue["completed"] as? Bool, true); XCTAssertEqual(cue["outcome"] as? String, "unverified")
+            XCTAssertLessThanOrEqual(receipt.compactText.utf8.count, 128)
+            let encoding = BrowserCompleteObservation.Encoding.lifecycle(receipt: receipt)
+            XCTAssertEqual(encoding.retentionCue, receipt.compactText); XCTAssertNil(encoding.actionReceipt)
+            let encoded = try encoding.encode(page, snapshotID: snapshotID), body = try object(encoded)
+            XCTAssertEqual(body["operation_kind"] as? String, receipt.kind.rawValue)
+            XCTAssertEqual(body["operation_complete"] as? Bool, true)
+            XCTAssertEqual(body["result_verified"] as? Bool, false); XCTAssertEqual(body["no_replay"] as? Bool, true)
+            XCTAssertNil(body["dispatched"]); XCTAssertNil(body["input_kind"])
+            if let binding = receipt.binding {
+                XCTAssertEqual(body["tab_id"] as? String, binding.targetID)
+                XCTAssertEqual(body["tab_handle"] as? String, binding.handle.uuidString)
+                XCTAssertEqual(body["bound"] as? Bool, true)
+                XCTAssertEqual(body["already_bound"] as? Bool, binding.alreadyBound)
+                XCTAssertNil(body["navigation_complete"])
+            } else {
+                XCTAssertEqual(body["navigation_complete"] as? Bool, true); XCTAssertNil(body["bound"])
+            }
+            let current = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            XCTAssertEqual(Array(try XCTUnwrap(current["text"] as? String).utf8), Array(page.utf8))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: receipt.compactText), 0)
+        }
+    }
+
+    func testLifecycleEnvelopeIncludesCueAndNestedJSONInBothUnchangedByteBounds() throws {
+        let receipt = BrowserCompleteObservation.LifecycleReceipt.navigation, cue = receipt.compactText
+        let encoding = BrowserCompleteObservation.Encoding.lifecycle(receipt: receipt)
+        let empty = try encoding.encode("", snapshotID: snapshotID)
+        let available = 4_096 - rawBytes(empty, receipt: cue)
+        let exact = try encoding.encode(String(repeating: "x", count: available), snapshotID: snapshotID)
+        XCTAssertEqual(rawBytes(exact, receipt: cue), 4_096)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(exact, actionReceipt: cue), 0)
+        let over = try encoding.encode(String(repeating: "x", count: available + 1), snapshotID: snapshotID)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(over, actionReceipt: cue), 1)
+        let escaped = try encoding.encode(String(repeating: "\\", count: 1_200), snapshotID: snapshotID)
+        XCTAssertLessThanOrEqual(rawBytes(escaped, receipt: cue), 4_096)
+        let serialized = try serializedParts(escaped, receipt: cue)
+        XCTAssertGreaterThan(serialized.count, 4_608)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(escaped, actionReceipt: cue), serialized.count - 4_608)
+    }
+
     private func cue(wasFill: Bool) -> String {
         wasFill
             ? #"{"dispatched":true,"kind":"fill","label":"Message","outcome":"unverified","partial":false}"#

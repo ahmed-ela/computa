@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const SOURCE_COMMIT: &str = "4607249e430dac1c961df4dc615beae88e33cec8";
-pub const PATCH_SHA256: &str = "6378734f6ff07431b239751f6d5c26909122685faf45c1799296153ffaafe11a";
+pub const PATCH_SHA256: &str = "083202ea2ca3485652b2dd9e1356addde30e0a80cc8e3878eb477ec164a31af7";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
@@ -117,7 +117,7 @@ impl Manifest {
             (2, Some(c)) => {
                 let mut names = std::collections::HashSet::new();
                 c.iter()
-                    .all(|s| s == "threadDynamicToolsV1" && names.insert(s))
+                    .all(|s| matches!(s.as_str(), "threadDynamicToolsV1" | "browserLifecycleObservationsV1") && names.insert(s))
             }
             _ => false,
         };
@@ -196,5 +196,33 @@ mod tests {
         assert!(m.validate().is_ok());
         m.patch_sha256 = "1".repeat(64);
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn lifecycle_capability_requires_explicit_valid_version_two_manifest() {
+        let baseline: Manifest = serde_json::from_str(include_str!(
+            "../../../Sources/Computa/Resources/AgentRuntime/manifest.json"
+        )).unwrap();
+        for capabilities in [vec![], vec!["browserLifecycleObservationsV1"],
+            vec!["threadDynamicToolsV1", "browserLifecycleObservationsV1"]] {
+            let mut m = baseline.clone();
+            m.schema_version = 2;
+            m.capabilities = Some(capabilities.into_iter().map(str::to_owned).collect());
+            assert!(m.validate().is_ok());
+        }
+        for capabilities in [vec!["browserLifecycleObservationsV1", "browserLifecycleObservationsV1"],
+            vec!["browserLifecycleObservationsV2"], vec!["browserLifecycleObservationsV1 "]] {
+            let mut m = baseline.clone();
+            m.schema_version = 2;
+            m.capabilities = Some(capabilities.into_iter().map(str::to_owned).collect());
+            assert!(m.validate().is_err());
+        }
+        let mut legacy = baseline;
+        legacy.schema_version = 1;
+        legacy.capabilities = None;
+        legacy.runtime_version = "mactopus-browserLifecycleObservationsV1".into();
+        assert!(legacy.validate().is_ok());
+        legacy.capabilities = Some(vec!["browserLifecycleObservationsV1".into()]);
+        assert!(legacy.validate().is_err());
     }
 }

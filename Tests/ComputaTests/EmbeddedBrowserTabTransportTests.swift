@@ -10,6 +10,61 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testLifecycleOpenNavigateAndBorrowedBindExposeRealWebKitRefsWithoutSeparateReads() async throws {
+        let body = "<!doctype html><main><h1>Settled lifecycle page</h1><button onclick='window.clicks++'>Inspect current page</button></main><script>window.clicks=0</script>"
+        let firstServer = try HeldBrowserNavigationFixture(body: body), firstURL = try await firstServer.start()
+        let nextServer = try HeldBrowserNavigationFixture(body: body), nextURL = try await nextServer.start()
+        defer { firstServer.stop(); nextServer.stop() }
+        let session = EmbeddedBrowserSession(persistent: false), transport = EmbeddedBrowserTabTransport(session: session)
+        let controller = EmbeddedBrowserToolController(transport: transport)
+        defer { session.shutdown() }
+        func page(_ result: EmbeddedBrowserToolExecution) throws -> String {
+            XCTAssertTrue(result.completeObservation); XCTAssertNil(result.nativeRead)
+            let cue = try XCTUnwrap(result.lifecycleReceipt)
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(result.response, actionReceipt: cue.compactText), 0)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.response.utf8)) as? [String: Any])
+            XCTAssertEqual(body["operation_complete"] as? Bool, true); XCTAssertEqual(body["result_verified"] as? Bool, false)
+            return try XCTUnwrap((body["current_observation"] as? [String: Any])?["text"] as? String)
+        }
+        let opening = Task { try await controller.executeResult(taskKey: "lifecycle", tool: "browser_open",
+            arguments: JSONSerialization.data(withJSONObject: ["url": firstURL.absoluteString]), lifecycleObservationsEnabled: true) }
+        await fulfillment(of: [firstServer.received], timeout: 5); firstServer.release()
+        let opened = try await opening.value, original = try page(opened)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(opened.response.utf8)) as? [String: Any])
+        let id = try XCTUnwrap(UUID(uuidString: XCTUnwrap(object["tab_id"] as? String)))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let old = try JSONSerialization.data(withJSONObject: inputReference(original, label: "Inspect current page"))
+        _ = try await controller.execute(taskKey: "lifecycle", tool: "browser_click", arguments: old)
+        let firstClicks = try await script(view, "return window.clicks;")
+        XCTAssertEqual(firstClicks, Data("1".utf8))
+        let navigation = Task { try await controller.executeResult(taskKey: "lifecycle", tool: "browser_navigate",
+            arguments: JSONSerialization.data(withJSONObject: ["url": nextURL.absoluteString]), lifecycleObservationsEnabled: true) }
+        await fulfillment(of: [nextServer.received], timeout: 5); nextServer.release()
+        let navigated = try await navigation.value, current = try page(navigated)
+        XCTAssertTrue(current.contains(nextURL.absoluteString))
+        do { _ = try await controller.execute(taskKey: "lifecycle", tool: "browser_click", arguments: old); XCTFail("Old document refs cannot act") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        _ = try await controller.execute(taskKey: "lifecycle", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: inputReference(current, label: "Inspect current page")))
+        let nextClicks = try await script(view, "return window.clicks;")
+        XCTAssertEqual(nextClicks, Data("1".utf8))
+        _ = await controller.release(taskKey: "lifecycle")
+        XCTAssertNil(session.webView(for: id))
+        let human = try session.createTab(), humanView = try XCTUnwrap(session.webView(for: human))
+        humanView.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        humanView.loadHTMLString(body, baseURL: URL(string: "http://localhost:8123/human"))
+        try await session.waitForHumanTabReady(id: human, until: .now + .seconds(10))
+        _ = try await controller.execute(taskKey: "borrowed", tool: "browser_tabs", arguments: Data("{}".utf8))
+        let borrowed = try await controller.executeResult(taskKey: "borrowed", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": human.uuidString]), lifecycleObservationsEnabled: true)
+        _ = try await controller.execute(taskKey: "borrowed", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: inputReference(page(borrowed), label: "Inspect current page")))
+        let humanClicks = try await script(humanView, "return window.clicks;")
+        XCTAssertEqual(humanClicks, Data("1".utf8))
+        _ = await controller.shutdown()
+        XCTAssertNotNil(session.webView(for: human), "Borrowed user tab survives cleanup")
+    }
+
     func testFreshReadAuthorizesSettledNativeTargetBeforeAnyDriverCapture() async throws {
         for denied in [false, true] {
             let fixture = try HeldBrowserNavigationFixture(), base = try await fixture.start()
@@ -1494,7 +1549,9 @@ private final class HeldBrowserNavigationFixture: @unchecked Sendable {
     private var connections: [NWConnection] = []
     private var held: [NWConnection] = []
     private var released = false
-    init() throws {
+    private let responseBody: Data
+    init(body: String = "<!doctype html><main><h1>Settled authorized page</h1></main>") throws {
+        responseBody = Data(body.utf8)
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -1543,7 +1600,7 @@ private final class HeldBrowserNavigationFixture: @unchecked Sendable {
         pending.forEach(send)
     }
     private func send(_ connection: NWConnection) {
-        let body = Data("<!doctype html><main><h1>Settled authorized page</h1></main>".utf8)
+        let body = responseBody
         var output = Data("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
         output.append(body)
         connection.send(content: output, completion: .contentProcessed { _ in connection.cancel() })

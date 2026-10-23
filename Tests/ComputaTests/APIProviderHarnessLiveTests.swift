@@ -8,11 +8,154 @@ import XCTest
 /// tools; provider inference and credentials are isolated loopback fixtures.
 @MainActor
 final class APIProviderHarnessLiveTests: XCTestCase {
+    func testBundledEngineRetainsLifecycleObservationsAcrossCompactionAndColdResume() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
+            "Enable the isolated bundled API harness qualification.")
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertTrue(artifact.manifest.capabilities.contains(.browserLifecycleObservationsV1))
+        let failuresBefore = testRun?.failureCount ?? 0
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appendingPathComponent("ComputaAPILifecycle-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let fakeKey = "SYNTHETIC_ONLY_LIFECYCLE_" + UUID().uuidString
+        let credentials = APIHarnessCredentials(providerID: "fixture-lifecycle", value: fakeKey)
+        let inference = APIHarnessBrowserLifecycleInference(expectedKey: fakeKey)
+        let upstream = try APIHarnessHTTPFixture { await inference.respond($0) }
+        let backend = InertRuntimeBrowser()
+        var owned: CodexAppServerRuntime?
+        var pump: Task<Void, Never>?
+        do {
+            let endpoint = try await upstream.start()
+            let model = APIModelDefinition(id: "fixture-lifecycle", name: "Synthetic Lifecycle", contextWindow: 65_536)
+            let provider = APIProviderDefinition(id: "fixture-lifecycle", name: "Synthetic Loopback",
+                baseURL: endpoint, wireAPI: .chatCompletions, models: [model])
+            let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            func configuration(_ trace: URL) throws -> CodexAppServerRuntime.Configuration {
+                var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+                config.executable = .bundled
+                config.model = modelID; config.codexHomePath = home.path; config.workspacePath = project.path
+                config.protocolTracePath = trace.path
+                config.apiModelServerForTesting = APIModelServer(credentials: credentials,
+                    capsules: try APIReasoningCapsules(key: Data(repeating: 0xA4, count: 32)),
+                    toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1", isDirectory: true))
+                return config
+            }
+            let firstTrace = root.appendingPathComponent("first.jsonl")
+            let runtime = CodexAppServerRuntime(configuration: try configuration(firstTrace), visualGrounder: APIHarnessNoVisualGrounder())
+            owned = runtime
+            await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend))
+            try await runtime.configureAPIProviders([provider])
+            _ = try await runtime.loadTasks()
+            let taskID = UUID().uuidString.lowercased(), audit = APIHarnessEventAudit(taskID: taskID)
+            pump = Task {
+                for await event in runtime.events() {
+                    audit.receive(event)
+                    if case .approvalRequested(let request) = event {
+                        let allowed = request.taskID == taskID && ["browser_open", "browser_navigate"].contains(request.summary)
+                        if !allowed { audit.errors.append("Unexpected lifecycle fixture approval") }
+                        do { try await runtime.resolveApproval(requestID: request.id, approved: allowed) }
+                        catch { audit.errors.append("Lifecycle fixture approval failed"); audit.terminal = true }
+                    }
+                }
+            }
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
+            try await runtime.submit(prompt: "List and bind the existing synthetic browser tab, then open https://example.invalid/lifecycle and navigate only that task tab to https://example.invalid/lifecycle/next. List tabs once more and report the recorded lifecycle observations. Do not press or fill page controls.",
+                toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .completed); XCTAssertEqual(audit.errors, [])
+            XCTAssertEqual(audit.approvals, 2); XCTAssertEqual(audit.finalTexts.last, "LIFECYCLE_OBSERVED")
+            let trace = try AppServerWireTrace.load(firstTrace)
+            XCTAssertEqual(trace.parseFailures, [])
+            let threadID = try threadStarted(in: trace)
+            let proofs = trace.messages.compactMap { ($0.object["result"] as? [String: Any])?["nativeBrowserRead"] as? String }
+            XCTAssertEqual(proofs, ["inventory_v1", "inventory_v1"], "Lifecycle operations must never acquire successful-read ledger proof")
+            let firstReceipt = await inference.receipt()
+            XCTAssertEqual(firstReceipt.ordinaryRequests, 6)
+            XCTAssertEqual(firstReceipt.maintenanceRequests, 4, "Existing auto-compaction must actually execute after the synthetic usage reports")
+            XCTAssertEqual(firstReceipt.completeKinds, Set(["bind", "open", "navigate"]))
+            XCTAssertEqual(firstReceipt.latestChecksAfterCompaction, 4)
+            XCTAssertEqual(firstReceipt.failures, [])
+            let report = await runtime.shutdown()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            pump?.cancel(); pump = nil; owned = nil
+            guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Initial lifecycle retention invariants failed.") }
+
+            let resumedTrace = root.appendingPathComponent("resumed.jsonl")
+            let resumed = CodexAppServerRuntime(configuration: try configuration(resumedTrace), visualGrounder: APIHarnessNoVisualGrounder())
+            owned = resumed
+            await resumed.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend))
+            try await resumed.configureAPIProviders([provider])
+            let tasks = try await resumed.loadTasks()
+            let saved = try XCTUnwrap(tasks.first { $0.id == threadID })
+            let resumedAudit = APIHarnessEventAudit(taskID: saved.id)
+            pump = Task { for await event in resumed.events() { resumedAudit.receive(event) } }
+            try await resumed.submit(prompt: "Return the saved lifecycle result without opening, binding, navigating, reading or acting again.",
+                toTaskID: saved.id, modelID: modelID)
+            try await waitForTerminal(resumedAudit)
+            XCTAssertEqual(resumedAudit.status, .completed); XCTAssertEqual(resumedAudit.errors, [])
+            XCTAssertEqual(resumedAudit.approvals, 0); XCTAssertEqual(resumedAudit.finalTexts.last, "LIFECYCLE_OBSERVED")
+            let finalReceipt = await inference.receipt()
+            XCTAssertEqual(finalReceipt.ordinaryRequests, 7); XCTAssertEqual(finalReceipt.maintenanceRequests, 4)
+            XCTAssertTrue(finalReceipt.coldResumePreserved); XCTAssertEqual(finalReceipt.failures, [])
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.inventories, 2); XCTAssertEqual(counts.created, 1)
+            XCTAssertEqual(counts.navigations, 1); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            XCTAssertEqual(counts.ownedClosed, 1); XCTAssertEqual(counts.activations, 0)
+            XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
+            let stopped = await resumed.shutdown()
+            XCTAssertTrue(stopped.succeeded, stopped.issues.joined(separator: "; "))
+            pump?.cancel(); pump = nil; owned = nil
+            let wire = try AppServerWireTrace.load(resumedTrace)
+            XCTAssertFalse(wire.messages.contains { $0.direction == .serverToClient && $0.method == "item/tool/call" })
+            // Inspect actual persisted metadata rather than inferring provenance
+            // from model-readable text or a marker in an output.
+            var compactedRecords = 0
+            func inspect(_ value: Any) throws {
+                if let object = value as? [String: Any] {
+                    if object["type"] as? String == "compacted" { compactedRecords += 1 }
+                    if let ledger = object["native_completed_reads"] {
+                        let bytes = try JSONSerialization.data(withJSONObject: ledger, options: [.sortedKeys])
+                        let text = String(decoding: bytes, as: UTF8.self)
+                        for id in ["lifecycle-bind", "lifecycle-open", "lifecycle-navigate"] {
+                            XCTAssertFalse(text.contains(id), "A lifecycle call must remain a genuine ordinary call/output pair")
+                        }
+                    }
+                    for child in object.values { try inspect(child) }
+                } else if let array = value as? [Any] { for child in array { try inspect(child) } }
+            }
+            let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+            let files = FileManager.default.enumerator(at: sessions, includingPropertiesForKeys: [.isRegularFileKey])
+            var rolloutCount = 0
+            while let file = files?.nextObject() as? URL {
+                guard file.pathExtension == "jsonl" else { continue }
+                rolloutCount += 1
+                for line in try Data(contentsOf: file).split(separator: 0x0A) {
+                    try inspect(JSONSerialization.jsonObject(with: Data(line)))
+                }
+            }
+            XCTAssertGreaterThan(rolloutCount, 0); XCTAssertGreaterThanOrEqual(compactedRecords, 4)
+            guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Lifecycle compaction/cold-resume invariants failed.") }
+            await upstream.stop()
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            if let owned { _ = await owned.shutdown() }
+            pump?.cancel(); await upstream.stop()
+            print("syntheticAPILifecycleFailureArtifacts=\(root.path)")
+            throw error
+        }
+    }
+
     func testBundledEngineRegistersAndColdResumesBrowserContinuation() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
@@ -121,7 +264,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -324,7 +467,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -433,7 +576,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -892,6 +1035,160 @@ private actor APIHarnessInference {
         var result = Data()
         for value in frames { result.append(Data("data: ".utf8)); result.append(try JSONSerialization.data(withJSONObject: value)); result.append(Data("\n\n".utf8)) }
         result.append(Data("data: [DONE]\n\n".utf8)); return result
+    }
+}
+
+/// The real engine owns compaction and persistence. This provider fixture only
+/// supplies deterministic calls/usage and checks the next actual HTTP request.
+private actor APIHarnessBrowserLifecycleInference {
+    struct Receipt: Sendable {
+        var ordinaryRequests = 0
+        var maintenanceRequests = 0
+        var completeKinds = Set<String>()
+        var latestChecksAfterCompaction = 0
+        var coldResumePreserved = false
+        var failures = [String]()
+    }
+    private let expectedKey: String
+    private var observations = Receipt()
+    private var calls = [String: (name: String, arguments: String)]()
+    private var completeOutputs = [String: String]()
+    private let marker = #"{"retention":"complete_browser_observation_v1"}"#
+    init(expectedKey: String) { self.expectedKey = expectedKey }
+    func receipt() -> Receipt { observations }
+
+    func respond(_ request: APIModelServer.HTTPRequest) -> APIHarnessHTTPFixture.Response {
+        do {
+            guard request.method == "POST", request.path == "/v1/chat/completions",
+                  request.headers["authorization"] == "Bearer " + expectedKey,
+                  let body = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                  body["model"] as? String == "fixture-lifecycle", body["stream"] as? Bool == true,
+                  let messages = body["messages"] as? [[String: Any]] else { throw APIHarnessFailure("lifecycle_request") }
+            let tools = body["tools"] as? [[String: Any]] ?? []
+            let maintenance = tools.isEmpty && messages.contains {
+                ($0["content"] as? String ?? "").contains("INTERNAL CONTEXT MAINTENANCE.")
+            }
+            func output(_ id: String) throws -> String {
+                let found = messages.filter { $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == id }
+                guard found.count == 1, let text = found[0]["content"] as? String else { throw APIHarnessFailure("lifecycle_output_missing_or_duplicate") }
+                return text
+            }
+            func cue(_ kind: String) -> String {
+                "{\"completed\":true,\"kind\":\"\(kind)\",\"outcome\":\"unverified\"}"
+            }
+            func verifyIdentities() throws {
+                let allCalls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                for (id, expected) in calls where id != "lifecycle-inventory-first" && id != "lifecycle-inventory-last" {
+                    let found = allCalls.filter { $0["id"] as? String == id }
+                    guard found.count == 1, let function = found[0]["function"] as? [String: Any],
+                          function["name"] as? String == expected.name,
+                          function["arguments"] as? String == expected.arguments else { throw APIHarnessFailure("lifecycle_call_identity_changed") }
+                    let kind = String(id.dropFirst("lifecycle-".count))
+                    guard try output(id).contains(cue(kind)) else { throw APIHarnessFailure("lifecycle_completion_cue_lost") }
+                }
+            }
+            func verifyComplete(_ kind: String, save: Bool) throws {
+                let text = try output("lifecycle-" + kind)
+                let prefix = marker + cue(kind)
+                guard text.hasPrefix(prefix),
+                      let envelope = try JSONSerialization.jsonObject(with: Data(text.dropFirst(prefix.count).utf8)) as? [String: Any],
+                      envelope["operation_kind"] as? String == kind,
+                      envelope["operation_complete"] as? Bool == true,
+                      envelope["no_replay"] as? Bool == true,
+                      envelope["result_verified"] as? Bool == false,
+                      let current = envelope["current_observation"] as? [String: Any],
+                      current["status"] as? String == "available", current["view"] as? String == "overview",
+                      let snapshot = current["snapshot_id"] as? String, UUID(uuidString: snapshot) != nil,
+                      let page = current["text"] as? String, !page.isEmpty,
+                      text.utf8.count <= BrowserCompleteObservation.maximumTextBytes else {
+                    throw APIHarnessFailure("lifecycle_complete_observation_shape")
+                }
+                if kind == "navigate" {
+                    guard envelope["navigation_complete"] as? Bool == true else { throw APIHarnessFailure("lifecycle_navigation_flag") }
+                } else {
+                    guard envelope["bound"] as? Bool == true,
+                          envelope["ownership"] as? String == (kind == "bind" ? "user_existing" : "task_created"),
+                          envelope["already_bound"] as? Bool == false else { throw APIHarnessFailure("lifecycle_binding_flags") }
+                }
+                if save {
+                    if let previous = completeOutputs[kind], Data(previous.utf8) != Data(text.utf8) { throw APIHarnessFailure("lifecycle_complete_page_changed") }
+                    completeOutputs[kind] = text
+                    observations.completeKinds.insert(kind)
+                } else {
+                    guard let previous = completeOutputs[kind], Data(previous.utf8) == Data(text.utf8) else { throw APIHarnessFailure("lifecycle_latest_page_not_atomic") }
+                }
+            }
+            func call(_ nativeName: String, id: String, arguments: [String: Any]) throws -> [String: Any] {
+                let found = tools.compactMap { $0["function"] as? [String: Any] }.filter {
+                    $0["name"] as? String == nativeName
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
+                }
+                guard found.count == 1, let name = found[0]["name"] as? String else { throw APIHarnessFailure("lifecycle_tool_not_registered") }
+                let raw = String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]), as: UTF8.self)
+                calls[id] = (name, raw)
+                return ["role": "assistant", "tool_calls": [["index": 0, "id": id, "type": "function", "function": ["name": name, "arguments": raw]]]]
+            }
+            let delta: [String: Any]
+            let finish: String
+            var highUsage = false
+            if maintenance {
+                observations.maintenanceRequests += 1
+                let expected = observations.maintenanceRequests
+                guard (1...4).contains(expected), observations.ordinaryRequests == expected + 1 else { throw APIHarnessFailure("lifecycle_unexpected_compaction") }
+                try verifyIdentities()
+                try verifyComplete(expected == 1 ? "bind" : expected == 2 ? "open" : "navigate", save: true)
+                delta = ["role": "assistant", "content": "Historical notes: the requested browser lifecycle operations are recorded in genuine tool receipts. No page controls were pressed or filled."]
+                finish = "stop"
+            } else {
+                observations.ordinaryRequests += 1
+                switch observations.ordinaryRequests {
+                case 1:
+                    delta = try call("browser_tabs", id: "lifecycle-inventory-first", arguments: [:]); finish = "tool_calls"
+                case 2:
+                    guard try output("lifecycle-inventory-first").contains(InertRuntimeBrowser.humanID) else { throw APIHarnessFailure("lifecycle_inventory") }
+                    delta = try call("browser_bind", id: "lifecycle-bind", arguments: ["tab_id": InertRuntimeBrowser.humanID]); finish = "tool_calls"; highUsage = true
+                case 3...6:
+                    guard observations.maintenanceRequests == observations.ordinaryRequests - 2 else { throw APIHarnessFailure("lifecycle_compaction_not_exercised") }
+                    try verifyIdentities()
+                    try verifyComplete(observations.ordinaryRequests == 3 ? "bind" : observations.ordinaryRequests == 4 ? "open" : "navigate", save: false)
+                    observations.latestChecksAfterCompaction += 1
+                    switch observations.ordinaryRequests {
+                    case 3:
+                        delta = try call("browser_open", id: "lifecycle-open", arguments: ["url": "https://example.invalid/lifecycle"]); finish = "tool_calls"; highUsage = true
+                    case 4:
+                        delta = try call("browser_navigate", id: "lifecycle-navigate", arguments: ["url": "https://example.invalid/lifecycle/next"]); finish = "tool_calls"; highUsage = true
+                    case 5:
+                        delta = try call("browser_tabs", id: "lifecycle-inventory-last", arguments: [:]); finish = "tool_calls"; highUsage = true
+                    default:
+                        _ = try output("lifecycle-inventory-last")
+                        delta = ["role": "assistant", "content": "LIFECYCLE_OBSERVED"]; finish = "stop"
+                    }
+                case 7:
+                    try verifyIdentities(); try verifyComplete("navigate", save: false)
+                    guard observations.maintenanceRequests == 4 else { throw APIHarnessFailure("lifecycle_cold_resume_replayed") }
+                    observations.coldResumePreserved = true
+                    delta = ["role": "assistant", "content": "LIFECYCLE_OBSERVED"]; finish = "stop"
+                default: throw APIHarnessFailure("lifecycle_unexpected_replay")
+                }
+            }
+            let id = "chatcmpl-lifecycle-\(observations.ordinaryRequests)-\(observations.maintenanceRequests)"
+            let inputTokens = highUsage ? 70_000 : 120
+            let chunks: [[String: Any]] = [
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-lifecycle", "choices": [["index": 0, "delta": delta, "finish_reason": NSNull()]]],
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-lifecycle", "choices": [["index": 0, "delta": [:], "finish_reason": finish]]],
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-lifecycle", "choices": [], "usage": ["prompt_tokens": inputTokens, "completion_tokens": 40, "total_tokens": inputTokens + 40]],
+            ]
+            var data = Data()
+            for chunk in chunks {
+                data.append(Data("data: ".utf8)); data.append(try JSONSerialization.data(withJSONObject: chunk)); data.append(Data("\n\n".utf8))
+            }
+            data.append(Data("data: [DONE]\n\n".utf8))
+            return .init(status: "200 OK", body: data)
+        } catch {
+            observations.failures.append((error as? APIHarnessFailure)?.message ?? "lifecycle_fixture_failed")
+            return .init(status: "400 Bad Request", body: Data("{\"error\":{\"code\":\"fixture_contract_rejected\"}}".utf8), contentType: "application/json")
+        }
     }
 }
 

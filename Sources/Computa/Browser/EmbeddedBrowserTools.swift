@@ -80,15 +80,15 @@ enum EmbeddedBrowserTools {
                 ["cursor": cursor]),
             specification(
                 "browser_open",
-                "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end.",
+                "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end. Use available current_observation; otherwise browser_read. Completion is not the requested website outcome.",
                 ["url": url], ["url"]),
             specification(
                 "browser_bind",
-                "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup.",
+                "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup. Use available current_observation; otherwise browser_read.",
                 ["tab_id": ["type": "string", "minLength": 1]], ["tab_id"]),
             specification(
                 "browser_navigate",
-                "Navigate the currently bound built-in tab once. A timeout never replays navigation. Read its new document before acting.",
+                "Navigate the currently bound built-in tab once. A timeout never replays navigation. Use available current_observation of the new document; otherwise browser_read. Never repeat completed navigation because observation failed.",
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
@@ -334,6 +334,7 @@ struct EmbeddedBrowserToolExecution: Sendable {
     }
     let response: String
     let actionReceipt: EmbeddedBrowserActionReceipt?
+    let lifecycleReceipt: BrowserCompleteObservation.LifecycleReceipt?
     let completeObservation: Bool
     let nativeRead: NativeRead?
     /// Native-only evidence of an observed binding/document generation.
@@ -342,10 +343,11 @@ struct EmbeddedBrowserToolExecution: Sendable {
 
     init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil,
          readFailureScope: EmbeddedBrowserReadFailureScope? = nil, completeObservation: Bool = false,
-         nativeRead: NativeRead? = nil) {
+         nativeRead: NativeRead? = nil, lifecycleReceipt: BrowserCompleteObservation.LifecycleReceipt? = nil) {
         self.completeObservation = completeObservation
         self.response = response
         self.actionReceipt = actionReceipt
+        self.lifecycleReceipt = lifecycleReceipt
         self.readFailureScope = readFailureScope
         self.nativeRead = nativeRead
     }
@@ -487,7 +489,8 @@ actor EmbeddedBrowserToolController {
     }
 
     func executeResult(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil,
-                       prepared: EmbeddedBrowserActionReferences.Prepared? = nil)
+                       prepared: EmbeddedBrowserActionReferences.Prepared? = nil,
+                       lifecycleObservationsEnabled: Bool = false)
         async throws -> EmbeddedBrowserToolExecution
     {
         guard !closed, !retiredKeys.contains(taskKey) else { throw BrowserTabBrokerError.handleMissing }
@@ -594,6 +597,11 @@ actor EmbeddedBrowserToolController {
                     binding.targetInstanceToken == current.instanceToken, leases[current.targetID] == taskKey
                 {
                     try binding.lifetime.check()
+                    if lifecycleObservationsEnabled {
+                        return try await postLifecycleResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                            receipt: .bound(wasOpen: false, targetID: current.targetID, handle: binding.handle,
+                                owned: contexts[taskKey]?.ownedTarget != nil, alreadyBound: true))
+                    }
                     return try .init(response: bindingResponse(
                         target: current, binding: binding,
                         owned: contexts[taskKey]?.ownedTarget != nil, alreadyBound: true))
@@ -614,6 +622,7 @@ actor EmbeddedBrowserToolController {
                 guard let selected else { throw BrowserTabBrokerError.targetClosed }
                 target = selected
             }
+            let completedBinding: BrowserTabBinding
             do {
                 try check(taskKey, contextID)
                 try requireScope(scope, url: target.url, title: target.title)
@@ -641,8 +650,7 @@ actor EmbeddedBrowserToolController {
                 // this exact instance. A redundant bind can reuse the existing
                 // no-op path, including its live target, lease and scope checks.
                 if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
-                return try .init(response: bindingResponse(target: target, binding: binding, owned: owned),
-                                 readFailureScope: EmbeddedBrowserReadFailureScope(binding: binding))
+                completedBinding = binding
             } catch {
                 // Failed binding never retains read/input authority. Keep a
                 // created target reserved for cleanup until close is confirmed.
@@ -679,6 +687,15 @@ actor EmbeddedBrowserToolController {
                 }
                 throw error
             }
+            // Binding/creation has completed. A subsequent observation failure
+            // must not enter the rollback above or close a successfully opened tab.
+            if lifecycleObservationsEnabled {
+                return try await postLifecycleResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                    receipt: .bound(wasOpen: owned, targetID: target.targetID, handle: completedBinding.handle,
+                        owned: owned), fallbackReadFailureScope: .init(binding: completedBinding))
+            }
+            return try .init(response: bindingResponse(target: target, binding: completedBinding, owned: owned),
+                             readFailureScope: EmbeddedBrowserReadFailureScope(binding: completedBinding))
         case "browser_read", "browser_continue":
             // The split tool and saved cursor-capable reads share one native
             // cursor admission/publication path; only their proof names differ.
@@ -752,6 +769,10 @@ actor EmbeddedBrowserToolController {
             try await transport.navigate(
                 target: target, url: destination, permit: BrowserMutationPermit(lifetime: binding.lifetime))
             try check(taskKey, contextID)
+            if lifecycleObservationsEnabled {
+                return try await postLifecycleResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                    receipt: .navigation)
+            }
             return try .init(response: json([
                 "navigation_complete": true, "no_replay": true,
                 "next": "Read the current document before acting.",
@@ -1040,6 +1061,38 @@ actor EmbeddedBrowserToolController {
             // It repeats physical target, document, scope and publication checks.
             return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read,
                                                 compact: compact, compactEncoding: compactEncoding)
+        }
+    }
+
+    /// The lifecycle operation already completed. This performs only a bounded
+    /// read on its existing lease; it cannot create, rebind or navigate again.
+    private func postLifecycleResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?,
+                                       receipt: BrowserCompleteObservation.LifecycleReceipt,
+                                       fallbackReadFailureScope: EmbeddedBrowserReadFailureScope? = nil)
+        async throws -> EmbeddedBrowserToolExecution {
+        do {
+            let encoding = BrowserCompleteObservation.Encoding.lifecycle(receipt: receipt)
+            let snapshot = try await currentReadObservation(taskKey: taskKey, contextID: contextID, scope: scope,
+                read: SemanticReadRequest(view: .overview), compact: true, compactEncoding: encoding)
+            let text = try readResponse(snapshot, taskKey: taskKey, compact: true)
+            let encoded = try encoding.encode(text, snapshotID: snapshot.id)
+            guard try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: receipt.compactText) == 0 else {
+                throw PostInputObservationFailure.outputLimit
+            }
+            return .init(response: encoded, readFailureScope: .init(snapshot: snapshot),
+                completeObservation: true, lifecycleReceipt: receipt)
+        } catch {
+            if contexts[taskKey]?.id == contextID {
+                contexts[taskKey]?.snapshot = nil
+                contexts[taskKey]?.actionReferences.retireCurrent()
+            }
+            // Cancellation/retirement still suppresses publication through the
+            // existing Core fences. A live capture failure keeps completion true.
+            var result = receipt.completion
+            result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
+            result["next"] = "Operation complete; do not repeat it. Use browser_read if the bound tab remains available."
+            return try .init(response: json(result), readFailureScope: fallbackReadFailureScope,
+                lifecycleReceipt: receipt)
         }
     }
 

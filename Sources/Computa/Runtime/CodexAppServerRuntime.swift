@@ -889,6 +889,9 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         #if DEBUG
         /// Isolated integration fixtures supply a local gateway and in-memory credentials.
         var apiModelServerForTesting: APIModelServer? = nil
+        /// Inert transports explicitly simulate a verified artifact feature.
+        /// Bundled launches ignore this and use only the validated manifest.
+        var fixtureRuntimeCapabilities: Set<ComputaRuntimeArtifact.Capability> = []
         #endif
         var isBundled: Bool {
             if case .bundled = executable { return true }
@@ -1384,6 +1387,7 @@ private extension CodexAppServerRuntime {
         private var computerV2InFlight: [AgentTask.ID: UUID] = [:]
         private var computerGlobalInFlight: UUID?
         private var isReady = false
+        private var runtimeCapabilities: Set<ComputaRuntimeArtifact.Capability> = []
         private var isStartingServer = false
         private var isShuttingDown = false
         private var isPreparingCommandShutdown = false
@@ -1542,6 +1546,10 @@ private extension CodexAppServerRuntime {
                     throw RuntimeError.serverStopped
                 }
                 try sendNotification(method: "initialized", params: [:])
+                runtimeCapabilities = executable.capabilities
+                #if DEBUG
+                if !configuration.isBundled { runtimeCapabilities = configuration.fixtureRuntimeCapabilities }
+                #endif
                 isReady = true
                 events.yield(.connectionChanged(.connected(provider: "Codex App Server · \(configuration.effectiveBackend.displayName)")))
             } catch {
@@ -4950,7 +4958,11 @@ private extension CodexAppServerRuntime {
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
             let result: EmbeddedBrowserToolExecution
-            do { result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope, prepared: invocation) }
+            do {
+                result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input,
+                    scope: scope, prepared: invocation,
+                    lifecycleObservationsEnabled: runtimeCapabilities.contains(.browserLifecycleObservationsV1))
+            }
             catch let recovery as EmbeddedBrowserPreflightRecoveryFailure {
                 try observeReadScope(recovery.readFailureScope)
                 throw recovery
@@ -4960,7 +4972,8 @@ private extension CodexAppServerRuntime {
             // retention keeps the dispatch cue separate from a typed excerpt of
             // complete observed rows, without old pagination metadata.
             let marker = result.completeObservation ? [textContent(BrowserCompleteObservation.marker)] : []
-            let receipt = result.actionReceipt.map { [textContent($0.compactText)] } ?? []
+            let receipt = result.actionReceipt.map { [textContent($0.compactText)] }
+                ?? result.lifecycleReceipt.map { [textContent($0.compactText)] } ?? []
             return DynamicToolExecution(contentItems: marker + receipt + [textContent(result.response)], nativeRead: result.nativeRead)
         }
 
@@ -7729,6 +7742,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
+            runtimeCapabilities.removeAll()
             for taskID in threadForTask.keys where isRemoteInference(modelForTask[taskID] ?? "") {
                 scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             }

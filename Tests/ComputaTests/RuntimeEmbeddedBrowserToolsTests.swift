@@ -7,6 +7,147 @@ import XCTest
 /// with an inert browser backend. No provider, Chrome, UI or network is used.
 @MainActor
 final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
+    func testLifecycleCapabilityPublishesOpenObservationForImmediateInputOnlyWhenEnabled() async throws {
+        for enabled in [false, true] {
+            try await withHarness(approval: true,
+                                  capabilities: enabled ? [.browserLifecycleObservationsV1] : []) { harness in
+                var calls: [[String: Any]] = [
+                    ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ]
+                if !enabled { calls.append(["tool": "browser_read", "arguments": ["view": "all"]]) }
+                calls += [
+                    ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
+                    ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+                ]
+                let expectedCount = calls.count
+                try await harness.submit(calls)
+                try await self.waitFor { harness.rowCount == expectedCount && harness.audit.status == .completed }
+                try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
+                let rows = try harness.rows()
+                XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+                let first = try XCTUnwrap(rows.first)
+                XCTAssertNil(first["nativeBrowserRead"] as? String,
+                             "Opening a page must never acquire read-ledger identity")
+                let items = try XCTUnwrap(first["contentItems"] as? [[String: Any]])
+                XCTAssertEqual(items.contains { $0["text"] as? String == BrowserCompleteObservation.marker }, enabled)
+                XCTAssertEqual(items.count, enabled ? 3 : 1)
+                if enabled { try self.assertLifecycleObservation(first, kind: "open") }
+                else { XCTAssertFalse((first["text"] as? String ?? "").contains("current_observation")) }
+                XCTAssertTrue((rows.last?["text"] as? String)?.contains("UA 123 departs at 14:35") == true)
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.ownedClosed, 1)
+                XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 1)
+                XCTAssertEqual(counts.navigations, 0); XCTAssertEqual(counts.activations, 0)
+                XCTAssertTrue(counts.humanIntact)
+                XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill", "browser_click"])
+            }
+        }
+    }
+
+    func testLifecycleBindAndIdempotentBindExposeCurrentReferencesWithoutOwningUserTab() async throws {
+        try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
+            try await self.waitFor { harness.rowCount == 4 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            for index in [1, 2] { try self.assertLifecycleObservation(rows[index], kind: "bind") }
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.ownedClosed, 0)
+            XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertEqual(counts.navigations, 0)
+            XCTAssertEqual(counts.presses, 1); XCTAssertEqual(counts.activations, 0)
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_click"])
+        }
+    }
+
+    func testLifecycleNavigationRejectsOldReferenceAndPublishesOnlyCurrentDocument() async throws {
+        try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"], "saveFillRef": "beforeNavigation"],
+                ["tool": "browser_navigate", "arguments": ["url": "https://example.invalid/flight-current"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@beforeNavigation", "text": "MUST_NOT_FILL"], "captureRecovery": true],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
+            try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
+            try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, true])
+            try self.assertLifecycleObservation(rows[1], kind: "navigate")
+            XCTAssertTrue((rows[1]["text"] as? String)?.contains("https://example.invalid/flight-current") == true)
+            XCTAssertFalse((rows.last?["text"] as? String ?? "").contains("MUST_NOT_FILL"))
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.navigations, 1)
+            XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 1)
+            XCTAssertEqual(counts.ownedClosed, 1); XCTAssertTrue(counts.humanIntact)
+            XCTAssertEqual(harness.audit.approvals.map(\.summary),
+                           ["browser_open", "browser_navigate", "browser_fill", "browser_click"])
+        }
+    }
+
+    func testLifecycleCaptureFailurePreservesSuccessfulOpenWithoutReplayOrReferences() async throws {
+        try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
+            await harness.backend.failNextRead()
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+            ], hold: true)
+            try await self.waitFor { harness.rowCount == 1 }
+            let row = try XCTUnwrap(harness.rows().first)
+            XCTAssertEqual(row["success"] as? Bool, true)
+            XCTAssertNil(row["nativeBrowserRead"] as? String)
+            let items = try XCTUnwrap(row["contentItems"] as? [[String: Any]])
+            XCTAssertFalse(items.contains { $0["text"] as? String == BrowserCompleteObservation.marker })
+            let body = try XCTUnwrap(items.compactMap { item -> [String: Any]? in
+                guard let text = item["text"] as? String else { return nil }
+                return (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+            }.first { $0["operation_kind"] != nil })
+            XCTAssertEqual(body["operation_kind"] as? String, "open")
+            XCTAssertEqual(body["operation_complete"] as? Bool, true)
+            XCTAssertEqual(body["no_replay"] as? Bool, true)
+            XCTAssertEqual((body["current_observation"] as? [String: Any])?["status"] as? String, "unavailable")
+            XCTAssertFalse((row["text"] as? String ?? "").contains("bfill_"))
+            let opened = await harness.backend.counts()
+            XCTAssertEqual(opened.created, 1); XCTAssertEqual(opened.ownedClosed, 0)
+            XCTAssertEqual(opened.mutations, 0); XCTAssertTrue(opened.humanIntact)
+            try await harness.runtime.interrupt(taskID: Harness.taskID)
+            try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open"])
+        }
+    }
+
+    func testStoppedLifecycleObservationCannotPublishLateReferencesOrCompletionCue() async throws {
+        // Stop records uncertainty while the deliberately uncooperative read
+        // is still held, just like the post-input observation cancellation test.
+        try await withHarness(approval: true, allowsCleanupFailure: true,
+                              capabilities: [.browserLifecycleObservationsV1]) { harness in
+            await harness.backend.holdNextRead()
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+            ], hold: true)
+            try await self.waitForAsync { await harness.backend.isReadHeld() }
+            XCTAssertEqual(harness.rowCount, 0)
+            let opened = await harness.backend.counts()
+            XCTAssertEqual(opened.created, 1)
+            let stopping = Task { try await harness.runtime.interrupt(taskID: Harness.taskID) }
+            try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
+            await harness.backend.resumeRead()
+            try await stopping.value
+            XCTAssertEqual(harness.rowCount, 0)
+            let trace = try AppServerWireTrace.load(harness.root.appendingPathComponent("protocol.jsonl"))
+            XCTAssertTrue(trace.parseFailures.isEmpty)
+            XCTAssertFalse(trace.messages.contains {
+                $0.direction == .clientToServer && $0.identifier == "string:request-1-0" && $0.object["result"] != nil
+            })
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertEqual(counts.mutations, 0); XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
     func testSplitContinuationPublishesItsOwnNativeProof() async throws {
         try await withHarness { harness in
             await harness.backend.enablePaginatedRead()
@@ -1280,7 +1421,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         let audit = Audit()
         var events: Task<Void, Never>?
 
-        init(configured: Bool, approval: Bool?, legacyPIDFixture: LegacyPIDFixture?) async throws {
+        init(configured: Bool, approval: Bool?, legacyPIDFixture: LegacyPIDFixture?,
+             capabilities: Set<ComputaRuntimeArtifact.Capability>) async throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserRuntime-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let fixture = root.appendingPathComponent("fixture.ts")
@@ -1292,6 +1434,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             configuration.workspacePath = root.path
             configuration.model = Self.modelID
             configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
+            configuration.fixtureRuntimeCapabilities = capabilities
             if let legacyPIDFixture {
                 configuration.fixtureNativeProcessIdentity = { await legacyPIDFixture.resolve($0) }
                 configuration.fixtureLegacyNativeSnapshot = { try await legacyPIDFixture.read($0) }
@@ -1372,12 +1515,43 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             BrowserCompleteObservation.maximumSerializedItemsBytes, file: file, line: line)
     }
 
+    private func assertLifecycleObservation(_ row: [String: Any], kind: String,
+                                            file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(row["success"] as? Bool, true, file: file, line: line)
+        XCTAssertNil(row["nativeBrowserRead"] as? String, file: file, line: line)
+        let items = try XCTUnwrap(row["contentItems"] as? [[String: Any]], file: file, line: line)
+        XCTAssertEqual(items.count, 3, file: file, line: line)
+        guard items.count == 3 else { return }
+        XCTAssertEqual(items[0]["text"] as? String, BrowserCompleteObservation.marker, file: file, line: line)
+        let cueText = try XCTUnwrap(items[1]["text"] as? String, file: file, line: line)
+        let cue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(cueText.utf8)) as? [String: Any], file: file, line: line)
+        XCTAssertEqual(Set(cue.keys), ["completed", "kind", "outcome"], file: file, line: line)
+        XCTAssertEqual(cue["kind"] as? String, kind, file: file, line: line)
+        XCTAssertEqual(cue["completed"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(cue["outcome"] as? String, "unverified", file: file, line: line)
+        XCTAssertLessThanOrEqual(cueText.utf8.count, 128, file: file, line: line)
+        let text = try XCTUnwrap(items[2]["text"] as? String, file: file, line: line)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any], file: file, line: line)
+        XCTAssertEqual(body["operation_kind"] as? String, kind, file: file, line: line)
+        XCTAssertEqual(body["operation_complete"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(body["no_replay"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(body["result_verified"] as? Bool, false, file: file, line: line)
+        let observation = try XCTUnwrap(body["current_observation"] as? [String: Any], file: file, line: line)
+        XCTAssertEqual(observation["status"] as? String, "available", file: file, line: line)
+        XCTAssertTrue((observation["text"] as? String)?.hasPrefix("AXSNAPSHOT ") == true, file: file, line: line)
+        XCTAssertLessThanOrEqual(items.reduce(2) { $0 + ($1["text"] as? String ?? "").utf8.count },
+                                 BrowserCompleteObservation.maximumTextBytes, file: file, line: line)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: items).count,
+                                 BrowserCompleteObservation.maximumSerializedItemsBytes, file: file, line: line)
+    }
+
     private func withHarness(configured: Bool = true, approval: Bool? = nil,
                              legacyPIDFixture: LegacyPIDFixture? = nil,
                              allowsCleanupFailure: Bool = false,
+                             capabilities: Set<ComputaRuntimeArtifact.Capability> = [],
                              _ body: @MainActor (Harness) async throws -> Void) async throws {
         let harness = try await Harness(configured: configured, approval: approval,
-            legacyPIDFixture: legacyPIDFixture)
+            legacyPIDFixture: legacyPIDFixture, capabilities: capabilities)
         defer { try? FileManager.default.removeItem(at: harness.root) }
         do {
             try await body(harness)
@@ -1386,6 +1560,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             if allowsCleanupFailure { XCTAssertFalse(report.succeeded) }
             else { XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; ")) }
         } catch {
+            await harness.backend.resumeRead()
             _ = await harness.runtime.shutdown()
             harness.events?.cancel()
             throw error
@@ -1629,8 +1804,16 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var postInputObservationHeld = false
     private var postInputObservationWaiter: CheckedContinuation<Void, Never>?
     private var nextContentReadFieldValue: String?
+    private var failRead = false
+    private var holdRead = false
+    private var readHeld = false
+    private var readWaiter: CheckedContinuation<Void, Never>?
 
     func changeFieldOnNextContentRead(_ value: String) { nextContentReadFieldValue = value }
+    func failNextRead() { failRead = true }
+    func holdNextRead() { holdRead = true }
+    func isReadHeld() -> Bool { readHeld }
+    func resumeRead() { holdRead = false; readWaiter?.resume(); readWaiter = nil }
     func holdNextClose() { holdClose = true }
     func failNextClose() { failClose = true }
     func failNextPress() { failPress = true }
@@ -1681,6 +1864,15 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         guard let current = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
         guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
         try authorization(current)
+        if failRead {
+            failRead = false
+            throw BrowserTabBrokerError.browserUnavailable("Synthetic lifecycle capture failure")
+        }
+        if holdRead {
+            holdRead = false; readHeld = true
+            await withCheckedContinuation { readWaiter = $0 }
+            readHeld = false
+        }
         if readiness == .content, let value = nextContentReadFieldValue {
             nextContentReadFieldValue = nil
             values[current.targetID] = value

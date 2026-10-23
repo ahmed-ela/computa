@@ -14729,10 +14729,10 @@ index 0000000..5d0ece5
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..c6cdf02
+index 0000000..d94e9d9
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,815 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! Mutations and failures remain paired tool history. Older proven native reads may become
@@ -15042,7 +15042,7 @@ index 0000000..c6cdf02
 +
 +fn has_complete_browser_marker(call: &ResponseItem, output: &FunctionCallOutputPayload) -> bool {
 +    matches!(call, ResponseItem::FunctionCall { name, namespace: None, .. }
-+        if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill"))
++        if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill" | "browser_open" | "browser_bind" | "browser_navigate"))
 +        && matches!(&output.body, FunctionCallOutputBody::ContentItems(items)
 +            if matches!(items.first(), Some(FunctionCallOutputContentItem::InputText { text })
 +                if text == COMPLETE_BROWSER_OBSERVATION_MARKER))
@@ -15057,7 +15057,7 @@ index 0000000..c6cdf02
 +    // changes custom/MCP or unmarked output behavior.
 +    let tool = match call {
 +        ResponseItem::FunctionCall { name, namespace: None, .. }
-+            if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill") => name.as_str(),
++            if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill" | "browser_open" | "browser_bind" | "browser_navigate") => name.as_str(),
 +        _ => return Ok(None),
 +    };
 +    let marker = match &output.body {
@@ -15085,6 +15085,10 @@ index 0000000..c6cdf02
 +         FunctionCallOutputContentItem::InputText { text: cue },
 +         FunctionCallOutputContentItem::InputText { text: body }]
 +            if matches!(tool, "browser_click" | "browser_fill") && output.success != Some(false) && valid_browser_dispatch_cue(tool, cue) => (Some(cue.clone()), body.as_str(), false),
++        [FunctionCallOutputContentItem::InputText { .. },
++         FunctionCallOutputContentItem::InputText { text: cue },
++         FunctionCallOutputContentItem::InputText { text: body }]
++            if output.success != Some(false) && valid_browser_lifecycle_cue(tool, cue) => (Some(cue.clone()), body.as_str(), false),
 +        _ => return Err(invalid()),
 +    };
 +    if body.trim().is_empty() { return Err(invalid()); }
@@ -15094,6 +15098,8 @@ index 0000000..c6cdf02
 +        } else {
 +            let valid = if recovery {
 +                complete_browser_recovery_observation(tool, cue.as_deref().unwrap_or_default(), body)
++            } else if matches!(tool, "browser_open" | "browser_bind" | "browser_navigate") {
++                complete_browser_lifecycle_observation(tool, cue.as_deref().unwrap_or_default(), body)
 +            } else {
 +                complete_browser_action_observation(tool, cue.as_deref().unwrap_or_default(), body)
 +            };
@@ -15324,6 +15330,56 @@ index 0000000..c6cdf02
 +        })
 +}
 +
++// Lifecycle completion is a host operation receipt, not website success or a
++// passive-read proof. It remains an ordinary exact call/output pair, including
++// when the following observation is retained atomically across compaction.
++fn valid_browser_lifecycle_cue(tool: &str, receipt: &str) -> bool {
++    if !matches!(tool, "browser_open" | "browser_bind" | "browser_navigate") || receipt.len() > 128 {
++        return false;
++    }
++    let Ok(value) = serde_json::from_str::<serde_json::Value>(receipt) else { return false };
++    let Some(cue) = value.as_object() else { return false };
++    cue.len() == 3
++        && cue.get("kind").and_then(serde_json::Value::as_str) == tool.strip_prefix("browser_")
++        && cue.get("completed").and_then(serde_json::Value::as_bool) == Some(true)
++        && cue.get("outcome").and_then(serde_json::Value::as_str) == Some("unverified")
++}
++
++fn complete_browser_lifecycle_observation(tool: &str, receipt: &str, observation: &str) -> bool {
++    if !valid_browser_lifecycle_cue(tool, receipt) { return false; }
++    let Ok(value) = serde_json::from_str::<serde_json::Value>(observation) else { return false };
++    let Some(body) = value.as_object() else { return false };
++    let shared = ["operation_kind", "operation_complete", "no_replay", "result_verified", "current_observation", "next"];
++    let completion: &[&str] = if tool == "browser_navigate" { &["navigation_complete"] }
++        else { &["browser", "tab_id", "tab_handle", "bound", "ownership", "already_bound", "profile"] };
++    if body.len() != shared.len() + completion.len()
++        || !body.keys().all(|key| shared.contains(&key.as_str()) || completion.contains(&key.as_str()))
++        || body.get("operation_kind").and_then(serde_json::Value::as_str) != tool.strip_prefix("browser_")
++        || body.get("operation_complete").and_then(serde_json::Value::as_bool) != Some(true)
++        || body.get("no_replay").and_then(serde_json::Value::as_bool) != Some(true)
++        || body.get("result_verified").and_then(serde_json::Value::as_bool) != Some(false)
++        || !body.get("next").and_then(serde_json::Value::as_str).is_some_and(|text| !text.trim().is_empty())
++    { return false; }
++    let Some(current) = body.get("current_observation").and_then(serde_json::Value::as_object) else { return false };
++    if current.len() != 4
++        || current.get("status").and_then(serde_json::Value::as_str) != Some("available")
++        || current.get("view").and_then(serde_json::Value::as_str) != Some("overview")
++        || !current.get("snapshot_id").and_then(serde_json::Value::as_str).is_some_and(|id| !id.is_empty())
++        || !current.get("text").and_then(serde_json::Value::as_str).is_some_and(|text| !text.trim().is_empty())
++    { return false; }
++    if tool == "browser_navigate" {
++        return body.get("navigation_complete").and_then(serde_json::Value::as_bool) == Some(true);
++    }
++    body.get("browser").and_then(serde_json::Value::as_str) == Some("computa_builtin")
++        && body.get("profile").and_then(serde_json::Value::as_str) == Some("shared_human")
++        && body.get("bound").and_then(serde_json::Value::as_bool) == Some(true)
++        && ["tab_id", "tab_handle"].iter().all(|key| body.get(*key).and_then(serde_json::Value::as_str).is_some_and(|id| !id.is_empty()))
++        && matches!(body.get("ownership").and_then(serde_json::Value::as_str), Some("task_created" | "user_existing"))
++        && body.get("already_bound").and_then(serde_json::Value::as_bool).is_some()
++        && (tool != "browser_open" || (body.get("ownership").and_then(serde_json::Value::as_str) == Some("task_created")
++            && body.get("already_bound").and_then(serde_json::Value::as_bool) == Some(false)))
++}
++
 +fn bounded_output(
 +    source: &FunctionCallOutputPayload,
 +    text_cap: usize,
@@ -15494,10 +15550,10 @@ index 0000000..c6cdf02
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..1ad74e9
+index 0000000..38cadfd
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,2173 @@
+@@ -0,0 +1,2366 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -16265,6 +16321,199 @@ index 0000000..1ad74e9
 +        ]);
 +    }
 +    history
++}
++
++fn complete_browser_lifecycle_pair(id: &str, kind: &str, page: &str) -> Vec<ResponseItemEnvelope> {
++    let mut history = complete_browser_pair(id, page);
++    if let ResponseItem::FunctionCall { name, arguments, .. } = &mut history[0].item {
++        *name = format!("browser_{kind}");
++        *arguments = if kind == "bind" { r#"{ "tab_id": "observed-tab" }"#.to_string() }
++            else { r#"{ "url": "https://example.test/observed" }"#.to_string() };
++    }
++    let mut body = json!({
++        "operation_kind":kind, "operation_complete":true, "no_replay":true, "result_verified":false,
++        "current_observation":{"status":"available","view":"overview", "snapshot_id":"00000000-0000-4000-8000-000000000001","text":page},
++        "next":"Use this observation; continue only its next_cursor. Operation complete; do not repeat it."
++    });
++    if kind == "navigate" { body["navigation_complete"] = json!(true); }
++    else {
++        let object = body.as_object_mut().unwrap();
++        object.extend(json!({"browser":"computa_builtin","tab_id":"observed-tab", "tab_handle":"00000000-0000-4000-8000-000000000002",
++            "bound":true,"ownership":"task_created","already_bound":false,"profile":"shared_human"}).as_object().unwrap().clone());
++    }
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++        output.body = FunctionCallOutputBody::ContentItems(vec![
++            FunctionCallOutputContentItem::InputText { text: COMPLETE_BROWSER_OBSERVATION_MARKER.to_string() },
++            FunctionCallOutputContentItem::InputText { text: json!({"kind":kind,"completed":true,"outcome":"unverified"}).to_string() },
++            FunctionCallOutputContentItem::InputText { text: body.to_string() },
++        ]);
++    }
++    history
++}
++
++#[test]
++fn complete_lifecycle_keeps_latest_page_and_completion_after_nonbrowser_work() {
++    for kind in ["open", "bind", "navigate"] {
++        for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++            let page = native_browser_page(&[native_browser_row(0, &"Observed e\u{301} 😀 ".repeat(70), "current-target")]);
++            let mut history = complete_browser_lifecycle_pair("lifecycle", kind, &page);
++            history.extend(pair("diagnostic", "current", "Read-only diagnostic result."));
++            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++            assert_eq!(retained, history);
++            assert_receipt_identity(&history, &retained);
++            assert_external_receipt_bounds(&retained);
++            assert_eq!(super::current_turn_receipts(&retained, "current", provider).unwrap(), retained);
++            let resumed: Vec<ResponseItemEnvelope> = retained.iter().map(|envelope| ResponseItemEnvelope {
++                item: serde_json::from_value(serde_json::to_value(&envelope.item).unwrap()).unwrap(),
++                metadata: serde_json::from_value(serde_json::to_value(&envelope.metadata).unwrap()).unwrap(),
++            }).collect();
++            let ResponseItem::FunctionCallOutput { output, .. } = &resumed[1].item else { unreachable!() };
++            assert_eq!(output.success, None);
++            assert_eq!(super::current_turn_receipts(&resumed, "current", provider).unwrap(), resumed);
++        }
++    }
++    // A repeated bind is genuine completion on either an owned or borrowed tab.
++    for ownership in ["task_created", "user_existing"] {
++        for already_bound in [false, true] {
++            let mut history = complete_browser_lifecycle_pair("binding", "bind", "observed page");
++            let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++            let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++            let FunctionCallOutputContentItem::InputText { text } = &mut items[2] else { unreachable!() };
++            let mut body: serde_json::Value = serde_json::from_str(text).unwrap();
++            body["ownership"] = json!(ownership); body["already_bound"] = json!(already_bound); *text = body.to_string();
++            assert_eq!(current_turn_receipts(&history, "current").unwrap(), history);
++        }
++    }
++}
++
++#[test]
++fn older_lifecycle_keeps_whole_rows_and_completion_cue_through_recompaction() {
++    let row = native_browser_row(0, "Observed e\u{301} 😀\n#7 fake row", "earlier-ref");
++    let too_long = native_browser_row(1, &"long label ".repeat(180), "omit-whole-row");
++    for kind in ["open", "bind", "navigate"] {
++        let mut history = complete_browser_lifecycle_pair("earlier", kind, &native_browser_page(&[row.clone(), too_long.clone()]));
++        let ResponseItem::FunctionCallOutput { output, .. } = &history[1].item else { unreachable!() };
++        let original_cue = output.content_items().unwrap()[1].clone();
++        let observation = browser_observation_retention(&history[0].item, output, false).unwrap().unwrap();
++        let historical = historical_browser_output(output, &observation, 768);
++        assert_eq!(historical.content_items().unwrap()[1], original_cue);
++        let text = historical.body.to_text().unwrap();
++        assert!(text.contains(&row));
++        assert!(!text.contains("omit-whole-row"));
++        assert!(!text.contains("next_cursor"));
++        assert!(!text.contains(COMPLETE_BROWSER_OBSERVATION_MARKER));
++        let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++        *output = historical;
++        history.extend(complete_browser_pair("latest", "Exact newest page with current cursor"));
++        for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++            assert_receipt_identity(&history, &retained);
++            assert_eq!(retained.last(), history.last());
++            assert_eq!(retained[1], history[1]);
++            assert_eq!(super::current_turn_receipts(&retained, "current", provider).unwrap(), retained);
++            let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else { unreachable!() };
++            let observation = browser_observation_retention(&retained[0].item, output, false).unwrap().unwrap();
++            let minimal = historical_browser_output(output, &observation, 256);
++            assert_eq!(minimal.content_items().unwrap()[1], original_cue);
++            assert!(output_text_bytes(&minimal.body) <= 256);
++            assert!(browser_observation_retention(&retained[0].item, &minimal, false).unwrap().is_some());
++        }
++    }
++}
++
++#[test]
++fn marked_lifecycle_rejects_malformed_completion_without_changing_custom_or_unmarked_outputs() {
++    for kind in ["open", "bind", "navigate"] {
++        for variant in ["failure", "missing_cue", "extra_item", "cue_kind", "cue_extra", "cue_incomplete", "cue_verified",
++            "invalid_json", "body_kind", "body_extra", "incomplete", "replay", "verified", "unavailable", "wrong_view", "empty_page",
++            "empty_snapshot", "observation_extra", "empty_next", "wrong_completion", "wrong_profile", "wrong_ownership", "wrong_binding_type"] {
++            let mut history = complete_browser_lifecycle_pair("invalid", kind, "Observed page");
++            let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++            if variant == "failure" { output.success = Some(false); }
++            let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++            if variant == "missing_cue" { items.remove(1); }
++            else if variant == "extra_item" { items.push(observation_image()); }
++            else {
++                let FunctionCallOutputContentItem::InputText { text } = &mut items[1] else { unreachable!() };
++                let mut cue: serde_json::Value = serde_json::from_str(text).unwrap();
++                match variant {
++                    "cue_kind" => cue["kind"] = json!("click"), "cue_extra" => cue["extra"] = json!(true),
++                    "cue_incomplete" => cue["completed"] = json!(false), "cue_verified" => cue["outcome"] = json!("verified"), _ => {}
++                }
++                *text = cue.to_string();
++                let FunctionCallOutputContentItem::InputText { text } = &mut items[2] else { unreachable!() };
++                let mut body: serde_json::Value = serde_json::from_str(text).unwrap();
++                match variant {
++                    "body_kind" => body["operation_kind"] = json!("click"), "body_extra" => body["extra"] = json!(true),
++                    "incomplete" => body["operation_complete"] = json!(false), "replay" => body["no_replay"] = json!(false),
++                    "verified" => body["result_verified"] = json!(true), "unavailable" => body["current_observation"]["status"] = json!("unavailable"),
++                    "wrong_view" => body["current_observation"]["view"] = json!("all"), "empty_page" => body["current_observation"]["text"] = json!("  "),
++                    "empty_snapshot" => body["current_observation"]["snapshot_id"] = json!(""), "observation_extra" => body["current_observation"]["extra"] = json!(true),
++                    "empty_next" => body["next"] = json!(""), "wrong_completion" => { body[if kind == "navigate" { "navigation_complete" } else { "bound" }] = json!(false); },
++                    "wrong_profile" => body["profile"] = json!("other"), "wrong_ownership" => body["ownership"] = json!("other"),
++                    "wrong_binding_type" => body["already_bound"] = json!("false"), _ => {}
++                }
++                *text = if variant == "invalid_json" { "{broken".to_string() } else { body.to_string() };
++            }
++            assert!(current_turn_receipts(&history, "current").unwrap_err().to_string().contains("invalid result shape or failure status"), "{kind}/{variant}");
++        }
++        for variant in ["custom", "namespace", "unmarked"] {
++            let mut history = complete_browser_lifecycle_pair("ordinary", kind, &"observed ".repeat(1000));
++            if let ResponseItem::FunctionCall { name, namespace, .. } = &mut history[0].item {
++                if variant == "custom" { *name = "custom_lifecycle".into(); }
++                if variant == "namespace" { *namespace = Some("mcp_custom".into()); }
++            }
++            if variant == "unmarked" {
++                let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item else { unreachable!() };
++                let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() }; items.remove(0);
++            }
++            let retained = current_turn_receipts(&history, "current").unwrap();
++            assert_receipt_identity(&history, &retained);
++            assert_ne!(retained[1], history[1]);
++        }
++    }
++    for (key, value) in [("ownership", json!("user_existing")), ("already_bound", json!(true))] {
++        let history = complete_browser_lifecycle_pair("open", "open", "Observed page");
++        let ResponseItem::FunctionCallOutput { output, .. } = &history[1].item else { unreachable!() };
++        let items = output.content_items().unwrap();
++        let FunctionCallOutputContentItem::InputText { text: cue } = &items[1] else { unreachable!() };
++        let FunctionCallOutputContentItem::InputText { text } = &items[2] else { unreachable!() };
++        let mut body: serde_json::Value = serde_json::from_str(text).unwrap(); body[key] = value;
++        assert!(!complete_browser_lifecycle_observation("browser_open", cue, &body.to_string()));
++    }
++}
++
++#[test]
++fn lifecycle_observation_preserves_existing_raw_canonical_aggregate_and_pair_caps() {
++    for kind in ["open", "bind", "navigate"] {
++        let empty = complete_browser_lifecycle_pair("boundary", kind, "");
++        let ResponseItem::FunctionCallOutput { output, .. } = &empty[1].item else { unreachable!() };
++        let available = MAX_LATEST_OUTPUT_TEXT_BYTES - output_text_bytes(&output.body);
++        let exact = complete_browser_lifecycle_pair("boundary", kind, &"x".repeat(available));
++        assert_eq!(current_turn_receipts(&exact, "current").unwrap(), exact);
++        assert!(current_turn_receipts(&complete_browser_lifecycle_pair("boundary", kind, &"x".repeat(available + 1)), "current").is_err());
++        let escaped = complete_browser_lifecycle_pair("escaped", kind, &"\\".repeat(1700));
++        let ResponseItem::FunctionCallOutput { output, .. } = &escaped[1].item else { unreachable!() };
++        assert!(output_text_bytes(&output.body) <= MAX_LATEST_OUTPUT_TEXT_BYTES);
++        assert!(current_turn_receipts(&escaped, "current").is_err());
++        let mut history: Vec<_> = (0..MAX_PAIRS).flat_map(|index| pair(&format!("old-{index}"), "current", "result")).collect();
++        history.extend(complete_browser_lifecycle_pair("extra", kind, "page"));
++        assert!(current_turn_receipts(&history, "current").unwrap_err().to_string().contains("32 completed-function-call"));
++        let mut demonstrated = false;
++        for count in 1..MAX_PAIRS {
++            let mut history: Vec<_> = (0..count).flat_map(|index| {
++                let mut pair = pair(&format!("old-{index}"), "current", "actual result");
++                if let ResponseItem::FunctionCall { arguments, .. } = &mut pair[0].item { *arguments = json!({"payload":"a".repeat(200)}).to_string(); }
++                pair
++            }).collect();
++            history.extend(complete_browser_lifecycle_pair("latest", kind, &"x".repeat(3000)));
++            let mut generic = history.clone();
++            if let ResponseItem::FunctionCall { name, .. } = &mut generic[count * 2].item { *name = "custom_lifecycle".into(); }
++            if super::current_turn_receipts(&generic, "current", ReceiptProvider::External).is_ok()
++                && super::current_turn_receipts(&history, "current", ReceiptProvider::External).is_err() { demonstrated = true; break; }
++        }
++        assert!(demonstrated, "{kind}: whole latest page must stop rather than drop calls/results");
++    }
 +}
 +
 +fn complete_browser_recovery_pair(id: &str, kind: &str, reason: &str, page: &str) -> Vec<ResponseItemEnvelope> {

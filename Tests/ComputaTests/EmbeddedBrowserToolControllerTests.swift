@@ -8,6 +8,185 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    private func lifecycle(_ controller: EmbeddedBrowserToolController, _ tool: String,
+                           _ arguments: [String: Any], key: String = "turn-a", scope: ComputerTaskScope? = nil)
+        async throws -> EmbeddedBrowserToolExecution {
+        try await controller.executeResult(taskKey: key, tool: tool,
+            arguments: JSONSerialization.data(withJSONObject: arguments), scope: scope,
+            lifecycleObservationsEnabled: true)
+    }
+
+    private func lifecyclePage(_ result: EmbeddedBrowserToolExecution, kind: String) throws -> String {
+        XCTAssertTrue(result.completeObservation); XCTAssertNil(result.nativeRead); XCTAssertNil(result.actionReceipt)
+        let cue = try XCTUnwrap(result.lifecycleReceipt)
+        XCTAssertEqual(cue.kind.rawValue, kind); XCTAssertLessThanOrEqual(cue.compactText.utf8.count, 128)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(result.response, actionReceipt: cue.compactText), 0)
+        let body = try jsonObject(result.response)
+        XCTAssertEqual(body["operation_kind"] as? String, kind)
+        XCTAssertEqual(body["operation_complete"] as? Bool, true)
+        XCTAssertEqual(body["no_replay"] as? Bool, true); XCTAssertEqual(body["result_verified"] as? Bool, false)
+        XCTAssertNil(body["dispatched"], "Binding is not a fabricated page input")
+        let current = try XCTUnwrap(body["current_observation"] as? [String: Any])
+        XCTAssertEqual(current["status"] as? String, "available"); XCTAssertEqual(current["view"] as? String, "overview")
+        let text = try XCTUnwrap(current["text"] as? String)
+        XCTAssertEqual(current["snapshot_id"] as? String, try snapshotID(text))
+        return text
+    }
+
+    func testLifecycleObservationOptInKeepsLegacyMetadataOnlyBehaviorByDefault() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let result = try await controller.executeResult(taskKey: "turn-a", tool: "browser_open",
+            arguments: JSONSerialization.data(withJSONObject: ["url": "http://localhost:8123/flight"]))
+        XCTAssertFalse(result.completeObservation); XCTAssertNil(result.lifecycleReceipt); XCTAssertNil(result.nativeRead)
+        XCTAssertNil(try jsonObject(result.response)["current_observation"])
+        XCTAssertEqual(try jsonObject(result.response)["content_evidence"] as? String, "metadata_only")
+        let counts = await backend.counts(); XCTAssertEqual(counts.creates, 1); XCTAssertEqual(counts.observes, 1)
+        _ = await controller.shutdown()
+    }
+
+    func testLifecycleOpenAndNavigatePublishUsableRefsWithoutExtraReadAndNeverReuseOldDocument() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.exposeCommittedDocumentIdentity()
+        let opened = try await lifecycle(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try lifecyclePage(opened, kind: "open"), oldID = try snapshotID(first)
+        XCTAssertEqual(try jsonObject(opened.response)["ownership"] as? String, "task_created")
+        _ = try await call(controller, "browser_fill", ["snapshot_id": oldID, "element_index": 0, "text": "UA 4629"])
+        let navigate = try await lifecycle(controller, "browser_navigate", ["url": "http://localhost:8123/other"])
+        let next = try lifecyclePage(navigate, kind: "navigate")
+        XCTAssertTrue(next.contains("http://localhost:8123/other"))
+        XCTAssertEqual(try jsonObject(navigate.response)["navigation_complete"] as? Bool, true)
+        XCTAssertNotEqual(navigate.readFailureScope?.committedDocumentID, opened.readFailureScope?.committedDocumentID)
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": oldID, "element_index": 1])
+            XCTFail("Navigation cannot resurrect old document references")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(next), "element_index": 1])
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 1); XCTAssertEqual(counts.navigations, 1)
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 1)
+        _ = await controller.shutdown()
+    }
+
+    func testLifecycleBorrowedAndAlreadyBoundObserveWithoutNavigationOrClosingHumanTab() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_tabs")
+        let id = await backend.humanID
+        let first = try await lifecycle(controller, "browser_bind", ["tab_id": id])
+        let page = try lifecyclePage(first, kind: "bind")
+        XCTAssertEqual(try jsonObject(first.response)["already_bound"] as? Bool, false)
+        let second = try await lifecycle(controller, "browser_bind", ["tab_id": id])
+        let next = try lifecyclePage(second, kind: "bind")
+        XCTAssertEqual(try jsonObject(second.response)["already_bound"] as? Bool, true)
+        XCTAssertEqual(try jsonObject(second.response)["ownership"] as? String, "user_existing")
+        XCTAssertNotEqual(try snapshotID(page), try snapshotID(next))
+        _ = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(next), "element_index": 0, "text": "visible"])
+        let report = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(report.isSettled); XCTAssertTrue(report.userBindingReleased); XCTAssertTrue(report.targets.isEmpty)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.navigations, 0); XCTAssertEqual(counts.closes, 0)
+        XCTAssertEqual(counts.fills, 1)
+        _ = await controller.shutdown()
+    }
+
+    func testLifecycleBindCannotStealAnExistingLeaseOrPublishCrossTaskRefs() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_tabs", key: "turn-a")
+        _ = try await call(controller, "browser_tabs", key: "turn-b")
+        let id = await backend.humanID
+        let result = try await lifecycle(controller, "browser_bind", ["tab_id": id])
+        let page = try lifecyclePage(result, kind: "bind"), before = await backend.counts()
+        do { _ = try await lifecycle(controller, "browser_bind", ["tab_id": id], key: "turn-b"); XCTFail("Another context cannot capture this lease") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+        let after = await backend.counts(); XCTAssertEqual(after, before)
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(page), "element_index": 1], key: "turn-b"); XCTFail("No cross-task authority") }
+        catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure) }
+        _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(page), "element_index": 1])
+        let final = await backend.counts(); XCTAssertEqual(final.presses, 1); XCTAssertEqual(final.closes, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testLifecycleCaptureFailureKeepsSuccessfulOpenAndDoesNotRepeatOrCloseIt() async throws {
+        for scenario in ["capture", "scope", "output", "document_twice"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+            if scenario == "capture" { await backend.failFreshReads([.browserUnavailable("PRIVATE_CAPTURE_DETAIL")]) }
+            if scenario == "scope" { await backend.prepareFreshRead(settlingAt: URL(string: "https://unrelated.example/private")!) }
+            if scenario == "output" { await backend.setObservationSourceName(String(repeating: "x", count: 4_096)) }
+            if scenario == "document_twice" { await backend.failFreshReads([.staleDocument, .staleDocument]) }
+            let result = try await lifecycle(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            XCTAssertFalse(result.completeObservation); XCTAssertNotNil(result.lifecycleReceipt); XCTAssertNil(result.nativeRead)
+            let body = try jsonObject(result.response), current = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            XCTAssertEqual(body["bound"] as? Bool, true); XCTAssertEqual(body["operation_complete"] as? Bool, true)
+            XCTAssertEqual(current["status"] as? String, "unavailable")
+            XCTAssertEqual(current["reason"] as? String, ["capture": "read_failed", "scope": "scope_denied", "output": "output_limit", "document_twice": "document_changed"][scenario])
+            XCTAssertNil(current["text"]); XCTAssertNil(current["snapshot_id"])
+            XCTAssertFalse(result.response.contains("PRIVATE_CAPTURE_DETAIL")); XCTAssertFalse(result.response.contains("fill_ref="))
+            let refs = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+            XCTAssertEqual(refs.current, 0)
+            let before = await backend.counts(); XCTAssertEqual(before.creates, 1); XCTAssertEqual(before.closes, 0)
+            XCTAssertEqual(before.navigations, 0); XCTAssertEqual(before.fills, 0); XCTAssertEqual(before.presses, 0)
+            let admissions = await backend.readAdmissionCounts()
+            XCTAssertEqual(admissions.preparations, scenario == "document_twice" ? 2 : 1)
+            _ = await controller.shutdown()
+            let after = await backend.counts(); XCTAssertEqual(after.closes, 1)
+        }
+    }
+
+    func testLifecycleNavigationCaptureFailureRemainsCompletedAndRetiresOldRefs() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let opened = try await lifecycle(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let old = try lifecyclePage(opened, kind: "open")
+        await backend.failFreshReads([.browserUnavailable("PRIVATE_FAILURE")])
+        let result = try await lifecycle(controller, "browser_navigate", ["url": "http://localhost:8123/replacement"])
+        XCTAssertFalse(result.completeObservation); XCTAssertNil(result.nativeRead)
+        let body = try jsonObject(result.response)
+        XCTAssertEqual(body["navigation_complete"] as? Bool, true); XCTAssertEqual(body["operation_complete"] as? Bool, true)
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(old), "element_index": 1]); XCTFail("Old refs were consumed") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let counts = await backend.counts(); XCTAssertEqual(counts.navigations, 1); XCTAssertEqual(counts.presses, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testLifecycleRetirementWhileReadWaitsNeverPublishesRefsOrClosesUnownedTab() async throws {
+        for cancel in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.prepareFreshRead(hold: true)
+            let operation = Task { try await self.lifecycle(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
+            await backend.waitUntilFreshReadHeld()
+            if cancel { operation.cancel() } else { _ = await controller.release(taskKey: "turn-a") }
+            await backend.resumeFreshRead()
+            let result = try await operation.value
+            XCTAssertFalse(result.completeObservation); XCTAssertNil(result.nativeRead)
+            XCTAssertFalse(result.response.contains("click_ref=")); XCTAssertFalse(result.response.contains("snapshot_id"))
+            let refs = await controller.actionReferenceCountsForTesting(taskKey: "turn-a"); XCTAssertEqual(refs.current, 0)
+            _ = await controller.shutdown()
+            let counts = await backend.counts(); XCTAssertEqual(counts.creates, 1); XCTAssertEqual(counts.closes, 1)
+            XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.presses, 0)
+        }
+    }
+
+    func testLifecycleLongEscapedObservationFitsAndContinuesWithoutSkippingFieldBytes() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let value = String(repeating: "\"\\e\u{301}🙂\n", count: 240) + "END"
+        await backend.showCompactMailboxForm(message: value)
+        let opened = try await lifecycle(controller, "browser_open", ["url": "http://localhost:8123/compose"])
+        var page = try lifecyclePage(opened, kind: "open"), reconstructed = "", pages = 0
+        let source = try field("source_observation", in: page)
+        while true {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(try field("source_observation", in: page), source)
+            for row in page.split(separator: "\n") where row.hasPrefix("#") && row.contains("value_utf8=") {
+                reconstructed += try XCTUnwrap(publishedString("value", in: String(row)))
+            }
+            guard let continuation = try continuationMetadata(page) else { break }
+            page = try await call(controller, "browser_continue", XCTUnwrap(continuation["arguments"] as? [String: Any]))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(page), 0)
+        }
+        XCTAssertGreaterThan(pages, 1); XCTAssertEqual(Array(reconstructed.utf8), Array(value.utf8))
+        let counts = await backend.counts(); XCTAssertEqual(counts.creates, 1); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
     func testOrdinaryMailboxKeepsSendAndAllFieldValuesInCompleteReadFillAndRecoveryPages() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         await backend.showCompactMailboxForm()
@@ -3842,6 +4021,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var holdPublicationAfterRead = false, targetChecksBeforeHold: Int?
     private var finalTargetHeld = false, finalTargetContinuation: CheckedContinuation<Void, Never>?
     private var finalTargetWaiters = [CheckedContinuation<Void, Never>]()
+    private var freshReadFailures = [BrowserTabBrokerError]()
     private var freshReadPreparations = 0, freshReadAdmissions = 0
     private var settleFreshReadURL: URL?
     private var holdFreshRead = false, freshReadHeld = false
@@ -3851,6 +4031,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
     func readAdmissionCounts() -> (preparations: Int, admissions: Int) { (freshReadPreparations, freshReadAdmissions) }
+    func failFreshReads(_ failures: [BrowserTabBrokerError]) { freshReadFailures = failures }
     func prepareFreshRead(settlingAt url: URL? = nil, hold: Bool = false) {
         settleFreshReadURL = url; holdFreshRead = hold; freshReadHeld = false
     }
@@ -3937,6 +4118,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
         try authorization(current)
         freshReadAdmissions += 1
+        if !freshReadFailures.isEmpty { throw freshReadFailures.removeFirst() }
         return try await observe(target: current)
     }
     func observe(target:BrowserTarget) async throws -> BrowserDocumentObservation {

@@ -45,15 +45,53 @@ enum BrowserCompleteObservation {
         }
     }
 
+    /// Completion of a host browser lifecycle operation, not page input or
+    /// proof of the user's requested website outcome. Never a read-ledger proof.
+    struct LifecycleReceipt: Sendable {
+        enum Kind: String, Sendable { case open, bind, navigate }
+        struct Binding: Sendable {
+            let targetID: String
+            let handle: UUID
+            let owned: Bool
+            let alreadyBound: Bool
+        }
+        let kind: Kind
+        let binding: Binding?
+
+        private init(kind: Kind, binding: Binding?) { self.kind = kind; self.binding = binding }
+        static func bound(wasOpen: Bool, targetID: String, handle: UUID, owned: Bool,
+                          alreadyBound: Bool = false) -> Self {
+            Self(kind: wasOpen ? .open : .bind,
+                 binding: .init(targetID: targetID, handle: handle, owned: owned, alreadyBound: alreadyBound))
+        }
+        static let navigation = Self(kind: .navigate, binding: nil)
+        var compactText: String {
+            "{\"completed\":true,\"kind\":\"\(kind.rawValue)\",\"outcome\":\"unverified\"}"
+        }
+        var completion: [String: Any] {
+            var result: [String: Any] = ["operation_kind": kind.rawValue, "operation_complete": true,
+                "no_replay": true, "result_verified": false]
+            if let binding {
+                result.merge(["browser": "computa_builtin", "tab_id": binding.targetID,
+                    "tab_handle": binding.handle.uuidString, "bound": true,
+                    "ownership": binding.owned ? "task_created" : "user_existing",
+                    "already_bound": binding.alreadyBound, "profile": "shared_human"]) { _, value in value }
+            } else { result["navigation_complete"] = true }
+            return result
+        }
+    }
+
     /// Size the actual input/recovery envelope before advancing a read cursor.
     /// Its dispatch or rejection cue remains separate through compaction.
     enum Encoding: Sendable {
         case read
         case input(wasFill: Bool, receipt: String, feedback: BrowserInputFeedback? = nil)
         case recovery(receipt: RejectionReceipt, view: SemanticReadView)
+        case lifecycle(receipt: LifecycleReceipt)
 
         var retentionCue: String? {
             if case let .recovery(receipt, _) = self { return receipt.compactText }
+            if case let .lifecycle(receipt) = self { return receipt.compactText }
             return actionReceipt
         }
 
@@ -63,6 +101,14 @@ enum BrowserCompleteObservation {
         }
 
         func encode(_ text: String, snapshotID: UUID, page: BrowserInputFeedback.PublishedPage? = nil) throws -> String {
+            if case let .lifecycle(receipt) = self {
+                var result = receipt.completion
+                result["current_observation"] = ["status": "available", "view": "overview",
+                    "snapshot_id": snapshotID.uuidString, "text": text]
+                result["next"] = "Use this observation; continue only its next_cursor. Operation complete; do not repeat it."
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+                return String(decoding: data, as: UTF8.self)
+            }
             if case let .recovery(receipt, view) = self {
                 let result: [String: Any] = [
                     "success": false, "error": ["code": receipt.reason.rawValue],
