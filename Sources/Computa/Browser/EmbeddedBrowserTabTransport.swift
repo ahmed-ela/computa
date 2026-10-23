@@ -203,6 +203,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
             sourceTruncated: truncated)
         result.sourceName = "computa_webkit_dom"
         result.semanticReadiness = readiness
+        result.committedDocumentID = session.committedHumanDocumentID(for: id, generation: generation)
         let diagnostics = try BrowserCaptureDiagnostics.decode(raw["captureDiagnostics"], emitted: nodes.count,
                                                               sourceTruncated: truncated)
         #if DEBUG

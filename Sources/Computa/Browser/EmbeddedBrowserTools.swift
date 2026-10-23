@@ -288,13 +288,37 @@ struct EmbeddedBrowserActionReceipt: Equatable, Sendable {
     }
 }
 
+struct EmbeddedBrowserReadFailureScope: Equatable, Sendable {
+    let bindingHandle: UUID
+    let committedDocumentID: UUID
+
+    init(bindingHandle: UUID, committedDocumentID: UUID) {
+        self.bindingHandle = bindingHandle
+        self.committedDocumentID = committedDocumentID
+    }
+
+    init?(binding: BrowserTabBinding) {
+        guard let documentID = binding.committedDocumentID else { return nil }
+        bindingHandle = binding.handle; committedDocumentID = documentID
+    }
+    init?(snapshot: BrowserTabSnapshot) {
+        guard let documentID = snapshot.evidenceDocument?.committedDocumentID else { return nil }
+        bindingHandle = snapshot.tabHandle; committedDocumentID = documentID
+    }
+}
+
 struct EmbeddedBrowserToolExecution: Sendable {
     let response: String
     let actionReceipt: EmbeddedBrowserActionReceipt?
+    /// Native-only evidence of an observed binding/document generation.
+    /// A fresh snapshot UUID or URL alone cannot reset a read failure budget.
+    let readFailureScope: EmbeddedBrowserReadFailureScope?
 
-    init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil) {
+    init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil,
+         readFailureScope: EmbeddedBrowserReadFailureScope? = nil) {
         self.response = response
         self.actionReceipt = actionReceipt
+        self.readFailureScope = readFailureScope
     }
 }
 
@@ -303,6 +327,7 @@ struct EmbeddedBrowserToolExecution: Sendable {
 struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable {
     let original: BrowserTabBrokerError
     let observationResponse: String
+    var readFailureScope: EmbeddedBrowserReadFailureScope? = nil
     var errorDescription: String? { original.localizedDescription }
 }
 
@@ -554,7 +579,8 @@ actor EmbeddedBrowserToolController {
                 // this exact instance. A redundant bind can reuse the existing
                 // no-op path, including its live target, lease and scope checks.
                 if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
-                return try .init(response: bindingResponse(target: target, binding: binding, owned: owned))
+                return try .init(response: bindingResponse(target: target, binding: binding, owned: owned),
+                                 readFailureScope: EmbeddedBrowserReadFailureScope(binding: binding))
             } catch {
                 // Failed binding never retains read/input authority. Keep a
                 // created target reserved for cleanup until close is confirmed.
@@ -614,7 +640,7 @@ actor EmbeddedBrowserToolController {
             }
             let snapshot = try await currentReadObservation(
                 taskKey: taskKey, contextID: contextID, scope: scope, read: read)
-            return try .init(response: readResponse(snapshot))
+            return try .init(response: readResponse(snapshot), readFailureScope: .init(snapshot: snapshot))
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(
                 taskKey: taskKey, contextID: contextID, tool: tool, object: object, scope: scope)
@@ -634,8 +660,10 @@ actor EmbeddedBrowserToolController {
             }
             // Input has already completed. Observation failure must not turn
             // that dispatch into an apparent input failure that invites replay.
-            return try await .init(response: postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
-                                               wasFill: tool == "browser_fill"), actionReceipt: receipt)
+            let response = try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                                                      wasFill: tool == "browser_fill")
+            return .init(response: response, actionReceipt: receipt,
+                readFailureScope: contexts[taskKey]?.snapshot.flatMap(EmbeddedBrowserReadFailureScope.init(snapshot:)))
         case "browser_navigate":
             let binding = try bound(taskKey, contextID)
             let destination = URL(string: object["url"] as! String)!
@@ -954,7 +982,8 @@ actor EmbeddedBrowserToolController {
             let response = try json(result)
             guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
             try Task.checkCancellation()
-            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response)
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response,
+                readFailureScope: .init(snapshot: snapshot))
         } catch {
             if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             try Task.checkCancellation()
@@ -997,7 +1026,8 @@ actor EmbeddedBrowserToolController {
             result["next"] = "Inspect this separate fresh observation of the requested filters; it supersedes prior references. To continue it, use only its next_cursor. To change filters again, omit cursor. No input was dispatched."
             let response = try json(result)
             guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
-            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response)
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response,
+                readFailureScope: .init(snapshot: snapshot))
         } catch {
             if captured, contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             try Task.checkCancellation()

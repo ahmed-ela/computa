@@ -1321,6 +1321,15 @@ final class EmbeddedBrowserSession {
 
     func documentGeneration(for id: UUID) -> UUID? { entries[id]?.tab.documentGeneration }
 
+    /// A provisional load may invalidate capabilities without replacing the
+    /// rendered document. Retry accounting uses only an observed native commit.
+    func committedHumanDocumentID(for id: UUID, generation: UUID) -> UUID? {
+        guard let entry = entries[id], !entry.isModelOwned,
+              entry.tab.documentGeneration == generation,
+              entry.humanCommittedNavigation != nil else { return nil }
+        return entry.humanCommittedDocumentID
+    }
+
 
     /// Diagnostic-only native observation/disposal authority for one exact
     /// private view. It never grants provider/page or conversation authority.

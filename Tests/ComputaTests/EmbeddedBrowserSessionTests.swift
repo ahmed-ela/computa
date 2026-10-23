@@ -5,6 +5,54 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testCommittedDocumentIdentityIgnoresCancelledProvisionalNavigationAndRejectsStaleOrModelReads() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        // Use real WebKit navigation tokens with synchronous native delegate
+        // callbacks. Detaching avoids asynchronous page-load races in this test.
+        view.navigationDelegate = nil
+        let initialGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: initialGeneration))
+        let first = try XCTUnwrap(view.loadHTMLString("<main>First document</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: first)
+        let firstGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        delegate.webView?(view, didCommit: first)
+        let firstID = try XCTUnwrap(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        delegate.webView?(view, didFinish: first)
+        let provisional = try XCTUnwrap(view.loadHTMLString("<main>Never committed</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: provisional)
+        let provisionalGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNotEqual(firstGeneration, provisionalGeneration)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: provisionalGeneration), firstID)
+        delegate.webView?(view, didFailProvisionalNavigation: provisional,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: provisionalGeneration), firstID,
+                       "Cancelled provisional navigation must not refund failures on the old document")
+        let replacement = try XCTUnwrap(view.loadHTMLString("<main>Replacement</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: replacement)
+        let replacementGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: replacementGeneration), firstID)
+        delegate.webView?(view, didCommit: replacement)
+        let replacementID = try XCTUnwrap(session.committedHumanDocumentID(for: id, generation: replacementGeneration))
+        XCTAssertNotEqual(replacementID, firstID)
+        delegate.webView?(view, didCommit: replacement)
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: replacementGeneration), replacementID)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: provisionalGeneration))
+        let modelID = try session.createUnloadedModelTabForTesting()
+        let modelView = try XCTUnwrap(session.webView(for: modelID)), modelDelegate = try XCTUnwrap(modelView.navigationDelegate)
+        modelView.navigationDelegate = nil
+        let modelNavigation = try XCTUnwrap(modelView.loadHTMLString("<main>Inference</main>", baseURL: nil))
+        modelDelegate.webView?(modelView, didStartProvisionalNavigation: modelNavigation)
+        modelDelegate.webView?(modelView, didCommit: modelNavigation)
+        XCTAssertNil(session.committedHumanDocumentID(for: modelID, generation: try XCTUnwrap(session.documentGeneration(for: modelID))))
+        session.closeTab(id)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: replacementGeneration))
+    }
+
     func testWebInspectorOptInIsPerTabAndPreservesTheBrowserDocument() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

@@ -36,6 +36,12 @@ old stop notice was appended after every subsequent turn, making it appear curre
   content was requested. Unknown, foreign, replaced or navigation-stale cursors
   grant no recovery read. Failed capture preserves the previous valid capability;
   success replaces it. Recovery shares the existing three-read turn limit.
+- Read failures are scoped to the verified browser binding and native committed-document
+  identity. A genuinely new binding or observed committed document cannot inherit
+  the previous page's failures. Same-document retries still stop at three;
+  fresh snapshots/cursors, URL changes alone, declined navigation and no-op binds
+  do not reset it. Mutation/native failures and the shared three-read recovery
+  limit remain unchanged across documents and bindings.
 - Completed reads omit the `next_cursor` field instead of displaying `none` as
   a token. A live model had copied that placeholder into a continuation request.
   Genuine cursor values remain exact, and invented cursors remain rejected

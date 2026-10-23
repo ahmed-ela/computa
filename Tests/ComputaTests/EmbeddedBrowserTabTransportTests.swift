@@ -28,6 +28,32 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 "expected_label": try exposedField("label", in: row)]
     }
 
+    func testRealWebKitReadScopeUsesCommittedDocumentAndIgnoresSameDocumentURLChanges() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString("<main><h1>Initial document</h1></main>", baseURL: URL(string: "http://localhost:8123/first"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        _ = try await controller.executeResult(taskKey: "document-scope", tool: "browser_tabs", arguments: Data("{}".utf8))
+        let bound = try await controller.executeResult(taskKey: "document-scope", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let initial = try XCTUnwrap(bound.readFailureScope)
+        _ = try await script(view, "history.pushState({}, '', '/same-document'); return true;")
+        let sameDocument = try await controller.executeResult(taskKey: "document-scope", tool: "browser_read", arguments: Data("{}".utf8))
+        XCTAssertEqual(sameDocument.readFailureScope, initial, "URL-derived broker epochs cannot reset the failure guard")
+        XCTAssertTrue(sameDocument.response.contains("same-document"))
+        view.loadHTMLString("<main><h1>Replacement document</h1></main>", baseURL: URL(string: "http://localhost:8123/replacement"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let replaced = try await controller.executeResult(taskKey: "document-scope", tool: "browser_read", arguments: Data("{}".utf8))
+        let replacement = try XCTUnwrap(replaced.readFailureScope)
+        XCTAssertEqual(replacement.bindingHandle, initial.bindingHandle)
+        XCTAssertNotEqual(replacement.committedDocumentID, initial.committedDocumentID)
+        XCTAssertTrue(replaced.response.contains("Replacement document"))
+        _ = await controller.shutdown()
+    }
+
     func testRealWebKitPostInputOverviewShowsReceiptBodyAndControlsWithoutVerifyingOutcomeOrReplaying() async throws {
         let receipt = "Receipt: cafe\u{301}-" + UUID().uuidString.lowercased()
         let navigation = (0..<35).map { "<a href='/item/\($0)'>Destination \($0)</a>" }.joined(separator: " ")

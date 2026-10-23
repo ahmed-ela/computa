@@ -660,6 +660,162 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testVerifiedNewBindingSeparatesReadFailuresWithoutRefundingRecoveryReads() async throws {
+        try await withHarness(approval: true) { harness in
+            await harness.backend.enablePaginatedRead()
+            let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+            let changed: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": "@cursor", "view": "content"]]
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
+                read, changed, read, changed,
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/document"]],
+                read, changed,
+                ["tool": "browser_read", "arguments": ["view": "content"]],
+            ])
+            try await self.waitFor { harness.rowCount == 9 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, false, true, true, false, true])
+            for index in [2, 4, 7] {
+                let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
+                let recovery = try XCTUnwrap(items.compactMap { item -> [String: Any]? in
+                    guard let text = item["text"] as? String else { return nil }
+                    return (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+                }.first { $0["current_observation"] != nil })
+                XCTAssertEqual(recovery["dispatched"] as? Bool, false)
+                XCTAssertEqual((recovery["current_observation"] as? [String: Any])?["status"] as? String, "available")
+            }
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_open"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 2); XCTAssertEqual(counts.ownedClosed, 2)
+            XCTAssertEqual(counts.mutations, 0); XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
+    func testSameBindingNavigationChangesReadFailureScopeOnlyAfterCommittedObservation() async throws {
+        for mode in ["commit", "same_document", "cancelled_provisional", "fail"] {
+            try await withHarness(approval: true) { harness in
+                await harness.backend.enablePaginatedRead()
+                await harness.backend.configureNavigation(mode)
+                let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+                let changed: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": "@cursor", "view": "content"]]
+                var calls: [[String: Any]] = [
+                    ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
+                    read, changed, read, changed,
+                    ["tool": "browser_navigate", "arguments": ["url": "https://example.invalid/document"]],
+                    read, changed,
+                ]
+                calls.append(mode == "commit"
+                    ? ["tool": "browser_read", "arguments": ["view": "content"]]
+                    : ["tool": "browser_open", "arguments": ["url": "https://example.invalid/MUST_NOT_OPEN"]])
+                try await harness.submit(calls)
+                if mode == "commit" {
+                    try await self.waitFor { harness.rowCount == 9 && harness.audit.status == .completed }
+                    XCTAssertFalse(harness.audit.entries.contains { $0.title == "Native action stopped" })
+                    let rows = try harness.rows()
+                    XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, false, true, true, false, true])
+                    XCTAssertTrue((rows[7]["text"] as? String)?.contains("\"status\":\"available\"") == true)
+                } else {
+                    try await self.waitFor { harness.rowCount == 8 && harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" }, mode)
+                    let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+                    XCTAssertEqual(sent.count, 8, "Uncommitted navigation cannot refund the third repeated failure")
+                }
+                XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_navigate"])
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.presses, 0)
+                XCTAssertEqual(counts.navigations, mode == "fail" ? 0 : 1)
+            }
+        }
+    }
+
+    func testSameBindingReadsNoOpBindAndFailedReplacementCannotRefundReadFailures() async throws {
+        for transition in ["fresh_read", "already_bound", "invalid_replacement"] {
+            try await withHarness(approval: true) { harness in
+                await harness.backend.enablePaginatedRead()
+                let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+                let changed: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": "@cursor", "view": "content"]]
+                var calls: [[String: Any]] = [
+                    ["tool": "browser_tabs", "arguments": [:]],
+                    ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                    read, changed, read, changed,
+                ]
+                if transition == "already_bound" { calls.append(["tool": "browser_bind", "arguments": ["tab_id": "@human"]]) }
+                if transition == "invalid_replacement" { calls.append(["tool": "browser_open", "arguments": ["url": "file:///MUST_NOT_OPEN"]]) }
+                calls += [read, changed]
+                let stopCount = calls.count
+                calls.append(["tool": "browser_open", "arguments": ["url": "https://example.invalid/MUST_NOT_OPEN"]])
+                try await harness.submit(calls)
+                try await self.waitFor { harness.rowCount == stopCount && harness.audit.status == .waiting }
+                XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" }, transition)
+                let rows = try harness.rows()
+                var expected = [true, true, true, false, true, false]
+                if transition == "already_bound" { expected.append(true) }
+                if transition == "invalid_replacement" { expected.append(false) }
+                expected += [true, false]
+                XCTAssertEqual(rows.map { $0["success"] as? Bool }, expected.map(Optional.some))
+                XCTAssertEqual(rows.last?["tool"] as? String, "browser_read")
+                XCTAssertEqual(rows.last?["success"] as? Bool, false)
+                let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+                XCTAssertEqual(sent.count, stopCount, "Same-target third failure stops before a later action")
+                XCTAssertTrue(harness.audit.approvals.isEmpty, "Inventory-backed binding and reads are read-only; invalid URLs never reach approval")
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0); XCTAssertTrue(counts.humanIntact)
+            }
+        }
+    }
+
+    func testDeclinedReplacementCannotRefundReadFailures() async throws {
+        for transitionTool in ["browser_open", "browser_navigate"] {
+            try await withHarness { harness in
+                await harness.backend.enablePaginatedRead()
+                let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+                let changed: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": "@cursor", "view": "content"]]
+                try await harness.submit([
+                    ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
+                    read, changed, read, changed,
+                    ["tool": transitionTool, "arguments": ["url": "https://example.invalid/DECLINED"]],
+                    read, changed,
+                    ["tool": "browser_open", "arguments": ["url": "https://example.invalid/MUST_NOT_OPEN"]],
+                ])
+                try await self.waitFor { harness.audit.approvals.count == 1 }
+                try await harness.runtime.resolveApproval(requestID: harness.audit.approvals[0].id, approved: true)
+                try await self.waitFor { harness.audit.approvals.count == 2 }
+                try await harness.runtime.resolveApproval(requestID: harness.audit.approvals[1].id, approved: false)
+                try await self.waitFor { harness.rowCount == 8 && harness.audit.status == .waiting }
+                XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+                let rows = try harness.rows()
+                XCTAssertTrue((rows[5]["text"] as? String)?.contains("declined") == true)
+                XCTAssertEqual(rows.last?["tool"] as? String, "browser_read")
+                XCTAssertEqual(rows.last?["success"] as? Bool, false)
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.mutations, 0)
+                XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", transitionTool])
+            }
+        }
+    }
+
+    func testSuccessfulNewBindingCannotRefundMutationFailures() async throws {
+        try await withHarness(approval: true) { harness in
+            let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+            let mismatch: [String: Any] = ["tool": "browser_click", "arguments": [
+                "snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "MUST_NOT_MATCH",
+            ]]
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
+                read, mismatch, mismatch,
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/document"]],
+                read, mismatch,
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+            ])
+            try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .waiting }
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_open"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 2); XCTAssertEqual(counts.mutations, 0)
+        }
+    }
+
     func testStopAndShutdownCloseOnlyTaskCreatedPages() async throws {
         for stop in [false, true] {
             try await withHarness(approval: true) { harness in
@@ -1016,6 +1172,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
           } catch {}
         }
         const snapshot = observationText.match(/AXSNAPSHOT id=([A-Fa-f0-9-]{36})/);
+        const readLine = observationText.split('\n').find(line => line.startsWith('READ '));
+        const cursor = readLine?.match(/(?:^| )next_cursor=([A-Fa-f0-9-]{36})(?: |$)/);
+        if (cursor) refs.cursor = cursor[1]; else delete refs.cursor;
         if (snapshot) {
           refs.snapshot = snapshot[1];
           if (plan.calls[step].saveSnapshot) refs[plan.calls[step].saveSnapshot] = snapshot[1];
@@ -1132,6 +1291,10 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var closeWaiter: CheckedContinuation<Void, Never>?
     private var failClose = false
     private var failPress = false
+    private var paginatedRead = false
+    private var committedDocuments: [String: UUID] = [humanID: UUID()]
+    private var loaderGenerations = [String: UUID]()
+    private var navigationMode = "commit"
     private var holdPostInputObservation = false
     private var postInputObservationHeld = false
     private var postInputObservationWaiter: CheckedContinuation<Void, Never>?
@@ -1139,6 +1302,8 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     func holdNextClose() { holdClose = true }
     func failNextClose() { failClose = true }
     func failNextPress() { failPress = true }
+    func enablePaginatedRead() { paginatedRead = true }
+    func configureNavigation(_ mode: String) { navigationMode = mode }
     func isCloseHeld() -> Bool { closeHeld }
     func resumeClose() { closeWaiter?.resume(); closeWaiter = nil }
     func holdNextPostInputObservation() { holdPostInputObservation = true }
@@ -1156,7 +1321,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         ledger.created += 1
         let id = UUID().uuidString
         let target = BrowserTarget(targetID: id, instanceToken: UUID().uuidString, title: "Fixture flight", url: url)
-        targets[id] = target; owned.insert(id); return target
+        targets[id] = target; owned.insert(id); committedDocuments[id] = UUID(); return target
     }
     func target(id: String) -> BrowserTarget? { targets[id] }
     func activateTarget(id: String) { ledger.activations += 1 }
@@ -1185,14 +1350,22 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
             await withCheckedContinuation { postInputObservationWaiter = $0 }
             postInputObservationHeld = false
         }
-        let nodes = [
+        var nodes = [
             BrowserDocumentNode(backendNodeID: 1, role: "main", name: "Flight lookup", value: nil, isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "main", childNodeIDs: ["heading", "query", "find", "result"]),
             BrowserDocumentNode(backendNodeID: 2, role: "heading", name: "United flight fixture", value: nil, isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "heading", parentNodeID: "main"),
             BrowserDocumentNode(backendNodeID: 3, role: "textbox", name: "Search flights", value: values[target.targetID] ?? "", isDisabled: false, isReadOnly: false, isIgnored: false, nodeID: "query", parentNodeID: "main", isEditable: true),
             BrowserDocumentNode(backendNodeID: 4, role: "button", name: "Find flight", value: nil, isDisabled: false, isReadOnly: false, isIgnored: false, nodeID: "find", parentNodeID: "main", isDOMClickable: true),
             BrowserDocumentNode(backendNodeID: 5, role: "StaticText", name: results[target.targetID] ?? "Enter a flight number", value: nil, isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "result", parentNodeID: "main"),
         ]
-        var document = BrowserDocumentObservation(loaderID: "loader-" + target.instanceToken, title: target.title, url: target.url, nodes: nodes)
+        if paginatedRead {
+            for index in 0..<40 {
+                nodes.append(BrowserDocumentNode(backendNodeID: Int64(6 + index), role: "StaticText",
+                    name: "Document paragraph \(index)", value: nil, isDisabled: false, isReadOnly: true,
+                    isIgnored: false, nodeID: "paragraph-\(index)", parentNodeID: "main"))
+            }
+        }
+        var document = BrowserDocumentObservation(loaderID: loaderGenerations[target.targetID]?.uuidString ?? "loader-" + target.instanceToken, title: target.title, url: target.url, nodes: nodes)
+        document.committedDocumentID = committedDocuments[target.targetID]
         document.sourceName = "computa_webkit_dom"
         return document
     }
@@ -1209,9 +1382,16 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         try permit.commit { ledger.fills += 1; values[target.targetID] = text }
     }
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) throws {
+        if navigationMode == "fail" { throw BrowserTabBrokerError.browserUnavailable("Synthetic navigation failed before dispatch") }
         try permit.commit {
             ledger.navigations += 1
-            targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken, title: target.title, url: url)
+            if navigationMode != "same_document" { loaderGenerations[target.targetID] = UUID() }
+            if navigationMode == "commit" { committedDocuments[target.targetID] = UUID() }
+            // A cancelled provisional navigation advances native generation,
+            // but neither the committed document nor its URL has changed.
+            if navigationMode != "cancelled_provisional" {
+                targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken, title: target.title, url: url)
+            }
         }
     }
     func wait(target: BrowserTarget, text: String?, timeoutMS: Int) -> Bool { text.map { (results[target.targetID] ?? "").contains($0) } ?? true }

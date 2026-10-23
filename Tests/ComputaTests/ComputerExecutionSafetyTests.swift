@@ -160,6 +160,34 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         XCTAssertFalse(guardrail.failed(key: "failed-input"))
     }
 
+    func testVerifiedBrowserReadScopeClearsOnlyReadFailuresAndSameScopeCannotRefundThem() {
+        var guardrail = ComputerUnchangedAttemptGuard()
+        let first = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        let second = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        let read = ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["view": "content", "cursor": "old"])
+        let mutation = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["text": "query", "element_index": 2])
+        let native = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_snapshot", arguments: [:])
+        guardrail.observedBrowserReadScope(first)
+        for key in [read, mutation, native] {
+            XCTAssertFalse(guardrail.failed(key: key)); XCTAssertFalse(guardrail.failed(key: key))
+        }
+        guardrail.observedBrowserReadScope(first)
+        XCTAssertTrue(guardrail.failed(key: read), "An already-bound target cannot refund failures")
+        guardrail.observedBrowserReadScope(second)
+        XCTAssertFalse(guardrail.failed(key: read), "A different native binding starts its own read attempt budget")
+        XCTAssertTrue(guardrail.failed(key: mutation), "Changing tabs cannot forgive failed input")
+        XCTAssertTrue(guardrail.failed(key: native), "Native computer failures remain independent")
+        XCTAssertFalse(guardrail.failed(key: read))
+        guardrail.succeeded(key: ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["view": "all"]))
+        XCTAssertTrue(guardrail.failed(key: read), "An unrelated fresh read still does not reset the matching failure")
+        let replacementDocument = EmbeddedBrowserReadFailureScope(
+            bindingHandle: second.bindingHandle, committedDocumentID: UUID())
+        guardrail.observedBrowserReadScope(replacementDocument)
+        XCTAssertFalse(guardrail.failed(key: read), "A committed replacement in the same tab starts a new read scope")
+        XCTAssertTrue(guardrail.failed(key: mutation), "Document replacement cannot forgive failed input")
+        XCTAssertTrue(guardrail.failed(key: native))
+    }
+
     private func fixture() -> [String: Any] {
         ["operation_id": "action-1", "snapshot_id": "D56814BA-CF94-44BB-938F-1008A315D982",
          "property": "value", "element_index": 7, "expected": "requested query"]

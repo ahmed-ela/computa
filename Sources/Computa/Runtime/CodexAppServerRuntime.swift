@@ -4812,11 +4812,22 @@ private extension CodexAppServerRuntime {
             embeddedBrowserTurnKeys[taskID] = lease
             let key = lease.key
             let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+            func observeReadScope(_ scope: EmbeddedBrowserReadFailureScope?) throws {
+                guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
+                      generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
+                      computerV2Sessions[taskID]?.epoch == epoch,
+                      embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
+                if let scope { computerAttempts[taskID]?.observedBrowserReadScope(scope) }
+            }
             if ["browser_click", "browser_fill"].contains(tool) {
                 // Validate the currently published target's eligibility before
                 // asking the user. This read-only check does not consume it;
                 // execute and the backend revalidate after approval as well.
-                try await controller.preflightMutation(taskKey: key, tool: tool, arguments: input, scope: scope)
+                do { try await controller.preflightMutation(taskKey: key, tool: tool, arguments: input, scope: scope) }
+                catch let recovery as EmbeddedBrowserPreflightRecoveryFailure {
+                    try observeReadScope(recovery.readFailureScope)
+                    throw recovery
+                }
             }
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
@@ -4833,11 +4844,13 @@ private extension CodexAppServerRuntime {
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
-            let result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope)
-            guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
-                  generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
-                  computerV2Sessions[taskID]?.epoch == epoch,
-                  embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
+            let result: EmbeddedBrowserToolExecution
+            do { result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope) }
+            catch let recovery as EmbeddedBrowserPreflightRecoveryFailure {
+                try observeReadScope(recovery.readFailureScope)
+                throw recovery
+            }
+            try observeReadScope(result.readFailureScope)
             // Keep the bounded historical dispatch cue in a distinct first
             // item. The native compactor budgets items individually; joining
             // these strings would lose the clicked target label again.

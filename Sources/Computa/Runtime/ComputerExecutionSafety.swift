@@ -9,6 +9,7 @@ struct ComputerExecutionFailure: LocalizedError {
 
 struct ComputerUnchangedAttemptGuard {
     private var attempts: [String: Int] = [:]
+    private var browserReadScope: EmbeddedBrowserReadFailureScope?
 
     static func key(tool: String, arguments: [String: Any], observedElementIdentity: String? = nil) -> String {
         // Capability refresh is not a new intent. Keep action/text/element,
@@ -28,6 +29,16 @@ struct ComputerUnchangedAttemptGuard {
     }
 
     mutating func succeeded(key: String) { attempts.removeValue(forKey: key) }
+
+    /// Only a host-verified binding/current observation supplies this identity.
+    /// Fresh cursors/snapshots and model URLs are not document transitions.
+    /// Mutation/native failures and the controller's turn-wide recovery cap
+    /// remain independent of which browser document is now being read.
+    mutating func observedBrowserReadScope(_ scope: EmbeddedBrowserReadFailureScope) {
+        guard browserReadScope != scope else { return }
+        browserReadScope = scope
+        attempts = attempts.filter { !$0.key.hasPrefix("browser_read:") }
+    }
 }
 
 enum ComputerOutcomeToolContract {

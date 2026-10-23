@@ -118,6 +118,9 @@ struct BrowserDocumentObservation: Equatable, Sendable {
     /// Optional for other backends. An empty bounded observation is not proof
     /// that requested content is absent or that SPA initialization has ended.
     var semanticReadiness: SemanticReadiness? = nil
+    /// Optional native identity from a committed document, never page JSON.
+    /// Provisional-load invalidation and URL-only changes do not advance it.
+    var committedDocumentID: UUID? = nil
     /// Host-only immutable plan carried to the final browser mutation preflight.
     /// Never accepted from a browser document or model response.
     var verificationPlan: BrowserActionVerification.Plan? = nil
@@ -190,6 +193,8 @@ struct BrowserTabBinding: Equatable, Sendable {
     let documentEpoch: UUID
     let ownership: BrowserTabOwnership
     let lifetime: BrowserTabLifetime
+    /// Host-only committed document identity; absent backends grant no refund.
+    var committedDocumentID: UUID? = nil
 }
 
 /// Structural provenance, not a judgment that text answers the user's request.
@@ -410,6 +415,7 @@ actor BrowserTabSessionBroker {
         var activeSnapshot: BrowserTabSnapshot?
         let lifetime: BrowserTabLifetime
         var readState: ReadState? = nil
+        var committedDocumentID: UUID? = nil
     }
 
     /// Server-owned pagination capabilities never encode a user-controlled tab,
@@ -537,7 +543,8 @@ actor BrowserTabSessionBroker {
                 documentURL: document.url,
                 documentEpoch: UUID(),
                 activeSnapshot: nil,
-                lifetime: lifetime
+                lifetime: lifetime,
+                committedDocumentID: document.committedDocumentID
             )
             entries[handle] = entry
             return binding(handle: handle, entry: entry)
@@ -606,7 +613,8 @@ actor BrowserTabSessionBroker {
                 targetID: current.targetID, targetInstanceToken: current.instanceToken,
                 processIdentifier: processIdentifier, ownership: .borrowed,
                 loaderID: document.loaderID, documentURL: document.url,
-                documentEpoch: UUID(), activeSnapshot: nil, lifetime: lifetime
+                documentEpoch: UUID(), activeSnapshot: nil, lifetime: lifetime,
+                committedDocumentID: document.committedDocumentID
             )
             entries[handle] = entry
             return binding(handle: handle, entry: entry)
@@ -731,6 +739,7 @@ actor BrowserTabSessionBroker {
             entry.documentEpoch = UUID()
             entry.activeSnapshot = nil
         }
+        entry.committedDocumentID = freshDocument.committedDocumentID
         // Read pages are one immutable captured observation, not a splice of
         // different live trees. Unrelated timers or ads must not make that
         // observation impossible to finish. Revalidate the exact tab/document
@@ -1127,7 +1136,8 @@ actor BrowserTabSessionBroker {
             processIdentifier: entry.processIdentifier,
             documentEpoch: entry.documentEpoch,
             ownership: entry.ownership,
-            lifetime: entry.lifetime
+            lifetime: entry.lifetime,
+            committedDocumentID: entry.committedDocumentID
         )
     }
 

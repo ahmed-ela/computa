@@ -8,6 +8,68 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    func testReadFailureScopeRequiresCurrentNativeCommittedDocumentEvidence() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        func execute(_ tool: String, _ arguments: [String: Any] = [:]) async throws -> EmbeddedBrowserToolExecution {
+            try await controller.executeResult(taskKey: "turn-a", tool: tool,
+                arguments: JSONSerialization.data(withJSONObject: arguments))
+        }
+        let inventory = try await execute("browser_tabs")
+        XCTAssertNil(inventory.readFailureScope)
+        let humanID = await backend.humanID
+        let bound = try await execute("browser_bind", ["tab_id": humanID])
+        let first = try XCTUnwrap(bound.readFailureScope)
+        let noOp = try await execute("browser_bind", ["tab_id": humanID])
+        XCTAssertNil(noOp.readFailureScope, "A successful already-bound no-op is not a transition")
+        let read = try await execute("browser_read", ["view": "all"])
+        XCTAssertEqual(read.readFailureScope, first, "Fresh snapshots retain the same native scope")
+        let opened = try await execute("browser_open", ["url": "http://localhost:8123/document"])
+        let second = try XCTUnwrap(opened.readFailureScope)
+        XCTAssertNotEqual(second, first)
+        do {
+            _ = try await execute("browser_open", ["url": "file:///MUST_NOT_OPEN"])
+            XCTFail("An invalid replacement cannot return binding evidence")
+        } catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+        let afterFailure = try await execute("browser_read", ["view": "all"])
+        XCTAssertEqual(afterFailure.readFailureScope, second)
+        let navigating = try await execute("browser_navigate", ["url": "http://localhost:8123/replacement"])
+        XCTAssertNil(navigating.readFailureScope, "Accepting navigation alone is not an observed commit")
+        let committedRead = try await execute("browser_read", ["view": "all"])
+        let afterCommit = try XCTUnwrap(committedRead.readFailureScope)
+        XCTAssertEqual(afterCommit.bindingHandle, second.bindingHandle)
+        XCTAssertNotEqual(afterCommit.committedDocumentID, second.committedDocumentID)
+        await backend.hideCommittedDocumentIdentity()
+        let unknown = try await execute("browser_read", ["view": "all"])
+        XCTAssertNil(unknown.readFailureScope, "Unknown native provenance cannot relax the guard")
+        _ = await controller.shutdown()
+    }
+
+    func testNewBindingsAndCommittedDocumentsDoNotRefundTheTurnWideThreeReadRecoveryBudget() async throws {
+        for transition in ["browser_open", "browser_navigate"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.showManyControls()
+            for index in 0..<4 {
+                _ = try await call(controller, index == 0 ? "browser_open" : transition,
+                                   ["url": "http://localhost:8123/document-\(index)"])
+                let read = try await call(controller, "browser_read", ["view": "all"])
+                let before = await backend.counts()
+                let failure = try await changedFilterFailure(controller,
+                    arguments: ["cursor": field("next_cursor", in: read), "view": "content"])
+                let observation = try XCTUnwrap(jsonObject(failure.observationResponse)["current_observation"] as? [String: Any])
+                XCTAssertEqual(observation["status"] as? String, index < 3 ? "available" : "unavailable")
+                if index < 3 { XCTAssertNotNil(failure.readFailureScope) }
+                else {
+                    XCTAssertEqual(observation["reason"] as? String, "recovery_limit")
+                    XCTAssertNil(failure.readFailureScope, "A rejected recovery cannot reset retry accounting")
+                }
+                let after = await backend.counts()
+                XCTAssertEqual(after.observes, before.observes + (index < 3 ? 1 : 0))
+                XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            }
+            _ = await controller.shutdown()
+        }
+    }
+
     /// Older fixture scenarios still build index dictionaries. Enrich only
     /// those test calls from the exact published row, never backend state.
     /// Explicit expectations are retained so negative tests exercise mismatch.
@@ -2352,6 +2414,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""
+    private var committedDocumentID: UUID? = UUID()
     private var observationSourceName = "computa_webkit_dom"
     private var semanticReadiness: BrowserDocumentObservation.SemanticReadiness?, emptyObservation = false
     private var buttonID: Int64 = 2, buttonDisabled = false, buttonLabel = "Check flight"
@@ -2372,6 +2435,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
+    func hideCommittedDocumentIdentity() { committedDocumentID = nil }
     func fieldValue() -> String { field }
     func setInitialField(_ value: String) { field = value }
     func setObservedResult(_ text: String) { result = text }
@@ -2494,6 +2558,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             }
         }
         var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:emptyObservation ? [] : nodes)
+        observation.committedDocumentID = committedDocumentID
         observation.sourceName = observationSourceName
         observation.semanticReadiness = semanticReadiness
         if driftAfterCapture {
@@ -2517,7 +2582,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func setText(target:BrowserTarget,backendNodeID:Int64,text:String,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws { try permit.commit { stats.fills += 1; field=text; didInput(target) } }
     func navigate(target:BrowserTarget,url:URL,permit:BrowserMutationPermit) async throws {
-        try permit.commit { stats.navigations += 1; generation=UUID().uuidString; targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url) }
+        try permit.commit { stats.navigations += 1; generation=UUID().uuidString; committedDocumentID=UUID(); targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url) }
     }
     func wait(target:BrowserTarget,text:String?,timeoutMS:Int) async throws -> Bool { text == nil || result.contains(text!) }
     func holdNextCreate() { holdCreate=true }
