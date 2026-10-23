@@ -774,3 +774,37 @@ check ran before the new runtime was packaged and correctly rejected the old
 artifact. After the final runtime rebuild, all three bundled-engine checks and
 all 20 version/product-identity checks passed. Installed live qualification remains
 separate.
+
+
+### Build 237 live checks and filtered control visibility
+
+The signed build 237 matched source `87d265e` and the final `mactopus-12`
+runtime. The real Outlook lookup failed semantic acceptance in 36.556 seconds
+with 13 calls, two recovered errors and no compaction. Its last `content` view
+showed only “Pick an account” from a 17-node capture. It exposed no account
+controls and no password/MFA requirement, but the model asked the user to sign
+in instead of requesting controls. The natural ODE follow-up then repeated that
+historical block without any tool calls. Neither result proves an access block.
+
+Compact snapshots had weaker view guidance than full snapshots. The next
+candidate reports the number of enabled input-capable nodes excluded by the
+selected view/query from the same captured subtree. When positive, it directs
+a fresh overview/all read before claiming an access block. This is a count of
+filtered captured nodes, not hidden page content, pagination, or permission. It
+exposes no omitted labels/references, changes no input authority, and preserves
+all existing limits. The 90-case broker suite passed without failures or skips.
+An installed retest remains required; this hint cannot itself guarantee that a
+model will inspect the page or correct a historical false refusal.
+
+The local read returned the requested attachment filename exactly. A same-chat
+send follow-up failed after repeated page reopening and the unchanged 32-call
+guard; no POST occurred. Two successful compactions preceded that guard, so
+the repaired saved-read expansion was exercised without the earlier message-ID
+validation error. The independent fresh-chat send reached a current receipt;
+its single POST matched all requested fields, and its final reply copied that
+current receipt exactly (8.028 seconds, 14 tools, three recovered errors). The diagnostic trial repeated
+negative searches and launched broad home-directory scans. It was interrupted,
+and the engine confirmed termination of its four owned command sessions. A
+receipt-bound error was visible in the UI, but the canonical interrupted trace
+does not establish whether that error preceded the stop action. These failed
+trials remain part of qualification.
