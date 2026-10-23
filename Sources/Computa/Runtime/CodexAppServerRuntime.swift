@@ -4833,12 +4833,16 @@ private extension CodexAppServerRuntime {
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
-            let result = try await controller.execute(taskKey: key, tool: tool, arguments: input, scope: scope)
+            let result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope)
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
-            return [textContent(result)]
+            // Keep the bounded historical dispatch cue in a distinct first
+            // item. The native compactor budgets items individually; joining
+            // these strings would lose the clicked target label again.
+            let receipt = result.actionReceipt.map { [textContent($0.compactText)] } ?? []
+            return receipt + [textContent(result.response)]
         }
 
         private func executeDynamicTool(

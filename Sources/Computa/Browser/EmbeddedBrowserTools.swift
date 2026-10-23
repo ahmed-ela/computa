@@ -79,7 +79,7 @@ enum EmbeddedBrowserTools {
                 ]),
             specification(
                 "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action against the intended operation; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action against the intended operation; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
@@ -186,6 +186,69 @@ enum EmbeddedBrowserTools {
     }
 }
 
+/// A historical dispatch cue, never a fresh observation or input capability.
+/// Keeping it in its own text item lets native history compaction retain it
+/// intact at the smallest text-only receipt budget (256 minus 128 reserve).
+struct EmbeddedBrowserActionReceipt: Equatable, Sendable {
+    enum Kind: String, Sendable { case click, fill }
+    let compactText: String
+
+    init(kind: Kind, snapshot: BrowserTabSnapshot, elementIndex: Int) throws {
+        var exposedLabel = ""
+        var wholeLabelExposed = false
+        if let element = snapshot.element(at: elementIndex),
+           let receipt = snapshot.readReceipt, receipt.id == snapshot.id {
+            let bytes = element.label.utf8
+            // A retained element may hold an unexposed prefix or suffix. Copy
+            // only one actually emitted span; never reconstruct the full label.
+            for exposure in receipt.exposures where exposure.nodeID == "backend:\(element.backendNodeID)"
+                && exposure.field == .label {
+                guard exposure.totalUTF8 == bytes.count, exposure.startUTF8 >= 0,
+                      exposure.endUTF8 >= exposure.startUTF8, exposure.endUTF8 <= bytes.count else { continue }
+                let start = bytes.index(bytes.startIndex, offsetBy: exposure.startUTF8)
+                let end = bytes.index(bytes.startIndex, offsetBy: exposure.endUTF8)
+                guard let fragment = String(bytes: bytes[start..<end], encoding: .utf8) else { continue }
+                exposedLabel = fragment
+                wholeLabelExposed = exposure.startUTF8 == 0 && exposure.endUTF8 == bytes.count
+                break
+            }
+        }
+        func encode(_ label: String, partial: Bool) throws -> String {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "kind": kind.rawValue, "dispatched": true, "outcome": "unverified",
+                "label": label, "partial": partial,
+            ], options: [.sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        }
+        var label = ""
+        // Measure the serialized bytes, including escaping. Iterating Characters
+        // keeps any shortened fragment on Unicode grapheme boundaries.
+        for character in exposedLabel {
+            let candidate = label + String(character)
+            guard try encode(candidate, partial: true).utf8.count <= 128 else { break }
+            label = candidate
+        }
+        // false is one byte longer than true, so include the final flag in the
+        // budget check rather than assuming the provisional size is sufficient.
+        var encoded = try encode(label, partial: !wholeLabelExposed || label != exposedLabel)
+        if encoded.utf8.count > 128 {
+            label.removeLast()
+            encoded = try encode(label, partial: true)
+        }
+        compactText = encoded
+    }
+}
+
+struct EmbeddedBrowserToolExecution: Sendable {
+    let response: String
+    let actionReceipt: EmbeddedBrowserActionReceipt?
+
+    init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil) {
+        self.response = response
+        self.actionReceipt = actionReceipt
+    }
+}
+
 /// A rejected preflight stays a tool failure. The runtime may publish this
 /// separate bounded read only after its normal failure/terminal checks.
 struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable {
@@ -287,6 +350,12 @@ actor EmbeddedBrowserToolController {
     func execute(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil)
         async throws -> String
     {
+        try await executeResult(taskKey: taskKey, tool: tool, arguments: arguments, scope: scope).response
+    }
+
+    func executeResult(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil)
+        async throws -> EmbeddedBrowserToolExecution
+    {
         guard !closed, !retiredKeys.contains(taskKey) else { throw BrowserTabBrokerError.handleMissing }
         guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
             throw BrowserTabBrokerError.invalidRead("Browser arguments must be a JSON object.")
@@ -360,7 +429,7 @@ actor EmbeddedBrowserToolController {
                 result["authentication_evidence"] = "not_observed"
                 result["next"] = "No matching human tabs were listed; this does not establish logout, missing credentials or denied access. Previous task-created tabs may have been closed at turn end. Use browser_open with the task's supplied or previously observed URL (including local URLs), or an authorized known service's official entrypoint, then browser_read. Opening a new task tab remains an offered operation subject to current user scope and approvals; an empty inventory is not a reason to refuse the task or ask for an already-known URL."
             }
-            return try json(result)
+            return try .init(response: json(result))
         case "browser_open", "browser_bind":
             let owned = tool == "browser_open"
             if owned { try requireScope(scope, url: URL(string: object["url"] as! String)!) }
@@ -389,9 +458,9 @@ actor EmbeddedBrowserToolController {
                     binding.targetInstanceToken == current.instanceToken, leases[current.targetID] == taskKey
                 {
                     try binding.lifetime.check()
-                    return try bindingResponse(
+                    return try .init(response: bindingResponse(
                         target: current, binding: binding,
-                        owned: contexts[taskKey]?.ownedTarget != nil, alreadyBound: true)
+                        owned: contexts[taskKey]?.ownedTarget != nil, alreadyBound: true))
                 }
             }
             let cleanup = await unbind(taskKey: taskKey, trigger: .replacement)
@@ -436,7 +505,7 @@ actor EmbeddedBrowserToolController {
                 // this exact instance. A redundant bind can reuse the existing
                 // no-op path, including its live target, lease and scope checks.
                 if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
-                return try bindingResponse(target: target, binding: binding, owned: owned)
+                return try .init(response: bindingResponse(target: target, binding: binding, owned: owned))
             } catch {
                 // Failed binding never retains read/input authority. Keep a
                 // created target reserved for cleanup until close is confirmed.
@@ -508,10 +577,12 @@ actor EmbeddedBrowserToolController {
                 snapshot = try await currentObservation(
                     taskKey: taskKey, contextID: contextID, scope: scope, read: read)
             }
-            return try readResponse(snapshot)
+            return try .init(response: readResponse(snapshot))
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(
                 taskKey: taskKey, contextID: contextID, tool: tool, object: object, scope: scope)
+            let receipt = try EmbeddedBrowserActionReceipt(kind: tool == "browser_fill" ? .fill : .click,
+                                                          snapshot: snapshot, elementIndex: index)
             // Unsupported captured intent retains the observation. An admitted
             // mutation consumes it synchronously before the first input await.
             contexts[taskKey]?.snapshot = nil
@@ -526,8 +597,8 @@ actor EmbeddedBrowserToolController {
             }
             // Input has already completed. Observation failure must not turn
             // that dispatch into an apparent input failure that invites replay.
-            return try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
-                                               wasFill: tool == "browser_fill")
+            return try await .init(response: postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
+                                               wasFill: tool == "browser_fill"), actionReceipt: receipt)
         case "browser_navigate":
             let binding = try bound(taskKey, contextID)
             let destination = URL(string: object["url"] as! String)!
@@ -538,10 +609,10 @@ actor EmbeddedBrowserToolController {
             try await transport.navigate(
                 target: target, url: destination, permit: BrowserMutationPermit(lifetime: binding.lifetime))
             try check(taskKey, contextID)
-            return try json([
+            return try .init(response: json([
                 "navigation_complete": true, "no_replay": true,
                 "next": "Read the current document before acting.",
-            ])
+            ]))
         case "browser_wait":
             let binding = try bound(taskKey, contextID)
             let target = try await currentTarget(binding: binding, scope: scope)
@@ -552,11 +623,11 @@ actor EmbeddedBrowserToolController {
             try check(taskKey, contextID)
             _ = try await currentTarget(binding: binding, scope: scope)
             try check(taskKey, contextID)
-            return try json([
+            return try .init(response: json([
                 "matched": matched, "event_driven": true,
                 "next":
                     "Read the current page for evidence; wait results do not expose new action references.",
-            ])
+            ]))
         case "browser_close":
             _ = try bound(taskKey, contextID)
             let cleanup = await unbind(taskKey: taskKey, trigger: .explicit)
@@ -564,8 +635,8 @@ actor EmbeddedBrowserToolController {
                 throw BrowserTabBrokerError.browserUnavailable("Task-tab cleanup could not be confirmed.")
             }
             try check(taskKey, contextID)
-            return try json(["released": true, "existing_user_tab_preserved": true,
-                "literal_copy_guidance": Self.literalCopyGuidance])
+            return try .init(response: json(["released": true, "existing_user_tab_preserved": true,
+                "literal_copy_guidance": Self.literalCopyGuidance]))
         default: throw BrowserTabBrokerError.invalidRead("Unknown built-in browser tool.")
         }
     }

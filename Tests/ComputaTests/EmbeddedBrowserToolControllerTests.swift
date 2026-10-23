@@ -1,3 +1,4 @@
+import AutomationCore
 import Foundation
 import XCTest
 @testable import Computa
@@ -274,9 +275,25 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 
     func testPostInputObservationSuppliesFreshFillThenClickReferencesWithoutAnotherRead() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
-        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
-        let original = try await call(controller, "browser_read")
-        let fill = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"])
+        let opened = try await controller.executeResult(taskKey: "turn-a", tool: "browser_open",
+            arguments: JSONSerialization.data(withJSONObject: ["url": "http://localhost:8123/flight"]))
+        XCTAssertNil(opened.actionReceipt)
+        let read = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read", arguments: Data("{}".utf8))
+        XCTAssertNil(read.actionReceipt)
+        let original = read.response
+        let filled = try await controller.executeResult(taskKey: "turn-a", tool: "browser_fill",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"]))
+        let fill = filled.response
+        let compactFill = try XCTUnwrap(filled.actionReceipt?.compactText)
+        let fillCue = try jsonObject(compactFill)
+        XCTAssertEqual(fillCue["kind"] as? String, "fill")
+        XCTAssertEqual(fillCue["label"] as? String, "Flight number")
+        XCTAssertEqual(fillCue["partial"] as? Bool, false)
+        XCTAssertEqual(fillCue["dispatched"] as? Bool, true)
+        XCTAssertEqual(fillCue["outcome"] as? String, "unverified")
+        XCTAssertEqual(Set(fillCue.keys), ["kind", "label", "partial", "dispatched", "outcome"])
+        XCTAssertLessThanOrEqual(compactFill.utf8.count, 128)
+        XCTAssertFalse(compactFill.contains("UA 4629"), "The dispatch cue never duplicates typed field content")
         let fillReceipt = try jsonObject(fill)
         XCTAssertEqual(fillReceipt["input_kind"] as? String, "fill")
         XCTAssertEqual(fillReceipt["dispatched"] as? Bool, true)
@@ -297,7 +314,17 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertNotEqual(try snapshotID(fresh), try snapshotID(original))
         do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(original), "element_index": 1]); XCTFail("Old action cannot be replayed") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
-        let click = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1])
+        let clicked = try await controller.executeResult(taskKey: "turn-a", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(fresh), "element_index": 1]))
+        let click = clicked.response
+        let compactClick = try XCTUnwrap(clicked.actionReceipt?.compactText)
+        let clickCue = try jsonObject(compactClick)
+        XCTAssertEqual(clickCue["kind"] as? String, "click")
+        XCTAssertEqual(clickCue["label"] as? String, "Check flight")
+        XCTAssertEqual(clickCue["partial"] as? Bool, false)
+        XCTAssertEqual(clickCue["dispatched"] as? Bool, true)
+        XCTAssertEqual(clickCue["outcome"] as? String, "unverified")
+        XCTAssertLessThanOrEqual(compactClick.utf8.count, 128)
         let clickReceipt = try jsonObject(click)
         XCTAssertEqual(clickReceipt["input_kind"] as? String, "click")
         XCTAssertEqual(clickReceipt["result_verified"] as? Bool, false)
@@ -320,6 +347,54 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testCompactActionReceiptUsesOnlyCurrentPageExposedLabelBytesAndEscapedBudget() async throws {
+        let backend = EmbeddedBrowserFixtureBackend()
+        let label = "UNEXPOSED_PREFIX " + String(repeating: "👩‍💻\"\\\n-e\u{0301}-", count: 1_200) + " UNEXPOSED_SUFFIX"
+        await backend.setButtonLabel(label)
+        let broker = BrowserTabSessionBroker(transport: backend, browserGeneration: UUID(), ownership: .borrowed)
+        let humanID = await backend.humanID
+        let observedTarget = try await backend.target(id: humanID)
+        let target = try XCTUnwrap(observedTarget)
+        let bound = try await broker.bindBorrowed(taskKey: "receipt", processIdentifier: 42, target: target)
+        let first = try await broker.snapshot(taskKey: "receipt", binding: bound,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let cursor = try XCTUnwrap(first.snapshot.nextCursor)
+        let second = try await broker.snapshot(taskKey: "receipt", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(cursor: cursor))
+        let snapshot = second.snapshot
+        let element = try XCTUnwrap(snapshot.elements.first { $0.backendNodeID == 2 })
+        let exposure = try XCTUnwrap(snapshot.readReceipt?.exposures.first { $0.nodeID == "backend:2" && $0.field == .label })
+        XCTAssertGreaterThan(exposure.startUTF8, 0)
+        XCTAssertLessThan(exposure.endUTF8, label.utf8.count)
+        XCTAssertEqual(element.label, label, "The retained source includes text the current page did not expose")
+        let bytes = Array(label.utf8)
+        let exposed = try XCTUnwrap(String(bytes: bytes[exposure.startUTF8..<exposure.endUTF8], encoding: .utf8))
+        let receipt = try EmbeddedBrowserActionReceipt(kind: .click, snapshot: snapshot, elementIndex: element.index)
+        let cue = try jsonObject(receipt.compactText)
+        let fragment = try XCTUnwrap(cue["label"] as? String)
+        XCTAssertFalse(fragment.isEmpty)
+        XCTAssertTrue(exposed.hasPrefix(fragment))
+        XCTAssertEqual(cue["partial"] as? Bool, true)
+        XCTAssertEqual(cue["outcome"] as? String, "unverified")
+        XCTAssertLessThanOrEqual(receipt.compactText.utf8.count, 128)
+        XCTAssertFalse(receipt.compactText.contains("UNEXPOSED_PREFIX"))
+        XCTAssertFalse(receipt.compactText.contains("UNEXPOSED_SUFFIX"))
+        XCTAssertFalse(receipt.compactText.contains(snapshot.id.uuidString))
+        // The receipt does not replace or broaden the ordinary current-page
+        // capability. The actual admitted node still dispatches exactly once.
+        try await broker.perform(taskKey: "receipt", binding: second.binding, snapshot: snapshot,
+                                 elementIndex: element.index, action: "AXPress")
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 1)
+        var missingExposure = snapshot
+        missingExposure.readReceipt = nil
+        let missing = try jsonObject(EmbeddedBrowserActionReceipt(kind: .click,
+            snapshot: missingExposure, elementIndex: element.index).compactText)
+        XCTAssertEqual(missing["label"] as? String, "")
+        XCTAssertEqual(missing["partial"] as? Bool, true, "Missing exposure cannot resurrect the retained label")
+        try await broker.revoke(taskKey: "receipt", binding: second.binding)
+    }
+
     func testPostInputObservationFailuresPreserveDispatchAndExposeNoCapabilityOrPrivateError() async throws {
         for scenario in ["read_failed", "no_read_authority", "generation_drift", "redirect", "replaced", "protected", "drift_after_capture"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -327,7 +402,12 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
             let original = try await call(controller, "browser_read", scope: scope)
             await backend.configureAfterInput(scenario)
-            let fill = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"], scope: scope)
+            let filled = try await controller.executeResult(taskKey: "turn-a", tool: "browser_fill", arguments:
+                JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"]), scope: scope)
+            let fill = filled.response
+            let cue = try jsonObject(XCTUnwrap(filled.actionReceipt).compactText)
+            XCTAssertEqual(cue["label"] as? String, "Flight number")
+            XCTAssertEqual(cue["outcome"] as? String, "unverified", "A failed follow-up read cannot upgrade dispatch into verified outcome")
             let result = try jsonObject(fill)
             XCTAssertEqual(result["dispatched"] as? Bool, true, scenario)
             XCTAssertEqual(result["no_replay"] as? Bool, true)
@@ -1223,6 +1303,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         })
         XCTAssertTrue(descriptions["browser_click"]?.contains("actions=[\"AXPress\"]") == true)
         XCTAssertTrue(descriptions["browser_click"]?.contains("Recheck the current row's label/action against the intended operation; indices change") == true)
+        XCTAssertTrue(descriptions["browser_click"]?.contains("existing-account selector may be used within the authorized service/task and approvals") == true)
+        XCTAssertTrue(descriptions["browser_click"]?.contains("when credentials, MFA or account ambiguity actually require it") == true)
         XCTAssertTrue(descriptions["browser_click"]?.contains("If dispatched input leaves the page unchanged, wait/read instead of clicking again") == true)
         XCTAssertTrue(descriptions["browser_click"]?.contains("After stale errors use available current_observation; otherwise browser_read") == true)
         XCTAssertFalse(descriptions["browser_click"]?.contains("After stale errors, browser_read before input") == true)
@@ -1658,7 +1740,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let read = try await call(controller,"browser_read")
         await backend.holdNextMutation()
         let id = try snapshotID(read)
-        let operation = Task { try await self.call(controller,"browser_click",["snapshot_id":id,"element_index":1]) }
+        let operation = Task { try await controller.executeResult(taskKey: "turn-a", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": id, "element_index": 1])) }
         await backend.waitUntilMutationHeld()
         do {
             try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
@@ -1667,7 +1750,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
         _ = await controller.release(taskKey:"turn-a")
         await backend.resumeMutation()
-        do { _ = try await operation.value; XCTFail("Revoked mutation must not dispatch") } catch { }
+        do { _ = try await operation.value; XCTFail("Revoked broker mutation must not return a successful dispatch cue") } catch { }
         let counts = await backend.counts()
         XCTAssertEqual(counts.presses,0); XCTAssertEqual(counts.closes,1)
     }
@@ -1924,7 +2007,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var generation = UUID().uuidString, field = "", result = ""
     private var observationSourceName = "computa_webkit_dom"
     private var semanticReadiness: BrowserDocumentObservation.SemanticReadiness?, emptyObservation = false
-    private var buttonID: Int64 = 2, buttonDisabled = false
+    private var buttonID: Int64 = 2, buttonDisabled = false, buttonLabel = "Check flight"
     private var pendingRedirect: URL?
     private var link: String?, linkPressUnsupported = false
     private var holdCreate=false, createHeld=false, createContinuation: CheckedContinuation<Void,Never>?
@@ -1941,6 +2024,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func counts() -> Counts { stats }
     func fieldValue() -> String { field }
     func setObservedResult(_ text: String) { result = text }
+    func setButtonLabel(_ text: String) { buttonLabel = text }
     func setObservationSourceName(_ name: String) { observationSourceName = name }
     func setSemanticReadiness(_ value: BrowserDocumentObservation.SemanticReadiness?, empty: Bool = false) {
         semanticReadiness = value; emptyObservation = empty
@@ -2023,7 +2107,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         }
         var nodes = [
             BrowserDocumentNode(backendNodeID:1,role:"textbox",name:"Flight number",value:field,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"1",isEditable:true),
-            BrowserDocumentNode(backendNodeID:buttonID,role:"button",name:"Check flight",value:nil,isDisabled:buttonDisabled,isReadOnly:false,isIgnored:false,nodeID:String(buttonID),isDOMClickable:true),
+            BrowserDocumentNode(backendNodeID:buttonID,role:"button",name:buttonLabel,value:nil,isDisabled:buttonDisabled,isReadOnly:false,isIgnored:false,nodeID:String(buttonID),isDOMClickable:true),
             BrowserDocumentNode(backendNodeID:3,role:"statictext",name:result,value:nil,isDisabled:true,isReadOnly:true,isIgnored:false,nodeID:"3")
         ]
         if let link {

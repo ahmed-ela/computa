@@ -290,6 +290,31 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
             let rows = try harness.rows()
             XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            for (index, kind, label) in [(2, "fill", "Search flights"), (4, "click", "Find flight")] {
+                let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
+                XCTAssertEqual(items.count, 2, "Separate items preserve the dispatch cue through native history compaction")
+                let compact = try XCTUnwrap(items[0]["text"] as? String)
+                XCTAssertLessThanOrEqual(compact.utf8.count, 128)
+                let cue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(compact.utf8)) as? [String: Any])
+                XCTAssertEqual(cue["kind"] as? String, kind)
+                XCTAssertEqual(cue["label"] as? String, label)
+                XCTAssertEqual(cue["partial"] as? Bool, false)
+                XCTAssertEqual(cue["dispatched"] as? Bool, true)
+                XCTAssertEqual(cue["outcome"] as? String, "unverified")
+                XCTAssertEqual(Set(cue.keys), ["kind", "label", "partial", "dispatched", "outcome"])
+                let observation = try XCTUnwrap(items[1]["text"] as? String)
+                let full = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(observation.utf8)) as? [String: Any])
+                XCTAssertEqual(full["input_kind"] as? String, kind)
+                XCTAssertEqual(full["result_verified"] as? Bool, false)
+                XCTAssertEqual(full["no_replay"] as? Bool, true)
+                let current = try XCTUnwrap(full["current_observation"] as? [String: Any])
+                XCTAssertEqual(current["status"] as? String, "available")
+                XCTAssertTrue((current["text"] as? String)?.contains("AXSNAPSHOT") == true)
+            }
+            for index in [0, 1, 3, 5] {
+                XCTAssertEqual((rows[index]["contentItems"] as? [[String: Any]])?.count, 1,
+                               "Reads and navigation do not receive a click/fill dispatch cue")
+            }
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("UA 123") == true)
             XCTAssertTrue((rows[5]["text"] as? String)?.contains("UA 123 departs at 14:35") == true)
             let counts = await harness.backend.counts()
@@ -404,6 +429,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 let final = try XCTUnwrap(harness.rows().last)
                 XCTAssertEqual(final["success"] as? Bool, false)
                 XCTAssertTrue((final["text"] as? String)?.contains("declined") == true)
+                let items = try XCTUnwrap(final["contentItems"] as? [[String: Any]])
+                XCTAssertEqual(items.count, 1)
+                XCTAssertFalse((items[0]["text"] as? String ?? "").contains("\"dispatched\":true"))
                 let counts = await harness.backend.counts()
                 XCTAssertEqual(counts.created, 0)
                 XCTAssertEqual(counts.mutations, 0)
@@ -625,6 +653,62 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 XCTAssertTrue(counts.humanIntact)
                 XCTAssertEqual(counts.activations, 0)
             }
+        }
+    }
+
+    func testRetiredTurnDoesNotPublishLateDispatchCueOrObservation() async throws {
+        try await withHarness(approval: true, allowsCleanupFailure: true) { harness in
+            await harness.backend.holdNextPostInputObservation()
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+            ], hold: true)
+            try await self.waitForAsync { await harness.backend.isPostInputObservationHeld() }
+            XCTAssertEqual(harness.rowCount, 2, "The fill result remains unpublished while its fresh read is pending")
+            let dispatched = await harness.backend.counts()
+            XCTAssertEqual(dispatched.fills, 1)
+            let stopping = Task { try await harness.runtime.interrupt(taskID: Harness.taskID) }
+            try await self.waitForAsync { await harness.backend.counts().ownedClosed == 1 }
+            await harness.backend.resumePostInputObservation()
+            try await stopping.value
+            // interrupt awaits the cancelled dynamic tool task, making this
+            // assertion an ordering barrier after the late controller result.
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertEqual(rows.map { $0["tool"] as? String }, ["browser_open", "browser_read"])
+            XCTAssertFalse(rows.contains { $0["tool"] as? String == "browser_fill" })
+            let trace = try AppServerWireTrace.load(harness.root.appendingPathComponent("protocol.jsonl"))
+            XCTAssertTrue(trace.parseFailures.isEmpty)
+            XCTAssertFalse(trace.messages.contains {
+                $0.direction == .clientToServer && $0.identifier == "string:request-1-2" && $0.object["result"] != nil
+            }, "Neither the dispatch cue nor the full observation may publish to a retired turn")
+            let finalCounts = await harness.backend.counts()
+            XCTAssertEqual(finalCounts.fills, 1)
+            XCTAssertEqual(finalCounts.ownedClosed, 1)
+            XCTAssertTrue(finalCounts.humanIntact)
+        }
+    }
+
+    func testFailedBrokerDispatchPublishesOnlyFailureWithoutCompactCue() async throws {
+        try await withHarness(approval: true) { harness in
+            await harness.backend.failNextPress()
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button"]],
+            ])
+            try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
+            let last = try XCTUnwrap(harness.rows().last)
+            XCTAssertEqual(last["success"] as? Bool, false)
+            let items = try XCTUnwrap(last["contentItems"] as? [[String: Any]])
+            XCTAssertEqual(items.count, 1)
+            let error = try XCTUnwrap(items.first?["text"] as? String)
+            XCTAssertTrue(error.contains("Synthetic press failed"))
+            XCTAssertFalse(error.contains("\"dispatched\":true"))
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_click"])
         }
     }
 
@@ -886,7 +970,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       }
       if (message.id !== `request-${turnCount}-${step}`) return;
       const text = (message.result?.contentItems ?? []).map(item => item.text ?? '').join('\n');
-      rows.push({turnId, tool:plan.calls[step].tool, success:message.result?.success === true, text, error:message.error?.message ?? null});
+      rows.push({turnId, tool:plan.calls[step].tool, success:message.result?.success === true, contentItems:message.result?.contentItems ?? [], text, error:message.error?.message ?? null});
       save('results.json', rows);
       let observationText = message.result?.success ? text : null;
       if (!message.result?.success && plan.calls[step].captureRecovery) {
@@ -1011,11 +1095,19 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var closeHeld = false
     private var closeWaiter: CheckedContinuation<Void, Never>?
     private var failClose = false
+    private var failPress = false
+    private var holdPostInputObservation = false
+    private var postInputObservationHeld = false
+    private var postInputObservationWaiter: CheckedContinuation<Void, Never>?
 
     func holdNextClose() { holdClose = true }
     func failNextClose() { failClose = true }
+    func failNextPress() { failPress = true }
     func isCloseHeld() -> Bool { closeHeld }
     func resumeClose() { closeWaiter?.resume(); closeWaiter = nil }
+    func holdNextPostInputObservation() { holdPostInputObservation = true }
+    func isPostInputObservationHeld() -> Bool { postInputObservationHeld }
+    func resumePostInputObservation() { postInputObservationWaiter?.resume(); postInputObservationWaiter = nil }
 
     func counts() -> Counts {
         var result = ledger
@@ -1049,8 +1141,14 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         for id in owned { targets.removeValue(forKey: id); ledger.ownedClosed += 1 }
         owned.removeAll(); return []
     }
-    func observe(target: BrowserTarget) throws -> BrowserDocumentObservation {
+    func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         guard targets[target.targetID] == target else { throw BrowserTabBrokerError.targetClosed }
+        if holdPostInputObservation, ledger.fills + ledger.presses > 0 {
+            holdPostInputObservation = false
+            postInputObservationHeld = true
+            await withCheckedContinuation { postInputObservationWaiter = $0 }
+            postInputObservationHeld = false
+        }
         let nodes = [
             BrowserDocumentNode(backendNodeID: 1, role: "main", name: "Flight lookup", value: nil, isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "main", childNodeIDs: ["heading", "query", "find", "result"]),
             BrowserDocumentNode(backendNodeID: 2, role: "heading", name: "United flight fixture", value: nil, isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "heading", parentNodeID: "main"),
@@ -1064,6 +1162,10 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     }
     func press(target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation, permit: BrowserMutationPermit) throws {
         guard backendNodeID == 4 else { throw BrowserTabBrokerError.elementNotFound }
+        if failPress {
+            failPress = false
+            throw BrowserTabBrokerError.browserUnavailable("Synthetic press failed")
+        }
         try permit.commit { ledger.presses += 1; results[target.targetID] = "UA 123 departs at 14:35" }
     }
     func setText(target: BrowserTarget, backendNodeID: Int64, text: String, document: BrowserDocumentObservation, permit: BrowserMutationPermit) throws {

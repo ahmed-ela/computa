@@ -83,6 +83,20 @@ old stop notice was appended after every subsequent turn, making it appear curre
   control remains available within the user's scope. No-replay guidance refers
   to the same input, so it does not discourage a needed Search after field entry.
   Page event handlers may still react to a fill; observed outcomes remain required.
+- Successful click/fill tool outputs begin with a separate compact dispatch
+  receipt. It preserves the operation and the control label through item-wise
+  history truncation; snapshot IDs and indices alone cannot explain an older
+  action. The serialized receipt fits 128 UTF-8 bytes, including JSON escaping,
+  and copies only a label span already exposed by the validated input snapshot.
+  A partial flag identifies clipped or unavailable labels. The full post-input
+  observation remains the second item. Failed dispatches have no such receipt,
+  and existing turn, lease and generation checks still gate publication. This
+  historical cue provides no new action reference and explicitly leaves the
+  outcome unverified. Compaction's total history limits are unchanged.
+- Click guidance permits choosing an observed existing account within the
+  authorized task and approvals. The model must not infer that a password or MFA
+  is required before observing that requirement. Actual credential requirements,
+  account ambiguity and approval boundaries still require appropriate help.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host
