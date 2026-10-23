@@ -1688,7 +1688,8 @@ actor BrowserTabSessionBroker {
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) "
                 + "metadata_truncated=\(metadataTruncated ? 1 : 0) "
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
-                + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")"
+                + (nextCursor.map { "next_cursor=\($0) " } ?? "")
+                + "observation=\(retainedObservation ? "retained" : "live")"
                 + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
             try selectionEvidence(receipt: receipt, elements: elements),
             "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }.count) "

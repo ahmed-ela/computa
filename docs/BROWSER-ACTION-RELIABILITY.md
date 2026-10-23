@@ -36,6 +36,11 @@ old stop notice was appended after every subsequent turn, making it appear curre
   content was requested. Unknown, foreign, replaced or navigation-stale cursors
   grant no recovery read. Failed capture preserves the previous valid capability;
   success replaces it. Recovery shares the existing three-read turn limit.
+- Completed reads omit the `next_cursor` field instead of displaying `none` as
+  a token. A live model had copied that placeholder into a continuation request.
+  Genuine cursor values remain exact, and invented cursors remain rejected
+  without a read or input dispatch. Page text containing the same words is not
+  rewritten.
 - Navigation-related stale preflight errors can return a bounded fresh read,
   like other stale snapshot errors. They remain failed, undispatched actions;
   input is never replayed. Approval, ownership and unchanged-attempt limits remain.

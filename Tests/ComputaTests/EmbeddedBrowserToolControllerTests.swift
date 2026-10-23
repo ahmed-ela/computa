@@ -947,6 +947,24 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testCompletedReadOffersNoPlaceholderCursorAndInventedNoneStillRejectsWithoutDispatch() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let output = try await call(controller, "browser_read", ["view": "all"])
+        let read = try XCTUnwrap(output.split(separator: "\n").first { $0.hasPrefix("READ ") })
+        XCTAssertFalse(read.contains("next_cursor=")); XCTAssertTrue(read.contains("output_truncated=0"))
+        XCTAssertNil(try actionReferenceMetadata(output)["continuation"])
+        let before = await backend.counts()
+        do {
+            _ = try await call(controller, "browser_read", ["cursor": "none"])
+            XCTFail("Removing the placeholder must not make a guessed cursor a fresh read")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes)
+        XCTAssertEqual(after.presses, before.presses); XCTAssertEqual(after.fills, before.fills)
+        _ = await controller.shutdown()
+    }
+
     func testReadContinuationMetadataNamesOnlyItsExactCursorAndPreservesCapturedFilters() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])

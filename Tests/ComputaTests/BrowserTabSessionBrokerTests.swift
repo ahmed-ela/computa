@@ -4,6 +4,35 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testCompletedReadOmitsCursorFieldWithoutRewritingLiteralPageText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let literal = "Observed documentation: next_cursor=none"
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "main", name: "", children: ["n1"]),
+            semanticNode(1, role: "StaticText", name: literal, parent: "n0"),
+        ])
+        for view in [SemanticReadView.all, .overview, .content] {
+            for query in [nil, "Absent fixture text"] as [String?] {
+                let observed = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: query, view: view))
+                let read = try XCTUnwrap(observed.snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix("READ ") })
+                XCTAssertNil(observed.snapshot.nextCursor)
+                XCTAssertFalse(read.contains("next_cursor="), "An absent continuation must not look like a usable token")
+                XCTAssertTrue(read.contains("output_truncated=0"))
+                let receipt = try XCTUnwrap(observed.snapshot.readReceipt)
+                XCTAssertFalse(receipt.outputTruncated)
+                if query == nil {
+                    XCTAssertTrue(observed.snapshot.formattedText.contains(literal), "Only native metadata changes, never page text")
+                    let exposure = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "backend:2" && $0.field == .label })
+                    XCTAssertEqual(exposure.startUTF8, 0); XCTAssertEqual(exposure.endUTF8, literal.utf8.count)
+                } else {
+                    XCTAssertTrue(observed.snapshot.elements.isEmpty); XCTAssertTrue(receipt.exposures.isEmpty)
+                }
+            }
+        }
+        await fixture.assertNoInput()
+    }
+
     func testConstraintMetadataRemainsAttachedToItsPublishedRowWithinReadBudgets() async throws {
         for view in [SemanticReadView.all, .overview] {
             let fixture = try await BrowserBrokerTestFixture.make()
@@ -362,6 +391,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         repeat {
             pages += 1
             let receipt = try XCTUnwrap(page.snapshot.readReceipt), presentation = try XCTUnwrap(page.snapshot.presentation)
+            let read = try XCTUnwrap(page.snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix("READ ") })
+            if let cursor = page.snapshot.nextCursor {
+                XCTAssertEqual(read.split(separator: " ").first { $0.hasPrefix("next_cursor=") }.map(String.init), "next_cursor=\(cursor)")
+                XCTAssertTrue(receipt.outputTruncated)
+            } else {
+                XCTAssertFalse(read.contains("next_cursor=")); XCTAssertFalse(receipt.outputTruncated)
+            }
             XCTAssertEqual(receipt.sourceID, source); XCTAssertFalse(receipt.sourceTruncated)
             XCTAssertLessThanOrEqual(presentation.rows.count, 18)
             XCTAssertLessThanOrEqual(presentation.rows.reduce(0) { $0 + $1.text.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
