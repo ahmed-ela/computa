@@ -99,6 +99,13 @@ old stop notice was appended after every subsequent turn, making it appear curre
   Cursor and subtree reads cannot switch documents, and unrelated failures do
   not retry. A second failure remains an unavailable observation. The input is
   never replayed, and a recovered observation does not verify its outcome.
+- Overview interleaves controls, headings, readable main/article body text, and
+  navigation in one captured selection. It keeps the existing 18-row and
+  6,000-byte row budget, exact field exposures, and immutable continuation.
+  A long sidebar cannot by itself hide all document text; a heading does not
+  substitute for the body. Selection uses observed structure, never success
+  keywords. This is a bounded sample, not complete document coverage or proof
+  that an action succeeded. Additional evidence may still require a read.
 - Successful click/fill tool outputs begin with a separate compact dispatch
   receipt. It preserves the operation and the control label through item-wise
   history truncation; snapshot IDs and indices alone cannot explain an older
@@ -175,3 +182,13 @@ steered keyword control when comparing builds.
 
 Synthetic mailbox qualification does not establish delivery through a real mail
 provider. Real mailbox checks must preserve the user's task-specific limits.
+
+For a refusal that happens before any tool call, the existing private API request
+diagnostic can be armed once with `mode: "projection"` for an exact task/thread.
+It compares the actual HTTP request body with the policy and active user inputs
+retained by native admission, and records bounded match flags, counts, revisions,
+HTTP status and the first decode outcome. It records no prompt, history, header,
+URL, response text or content hash. Maintenance and correction requests cannot
+consume that arm; cancellation or a superseded user revision suppresses
+publication. The diagnostic is inactive unless explicitly armed. A matching
+request and validated response still do not verify the requested task outcome.

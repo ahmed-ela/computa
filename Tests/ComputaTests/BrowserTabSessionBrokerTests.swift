@@ -158,32 +158,46 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
-    func testOverviewSurfacesControlsHeadingsAndNavigationWithoutClaimingBodyCoverage() async throws {
+    func testOverviewInterleavesDocumentTextWithControlsHeadingsAndNavigationWithoutAddingAuthority() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
-        let body = String(repeating: "Ordinary document passage. ", count: 1_000)
+        let body = "Ordinary document passage with an exact identifier: cafe\u{301}-219."
         let links = (10..<60).map { semanticNode($0, role: "link", name: "Destination \($0)", link: "https://example.com/item/\($0)") }
-        let nodes = [semanticNode(0, role: "StaticText", name: body)] + links + [
+        let nodes = [semanticNode(0, role: "StaticText", name: body, parent: "n1000")] + links + [
             semanticNode(100, role: "heading", name: "Observed heading"),
             semanticNode(101, role: "heading", name: "Other heading"),
             semanticNode(200, role: "button", name: "Open panel", children: ["n201"]),
             semanticNode(201, role: "StaticText", name: "Inherited control child", parent: "n200"),
             semanticNode(202, role: "searchbox", name: "Find records"),
             semanticNode(203, role: "generic", name: "Custom action", clickable: true),
+            semanticNode(1000, role: "main", name: "", children: ["n0"]),
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let overview = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
             bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
-        XCTAssertEqual(overview.snapshot.elements.prefix(3).map(\.semanticRole), ["button", "heading", "link"])
+        XCTAssertEqual(overview.snapshot.elements.prefix(4).map(\.semanticRole), ["button", "heading", "StaticText", "link"])
         for label in ["Open panel", "Find records", "Custom action", "Observed heading"] {
             XCTAssertTrue(overview.snapshot.elements.contains { $0.label == label })
         }
-        XCTAssertFalse(overview.snapshot.formattedText.contains("Ordinary document passage"))
+        XCTAssertTrue(overview.snapshot.formattedText.contains(body))
         XCTAssertFalse(overview.snapshot.formattedText.contains("Inherited control child"))
         XCTAssertTrue(overview.snapshot.formattedText.contains("document_content_exhaustive=false"))
         let receipt = try XCTUnwrap(overview.snapshot.readReceipt)
         XCTAssertEqual(receipt.view, .overview)
-        XCTAssertEqual(receipt.selectedElementCount, 55)
-        XCTAssertFalse(receipt.exposures.contains { ["backend:1", "backend:202"].contains($0.nodeID) })
+        XCTAssertEqual(receipt.selectedElementCount, 56)
+        let bodyExposure = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "backend:1" && $0.field == .label })
+        XCTAssertEqual(bodyExposure.startUTF8, 0); XCTAssertEqual(bodyExposure.endUTF8, body.utf8.count)
+        XCTAssertEqual(bodyExposure.kind, .readable); XCTAssertEqual(bodyExposure.provenance, .main)
+        XCTAssertFalse(receipt.exposures.contains { $0.nodeID == "backend:202" })
+        let bodyElement = try XCTUnwrap(overview.snapshot.elements.first { $0.backendNodeID == 1 })
+        XCTAssertFalse(bodyElement.supportsPress); XCTAssertFalse(bodyElement.supportsSetText)
+        await assertBrowserError(.unsupportedAction("AXPress")) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: overview.binding,
+                snapshot: overview.snapshot, elementIndex: bodyElement.index, action: "AXPress")
+        }
+        await assertBrowserError(.unsupportedAction("set text")) {
+            try await fixture.broker.setText(taskKey: "task-a", binding: overview.binding,
+                snapshot: overview.snapshot, elementIndex: bodyElement.index, text: "Not authorized")
+        }
         XCTAssertTrue(overview.snapshot.elements.contains { $0.label == "Custom action" && $0.supportsPress })
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: overview.binding,
             bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
@@ -252,7 +266,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let controls = (0..<41).map { semanticNode($0, role: "button", name: "Control \($0)") }
         let headings = (100..<115).map { semanticNode($0, role: "heading", name: "Heading \($0)") }
         let links = (200..<220).map { semanticNode($0, role: "link", name: "Destination \($0)", link: "https://example.com/\($0)") }
-        let nodes = controls + headings + links + [semanticNode(300, role: "StaticText", name: "Body remains unread")]
+        let body = (300..<310).map { semanticNode($0, role: "StaticText", name: "Captured body \($0)", parent: "n500") }
+        let other = [semanticNode(500, role: "article", name: "", children: body.compactMap(\.nodeID)),
+                     semanticNode(600, role: "StaticText", name: "Unscoped text remains outside overview")]
+        let nodes = controls + headings + links + body + other
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes, sourceTruncated: true)
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
             bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
@@ -262,22 +279,22 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         repeat {
             let rows = page.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
             XCTAssertLessThanOrEqual(rows.count, 18)
-            XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 }, 6_000)
+            XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
             XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
             XCTAssertEqual(page.snapshot.readReceipt?.view, .overview)
             XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
-            XCTAssertEqual(page.snapshot.readReceipt?.selectedElementCount, 76)
+            XCTAssertEqual(page.snapshot.readReceipt?.selectedElementCount, 86)
             XCTAssertEqual(page.snapshot.readReceipt?.sourceTruncated, true)
             XCTAssertFalse(page.snapshot.formattedText.contains("Later live control"))
-            XCTAssertFalse(page.snapshot.formattedText.contains("Body remains unread"))
+            XCTAssertFalse(page.snapshot.formattedText.contains("Unscoped text remains outside overview"))
             seen += page.snapshot.elements.map(\.backendNodeID)
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
                 bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
-        XCTAssertEqual(seen.count, 76)
-        XCTAssertEqual(Set(seen).count, 76)
-        XCTAssertEqual(Set(seen), Set((controls + headings + links).compactMap(\.backendNodeID)))
+        XCTAssertEqual(seen.count, 86)
+        XCTAssertEqual(Set(seen).count, 86)
+        XCTAssertEqual(Set(seen), Set((controls + headings + body + links).compactMap(\.backendNodeID)))
         await fixture.assertNoInput()
     }
 
@@ -325,7 +342,55 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
-    func testEmptyOverviewDoesNotMakeAnOrdinaryDocumentEmpty() async throws {
+    func testOverviewDocumentTextUsesExactExposuresAndExistingContinuationBudget() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let body = String(repeating: "Observed \"cafe\u{301}\" 🙂\n", count: 900) + "UNPUBLISHED_BODY_TAIL"
+        let nodes = [semanticNode(0, role: "main", name: "", children: ["n1", "n2", "n3", "n4"]),
+                     semanticNode(1, role: "StaticText", name: body, parent: "n0"),
+                     semanticNode(2, role: "button", name: "Available action", parent: "n0"),
+                     semanticNode(3, role: "heading", name: "Observed document", parent: "n0"),
+                     semanticNode(4, role: "link", name: "Available destination", parent: "n0", link: "https://example.com/next")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
+        let first = page, source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Available action" && $0.supportsPress })
+        XCTAssertFalse(page.snapshot.formattedText.contains("UNPUBLISHED_BODY_TAIL"))
+        XCTAssertEqual(page.snapshot.elements.first { $0.backendNodeID == 2 }?.label, body,
+                       "Retaining the full field must not publish its unexposed tail")
+        var bytes = Data(), offset = 0, pages = 0
+        repeat {
+            pages += 1
+            let receipt = try XCTUnwrap(page.snapshot.readReceipt), presentation = try XCTUnwrap(page.snapshot.presentation)
+            XCTAssertEqual(receipt.sourceID, source); XCTAssertFalse(receipt.sourceTruncated)
+            XCTAssertLessThanOrEqual(presentation.rows.count, 18)
+            XCTAssertLessThanOrEqual(presentation.rows.reduce(0) { $0 + $1.text.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
+            XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+            for exposure in receipt.exposures where exposure.nodeID == "backend:2" && exposure.field == .label {
+                let element = try XCTUnwrap(page.snapshot.elements.first { $0.backendNodeID == 2 })
+                let row = try XCTUnwrap(presentation.rows.first { $0.index == element.index })
+                XCTAssertEqual(exposure.startUTF8, offset); XCTAssertEqual(exposure.totalUTF8, body.utf8.count)
+                XCTAssertEqual(exposure.provenance, .main); XCTAssertEqual(exposure.kind, .readable)
+                XCTAssertFalse(element.supportsPress); XCTAssertFalse(element.supportsSetText)
+                let fragment = try renderedJSONField("label", in: row.text)
+                XCTAssertEqual(fragment.utf8.count, exposure.endUTF8 - exposure.startUTF8)
+                bytes.append(contentsOf: fragment.utf8); offset = exposure.endUTF8
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            XCTAssertLessThan(pages, 20, "A long body must continue by actual exposed bytes")
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+        } while true
+        XCTAssertGreaterThan(pages, 1); XCTAssertEqual(bytes, Data(body.utf8))
+        let oldAction = try XCTUnwrap(first.snapshot.elements.first { $0.label == "Available action" })
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding,
+                snapshot: first.snapshot, elementIndex: oldAction.index, action: "AXPress")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testOverviewDoesNotPromoteUnscopedTextOrImplyItsAbsence() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "StaticText", name: "Observed body fact")])

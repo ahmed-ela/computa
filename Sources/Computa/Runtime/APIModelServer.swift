@@ -505,7 +505,8 @@ actor APIModelServer {
                 guard let active = activeUserInputs[taskID], active.context == context else { throw Failure.inferenceContextRequired }
                 userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
             } else { userInputs = [] }
-            let prepared = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty, purpose: purpose).map {
+            let hostMessage = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty, purpose: purpose)
+            let prepared = try hostMessage.map {
                 try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated, userInputs: userInputs, purpose: purpose)
             } ?? translated
             let userInputRevision = activeUserInputs[taskID]?.revision
@@ -514,9 +515,16 @@ actor APIModelServer {
             catch let failure as APIProviderHTTPClient.Failure { throw failure }
             catch { throw Failure.credentialUnavailable }
             let capture = APIRejectedRequestCapture.consume(directory: rejectionDiagnosticsDirectory, taskID: UUID(uuidString: taskID)!,
-                threadID: UUID(uuidString: context.identity.threadID)!, turnID: UUID(uuidString: context.identity.turnID)!)
+                threadID: UUID(uuidString: context.identity.threadID)!, turnID: UUID(uuidString: context.identity.turnID)!,
+                ordinaryInference: nativeRequest.requestKind == nil || nativeRequest.requestKind == "turn")
+            // No body inspection or expected-content copy for unarmed requests.
+            // Expectations come from native admission, before provider encoding.
+            let projectionExpectation: APIProviderHTTPClient.RequestProjectionExpectation? = capture?.mode == .projection
+                ? .init(provider: prepared.provider, modelID: prepared.model.id, hostMessage: hostMessage,
+                    userInputs: userInputs, userInputRevision: userInputRevision,
+                    checkpointRevision: executionCheckpoints[taskID]?.revision) : nil
             let onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?
-            if let capture { onRejection = { diagnostic in capture.capture(diagnostic) } }
+            if let capture, capture.mode == .rejection { onRejection = { diagnostic in capture.capture(diagnostic) } }
             else { onRejection = nil }
             failureStage = .requestTransport
             let laneID = UUID()
@@ -525,7 +533,8 @@ actor APIModelServer {
                 try await withThrowingTaskGroup(of: APIModelResponseCodec.Reply.self) { group in
                     group.addTask { try await self.performInference(prepared, key: key, taskID: taskID,
                         context: context, userInputRevision: userInputRevision, laneID: laneID,
-                        deadline: inferenceDeadline, onRejection: onRejection) }
+                        deadline: inferenceDeadline, onRejection: onRejection,
+                        projectionExpectation: projectionExpectation, requestCapture: capture) }
                     group.addTask {
                         try await ContinuousClock().sleep(until: inferenceDeadline)
                         throw StagedFailure(stage: .requestTransport, cause: APIProviderHTTPClient.Failure.timeout)
@@ -597,7 +606,9 @@ actor APIModelServer {
 
     private func performInference(_ original: APIModelResponseCodec.Request, key: String, taskID: String,
                                   context: Context, userInputRevision: Int?, laneID: UUID, deadline: ContinuousClock.Instant,
-                                  onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?) async throws -> APIModelResponseCodec.Reply {
+                                  onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?,
+                                  projectionExpectation: APIProviderHTTPClient.RequestProjectionExpectation?,
+                                  requestCapture: APIRejectedRequestCapture.Ticket?) async throws -> APIModelResponseCodec.Reply {
 #if DEBUG
         try await beforeInferenceDispatchForTesting?()
 #endif
@@ -605,19 +616,36 @@ actor APIModelServer {
         try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
         let first: APIProviderHTTPClient.Result
         do { first = try await client.request(provider: original.provider, key: key, path: original.path,
-            body: original.body, modelID: original.model.id, onRejection: onRejection) }
+            body: original.body, modelID: original.model.id, onRejection: onRejection,
+            projectionExpectation: projectionExpectation) }
         catch { throw StagedFailure(stage: .requestTransport, cause: error) }
+        func captureProjection(_ outcome: APIRejectedRequestCapture.ProjectionDecodeOutcome) {
+            guard requestCapture?.mode == .projection else { return }
+            // A diagnostic cannot publish for a cancelled/retired lane or an
+            // obsolete user revision. This gate does not change reply handling.
+            do {
+                try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
+            } catch { return }
+            requestCapture?.captureProjection(first.requestProjection, decodeOutcome: outcome)
+        }
         let outcome: APIModelResponseCodec.DecodeOutcome
         var firstDiagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic?
         var firstResponseDiagnostic: APIModelResponseCodec.InvalidResponseDiagnostic?
         do { outcome = try APIModelResponseCodec.decodeForCorrection(first, request: original,
             onArgumentRejection: { firstDiagnostic = $0 }, onInvalidResponse: { firstResponseDiagnostic = $0 }) }
-        catch { throw StagedFailure(stage: .decode, cause: error,
-            argumentDiagnostic: firstDiagnostic.map { .init(validation: $0, gate: .decoderExcluded, attempt: 1) },
-            responseDiagnostic: firstResponseDiagnostic.map { .init(validation: $0, attempt: 1) }) }
+        catch {
+            captureProjection(.decodeFailed)
+            throw StagedFailure(stage: .decode, cause: error,
+                argumentDiagnostic: firstDiagnostic.map { .init(validation: $0, gate: .decoderExcluded, attempt: 1) },
+                responseDiagnostic: firstResponseDiagnostic.map { .init(validation: $0, attempt: 1) })
+        }
         switch outcome {
-        case .reply(let reply): return reply
+        case .reply(let reply):
+            captureProjection(.responseValidated)
+            return reply
         case .argumentsRejected(let firstUsage, let rejectionDetails):
+            captureProjection(.argumentsRejected)
             guard let directory = correctionAccountingDirectory else {
                 throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments,
                     argumentDiagnostic: .init(validation: firstDiagnostic, gate: .accountingDisabled, attempt: 1))

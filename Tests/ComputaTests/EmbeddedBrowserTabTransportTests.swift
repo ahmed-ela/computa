@@ -1,4 +1,5 @@
 import AppKit
+import AutomationCore
 import Foundation
 import WebKit
 import XCTest
@@ -25,6 +26,68 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber })),
                 "expected_role": try exposedField("role", in: row),
                 "expected_label": try exposedField("label", in: row)]
+    }
+
+    func testRealWebKitPostInputOverviewShowsReceiptBodyAndControlsWithoutVerifyingOutcomeOrReplaying() async throws {
+        let receipt = "Receipt: cafe\u{301}-" + UUID().uuidString.lowercased()
+        let navigation = (0..<35).map { "<a href='/item/\($0)'>Destination \($0)</a>" }.joined(separator: " ")
+        let html = """
+        <!doctype html><body><nav>\(navigation)<p>SIDEBAR_BODY_SENTINEL</p></nav>
+        <main id="main"><h1>Compose record</h1><form id="form"><button type="submit">Send message</button></form></main>
+        <script>window.submits=0;window.inspections=0;
+        document.getElementById('form').addEventListener('submit',event=>{
+          event.preventDefault();window.submits++;
+          document.getElementById('main').innerHTML='<h1>Message sent</h1><p id="receipt"></p><p hidden>HIDDEN_BODY_SENTINEL</p><button id="inspect">Inspect record</button>';
+          document.getElementById('receipt').textContent='\(receipt)';
+          document.getElementById('inspect').addEventListener('click',()=>window.inspections++);
+        });</script></body>
+        """
+        let session = EmbeddedBrowserSession(persistent: false)
+        let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/receipt-body"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_tabs", arguments: Data("{}".utf8))
+        _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let before = try await controller.execute(taskKey: "receipt-body", tool: "browser_read", arguments: Data("{}".utf8))
+        XCTAssertFalse(before.contains(receipt), "The fixture script must not expose an unrendered receipt")
+        let send = try JSONSerialization.data(withJSONObject: inputReference(before, label: "Send message"))
+        let resultText = try await controller.execute(taskKey: "receipt-body", tool: "browser_click", arguments: send)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(resultText.utf8)) as? [String: Any])
+        XCTAssertEqual(result["dispatched"] as? Bool, true)
+        XCTAssertEqual(result["no_replay"] as? Bool, true)
+        XCTAssertEqual(result["result_verified"] as? Bool, false, "A displayed receipt is observed text, not host verification")
+        let current = try XCTUnwrap(result["current_observation"] as? [String: Any])
+        XCTAssertEqual(current["status"] as? String, "available"); XCTAssertEqual(current["view"] as? String, "overview")
+        let read = try XCTUnwrap(current["text"] as? String), rows = read.split(separator: "\n").filter { $0.hasPrefix("#") }
+        XCTAssertTrue(read.contains("source_truncated=0")); XCTAssertTrue(read.contains("output_truncated=1"))
+        XCTAssertTrue(rows.contains { $0.contains("label=\"Message sent\"") })
+        XCTAssertTrue(rows.contains { $0.contains("label=\"Inspect record\"") && $0.contains("actions=[\"AXPress\"]") })
+        let bodyRow = try XCTUnwrap(rows.first { $0.contains("label=\"\(receipt)\"") })
+        XCTAssertEqual(Data(try exposedField("label", in: bodyRow).utf8), Data(receipt.utf8))
+        XCTAssertTrue(bodyRow.contains("content_scope=main content_kind=readable"))
+        XCTAssertTrue(bodyRow.contains("settable=false actions=[]"))
+        XCTAssertFalse(read.contains("SIDEBAR_BODY_SENTINEL")); XCTAssertFalse(read.contains("HIDDEN_BODY_SENTINEL"))
+        XCTAssertLessThanOrEqual(rows.count, 18)
+        XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
+        XCTAssertLessThanOrEqual(read.utf8.count, 16_384); XCTAssertLessThanOrEqual(resultText.utf8.count, 20_480)
+        do {
+            _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click", arguments: send)
+            XCTFail("Publishing body text cannot revive the consumed send reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        do {
+            _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click",
+                arguments: JSONSerialization.data(withJSONObject: inputReference(read, label: receipt)))
+            XCTFail("A newly published body row has no action authority")
+        } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+        _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: inputReference(read, label: "Inspect record")))
+        let counters = try await script(view, "return {submits:window.submits,inspections:window.inspections};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: counters) as? [String: Int], ["submits": 1, "inspections": 1])
+        _ = await controller.shutdown()
     }
 
     func testRealWebKitReadsPassiveFieldConstraintsWithoutHiddenOrSecureState() async throws {

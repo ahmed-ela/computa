@@ -1211,17 +1211,18 @@ actor BrowserTabSessionBroker {
             return documentText + otherText + controls
         }
         guard read.view == .overview else { return elements }
-        // Interleave observed controls, headings, and navigation so a long
-        // sidebar cannot consume the first page before controls are exposed.
-        // Preserve source order within headings/navigation and each control
-        // strength group, then freeze this selection for continuations.
-        // Ordinary body text is read separately.
+        // Interleave observed controls, headings, document text, and navigation
+        // within the same page budget. Post-input observations must show a
+        // bounded sample of the new document, not only its heading and controls.
+        // Preserve source order within each lane, then freeze the selection for
+        // continuations. No page text or success wording determines priority.
         // Captured clickability can also mark roots and empty layout wrappers.
         // Keep those custom candidates, but never let them precede observed
         // semantic controls in the control lane. No label text is ranked.
         let controls = elements.filter { overviewCategory($0) == 0 }
             + elements.filter { overviewCategory($0) == 3 }
         let groups = [controls, elements.filter { overviewCategory($0) == 1 },
+                      elements.filter { overviewCategory($0) == 4 },
                       elements.filter { overviewCategory($0) == 2 }]
         var ordered = [BrowserTabElement]()
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
@@ -1242,6 +1243,9 @@ actor BrowserTabSessionBroker {
                 "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
                 "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"].contains(role) { return 0 }
         if element.supportsPress || element.isDOMClickable || element.isFocusablePointer { return 3 }
+        if element.contentKind == .readable, element.contentScope.isDocumentContent,
+           !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !(element.value ?? "").isEmpty { return 4 }
         return nil
     }
 
@@ -1705,7 +1709,7 @@ actor BrowserTabSessionBroker {
             lines.insert("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true. Included options retain original actions; read view=overview or all for other controls and before absence/access claims.", at: 2)
         }
         if read.view == .overview {
-            lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
+            lines.append("OVERVIEW selection=observed_controls_headings_document_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
         }
         lines.append(contentsOf: rows)
         if document.semanticReadiness == .emptyAtDeadline {

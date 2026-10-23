@@ -54,7 +54,87 @@ final class APIProviderHTTPClient: @unchecked Sendable {
         }
     }
 
-    struct Result: Sendable { let body: Data; let contentType: String }
+    struct Result: Sendable {
+        let body: Data
+        let contentType: String
+        let requestProjection: SuccessfulRequestProjection?
+        init(body: Data, contentType: String, requestProjection: SuccessfulRequestProjection? = nil) {
+            self.body = body; self.contentType = contentType; self.requestProjection = requestProjection
+        }
+    }
+
+    /// Ephemeral expected values from native admission, never encoded or logged.
+    /// Created only for an explicitly armed ordinary request. The HTTP boundary
+    /// compares these with URLRequest.httpBody, not with a reconstructed request.
+    struct RequestProjectionExpectation: Sendable {
+        let wireAPI: APIProviderDefinition.WireAPI
+        let supported: Bool
+        private let host: Data?
+        private let userInputs: [Data]
+        let userInputRevision: Int?
+        let checkpointRevision: Int?
+
+        init(provider: APIProviderDefinition, modelID: String, hostMessage: String?, userInputs: [String],
+             userInputRevision: Int?, checkpointRevision: Int?) {
+            wireAPI = provider.wireAPI
+            supported = !(provider.wireAPI == .chatCompletions && provider.isCerebrasInference && modelID == "qwen-3.8-27b")
+            host = hostMessage.map { Data($0.utf8) }; self.userInputs = userInputs.map { Data($0.utf8) }
+            self.userInputRevision = userInputRevision; self.checkpointRevision = checkpointRevision
+        }
+
+        func inspect(_ bytes: Data?) -> RequestProjectionDiagnostic {
+            let boundedBytes = min(bytes?.count ?? 0, 2_000_001)
+            let object = bytes.flatMap { data -> [String: Any]? in
+                guard data.count <= 2_000_000 else { return nil }
+                return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            }
+            let messages = object?[wireAPI == .chatCompletions ? "messages" : "input"] as? [[String: Any]]
+            func text(_ message: [String: Any]) -> Data? {
+                if let value = message["content"] as? String { return Data(value.utf8) }
+                guard let parts = message["content"] as? [[String: Any]], parts.count == 1,
+                      let part = parts.first, ["text", "input_text"].contains(part["type"] as? String ?? ""),
+                      let value = part["text"] as? String else { return nil }
+                return Data(value.utf8)
+            }
+            var hostExact: Bool?, hostRole: Bool?, usersExact: Bool?, userRoles: Bool?
+            if supported, let messages {
+                let hostIndex = messages.count - userInputs.count - 1
+                hostExact = host != nil && hostIndex >= 0 && text(messages[hostIndex]) == host
+                hostRole = hostIndex >= 0 && messages[hostIndex]["role"] as? String == "developer"
+                let tail = Array(messages.suffix(userInputs.count))
+                usersExact = tail.count == userInputs.count && zip(tail, userInputs).allSatisfy { text($0.0) == $0.1 }
+                userRoles = tail.count == userInputs.count && tail.allSatisfy { $0["role"] as? String == "user" }
+            }
+            return .init(format: wireAPI == .chatCompletions ? .chatCompletions : .responses,
+                supported: supported, bodyBytes: boundedBytes, messageCount: messages?.count,
+                toolCount: (object?["tools"] as? [Any])?.count ?? (object == nil ? nil : 0),
+                userInputRevision: userInputRevision, checkpointRevision: checkpointRevision,
+                hostExpected: host != nil, activeInputCount: userInputs.count,
+                hostBytesAtExpectedPosition: hostExact, hostRoleIsDeveloper: hostRole,
+                activeInputBytesAtTail: usersExact, activeInputRolesAreUser: userRoles)
+        }
+    }
+
+    struct RequestProjectionDiagnostic: Codable, Sendable {
+        enum Format: String, Codable, Sendable { case chatCompletions = "chat_completions", responses }
+        let format: Format
+        let supported: Bool
+        let bodyBytes: Int
+        let messageCount: Int?
+        let toolCount: Int?
+        let userInputRevision: Int?
+        let checkpointRevision: Int?
+        let hostExpected: Bool
+        let activeInputCount: Int
+        let hostBytesAtExpectedPosition: Bool?
+        let hostRoleIsDeveloper: Bool?
+        let activeInputBytesAtTail: Bool?
+        let activeInputRolesAreUser: Bool?
+    }
+    struct SuccessfulRequestProjection: Codable, Sendable {
+        let httpStatus: Int
+        let request: RequestProjectionDiagnostic
+    }
     struct RejectionDiagnostic: Codable, Sendable {
         let httpStatus: Int
         let modelID: String?
@@ -113,7 +193,8 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     }
 
     func request(provider: APIProviderDefinition, key: String, path: String, body: Data?, modelID: String? = nil,
-                 onRejection: (@Sendable (RejectionDiagnostic) -> Void)? = nil) async throws -> Result {
+                 onRejection: (@Sendable (RejectionDiagnostic) -> Void)? = nil,
+                 projectionExpectation: RequestProjectionExpectation? = nil) async throws -> Result {
         let url = try Self.endpoint(provider.baseURL, path: path)
         guard !key.isEmpty, key.utf8.count <= 16_384,
               !key.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw Failure.missingCredential }
@@ -125,6 +206,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
         request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         do {
             try Task.checkCancellation()
+            let projection = projectionExpectation?.inspect(request.httpBody)
             let (bytes, response) = try await session.bytes(for: request)
             guard let http = response as? HTTPURLResponse, http.url == url else { throw Failure.invalidResponse }
             switch http.statusCode {
@@ -153,7 +235,8 @@ final class APIProviderHTTPClient: @unchecked Sendable {
                 if http.statusCode == 429 { throw Self.rateLimitFailure(body: data) }
                 throw Self.rejectedRequest(status: http.statusCode, body: data)
             }
-            return Result(body: data, contentType: http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? "")
+            return Result(body: data, contentType: http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? "",
+                requestProjection: projection.map { .init(httpStatus: http.statusCode, request: $0) })
         } catch let error as Failure { throw error }
         catch is CancellationError { throw Failure.cancelled }
         catch let error as URLError {

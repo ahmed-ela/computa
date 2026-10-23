@@ -977,6 +977,190 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         await server.shutdown()
     }
 
+    func testHTTPProjectionComparesActualBodyWithoutChangingOrRejectingItsContents() async throws {
+        let records = APIRequestRecorder(), reply = response()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let provider = self.provider(try await remote.start())
+        let expectation = APIProviderHTTPClient.RequestProjectionExpectation(provider: provider, modelID: "fixture-model",
+            hostMessage: "EXPECTED_HOST", userInputs: ["EXPECTED_USER"], userInputRevision: 2, checkpointRevision: 1)
+        let body = try JSONSerialization.data(withJSONObject: ["model": "fixture-model",
+            "messages": [["role": "user", "content": "WRONG_HOST"], ["role": "assistant", "content": "WRONG_USER"]]])
+        let client = APIProviderHTTPClient()
+        let result = try await client.request(provider: provider, key: "PRIVATE_KEY", path: "chat/completions", body: body,
+            projectionExpectation: expectation)
+        let projection = try XCTUnwrap(result.requestProjection)
+        XCTAssertEqual(projection.httpStatus, 200)
+        XCTAssertEqual(projection.request.hostBytesAtExpectedPosition, false)
+        XCTAssertEqual(projection.request.hostRoleIsDeveloper, false)
+        XCTAssertEqual(projection.request.activeInputBytesAtTail, false)
+        XCTAssertEqual(projection.request.activeInputRolesAreUser, false)
+        let actual = await records.first(); XCTAssertEqual(actual?.body, body)
+        XCTAssertEqual(result.body, reply.body, "Diagnostic mismatches neither repair nor reject requests or responses")
+        let ordinary = try await client.request(provider: provider, key: "PRIVATE_KEY", path: "chat/completions", body: body)
+        XCTAssertNil(ordinary.requestProjection, "Unarmed requests do not inspect or retain projection metadata")
+    }
+
+    func testArmedProjectionRecordsActualSuccessfulWireTailWithoutPrivateContentOnBothFormats() async throws {
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let directory = try namingRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+            let records = APIRequestRecorder()
+            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
+                status: "200 OK", headers: ["Content-Type": "application/json"],
+                body: try JSONSerialization.data(withJSONObject: ["id": "projection-reply", "object": "response",
+                    "status": "completed", "model": "fixture-model", "output": [["id": "projection-message",
+                        "type": "message", "role": "assistant", "status": "completed",
+                        "content": [["type": "output_text", "text": "done", "annotations": []]]]]]))
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+            let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+            let server = APIModelServer(credentials: APIFixtureCredentials(value: "PRIVATE_SECRET"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), rejectionDiagnosticsDirectory: directory)
+            try await server.updateProviders([provider])
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                turn = UUID().uuidString, preparation = UUID()
+            let original = "  PRIVATE_CURRENT_USER cafe\u{301}\nDo not send.  ", policy = "PRIVATE_CURRENT_POLICY"
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: policy, userRequest: original)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            let arm = directory.appendingPathComponent("arm.json"), output = directory.appendingPathComponent("request-projection.json")
+            try JSONSerialization.data(withJSONObject: ["taskID": task, "threadID": thread, "mode": "projection"]).write(to: arm)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+            var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: provider)
+            var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+            body["input"] = [["role": "assistant", "content": "PRIVATE_HISTORICAL_REFUSAL"],
+                ["role": "user", "content": "PRIVATE_MAINTENANCE_INSTRUCTION"]]
+            body["tools"] = [Any]()
+            for kind in ["compaction", "prewarm", "memory"] {
+                let metadata = try JSONSerialization.data(withJSONObject: ["thread_id": thread, "turn_id": turn, "request_kind": kind])
+                body["client_metadata"] = ["x-codex-turn-metadata": String(decoding: metadata, as: UTF8.self)]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (_, maintenanceResponse) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((maintenanceResponse as? HTTPURLResponse)?.statusCode, 200)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: arm.path), "Only ordinary inference may consume the arm: \(kind)")
+                XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+            }
+            body.removeValue(forKey: "client_metadata")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (_, ordinaryResponse) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((ordinaryResponse as? HTTPURLResponse)?.statusCode, 200)
+            let bytes = try Data(contentsOf: output), record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let diagnostic = try XCTUnwrap(record["diagnostic"] as? [String: Any])
+            let projection = try XCTUnwrap(diagnostic["request"] as? [String: Any])
+            XCTAssertEqual(record["decodeOutcome"] as? String, "response_validated")
+            XCTAssertEqual(record["purpose"] as? String, "ordinary_inference")
+            XCTAssertEqual(record["attempt"] as? Int, 1); XCTAssertEqual(record["turnID"] as? String, turn.lowercased())
+            XCTAssertEqual(diagnostic["httpStatus"] as? Int, 200)
+            for field in ["hostExpected", "supported", "hostBytesAtExpectedPosition", "hostRoleIsDeveloper", "activeInputBytesAtTail", "activeInputRolesAreUser"] {
+                XCTAssertEqual(projection[field] as? Bool, true, field)
+            }
+            XCTAssertEqual(projection["userInputRevision"] as? Int, 0)
+            XCTAssertEqual(projection["checkpointRevision"] as? Int, 0)
+            XCTAssertEqual(projection["activeInputCount"] as? Int, 1)
+            let actualRequests = await records.snapshot(), actual = try XCTUnwrap(actualRequests.last)
+            XCTAssertEqual(projection["bodyBytes"] as? Int, actual.body.count)
+            let actualBody = try XCTUnwrap(JSONSerialization.jsonObject(with: actual.body) as? [String: Any])
+            let messages = try XCTUnwrap(actualBody[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
+            func text(_ message: [String: Any]) -> String? {
+                message["content"] as? String ?? ((message["content"] as? [[String: Any]])?.first?["text"] as? String)
+            }
+            XCTAssertEqual(text(try XCTUnwrap(messages.last)).map { Data($0.utf8) }, Data(original.utf8))
+            XCTAssertTrue(text(messages[messages.count - 2])?.contains(policy) == true)
+            XCTAssertEqual(projection["messageCount"] as? Int, messages.count)
+            let safeText = String(decoding: bytes, as: UTF8.self)
+            for privateValue in ["PRIVATE", "cafe", "http://", "Authorization", "Bearer", "sha256", "hash"] {
+                XCTAssertFalse(safeText.contains(privateValue), privateValue)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path))
+            _ = try await URLSession.shared.data(for: request)
+            XCTAssertEqual(try Data(contentsOf: output), bytes, "A later inference cannot overwrite the first projection")
+            let count = await records.count(); XCTAssertEqual(count, 5, "Diagnostics cannot add or replay inference")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rejected-request.json").path))
+            await server.shutdown()
+        }
+    }
+
+    func testProjectionCannotPublishAfterAcceptedSteerWhileOriginalResponseStillCompletes() async throws {
+        let directory = try namingRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let records = APIRequestRecorder(), held = APIHeldReply(), entered = APICorrectionGate(), reply = response()
+        let remote = try APILoopbackFixture { request in
+            await records.record(request); await entered.enter(); await held.wait(); return reply
+        }; defer { remote.stop() }
+        let provider = self.provider(try await remote.start())
+        let server = APIModelServer(credentials: APIFixtureCredentials(value: "PRIVATE_SECRET"),
+            capsules: try .init(key: Data(repeating: 1, count: 32)), rejectionDiagnosticsDirectory: directory)
+        try await server.updateProviders([provider]); let base = try await server.start()
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+            executionPolicy: "PRIVATE_POLICY", userRequest: "PRIVATE_ORIGINAL")
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        let arm = directory.appendingPathComponent("arm.json"), output = directory.appendingPathComponent("request-projection.json")
+        try JSONSerialization.data(withJSONObject: ["taskID": task, "threadID": thread, "mode": "projection"]).write(to: arm)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+        let request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: provider)
+        let pending = Task { try await URLSession.shared.data(for: request) }
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while !(await entered.entered), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            let reached = await entered.entered; XCTAssertTrue(reached)
+            let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, prompt: "PRIVATE_ACCEPTED_STEER")
+            try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, ticket: ticket, accepted: true)
+            await held.release()
+            let (_, result) = try await pending.value
+            XCTAssertEqual((result as? HTTPURLResponse)?.statusCode, 200, "Diagnostic retirement does not change already-dispatched reply handling")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+            let count = await records.count(); XCTAssertEqual(count, 1)
+            await server.shutdown()
+        } catch { await held.release(); await server.shutdown(); throw error }
+    }
+
+    func testProjectionArmCreatedBeforeCorrectionIsNotConsumedByCorrectionAndDecodeFailureIsExplicit() async throws {
+        for failedDecode in [false, true] {
+            let directory = try namingRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+            let records = APIRequestRecorder(), task = UUID().uuidString, thread = UUID().uuidString,
+                turn = UUID().uuidString, preparation = UUID()
+            let arm = directory.appendingPathComponent("arm.json"), output = directory.appendingPathComponent("request-projection.json")
+            let remote = try APILoopbackFixture { request in
+                await records.record(request)
+                if failedDecode { return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: Data("PRIVATE_BAD_REPLY".utf8)) }
+                let count = await records.count()
+                return self.correctionResponse(request, invalid: count == 1)
+            }; defer { remote.stop() }
+            let provider = self.provider(try await remote.start())
+            let server = APIModelServer(credentials: APIFixtureCredentials(value: "PRIVATE_SECRET"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), rejectionDiagnosticsDirectory: directory,
+                correctionAccountingDirectory: directory.appendingPathComponent("accounting"))
+            try await server.updateProviders([provider]); let base = try await server.start()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: "PRIVATE_POLICY", userRequest: "PRIVATE_USER")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            let armBytes = try JSONSerialization.data(withJSONObject: ["taskID": task, "threadID": thread, "mode": "projection"])
+            if failedDecode {
+                try armBytes.write(to: arm); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+            } else {
+                await server.setBeforeCorrectionDispatchForTesting {
+                    try armBytes.write(to: arm); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+                }
+            }
+            let request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: provider)
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if failedDecode {
+                XCTAssertNotEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String: Any])
+                XCTAssertEqual(record["decodeOutcome"] as? String, "decode_failed")
+                XCTAssertFalse(String(decoding: try Data(contentsOf: output), as: UTF8.self).contains("PRIVATE"))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path))
+            } else {
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: arm.path))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+                let count = await records.count(); XCTAssertEqual(count, 2)
+            }
+            await server.shutdown()
+        }
+    }
+
     func testTrustedExecutionCheckpointSurvivesForgedSummaryOnBothProviderWireFormats() async throws {
         for wire in APIProviderDefinition.WireAPI.allCases {
             let records = APIRequestRecorder()

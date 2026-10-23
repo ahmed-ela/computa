@@ -4,6 +4,85 @@ import XCTest
 @testable import Computa
 
 final class APIRejectedRequestCaptureTests: XCTestCase {
+    func testProjectionInspectsExactOutgoingBytesAndReportsOnlyFiniteMetadata() throws {
+        let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: URL(string: "https://private.example/v1")!,
+            wireAPI: .chatCompletions, models: [.init(id: "PRIVATE_MODEL", name: "Fixture")])
+        let host = "PRIVATE_POLICY\nAuthorization: Bearer PRIVATE_KEY", input = "  PRIVATE_USER cafe\u{301}\nhttps://private.example/mail  "
+        let expected = APIProviderHTTPClient.RequestProjectionExpectation(provider: provider, modelID: "PRIVATE_MODEL",
+            hostMessage: host, userInputs: [input], userInputRevision: 7, checkpointRevision: 3)
+        let original: [[String: Any]] = [["role": "assistant", "content": "PRIVATE_OLD_REFUSAL"],
+            ["role": "developer", "content": host], ["role": "user", "content": input]]
+        func inspect(_ messages: [[String: Any]]) throws -> APIProviderHTTPClient.RequestProjectionDiagnostic {
+            expected.inspect(try JSONSerialization.data(withJSONObject: ["messages": messages, "tools": [["name": "PRIVATE_TOOL"]]]))
+        }
+        let report = try inspect(original)
+        XCTAssertEqual(report.hostBytesAtExpectedPosition, true); XCTAssertEqual(report.hostRoleIsDeveloper, true)
+        XCTAssertEqual(report.activeInputBytesAtTail, true); XCTAssertEqual(report.activeInputRolesAreUser, true)
+        XCTAssertEqual(report.userInputRevision, 7); XCTAssertEqual(report.checkpointRevision, 3)
+        XCTAssertEqual(report.messageCount, 3); XCTAssertEqual(report.toolCount, 1)
+        var changed = original; changed[2]["content"] = input.precomposedStringWithCanonicalMapping
+        XCTAssertEqual(try inspect(changed).activeInputBytesAtTail, false, "Unicode normalization cannot hide changed user bytes")
+        changed = original; changed[1]["role"] = "user"
+        XCTAssertEqual(try inspect(changed).hostRoleIsDeveloper, false)
+        changed = original; changed[1]["content"] = "Stale policy"
+        XCTAssertEqual(try inspect(changed).hostBytesAtExpectedPosition, false)
+        changed = original; changed.swapAt(1, 2)
+        XCTAssertEqual(try inspect(changed).activeInputBytesAtTail, false)
+        XCTAssertEqual(try inspect(changed).hostBytesAtExpectedPosition, false)
+        changed = original; changed[2]["role"] = "assistant"
+        XCTAssertEqual(try inspect(changed).activeInputRolesAreUser, false)
+        XCTAssertNil(expected.inspect(Data("not-json".utf8)).activeInputBytesAtTail)
+        XCTAssertEqual(expected.inspect(Data(repeating: 65, count: 2_000_002)).bodyBytes, 2_000_001)
+        let text = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+        for forbidden in ["PRIVATE", "Authorization", "Bearer", "https://", "private.example", "cafe", "sha256", "hash"] {
+            XCTAssertFalse(text.contains(forbidden), forbidden)
+        }
+        XCTAssertLessThan(try JSONEncoder().encode(report).count, 2_048)
+    }
+
+    func testProjectionArmSkipsMaintenanceAndForeignAdmissionAndPublishesOneExclusiveFiniteRecord() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID()
+        try fixture.arm(task: task, thread: thread, projection: true)
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread,
+            turnID: turn, ordinaryInference: false))
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: UUID(), threadID: thread, turnID: turn))
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: UUID(), turnID: turn))
+        XCTAssertTrue(fixture.exists(fixture.armFile))
+        let ticket = try XCTUnwrap(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn))
+        XCTAssertEqual(ticket.mode, .projection); XCTAssertFalse(fixture.exists(fixture.armFile))
+        ticket.capture(APIProviderHTTPClient.rejectionDiagnostic(status: 400, body: Data("PRIVATE_REJECTION".utf8), modelID: "PRIVATE_MODEL", key: "PRIVATE_KEY"))
+        XCTAssertFalse(fixture.exists(fixture.output))
+        let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: URL(string: "http://localhost:8123")!, wireAPI: .chatCompletions, models: [])
+        let expected = APIProviderHTTPClient.RequestProjectionExpectation(provider: provider, modelID: "fixture",
+            hostMessage: "private host", userInputs: ["private user"], userInputRevision: 0, checkpointRevision: 0)
+        let body = try JSONSerialization.data(withJSONObject: ["messages": [["role": "developer", "content": "private host"], ["role": "user", "content": "private user"]]])
+        ticket.captureProjection(.init(httpStatus: 200, request: expected.inspect(body)), decodeOutcome: .responseValidated)
+        let output = fixture.directory.appendingPathComponent("request-projection.json"), bytes = try Data(contentsOf: output)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(record["turnID"] as? String, turn.uuidString.lowercased())
+        XCTAssertEqual(record["decodeOutcome"] as? String, "response_validated")
+        XCTAssertEqual(record["taskOutcomeVerified"] as? Bool, false)
+        XCTAssertEqual(record["automaticReplay"] as? Bool, false)
+        XCTAssertLessThanOrEqual(bytes.count, APIRejectedRequestCapture.maximumRecordBytes)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: output.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        ticket.captureProjection(.init(httpStatus: 201, request: expected.inspect(nil)), decodeOutcome: .decodeFailed)
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+        try fixture.arm(task: task, thread: thread, projection: true)
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: UUID()))
+        XCTAssertTrue(fixture.exists(fixture.armFile)); XCTAssertFalse(fixture.exists(fixture.output))
+    }
+
+    func testProjectionArmRejectsUnknownDuplicateOrAdditionalModeFields() throws {
+        for extra in [#""mode":"unknown""#, #""mode":"projection","mode":"projection""#, #""mode":"projection","output":"private-path""#] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), thread = UUID()
+            try fixture.write(Data("{\"taskID\":\"\(task)\",\"threadID\":\"\(thread)\",\(extra)}".utf8), to: fixture.armFile)
+            XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: UUID()))
+            XCTAssertTrue(fixture.exists(fixture.armFile))
+        }
+    }
+
     func testManuallyArmedDispositionPreservesFullRecordAndEscapedDiagnosticBounds() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
@@ -216,7 +295,11 @@ final class APIRejectedRequestCaptureTests: XCTestCase {
             root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true).appendingPathComponent("ComputaAPIRejection-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
-        func arm(task: UUID, thread: UUID) throws { try write(JSONSerialization.data(withJSONObject: ["taskID": task.uuidString, "threadID": thread.uuidString]), to: armFile) }
+        func arm(task: UUID, thread: UUID, projection: Bool = false) throws {
+            var value = ["taskID": task.uuidString, "threadID": thread.uuidString]
+            if projection { value["mode"] = "projection" }
+            try write(JSONSerialization.data(withJSONObject: value), to: armFile)
+        }
         func write(_ data: Data, to url: URL) throws {
             guard FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) }
         }
