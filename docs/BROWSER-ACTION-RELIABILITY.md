@@ -1282,7 +1282,48 @@ Validation before installation:
   (292,294,624 bytes), schema2, declaring only `browserLifecycleObservationsV1`.
   The source pin and exact patch were checked before and after the build.
 
-Native installation and live 244 qualification are pending. The 243 live failures
-remain unresolved. This changes observation delivery and retention; the checks
-above do not establish that current-record association, literal copying, task
-focus, mailbox search or diagnostics are repaired.
+Installed build 244 was verified against source `9440287` and the packaged
+runtime above. Live trials used remote Cerebras GPT-OSS 120B at medium effort.
+
+| Local fixture trial | Seconds | Calls | Result |
+| --- | ---: | ---: | --- |
+| Fresh send | 4.841 | 7 | One exact POST; observed current receipt copied exactly. |
+| Read control | 2.107 | 3 | Correct change and exact attachment filename; zero POSTs. |
+| Same-chat send | 4.704 | 6 | One exact POST; current receipt and final fields copied exactly. |
+| Fresh-send repetition | 4.281 | 7 | One exact POST; observed current receipt copied exactly. |
+
+All four local trials had zero native tool errors and zero compactions. Each send
+used the overview returned by open directly, with no separate initial read or
+repeated delivery. The two fresh-send answers changed recipient/body typography,
+although their actual submitted fields and returned receipts were exact. These
+three deliveries are sampled successes, not a general reliability result.
+
+Real-mail results diverged:
+
+- The first attachment lookup took 22.626 seconds and ten calls, with one rejected
+  stale click and no compaction. It submitted website search, opened a matching
+  conversation and copied an observed attachment filename exactly. Truncated
+  capture does not establish complete mailbox coverage or a unique intended match.
+- The repeated lookup took 18.854 seconds and twenty-one calls, with no native
+  failures and one compaction. Its different filename was genuinely published and
+  copied exactly, but sender attribution was wrong. Independent manual inspection
+  expanded the attachment-bearing message in the four-message conversation: its
+  From heading identified the account owner, while the requested sender authored
+  other messages. The model had treated a conversation-level attachment as that
+  sender's attachment. Capture-local record ancestry is not message authorship;
+  this was an attribution failure, not a fabricated filename or demonstrated
+  compaction corruption. The diagnostic tab was closed without opening or
+  downloading the attachment or changing mail.
+- The natural course-announcement follow-up took 8.202 seconds and seven calls,
+  with no native failures and one compaction. Website search was submitted, but
+  the final mailbox-wide absence claim exceeded the partial results. A relevant
+  option and continuation were available; the model selected another option and
+  answered without reading its body. No zero-result evidence supported the claim.
+
+Finite trace, fixture-event and separate UI cleanup evidence is in `audits244/`.
+`outlook-repeat-independent-check.json` adds the manual ownership verification
+without rewriting the original trace-only audit. No real mail was sent, forwarded,
+deleted or downloaded. The goal remains unresolved: sender/message association,
+negative-search grounding and literal copying still fail in these samples, and
+diagnostics were not requalified in 244. Earlier failures and all existing limits
+remain preserved.
