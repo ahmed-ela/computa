@@ -16,7 +16,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
             ], hold: true, pauseForNativeBinding: true, pauseAfterEachCall: true)
             try await self.waitFor { harness.audit.status == .running }
-            let request = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+            let prepared = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+            XCTAssertEqual(prepared.taskID, Harness.taskID)
+            let request = EmbeddedBrowserToolAvailabilityRequest(taskID: prepared.taskID.lowercased(),
+                threadID: prepared.threadID, turnID: prepared.turnID, preparationID: prepared.preparationID)
+            XCTAssertNotEqual(request.taskID, prepared.taskID,
+                              "API and website admission canonicalize UUIDs; Core retains the original task ID")
             let before = await harness.backend.counts()
             let initial = try await harness.runtime.browserToolAvailabilityForFixture(request)
             XCTAssertEqual(initial, .unbound)
@@ -25,6 +30,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue(harness.audit.approvals.isEmpty)
             for invalid in [
                 EmbeddedBrowserToolAvailabilityRequest(taskID: "foreign", threadID: request.threadID,
+                    turnID: request.turnID, preparationID: request.preparationID),
+                .init(taskID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", threadID: request.threadID,
                     turnID: request.turnID, preparationID: request.preparationID),
                 .init(taskID: request.taskID, threadID: "foreign", turnID: request.turnID, preparationID: request.preparationID),
                 .init(taskID: request.taskID, threadID: request.threadID, turnID: "foreign", preparationID: request.preparationID),
@@ -59,6 +66,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertEqual(cleanup.taskID, request.taskID)
             XCTAssertEqual(cleanup.threadID, request.threadID)
             XCTAssertEqual(cleanup.turnID, request.turnID)
+            let browserCleanup = try XCTUnwrap(harness.cleanupReceipts().last)
+            XCTAssertEqual(browserCleanup.taskID, prepared.taskID,
+                           "Native cleanup keeps the original task identity rather than the callback spelling")
+            XCTAssertEqual(browserCleanup.threadID, request.threadID)
+            XCTAssertEqual(browserCleanup.turnID, request.turnID)
+            XCTAssertTrue(harness.audit.approvals.allSatisfy { $0.taskID == prepared.taskID })
             try await harness.submit([], hold: true)
             try await self.waitFor { harness.audit.status == .running }
             let next = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
@@ -1506,7 +1519,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     private final class Harness {
         // Inference preparation also records normal cleanup evidence. Use the
         // same UUID identity shape as production, including in the JSON-RPC peer.
-        static let taskID = "01000000-0000-4000-8000-000000000001"
+        // AgentTask's default UUID spelling contains uppercase letters.
+        static let taskID = "ABCDEF01-ABCD-4ABC-8ABC-ABCDEF012345"
         static let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let root: URL
         let runtime: CodexAppServerRuntime

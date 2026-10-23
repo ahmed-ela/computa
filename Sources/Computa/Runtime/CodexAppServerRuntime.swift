@@ -4961,18 +4961,24 @@ private extension CodexAppServerRuntime {
 
         private func browserToolAvailability(_ request: EmbeddedBrowserToolAvailabilityRequest)
             async throws -> EmbeddedBrowserToolAvailability {
+            // Server admission canonicalizes UUID spelling, while Core retains
+            // the original task ID. Resolve only through the authoritative thread
+            // mapping, then compare UUID values without rewriting any Core keys.
             guard let controller = embeddedBrowserTools,
-                  inferencePreparations[request.taskID] == request.preparationID,
-                  let epoch = computerV2Sessions[request.taskID]?.epoch else { throw CancellationError() }
+                  let taskID = taskForThread[request.threadID],
+                  let requestedTask = UUID(uuidString: request.taskID),
+                  let mappedTask = UUID(uuidString: taskID), requestedTask == mappedTask,
+                  inferencePreparations[taskID] == request.preparationID,
+                  let epoch = computerV2Sessions[taskID]?.epoch else { throw CancellationError() }
             let generation = serverGeneration
-            let lease = try reserveEmbeddedBrowserTurnLease(taskID: request.taskID,
+            let lease = try reserveEmbeddedBrowserTurnLease(taskID: taskID,
                 threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
             let availability = try await controller.toolAvailability(taskKey: lease.key)
             // The controller actor hop must not publish a prior preparation's
             // state into a new turn, or recreate a lease retired by Stop.
-            guard inferencePreparations[request.taskID] == request.preparationID,
-                  embeddedBrowserTurnKeys[request.taskID] == lease else { throw CancellationError() }
-            _ = try reserveEmbeddedBrowserTurnLease(taskID: request.taskID,
+            guard inferencePreparations[taskID] == request.preparationID,
+                  embeddedBrowserTurnKeys[taskID] == lease else { throw CancellationError() }
+            _ = try reserveEmbeddedBrowserTurnLease(taskID: taskID,
                 threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
             return availability
         }

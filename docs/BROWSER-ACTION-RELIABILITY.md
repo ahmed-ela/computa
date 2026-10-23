@@ -1476,3 +1476,33 @@ passed for 0.7.0 (247).
 These checks establish host behavior under controlled binding states. They do
 not establish that the model will keep the ODE task, select the correct message,
 or copy identifiers exactly. Installed live qualification is recorded separately.
+
+
+The signed build247 passed all eleven build/source/resource/signing checks and
+was installed from `50b1364`. Its first fresh Cerebras GPT-OSS120B/medium UI trial
+failed in 101 ms with `inference_context_required`, zero tool calls and zero
+fixture HTTP requests. Further live trials stopped. The new callback passed the
+API server's lowercase task UUID into Core's case-sensitive original-task maps;
+new AgentTask IDs use uppercase UUID strings. The bundled tests all used
+lowercase task IDs, missing the installed path. This regression is preserved and
+must be fixed before qualifying the catalog change. No provider success is
+claimed for build247.
+
+
+## Build 248: preserve native task identity across API normalization
+
+The availability callback now resolves the original task through the exact
+registered thread mapping and requires UUID-value equality with the admitted
+request. All preparation, reciprocal thread, active-turn, epoch, generation,
+submission, Stop and cleanup checks continue to use the original native task key.
+No dictionary scan, global ID rewrite or authority relaxation was introduced.
+
+Two regression cases used uppercase alphabetic native task UUIDs and lowercase
+admission UUIDs. Both failed against the unchanged build247 production code:
+the actual engine sent zero provider requests and the direct Core query rejected.
+After the narrow fix, all 183 targeted API/server/native/website and bundled-engine
+tests passed with zero skips and stable source hashes. The exact same new tests
+also check foreign UUID rejection and original native approval/cleanup identity.
+The bundled case retains its two tasks, three compactions and cold resume.
+Independent review found no identity or lifecycle-check relaxation. Version
+validation passed for 0.7.0 (248). Live installation remains a separate check.

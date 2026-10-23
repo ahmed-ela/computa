@@ -195,7 +195,10 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend))
             try await runtime.configureAPIProviders([provider])
             _ = try await runtime.loadTasks()
-            let taskID = UUID().uuidString.lowercased(), audit = APIHarnessEventAudit(taskID: taskID)
+            // Match AgentTask's normal local identity spelling. API admission
+            // canonicalizes UUID text, but native events and cleanup keep this ID.
+            let taskID = try XCTUnwrap(UUID(uuidString: "A1470000-ABCD-4EF0-9876-0123456789AB")).uuidString
+            let audit = APIHarnessEventAudit(taskID: taskID)
             pump = Task { for await event in runtime.events() { audit.receive(event) } }
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
             try await runtime.submit(prompt: APIHarnessBrowserContinuationInference.priorPrompt,
@@ -241,6 +244,20 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
             pump?.cancel(); pump = nil; owned = nil
+
+            let cleanupFiles = try FileManager.default.contentsOfDirectory(
+                at: home.appendingPathComponent("EmbeddedBrowserCleanup-v1", isDirectory: true),
+                includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            let cleanupReceipts = try cleanupFiles.map {
+                try JSONDecoder().decode(EmbeddedBrowserCleanupReceipt.self, from: Data(contentsOf: $0))
+            }
+            XCTAssertEqual(cleanupReceipts.count, 1)
+            XCTAssertEqual(cleanupReceipts.first?.taskID, taskID,
+                "API UUID normalization must not replace the original native task identity")
+            XCTAssertEqual(cleanupReceipts.first?.threadID, threadID)
+            XCTAssertEqual(cleanupReceipts.first?.turnID.lowercased(), firstReceipt.hostTurnIDs.last)
+            XCTAssertEqual(cleanupReceipts.first?.report.userBindingReleased, true)
+            XCTAssertEqual(cleanupReceipts.first?.report.isSettled, true)
 
             let resumed = CodexAppServerRuntime(configuration: try configuration(root.appendingPathComponent("resumed.jsonl")),
                 visualGrounder: APIHarnessNoVisualGrounder())
