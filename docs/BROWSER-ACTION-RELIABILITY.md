@@ -319,3 +319,36 @@ input, including after an approval wait.
 These changes address observed host failures. They do not turn a model's final
 answer, search interpretation or selected control into verified task success.
 Live qualification must still check actual outcomes and preserve failed attempts.
+
+## Build 227 qualification
+
+Controlled build 0.7.0 (227), commit `183ccad`, packages source-pinned runtime
+`mactopus-9`. The final selected native union passed 561 tests with no remaining
+failures or skips, including three enabled bundled-engine integration cases.
+The runtime receipt suite passed 33 tests with one intentional diagnostic-export
+skip; version/product-identity checks passed 20 tests. Initial failures remain in
+the local evidence and are superseded only by recorded affected reruns. Xcode
+Release packaging, Developer ID signature, copied resources and the installed
+running executable were verified. This is not a published or notarized release.
+
+Remote Cerebras GPT-OSS120b at medium effort produced mixed installed results:
+
+- The unchanged adverse search prompt still stopped after one overly literal
+  query: five calls, no native errors, no delivery. Its mailbox-wide absence claim
+  was unsupported; pagination and retention fixes do not correct search reasoning.
+- The same-chat send made thirteen calls with one missing-binding error. An
+  earlier-page field reference correctly survived continuation. After two fills,
+  however, the model reopened Compose and discarded its draft, never filled the
+  message, and pressed Send with required fields empty. There was no compaction
+  and zero POST deliveries. References remained attached to their actual labels.
+- A fresh send-only control made nine calls, recovered from one consumed-reference
+  rejection, filled all three exact fields, and produced exactly one local POST.
+  The server-generated receipt was observed and copied correctly into the answer.
+  The failed stale action dispatched nothing. This is a recovered outcome pass,
+  not an error-free run or proof of real-provider mail delivery.
+- Fresh Outlook lookup remained unqualified: it stopped at the unchanged receipt
+  byte limit before a final answer. Its precise budget pressure is under review.
+
+All four completed attempts closed their owned tabs and preserved existing user
+tabs. Failed attempts remain part of qualification; a successful control does
+not establish general reliability or resolve the goal.
