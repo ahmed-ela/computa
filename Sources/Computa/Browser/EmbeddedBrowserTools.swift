@@ -964,12 +964,16 @@ actor EmbeddedBrowserToolController {
         try check(taskKey, contextID)
         try observation.binding.lifetime.check()
         try requireScope(scope, url: observation.snapshot.documentURL)
-        let target = try await currentTarget(binding: observation.binding, scope: scope)
+        let target = try await currentTarget(binding: observation.binding, scope: nil)
         try Task.checkCancellation()
         try check(taskKey, contextID)
         try observation.binding.lifetime.check()
         guard contexts[taskKey]?.binding?.handle == binding.handle,
               target.url == observation.snapshot.documentURL else { throw BrowserTabBrokerError.staleDocument }
+        // Navigation can begin immediately after capture. Classify that drift
+        // before interpreting a different provisional address as this page's
+        // scope. The existing fresh-read retry still gates its settled target.
+        try requireScope(scope, url: target.url)
         contexts[taskKey]?.binding = observation.binding
         contexts[taskKey]?.snapshot = observation.snapshot
         return observation.snapshot

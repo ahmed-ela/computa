@@ -603,3 +603,35 @@ click/fill with no replay. Version/product-identity checks passed 20 tests. An
 initial compiler failure on a conditional closure expression is retained in the
 evidence; explicit conditional assignment resolved it without behavior changes.
 The pinned mactopus-10 runtime remains unchanged. Live qualification is separate.
+
+
+## Post-capture navigation ordering
+
+Build 232 still failed the fresh Outlook attachment task: 15.964 seconds, five
+native calls, and no verified mailbox or attachment. The account-selection
+click dispatched once, but its following observation reported `scope_denied`.
+The model incorrectly inferred a password/MFA requirement. Normal browser
+navigation then reached the mailbox without credential entry; that diagnostic
+refreshed the shared session and is not an autonomous qualification pass.
+
+The bounded native log places a provisional main-frame navigation immediately
+after the post-click capture and before publication. Source inspection found
+that the publication guard checked the final target's scope before checking
+whether its URL still matched the captured document. A changed provisional URL
+could therefore mask document drift as a scope denial. The exact rejected URL
+was not retained, so the live destination remains unproven.
+
+The follow-up retains the captured-document scope check, validates the physical
+target and lifetime, then compares URLs before evaluating the final target's
+scope. Drift uses the existing single fresh-read recovery. Its settled target
+must pass authorization before another capture. Persistent off-scope content,
+a second drift, and an unauthorized captured document still fail. No timeout,
+retry allowance, permitted route, input replay, or receipt limit is added.
+
+A separate signed-in-tab diagnostic on build 232 reached message content but
+no requested filename. It failed after 16.826 seconds and 21 calls. One API
+read-mode conflict was corrected to a valid cursor-only continuation; a later
+conflict exhausted the existing correction allowance. Compaction retained all
+20 prior call/result pairs and the exact latest observation. This identifies a
+separate contract/usability failure; it does not establish the rejected filter
+values. The diagnostic tab was explicitly closed after testing.

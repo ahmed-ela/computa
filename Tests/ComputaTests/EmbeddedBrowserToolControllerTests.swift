@@ -1478,6 +1478,53 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         }
     }
 
+    func testPostCaptureNavigationUsesOnlyExistingReadRecoveryAndPreservesScope() async throws {
+        for tool in ["browser_click", "browser_fill"] {
+            for scenario in ["post_capture_scope_settles", "post_capture_scope_permanent",
+                             "post_capture_scope_twice", "post_capture_outscope_document"] {
+                let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+                let scope = ComputerTaskScope(userPrompt: "Use only http://localhost:8123/flight for the requested action.")
+                _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+                let page = try await call(controller, "browser_read", scope: scope)
+                var arguments: [String: Any] = ["snapshot_id": try snapshotID(page), "element_index": tool == "browser_click" ? 1 : 0]
+                if tool == "browser_fill" { arguments["text"] = "UA 4629" }
+                await backend.configureAfterInput(scenario)
+                let before = await backend.counts(), beforeAdmissions = await backend.readAdmissionCounts()
+                let output = try await controller.executeResult(taskKey: "turn-a", tool: tool,
+                    arguments: argumentData(arguments), scope: scope)
+                let response = try jsonObject(output.response)
+                let observation = try XCTUnwrap(response["current_observation"] as? [String: Any])
+                XCTAssertEqual(response["dispatched"] as? Bool, true, scenario)
+                XCTAssertEqual(response["no_replay"] as? Bool, true)
+                XCTAssertEqual(response["result_verified"] as? Bool, false)
+                if scenario == "post_capture_scope_settles" {
+                    XCTAssertEqual(observation["status"] as? String, "available")
+                    let text = try XCTUnwrap(observation["text"] as? String)
+                    XCTAssertTrue(text.contains("http://localhost:8123/settled-after-capture"))
+                    XCTAssertTrue(output.completeObservation)
+                } else {
+                    XCTAssertEqual(observation["status"] as? String, "unavailable", scenario)
+                    XCTAssertEqual(observation["reason"] as? String,
+                        scenario == "post_capture_scope_twice" ? "document_changed" : "scope_denied", scenario)
+                    XCTAssertNil(observation["text"]); XCTAssertNil(observation["snapshot_id"])
+                    XCTAssertFalse(output.completeObservation)
+                }
+                XCTAssertFalse(output.response.contains("PRIVATE_POST_CAPTURE_ROUTE"))
+                let after = await backend.counts(), admissions = await backend.readAdmissionCounts()
+                let captureDenied = scenario == "post_capture_scope_permanent"
+                let capturedOutscope = scenario == "post_capture_outscope_document"
+                XCTAssertEqual(admissions.preparations - beforeAdmissions.preparations, capturedOutscope ? 1 : 2)
+                XCTAssertEqual(admissions.admissions - beforeAdmissions.admissions, captureDenied || capturedOutscope ? 1 : 2)
+                XCTAssertEqual(after.observes - before.observes, captureDenied || capturedOutscope ? 2 : 3,
+                    "One input preflight, at most two post-input captures, and no capture after a denied retry gate")
+                XCTAssertEqual(after.presses, tool == "browser_click" ? 1 : 0)
+                XCTAssertEqual(after.fills, tool == "browser_fill" ? 1 : 0)
+                XCTAssertEqual(after.creates, 1); XCTAssertEqual(after.navigations, 0)
+                _ = await controller.shutdown()
+            }
+        }
+    }
+
     func testFreshReadGateRejectsCancellationReleaseReplacementAndScopeChangeBeforeCapture() async throws {
         for change in ["cancel", "release", "replacement", "offscope"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -3348,6 +3395,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             throw failure
         }
         var driftAfterCapture = false
+        var postCaptureScopeScenario: String?
         if postInputPending {
             postInputPending = false
             let scenario = afterInputScenario
@@ -3355,6 +3403,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             if scenario == "read_failed" { throw BrowserTabBrokerError.browserUnavailable("PRIVATE_READ_ERROR") }
             if scenario == "invalid_read" { throw BrowserTabBrokerError.invalidRead("PRIVATE_READ_ERROR") }
             driftAfterCapture = scenario == "drift_after_capture"
+            if scenario?.hasPrefix("post_capture_scope_") == true || scenario == "post_capture_outscope_document" {
+                postCaptureScopeScenario = scenario
+            }
             if scenario == "hold_observation" || scenario == "hold_generation_drift" {
                 observationHeld = true
                 observationWaiters.forEach { $0.resume() }; observationWaiters.removeAll()
@@ -3398,13 +3449,25 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         if buttonAfterControls, let index = nodes.firstIndex(where: { $0.backendNodeID == buttonID }) {
             nodes.append(nodes.remove(at: index))
         }
-        var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:emptyObservation ? [] : nodes)
+        let capturedOutscope = postCaptureScopeScenario == "post_capture_outscope_document"
+        let capturedURL = capturedOutscope ? URL(string: "https://unrelated.example/PRIVATE_POST_CAPTURE_ROUTE")!
+            : targets[target.targetID]?.url ?? target.url
+        var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:capturedURL,nodes:emptyObservation ? [] : nodes)
         observation.committedDocumentID = committedIdentityExposed ? committedDocumentID : nil
         observation.sourceName = observationSourceName
         observation.semanticReadiness = semanticReadiness
         if driftAfterCapture {
             targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken,
                 title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!)
+        }
+        if let scenario = postCaptureScopeScenario, !capturedOutscope {
+            redirectOwnedTarget(to: URL(string: "https://unrelated.example/PRIVATE_POST_CAPTURE_ROUTE")!)
+            if scenario != "post_capture_scope_permanent" {
+                settleFreshReadURL = URL(string: "http://localhost:8123/settled-after-capture")!
+            }
+            if scenario == "post_capture_scope_twice" {
+                afterInputScenario = "post_capture_scope_permanent"; postInputPending = true
+            }
         }
         if holdPublicationAfterRead {
             holdPublicationAfterRead = false
