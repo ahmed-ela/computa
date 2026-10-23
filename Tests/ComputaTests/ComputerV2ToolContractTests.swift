@@ -548,12 +548,22 @@ final class ComputerV2ToolContractTests: XCTestCase {
             }
         }
         let instructions = ComputerV2ToolContract.instructions(for: .backgroundOnly)
-        XCTAssertTrue(instructions.contains("Background-only computer use is enforced by the host"))
-        XCTAssertTrue(instructions.contains("screenshot is observation only"))
-        XCTAssertTrue(instructions.contains("no click or keyboard authority"))
-        XCTAssertTrue(instructions.contains("Full Access does not change this policy"))
+        XCTAssertTrue(instructions.hasPrefix("Background-only permits user-authorized native AX/browser writes under native checks."),
+                      "The first host-policy statement must distinguish authorized effects from delivery restrictions")
+        XCTAssertTrue(instructions.contains("computer_v2_open(activation=none)"))
+        XCTAssertTrue(instructions.contains("Never activate apps, raise windows or send global input, including recovery"))
+        XCTAssertTrue(instructions.contains("Screenshots only observe; no input authority"))
+        XCTAssertTrue(instructions.contains("Full Access cannot lift these delivery limits"))
         XCTAssertFalse(instructions.contains("use computer_v2_ground_click"))
-        XCTAssertTrue(ComputerV2ToolContract.instructions(for: .foregroundAllowed).contains("offered capture and input tools"))
+        let routing = " Computer tools operate native apps."
+        let limits = try XCTUnwrap(instructions.components(separatedBy: routing).first)
+        XCTAssertLessThanOrEqual(limits.utf8.count, 314, "Clarification must not grow the previous policy paragraph")
+        let foreground = ComputerV2ToolContract.instructions(for: .foregroundAllowed)
+        XCTAssertTrue(foreground.contains("offered capture and input tools"))
+        XCTAssertFalse(foreground.contains("Background-only"))
+        XCTAssertEqual(instructions.components(separatedBy: routing).dropFirst(),
+                       foreground.components(separatedBy: routing).dropFirst(),
+                       "Native/browser routing remains independent of the delivery policy")
     }
 
     func testModelGuidanceSeparatesAccessibilityActionsFromScreenshotClicks() throws {

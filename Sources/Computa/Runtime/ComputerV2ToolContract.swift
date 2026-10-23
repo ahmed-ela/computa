@@ -225,7 +225,7 @@ enum ComputerV2ToolContract {
 
     static func instructions(for interactionPolicy: ComputerInteractionPolicy) -> String {
         let limits = interactionPolicy == .backgroundOnly
-            ? "Background-only computer use is enforced by the host. Bind an already-running native app with computer_v2_open(activation=none). Do not activate apps, raise windows or send global input. A background screenshot is observation only; it grants no click or keyboard authority. Full Access does not change this policy."
+            ? "Background-only permits user-authorized native AX/browser writes under native checks. Bind running apps with computer_v2_open(activation=none). Never activate apps, raise windows or send global input, including recovery. Screenshots only observe; no input authority. Full Access cannot lift these delivery limits."
             : "Bind the requested native app and use its supported Accessibility actions. For a visible native target without an available Accessibility action, use only the offered capture and input tools and verify the observed outcome."
         return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Computa's built-in browser. computer_v2_continue accepts only native computer cursors. Use the offered browser page-continuation tool for page cursors; browser_tabs continues inventory."
     }

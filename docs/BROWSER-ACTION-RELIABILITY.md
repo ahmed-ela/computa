@@ -1017,7 +1017,7 @@ tests passed. The runtime was rebuilt with those exports and its final identity
 is recorded above; the initial pre-schema artifact and receipts are preserved.
 
 
-### Build 241 source qualification — live qualification pending
+### Build 241: source qualification and mixed live outcomes
 
 The candidate qualifies read-only guidance to the user's task and diagnostic
 checks to diagnostic tasks. It preserves current-send authorization, ongoing
@@ -1047,5 +1047,47 @@ compaction and resume. Neither probe made a remote provider request. Initial
 launcher failures and an incorrect empty-annotation expectation remain recorded;
 the corrected harnesses passed without changing the runtime.
 
-Installed live model qualification remains pending. No execution or retention
-budget, native permission, runtime package or approval policy is changed.
+Installed live trials used remote Cerebras GPT-OSS120b at medium effort:
+
+- The synthetic read passed in 3.277 seconds with four calls, no errors or
+  compaction, and zero POSTs. The answer reported the observed change and copied
+  the attachment filename exactly.
+- Both authorized synthetic sends failed before any tool call: the same-chat
+  follow-up in 0.520 seconds and an independent fresh task in 0.477 seconds. Both
+  invented a host read-only prohibition; no native gate denied input and no POST
+  occurred. The fresh failure does not require earlier read-only conversation
+  history. Current user-proof checks accepted both requests and omitted duplicate
+  reminders, but no separate raw remote-request capture was made. The refusal
+  remains unresolved.
+- The real Outlook attachment task passed in 29.401 seconds with seventeen calls,
+  zero native errors and one compaction. It selected the matching account,
+  submitted search, opened the relevant conversation and copied an actual
+  attachment filename exactly from that conversation. This is one successful
+  task, not a repeated-reliability claim; no attachment was opened or downloaded.
+- The ODE follow-up preserved the intended service/account context but failed
+  semantic acceptance in 14.037 seconds with nineteen calls, one native failure
+  and one compaction. It submitted a query for the earlier task's sender, failed
+  to replace it after a correctly rejected stale reference, and left its final
+  query unsubmitted. It then treated autocomplete absence as mailbox absence and
+  overstated which searches had run. Valid continuation transport and successful
+  compaction did not establish the requested announcements or a justified absence.
+- Read-only diagnostics were stopped through the UI after roughly 35 seconds of
+  repetitive broad shell searches without useful progress. There was no completed
+  answer. Native cancellation and termination of one owned command session were
+  observed; the detailed command audit was still pending when this note froze.
+
+Owned-tab cleanup was observed for the synthetic read, attachment lookup and ODE
+follow-up; the zero-tool refusals created none. No real mail was sent, forwarded,
+removed or downloaded. Finite evidence is preserved in `audits241/`; task status
+and cleanup are recorded separately. No execution or retention budget, native
+permission, runtime package or approval policy changed in build 241.
+
+### Build 242 candidate — live qualification pending
+
+The candidate replaces only the first background-policy paragraph to state
+explicitly that background-only permits user-authorized native AX/browser writes
+under native checks. Existing restrictions on recovery, activation, global input
+and image authority remain. The rendered paragraph is 313 bytes, one byte shorter
+than before. All 45 focused tool-contract tests passed with unchanged sources;
+this is source qualification only. Installed live evidence is still pending, and
+the build 241 send refusals remain unresolved.
