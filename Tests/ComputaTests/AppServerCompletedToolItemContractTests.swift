@@ -3,6 +3,93 @@ import XCTest
 @testable import Computa
 
 final class AppServerCompletedToolItemContractTests: XCTestCase {
+    private func recoveryItem(_ cue: BrowserCompleteObservation.RejectionReceipt) throws -> [String: Any] {
+        let snapshot = UUID(uuidString: "A503BFB1-49CF-4BC7-857C-38613FFEFDAA")!
+        let body = try BrowserCompleteObservation.Encoding.recovery(receipt: cue, view: .overview).encode(
+            "AXSNAPSHOT id=\(snapshot)\nREAD view=overview\n#0 role=AXStaticText label=\"Fixture\"", snapshotID: snapshot)
+        return ["id": "native-recovery", "type": "dynamicToolCall", "tool": "browser_" + cue.kind.rawValue,
+            "namespace": NSNull(), "status": "failed", "success": false,
+            "contentItems": [BrowserCompleteObservation.marker, cue.compactText, body].map { ["type": "inputText", "text": $0] }]
+    }
+
+    func testCompleteBrowserRecoveryShowsDiagnosticWithoutChangingFailureOrWireItems() throws {
+        let cases: [(BrowserCompleteObservation.RejectionReceipt, String)] = [
+            (.changedFilters, "The read cursor used different filters. A fresh view is available."),
+            (.stale(wasFill: false, documentChanged: false), "The browser target changed. No input was sent; a fresh view is available."),
+            (.stale(wasFill: true, documentChanged: false), "The browser target changed. No input was sent; a fresh view is available."),
+            (.stale(wasFill: false, documentChanged: true), "The page navigated or reloaded. No input was sent; a fresh view is available."),
+            (.stale(wasFill: true, documentChanged: true), "The page navigated or reloaded. No input was sent; a fresh view is available."),
+        ]
+        for (cue, expected) in cases {
+            let item = try recoveryItem(cue)
+            let before = try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys])
+            XCTAssertEqual(AppServerCompletedToolItemContract.summary(for: item, name: "browser_" + cue.kind.rawValue), expected)
+            XCTAssertEqual(AppServerCompletedToolItemContract.status(for: item), .failed)
+            XCTAssertEqual(try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]), before)
+        }
+    }
+
+    func testCompleteRecoveryDiagnosticRestoresWithUnchangedRawOutput() throws {
+        let item = try recoveryItem(.changedFilters)
+        let data = try JSONSerialization.data(withJSONObject: ["result": ["thread": ["turns": [
+            ["id": "saved-turn", "status": "completed", "items": [item]],
+        ]]]])
+        let entries = try AppServerThreadHistoryContract.entries(from: data)
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entry.body, AppServerCompletedToolItemContract.summary(for: item, name: "browser_read"))
+        XCTAssertEqual(entry.toolEvent?.status, .failed)
+        let items = try XCTUnwrap(item["contentItems"] as? [[String: String]])
+        XCTAssertEqual(entry.toolEvent?.output, items.compactMap { $0["text"] }.joined(separator: "\n"))
+        XCTAssertTrue(entry.toolEvent?.output?.hasPrefix(BrowserCompleteObservation.marker) == true)
+    }
+
+    func testExplicitErrorWinsOverCompleteRecoveryPresentation() throws {
+        for error in ["Original native error", ["message": "Original native error"]] as [Any] {
+            var item = try recoveryItem(.changedFilters)
+            item["error"] = error
+            XCTAssertEqual(AppServerCompletedToolItemContract.summary(for: item, name: "browser_read"), "Original native error")
+        }
+    }
+
+    func testUnrecognizedRecoveryShapesKeepLegacyFirstTextFallback() throws {
+        for variant in 0..<17 {
+            var item = try recoveryItem(.changedFilters)
+            var items = try XCTUnwrap(item["contentItems"] as? [[String: Any]])
+            var cue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((items[1]["text"] as! String).utf8)) as? [String: Any])
+            var body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((items[2]["text"] as! String).utf8)) as? [String: Any])
+            var current = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            switch variant {
+            case 0: item["namespace"] = "custom"
+            case 1: item["type"] = "mcpToolCall"
+            case 2: item["tool"] = "browser_click"
+            case 3: cue["reason"] = "unknown"
+            case 4: cue["extra"] = true
+            case 5: cue["dispatched"] = NSNumber(value: 0)
+            case 6: body["success"] = true
+            case 7: body["dispatched"] = true
+            case 8: body["no_replay"] = false
+            case 9: body["result_verified"] = true
+            case 10: body["error"] = ["code": "stale_snapshot"]
+            case 11: current["source"] = "unverified"
+            case 12: current["status"] = "unavailable"
+            case 13: current["snapshot_id"] = "not-a-snapshot"
+            case 14: current["text"] = "arbitrary page text"
+            case 15: body["extra"] = true
+            default: items.append(["type": "inputText", "text": "additional result"])
+            }
+            body["current_observation"] = current
+            items[1]["text"] = String(decoding: try JSONSerialization.data(withJSONObject: cue), as: UTF8.self)
+            items[2]["text"] = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+            item["contentItems"] = items
+            XCTAssertEqual(AppServerCompletedToolItemContract.summary(for: item, name: "browser_read"), BrowserCompleteObservation.marker, "variant \(variant)")
+            XCTAssertEqual(AppServerCompletedToolItemContract.status(for: item), .failed)
+        }
+        var success = try recoveryItem(.changedFilters)
+        success["status"] = "completed"; success["success"] = true
+        XCTAssertEqual(AppServerCompletedToolItemContract.summary(for: success, name: "browser_read"), "browser_read completed")
+    }
+
     func testDynamicToolFailureUsesSuccessFlagAndReturnedMessage() {
         let item: [String: Any] = [
             "type": "dynamicToolCall",

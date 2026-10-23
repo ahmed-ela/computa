@@ -293,10 +293,55 @@ enum AppServerCompletedToolItemContract {
         guard let contentItems = item["contentItems"] as? [[String: Any]] else {
             return nil
         }
+        if let summary = browserRecoverySummary(item: item, contentItems: contentItems) { return summary }
         return contentItems.compactMap { contentItem in
             guard contentItem["type"] as? String == "inputText" else { return nil }
             return contentItem["text"] as? String
         }.first(where: { !$0.isEmpty })
+    }
+
+    /// Presentation only: the marker-first model receipt stays byte-for-byte
+    /// unchanged. Recognize its closed failure shape before the legacy fallback
+    /// so live and restored cards do not show a retention marker as an error.
+    private static func browserRecoverySummary(item: [String: Any], contentItems: [[String: Any]]) -> String? {
+        func boolean(_ value: Any?, equals expected: Bool) -> Bool {
+            guard let value = value as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return value.boolValue == expected
+        }
+        guard item["type"] as? String == "dynamicToolCall",
+              item["namespace"] == nil || item["namespace"] is NSNull,
+              boolean(item["success"], equals: false), contentItems.count == 3,
+              contentItems.allSatisfy({ Set($0.keys) == ["type", "text"] && $0["type"] as? String == "inputText" }),
+              let marker = contentItems[0]["text"] as? String, marker == BrowserCompleteObservation.marker,
+              let cueText = contentItems[1]["text"] as? String, cueText.utf8.count <= 128,
+              let bodyText = contentItems[2]["text"] as? String,
+              marker.utf8.count + cueText.utf8.count + bodyText.utf8.count + 2 <= 4_096,
+              let cue = try? JSONSerialization.jsonObject(with: Data(cueText.utf8)) as? [String: Any],
+              Set(cue.keys) == ["kind", "reason", "dispatched", "outcome"],
+              boolean(cue["dispatched"], equals: false), cue["outcome"] as? String == "unverified",
+              let kind = cue["kind"] as? String, item["tool"] as? String == "browser_" + kind,
+              let reason = cue["reason"] as? String,
+              let body = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
+              Set(body.keys) == ["success", "error", "dispatched", "no_replay", "result_verified", "current_observation", "next"],
+              boolean(body["success"], equals: false), boolean(body["dispatched"], equals: false),
+              boolean(body["no_replay"], equals: true), boolean(body["result_verified"], equals: false),
+              let error = body["error"] as? [String: Any], Set(error.keys) == ["code"], error["code"] as? String == reason,
+              let current = body["current_observation"] as? [String: Any],
+              Set(current.keys) == ["status", "source", "view", "snapshot_id", "text"],
+              current["status"] as? String == "available", current["source"] as? String == "separate_recovery_read",
+              let view = current["view"] as? String, ["overview", "content", "all", "headings", "links"].contains(view),
+              let snapshot = current["snapshot_id"] as? String, UUID(uuidString: snapshot) != nil,
+              let page = current["text"] as? String, page.hasPrefix("AXSNAPSHOT "),
+              let next = body["next"] as? String, !next.isEmpty else { return nil }
+        switch (kind, reason) {
+        case ("read", "continuation_filters_changed"):
+            return "The read cursor used different filters. A fresh view is available."
+        case ("click", "stale_snapshot"), ("fill", "stale_snapshot"):
+            return "The browser target changed. No input was sent; a fresh view is available."
+        case ("click", "stale_document"), ("fill", "stale_document"):
+            return "The page navigated or reloaded. No input was sent; a fresh view is available."
+        default: return nil
+        }
     }
 }
 

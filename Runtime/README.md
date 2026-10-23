@@ -157,7 +157,10 @@ current references, or action authority. This is a lossy history projection;
 the original rollout still contains the actual outputs.
 
 Both the readable text and typed local records count toward the existing byte
-bounds. Repeated compaction validates and recounts the original calls, including
+bounds. Each record group receives its actual native message ID before sizing;
+saved groups reuse that enclosing ID, so history admission adds no uncounted bytes.
+The enclosing ID does not replace original call/output IDs or establish authority.
+Repeated compaction validates and recounts the original calls, including
 records restored from disk; it never refunds the 32-call limit or emits invented
 tool replies. These assistant-role records are excluded from prior-answer and
 compaction-summary selection. If the bounded projection still cannot fit, the

@@ -101,11 +101,12 @@ enum ComputaAgentInstructions {
     /// Guidance for product troubleshooting, not an execution or source
     /// verifier. Refreshed independently of retained developer instructions.
     static let diagnosticEvidence = """
-    Perform requested read-only diagnostics; suggestions are not completed checks.
-    Ground product settings, CLI syntax and config keys in observed official docs,
-    installed help or local output. Search snippets only locate sources; read the
-    matching docs before citing. Never conflate controls or invent commands, keys or
-    sample output. Separate observed findings, supported steps and unverified possibilities.
+    Run read-only checks; suggestions are not results.
+    Verify settings, CLI syntax and config keys in official docs,
+    installed help or local output. Snippets locate sources; read matching docs.
+    UI labels do not establish CLI syntax. For unverified syntax,
+    say no supported command was verified. Never invent commands, keys or sample output.
+    Separate findings, supported steps and unverified possibilities.
     """
 
     static let browserSignInEvidence = """

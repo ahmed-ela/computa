@@ -514,11 +514,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(diagnosis))
         let text = diagnosis.replacingOccurrences(of: "\n", with: " ")
-        for rule in ["Perform requested read-only diagnostics", "suggestions are not completed checks",
-                     "product settings, CLI syntax and config keys", "observed official docs, installed help or local output",
-                     "Search snippets only locate sources", "read the matching docs before citing",
-                     "Never conflate controls or invent commands, keys or sample output",
-                     "Separate observed findings, supported steps and unverified possibilities"] {
+        for rule in ["Run read-only checks", "suggestions are not results",
+                     "settings, CLI syntax and config keys", "official docs, installed help or local output",
+                     "Snippets locate sources", "read matching docs",
+                     "UI labels do not establish CLI syntax", "say no supported command was verified",
+                     "Never invent commands, keys or sample output",
+                     "Separate findings, supported steps and unverified possibilities"] {
             XCTAssertTrue(text.contains(rule), rule)
         }
         XCTAssertTrue(signIn.contains("An observed account picker or sign-in/footer text is not a credential block"))

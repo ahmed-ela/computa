@@ -703,14 +703,17 @@ reload and repeated compaction. These records cannot become prior assistant
 answers or the model's compaction summary. External requests omit only optional
 function item IDs, preserving exact `call_id` pairing and canonical history.
 
-The actual-source serializer retained the sanitized 75-position Outlook history
-at **11,097 provider bytes / 21,496 canonical bytes**, with 1,191 / 3,080 bytes
-remaining under the unchanged limits. Its 15 reasoning positions and all four
-message boundaries preserve the original typed layout. Five representative
-32-call continuations also fit. The most constrained one has only 69 / 481 bytes
-remaining; this is not a worst-case guarantee. Deliberate byte overflow and the
-33rd genuine call still stop. Initial fixture omissions and the first repeated-
-compaction grouping defect are retained as failed evidence, not discarded runs.
+The initial serializer measurement retained the sanitized 75-position Outlook
+history at **11,097 provider bytes / 21,496 canonical bytes** before history
+assigned enclosing message IDs. Its 15 reasoning positions and all four message
+boundaries preserve the original typed layout. Five representative 32-call
+continuations initially appeared to fit, but later admission-path review found
+an additional 48 bytes per retained run from those IDs. Two of those continuations
+therefore exceeded the provider bound; the earlier 69-byte minimum headroom was
+not a persisted-wire guarantee. The corrected admission counts real IDs before
+checking the unchanged limits. Deliberate byte overflow and the 33rd genuine call
+still stop. Initial fixture omissions, the first repeated-compaction grouping
+defect and this sizing gap remain failed evidence, not discarded runs.
 
 Source qualification passed 59 isolated retention, projection and restoration
 checks (one private-rollout export intentionally skipped), five isolated native
@@ -725,3 +728,49 @@ tests. Version and product identity checks passed 20 cases. The production
 runtime compiled successfully and its packaged binary and pinned patch were
 verified. The signed app and fresh live acceptance results remain separate
 required evidence.
+
+The signed build 236 was installed and matched its committed source and packaged
+runtime. Its first local mailbox read passed in 3.250 seconds with five tools and
+no failures, including an exact filename. Same-chat and fresh synthetic sends
+each produced exactly one local POST with the requested fields; their current
+receipts were observed. The fresh final reply still changed punctuation in the
+recipient and spacing in the body, so delivery and literal-copy fidelity remain
+separate results. All three trials closed their owned tab and preserved user tabs.
+
+The real Outlook lookup failed after 22.397 seconds. Its first compaction assigned
+normal native message IDs to the retained read records; a later expansion compared
+them to records with no enclosing message ID and incorrectly rejected the history.
+This is a runtime defect, not missing site permission or an attachment result.
+The build 237 candidate accepts that host-assigned enclosing ID while preserving
+exact checks of the record's remaining fields and original call/output identities.
+
+The read-only diagnostics trial also failed semantic acceptance. It read actual
+documentation, then invented unsupported CLI syntax and a configuration field.
+Three broad local-history searches returned running sessions and excessive output;
+subsequent process inspection found none remaining. No unmatched process was killed.
+The candidate adds an explicit unverified-command fallback to the shared guidance
+within its existing byte limit. This is guidance, not a proof of grounded answers.
+It also fixes the presentation-only error summary that exposed a retention marker
+instead of explaining a recovered failure. Fresh build 237 live qualification is
+still required; these build 236 failures remain part of the evidence.
+
+The final build 237 isolated source run passed 61 checks, with one intentional
+private export skip. Regressions first reproduced the message-ID error and the
+post-admission byte increase, then exercised actual ID assignment,
+serialization/reload and two more compactions. The unchanged build 236 checkpoint
+now fits at 10,913 provider / 18,171 canonical bytes for 18 calls; the actual failed
+29-call candidate fits at 11,767 / 22,750 bytes. Saving adds zero bytes afterward.
+Four of five tested 32-call continuations fit, with the tightest leaving only
+36 provider / 352 canonical bytes; the heavier failure case correctly rejects.
+Altered record text, role, phase and provenance still reject. The presentation fix
+passed 22 focused native tests. These source replays do not establish a new
+website result or a grounded diagnostic answer.
+
+The affected native source checks cover 189 unique cases. The first run found
+two prompt-size assertions after expanding diagnostic guidance; shortening the
+guidance, without increasing either limit, passed the 47-case instructions suite
+on rerun. The other 142 cases passed unchanged. The initial packaging-identity
+check ran before the new runtime was packaged and correctly rejected the old
+artifact. After the final runtime rebuild, all three bundled-engine checks and
+all 20 version/product-identity checks passed. Installed live qualification remains
+separate.
