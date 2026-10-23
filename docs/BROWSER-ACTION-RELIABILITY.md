@@ -1156,7 +1156,7 @@ without a generic list of forbidden effects. Ongoing user restrictions, actual
 approvals/denials and Stop remain binding. Command guidance explicitly identifies
 HOME as isolated rather than the macOS home. This clarifies an upfront environment
 ambiguity; it does not explain away later repetition after the model had already
-observed correct absolute paths and errors. Live qualification remains pending.
+observed correct absolute paths and errors. Installed qualification is recorded below.
 
 Validation passed 305 tests with zero failures or skips, including 34 isolated
 WebKit transport tests. Source hashes remained stable throughout the final run.
@@ -1167,3 +1167,62 @@ escaped field values still paginate and reconstruct exactly. The first failed
 run is preserved with its stale wording assertions and an instruction-length
 regression; both were corrected without increasing any limit. These are
 representation and contract results, not live-model acceptance.
+
+Installed source `568847a` uses unchanged runtime `mactopus-14`. The three
+synthetic trials exactly matched the 241/242 prompts and used remote Cerebras
+GPT-OSS120b at medium effort:
+
+- Fresh send produced one exact POST in 5.081 seconds with eight calls, no native
+  failures and no compaction. The final post-fill page exposed the current Send
+  action, and the immediate confirmation exposed the new receipt. After visiting
+  Sent, however, the model cited an older same-subject delivery's receipt and
+  changed its hyphen to U+2011. The older and newer records had different
+  capture-local record paths; the newer record continued beyond that bounded
+  page. Recipient typography also changed. This is a current-record association
+  failure as well as a literal-copy failure, despite correct new delivery.
+- Read-only control passed in 2.455 seconds with four calls, no errors or
+  compaction and zero POSTs. The observed message supported the reported change,
+  and the attachment filename was copied exactly.
+- Same-chat send produced one exact POST in 6.472 seconds with nine calls and no
+  compaction. Its initial prior-turn click was correctly rejected as
+  `browser_binding_required` before input. The model reopened, read, filled and
+  sent successfully. The final accurately reported the local confirmation but
+  omitted its receipt. The earlier false read-only refusal did not recur in
+  this sampled turn; this does not establish repeated reliability or causality.
+
+Real-mail and diagnostic acceptance remained unsuccessful:
+
+- Attachment lookup stopped after 82.623 seconds and thirty-three calls at the
+  unchanged thirty-two completed-call retention bound, without a final answer.
+  Inventory was empty, so no existing Outlook tab was offered and ignored. Five
+  repeated personal-route navigations and two duplicate content reads stayed on
+  the public landing page before an observed Sign in link and matching account
+  choice reached the mailbox. Three genuine continuations advanced successfully.
+  The requested subject and filename were not exposed; truncated capture evidence
+  does not establish their absence. No native tool failed, and one compaction
+  completed before the terminal guard.
+- The natural course-announcement follow-up completed in 15.774 seconds with
+  sixteen calls, one stale fill rejection and two compactions, but answered the
+  prior attachment task instead. Its current human request survived the later
+  compaction byte-for-byte, and that summary explicitly identified the course
+  request as active and the attachment search as unrelated. The summary also
+  suggested an external web search instead of retaining the mailbox context.
+  Finite API diagnostics accepted the current-user proof on all seventeen
+  ordinary inferences, including the final one; maintenance requests retained
+  the reminder. No dropped-user projection was established. The attachment
+  filename was observed but altered typographically in the wrong-task answer.
+- Diagnostics were stopped after 32.792 seconds and thirteen read-only commands:
+  three listings, nine searches and one file read. The exact prompt matched 241.
+  The private-HOME path error did not recur, but duplicate broad home-directory
+  searches, two unpolled running-session receipts and another repeated search
+  produced no supported setting or command and no final answer. Three owned
+  commands were confirmed terminated after Stop.
+
+Each synthetic trial and attachment lookup closed one owned tab; the course
+follow-up closed two. User tabs were preserved and composers were empty. The two
+synthetic sends each contributed one exact POST; no real mail mutation occurred.
+Finite audits, exact event attribution, literal comparisons and separate UI
+cleanup reports are in `audits243/`. The goal remains unresolved: correct delivery
+alone does not satisfy current-record evidence, exact copying, task focus,
+mailbox search or useful diagnostic acceptance. Earlier failures remain preserved,
+and no execution, retention, retry, permission or approval limit was raised.
