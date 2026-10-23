@@ -28,7 +28,7 @@ enum EmbeddedBrowserTools {
         }
     }
     static let names: Set<String> = [
-        "browser_tabs", "browser_open", "browser_bind", "browser_navigate", "browser_read",
+        "browser_tabs", "browser_open", "browser_bind", "browser_navigate", "browser_read", "browser_continue",
         "browser_click", "browser_fill", "browser_wait", "browser_close",
     ]
     static func requiresApproval(tool: String) -> Bool {
@@ -36,22 +36,35 @@ enum EmbeddedBrowserTools {
             tool)
     }
 
+    private static func specification(
+        _ name: String, _ description: String, _ properties: [String: Any] = [:],
+        _ required: [String] = []
+    ) -> [String: Any] {
+        let schema: [String: Any] = ["type": "object", "properties": properties,
+            "required": required, "additionalProperties": false]
+        return ["type": "function", "name": name, "description": description, "inputSchema": schema]
+    }
+
+    /// Frozen pre-split contract for saved native catalogs and completed history.
+    /// New catalogs advertise fresh reads and continuation as distinct tools.
+    static var legacyReadDefinition: [String: Any] {
+        let readCursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
+            "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with the exact nonempty next_cursor from the latest page in the current turn. Prefer cursor alone: repeated view/query must match the captured filters exactly; changing them requires a fresh read. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes."]
+        let query: [String: Any] = ["type": "string", "minLength": 1,
+            "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
+        let readView: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
+        return specification(
+            "browser_read",
+            "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
+            ["view": readView, "query": query, "cursor": readCursor])
+    }
+
     static func definitions() -> [[String: Any]] {
-        func specification(
-            _ name: String, _ description: String, _ properties: [String: Any] = [:],
-            _ required: [String] = []
-        ) -> [String: Any] {
-            let schema: [String: Any] = ["type": "object", "properties": properties,
-                "required": required, "additionalProperties": false]
-            return ["type": "function", "name": name, "description": description, "inputSchema": schema]
-        }
         let waitText: [String: Any] = ["type": "string", "minLength": 1,
             "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
             "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
         let cursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
             "description": "Omit this field on the first page or a fresh inventory; null has the same fresh-inventory meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_tabs in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
-        let readCursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
-            "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with the exact nonempty next_cursor from the latest page in the current turn. Prefer cursor alone: repeated view/query must match the captured filters exactly; changing them requires a fresh read. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let readView: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
@@ -79,8 +92,12 @@ enum EmbeddedBrowserTools {
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
-                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
-                ["view": readView, "query": query, "cursor": readCursor]),
+                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. This is a fresh read with optional view/query and restarts page one. Use browser_continue(cursor=next_cursor) to advance the same capture; changing filters requires this fresh tool. Never use computer_v2_continue for browser pages. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
+                ["view": readView, "query": query]),
+            specification(
+                "browser_continue",
+                "Continue the bound built-in browser page using only browser_continue(cursor=next_cursor). Copy the latest page's exact nonempty next_cursor in this turn; view/query are retained and cannot be changed here. A fresh browser_read changes filters and restarts page one. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never use inventory or computer_v2_continue cursors. A rejected cursor never starts a fresh read or input.",
+                ["cursor": ["type": "string", "minLength": 1, "description": "Exact nonempty next_cursor from the latest browser page; at most 2048 UTF-8 bytes. Required; null never starts a fresh read."]], ["cursor"]),
             specification(
                 "browser_click",
                 "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is not pressable: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=overview or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
@@ -118,8 +135,13 @@ enum EmbeddedBrowserTools {
             required = ["tab_id"]
             allowed = required
         case "browser_read":
+            // Saved native catalogs retain their original cursor-capable read.
+            // Current provider schemas expose only view/query.
             required = []
             allowed = ["view", "query", "cursor"]
+        case "browser_continue":
+            required = ["cursor"]
+            allowed = required
         case "browser_click":
             required = ["click_ref"]
             allowed = required
@@ -307,7 +329,9 @@ struct EmbeddedBrowserReadFailureScope: Equatable, Sendable {
 struct EmbeddedBrowserToolExecution: Sendable {
     /// Issued only by the successful native read/inventory branches. This is
     /// history provenance, never permission, a page claim, or action authority.
-    enum NativeRead: String, Sendable { case read = "read_v1", inventory = "inventory_v1" }
+    enum NativeRead: String, Sendable {
+        case read = "read_v1", inventory = "inventory_v1", continuation = "continue_v1"
+    }
     let response: String
     let actionReceipt: EmbeddedBrowserActionReceipt?
     let completeObservation: Bool
@@ -655,7 +679,9 @@ actor EmbeddedBrowserToolController {
                 }
                 throw error
             }
-        case "browser_read":
+        case "browser_read", "browser_continue":
+            // The split tool and saved cursor-capable reads share one native
+            // cursor admission/publication path; only their proof names differ.
             let view = (object["view"] as? String).flatMap(SemanticReadView.init(rawValue:))
             let cursor = object["cursor"] as? String
             let read = SemanticReadRequest(
@@ -673,7 +699,7 @@ actor EmbeddedBrowserToolController {
                     // any capture. Do not infer an identifier's kind or turn
                     // an unissued/replaced cursor into a fresh read.
                     throw BrowserTabBrokerError.invalidRead(
-                        "cursor is not the latest page's exact next_cursor. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Send only the latest page's next_cursor to continue. Omit cursor or use null for a fresh view/query. No read or input was dispatched.")
+                        "cursor is not the latest page's exact next_cursor. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Send only the latest page's next_cursor to continue. Use browser_read without cursor for a fresh view/query. No read or input was dispatched.")
                 }
                 let original = SemanticReadRequest(query: receipt.query, view: receipt.view)
                 guard read.continues(original) else {
@@ -684,7 +710,7 @@ actor EmbeddedBrowserToolController {
             let snapshot = try await currentReadObservation(
                 taskKey: taskKey, contextID: contextID, scope: scope, read: read, compact: true)
             return try .init(response: readResponse(snapshot, taskKey: taskKey, compact: true),
-                readFailureScope: .init(snapshot: snapshot), completeObservation: true, nativeRead: .read)
+                readFailureScope: .init(snapshot: snapshot), completeObservation: true, nativeRead: tool == "browser_continue" ? .continuation : .read)
         case "browser_click", "browser_fill":
             let invocation = try prepared ?? prepareMutation(taskKey: taskKey, tool: tool, arguments: arguments)
             guard invocation.matches(taskKey: taskKey, contextID: contextID, tool: tool, arguments: object) else {
@@ -1199,7 +1225,7 @@ actor EmbeddedBrowserToolController {
             "literal_copy_guidance": Self.literalCopyGuidance,
         ]
         if let cursor = snapshot.nextCursor {
-            metadata["continuation"] = ["tool": "browser_read", "arguments": ["cursor": cursor]]
+            metadata["continuation"] = ["arguments": ["cursor": cursor]]
         }
         let result = text + "\nBROWSER_ACTION_REFERENCES " + (try json(metadata))
         contexts[taskKey]?.actionReferences = context.actionReferences

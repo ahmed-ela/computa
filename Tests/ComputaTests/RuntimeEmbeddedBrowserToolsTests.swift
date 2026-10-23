@@ -7,6 +7,55 @@ import XCTest
 /// with an inert browser backend. No provider, Chrome, UI or network is used.
 @MainActor
 final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
+    func testSplitContinuationPublishesItsOwnNativeProof() async throws {
+        try await withHarness { harness in
+            await harness.backend.enablePaginatedRead()
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_continue", "arguments": ["cursor": "@cursor"]],
+            ])
+            try await self.waitFor { harness.rowCount == 4 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, true])
+            XCTAssertEqual(rows.map { $0["nativeBrowserRead"] as? String }, ["inventory_v1", nil, "read_v1", "continue_v1"])
+            XCTAssertTrue((rows.last?["text"] as? String)?.contains("AXSNAPSHOT ") == true)
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0)
+            XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
+    func testAlternatingContinuationNamesCannotEvadeTheRuntimeFailureLimit() async throws {
+        try await withHarness { harness in
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_continue", "arguments": ["cursor": "PRIVATE_UNISSUED_ONE"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_read", "arguments": ["cursor": "PRIVATE_UNISSUED_TWO", "view": "content"]],
+                ["tool": "browser_continue", "arguments": ["cursor": "PRIVATE_UNISSUED_THREE"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
+            try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, true, false, false])
+            for index in [3, 5, 6] {
+                let proof = rows[index]["nativeBrowserRead"]
+                XCTAssertTrue(proof == nil || proof is NSNull)
+            }
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.mutations, 0)
+            XCTAssertEqual(counts.created, 0)
+            XCTAssertTrue(counts.humanIntact)
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+        }
+    }
+
     func testNullInventoryCursorReachesNativeToolAndAllowsObservedTabBindingWithoutApproval() async throws {
         try await withHarness { harness in
             try await harness.submit([
@@ -773,7 +822,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 let text = try XCTUnwrap(row["text"] as? String)
                 XCTAssertTrue(text.contains("latest page's exact next_cursor"))
                 XCTAssertTrue(text.contains("replaces older cursors"))
-                XCTAssertTrue(text.contains("Omit cursor or use null"))
+                XCTAssertTrue(text.contains("Use browser_read without cursor for a fresh view/query"))
                 XCTAssertFalse(text.contains("PRIVATE_UNISSUED_CURSOR"))
                 XCTAssertFalse(text.contains("\"current_observation\":"), "Invalid identifiers must not attach a recovery observation")
             }

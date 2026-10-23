@@ -9,7 +9,8 @@ final class ComputerReadContinuationTests: XCTestCase {
         for failure in [ComputerReadContinuation.Failure.unknownCursor, .pageScopeChanged, .invalidScope, .conflictingCursor] {
             let message = failure.localizedDescription
             XCTAssertFalse(message.contains("Chrome")); XCTAssertFalse(message.contains("computer_v2_tabs"))
-            XCTAssertTrue(message.contains("browser_read(cursor=next_cursor)"))
+            XCTAssertTrue(message.contains("offered page-continuation tool and next_cursor alone"))
+            XCTAssertFalse(message.contains("browser_read(cursor=next_cursor)"))
             XCTAssertTrue(message.contains("browser_tabs(cursor=next_cursor)"))
             XCTAssertTrue(message.contains("cursors are never converted between sources"))
             XCTAssertTrue(message.contains("No read, binding, navigation or input was dispatched"))

@@ -227,7 +227,7 @@ enum ComputerV2ToolContract {
         let limits = interactionPolicy == .backgroundOnly
             ? "Background-only computer use is enforced by the host. Bind an already-running native app with computer_v2_open(activation=none). Do not activate apps, raise windows or send global input. A background screenshot is observation only; it grants no click or keyboard authority. Full Access does not change this policy."
             : "Bind the requested native app and use its supported Accessibility actions. For a visible native target without an available Accessibility action, use only the offered capture and input tools and verify the observed outcome."
-        return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Computa's built-in browser. A computer_v2_continue cursor belongs only to a computer read; browser_read and browser_tabs continue their own cursors."
+        return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Computa's built-in browser. computer_v2_continue accepts only native computer cursors. Use the offered browser page-continuation tool for page cursors; browser_tabs continues inventory."
     }
 
     static func validateAlias(tool name: String, arguments: [String: Any]) throws -> ValidatedAliasCall {
@@ -610,10 +610,10 @@ enum ComputerV2ToolContract {
         switch tool {
         case .readPage:
             properties = ["view": view, "query": query]; required = []
-            description = "Read the native app already bound this turn with computer_v2_open, using all or content. An unbound read requires computer_v2_open first; computer_v2_status does not bind or read a page. Returns current host action/region references; readable structure is not an action target. Continue partial native text with computer_v2_continue(cursor=next_cursor). Webpage tasks use browser_* directly without native app discovery/status; browser_read(cursor=next_cursor) continues their own page text."
+            description = "Read the native app already bound this turn with computer_v2_open, using all or content. An unbound read requires computer_v2_open first; computer_v2_status does not bind or read a page. Returns current host action/region references; readable structure is not an action target. Continue partial native text with computer_v2_continue(cursor=next_cursor). Webpages use browser_read and the offered browser page-continuation tool without native app discovery/status."
         case .readRegion:
             properties = ["region_ref": reference, "view": view, "query": query]; required = ["region_ref"]
-            description = "Read below a currently published native region_ref. This is read-only context, not an action target. Refresh the native app with computer_v2_read_page; continue its partial text with computer_v2_continue. Built-in browser cursors belong to browser_read."
+            description = "Read below a currently published native region_ref. This is read-only context, not an action target. Refresh the native app with computer_v2_read_page; continue its partial text with computer_v2_continue. Built-in browser page cursors belong to the offered browser page-continuation tool."
         case .fill:
             properties = ["field_ref": reference, "text": ["type": "string", "minLength": 1, "maxLength": 4_096]]
             required = ["field_ref", "text"]
@@ -679,7 +679,7 @@ enum ComputerV2ToolContract {
             description = "Bind the requested native app using the offered activation mode and host policy. This tool does not navigate webpages. Use browser_tabs/browser_bind for an existing built-in page or browser_open for a task-owned page."
         case .continueRead:
             properties = ["cursor": uuid]; required = ["cursor"]
-            description = "Continue only a current native computer read with its observed next_cursor. Send cursor alone. Built-in browser_read cursors must use browser_read(cursor=next_cursor); browser_tabs inventory cursors must use browser_tabs(cursor=next_cursor). Never cross sources or reuse previous-turn cursors. No input, navigation or reconnect occurs."
+            description = "Continue only a current native computer read with its observed next_cursor. Send cursor alone. Built-in browser_read page cursors use the offered browser page-continuation tool; browser_tabs inventory cursors use browser_tabs(cursor=next_cursor). Never cross sources or reuse previous-turn cursors. No input, navigation or reconnect occurs."
         case .snapshot:
             properties = [
                 "query": ["type": "string", "minLength": 1, "maxLength": 200,
@@ -690,7 +690,7 @@ enum ComputerV2ToolContract {
                 "snapshot_id": ["type": "string", "description": "Subtree read only: BOTH snapshot_id and element_index are required. Omit both for a fresh whole-page read or a different view."],
                 "element_index": ["type": "integer", "minimum": 0, "description": "Observed current element to read below; not a guessed index."],
             ]; required = []
-            description = "Read the native app already bound with computer_v2_open, using all or content. computer_v2_status does not bind or read a page; an unbound read requires computer_v2_open first. Fresh reads omit snapshot_id and element_index; a subtree requires both from a current observation. Continue native text with computer_v2_continue. Use only observed supported actions and verify their results. Webpage tasks use browser_* directly without native app discovery/status; their pages and cursors belong to browser_read."
+            description = "Read the native app already bound with computer_v2_open, using all or content. computer_v2_status does not bind or read a page; an unbound read requires computer_v2_open first. Fresh reads omit snapshot_id and element_index; a subtree requires both from a current observation. Continue native text with computer_v2_continue. Use only observed supported actions and verify their results. Webpages use browser_read and the offered browser page-continuation tool without native app discovery/status."
         case .ax:
             properties = [
                 "snapshot_id": string,

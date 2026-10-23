@@ -18,7 +18,7 @@ enum BrowserCompleteObservation {
             "references": "Refs from the same capture survive continuation within the 120-ref FIFO limit; fresh reads replace the menu.",
             "literal_copy_guidance": "Copy observed values verbatim, preserving Unicode and whitespace.",
         ]
-        if let cursor { metadata["continuation"] = ["tool": "browser_read", "arguments": ["cursor": cursor]] }
+        if let cursor { metadata["continuation"] = ["arguments": ["cursor": cursor]] }
         let bytes = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes])
         return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
     }

@@ -32,6 +32,7 @@ enum WebModelResponseCodec {
         let name: String
         let namespace: String?
         let isCustom: Bool
+        let browserReadMode: ComputaModelToolCatalog.BrowserReadMode?
     }
 
     fileprivate struct ToolPolicy: Sendable {
@@ -93,6 +94,7 @@ enum WebModelResponseCodec {
         case missingInput
         case previousResponseUnsupported
         case invalidTools
+        case invalidBrowserReadArguments
         case unsupportedToolType
         case unsupportedModality(Modality)
         case promptTooLarge(actualBytes: Int, maximumBytes: Int)
@@ -115,6 +117,7 @@ enum WebModelResponseCodec {
             case .missingInput: "The web model request needs input as a string or an array."
             case .previousResponseUnsupported:
                 "Web models need the complete local conversation in input; previous_response_id is unsupported."
+            case .invalidBrowserReadArguments: "Browser read arguments do not match the offered fresh-read or continuation contract."
             case .invalidTools: "The web model request contains an invalid or ambiguous tool definition."
             case .unsupportedToolType:
                 "Web models support function tools with JSON object arguments and custom tools with literal string input, including namespaces. This request contains an unsupported tool type."
@@ -558,8 +561,13 @@ enum WebModelResponseCodec {
                     guard call.customInput != nil, call.argumentsJSON.isEmpty else { throw Failure.customInputMustBeString }
                 } else {
                     guard call.customInput == nil,
-                          (try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8))) is [String: Any] else {
+                          let arguments = try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: Any] else {
                         throw Failure.argumentsMustBeObject
+                    }
+                    if let mode = tool.browserReadMode {
+                        if mode == .fresh, arguments["cursor"] != nil { throw Failure.invalidBrowserReadArguments }
+                        do { try EmbeddedBrowserTools.validate(tool: tool.name, arguments: arguments) }
+                        catch { throw Failure.invalidBrowserReadArguments }
                     }
                 }
             }
@@ -729,7 +737,10 @@ enum WebModelResponseCodec {
         if type == "custom", let format = schema["format"], !(format is [String: Any]) { throw Failure.invalidTools }
         let offeredName = namespace.map { "\($0).\(name)" } ?? name
         guard tools[offeredName] == nil else { throw Failure.invalidTools }
-        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom")
+        let readMode = type == "function" ? (schema["parameters"] as? [String: Any]).flatMap {
+            ComputaModelToolCatalog.browserReadMode(name: name, namespace: namespace, schema: $0)
+        } : nil
+        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom", browserReadMode: readMode)
     }
 
     private static func rejectUnsupportedModalities(in input: Any?) throws {

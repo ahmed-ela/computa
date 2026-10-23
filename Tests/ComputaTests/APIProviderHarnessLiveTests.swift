@@ -8,6 +8,108 @@ import XCTest
 /// tools; provider inference and credentials are isolated loopback fixtures.
 @MainActor
 final class APIProviderHarnessLiveTests: XCTestCase {
+    func testBundledEngineRegistersAndColdResumesBrowserContinuation() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
+            "Enable the isolated bundled API harness qualification.")
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
+        let failuresBefore = testRun?.failureCount ?? 0
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appendingPathComponent("ComputaAPIContinuation-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let fakeKey = "SYNTHETIC_ONLY_CONTINUATION_" + UUID().uuidString
+        let credentials = APIHarnessCredentials(providerID: "fixture-browser", value: fakeKey)
+        let inference = APIHarnessBrowserContinuationInference(expectedKey: fakeKey)
+        let upstream = try APIHarnessHTTPFixture { await inference.respond($0) }
+        let backend = InertRuntimeBrowser()
+        await backend.enablePaginatedRead()
+        var owned: CodexAppServerRuntime?
+        var pump: Task<Void, Never>?
+        do {
+            let endpoint = try await upstream.start()
+            let model = APIModelDefinition(id: "fixture-browser", name: "Synthetic Browser", contextWindow: 65_536)
+            let provider = APIProviderDefinition(id: "fixture-browser", name: "Synthetic Loopback",
+                baseURL: endpoint, wireAPI: .chatCompletions, models: [model])
+            let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            func configuration(_ trace: URL) throws -> CodexAppServerRuntime.Configuration {
+                var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+                config.executable = .bundled
+                config.model = modelID; config.codexHomePath = home.path; config.workspacePath = project.path
+                config.protocolTracePath = trace.path
+                config.apiModelServerForTesting = APIModelServer(credentials: credentials,
+                    capsules: try APIReasoningCapsules(key: Data(repeating: 0xA3, count: 32)),
+                    toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1", isDirectory: true))
+                return config
+            }
+            let firstTrace = root.appendingPathComponent("first.jsonl")
+            let runtime = CodexAppServerRuntime(configuration: try configuration(firstTrace), visualGrounder: APIHarnessNoVisualGrounder())
+            owned = runtime
+            await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend))
+            try await runtime.configureAPIProviders([provider])
+            _ = try await runtime.loadTasks()
+            let taskID = UUID().uuidString.lowercased(), audit = APIHarnessEventAudit(taskID: taskID)
+            pump = Task { for await event in runtime.events() { audit.receive(event) } }
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
+            try await runtime.submit(prompt: "Read the existing fixture browser tab and continue its partial page. Read only.",
+                toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .completed); XCTAssertEqual(audit.errors, [])
+            XCTAssertEqual(audit.approvals, 0); XCTAssertEqual(audit.finalTexts.last, "CONTINUATION_OBSERVED")
+            let trace = try AppServerWireTrace.load(firstTrace)
+            let threadID = try threadStarted(in: trace)
+            let proofs = trace.messages.compactMap { ($0.object["result"] as? [String: Any])?["nativeBrowserRead"] as? String }
+            XCTAssertEqual(proofs, ["inventory_v1", "read_v1", "continue_v1"])
+            let firstReceipt = await inference.receipt()
+            XCTAssertEqual(firstReceipt.requests, 5)
+            XCTAssertTrue(firstReceipt.sameCaptureContinued)
+            XCTAssertTrue(firstReceipt.cursorArgumentsExact)
+            XCTAssertEqual(firstReceipt.failures, [])
+            guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Initial browser continuation invariants failed.") }
+            let report = await runtime.shutdown()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            pump?.cancel(); pump = nil; owned = nil
+
+            let resumed = CodexAppServerRuntime(configuration: try configuration(root.appendingPathComponent("resumed.jsonl")),
+                visualGrounder: APIHarnessNoVisualGrounder())
+            owned = resumed
+            await resumed.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend))
+            try await resumed.configureAPIProviders([provider])
+            let tasks = try await resumed.loadTasks()
+            let saved = try XCTUnwrap(tasks.first { $0.id == threadID })
+            let resumedAudit = APIHarnessEventAudit(taskID: saved.id)
+            pump = Task { for await event in resumed.events() { resumedAudit.receive(event) } }
+            try await resumed.submit(prompt: "Return the saved continuation result without using tools.",
+                toTaskID: saved.id, modelID: modelID)
+            try await waitForTerminal(resumedAudit)
+            XCTAssertEqual(resumedAudit.status, .completed); XCTAssertEqual(resumedAudit.errors, [])
+            XCTAssertEqual(resumedAudit.finalTexts.last, "CONTINUATION_OBSERVED")
+            let finalReceipt = await inference.receipt()
+            XCTAssertEqual(finalReceipt.requests, 6)
+            XCTAssertTrue(finalReceipt.coldResumePreserved)
+            XCTAssertEqual(finalReceipt.failures, [])
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.inventories, 1); XCTAssertEqual(counts.created, 0)
+            XCTAssertEqual(counts.mutations, 0); XCTAssertEqual(counts.activations, 0)
+            XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
+            let stopped = await resumed.shutdown()
+            XCTAssertTrue(stopped.succeeded, stopped.issues.joined(separator: "; "))
+            pump?.cancel(); pump = nil; owned = nil
+            guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Browser continuation invariants failed.") }
+            await upstream.stop()
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            if let owned { _ = await owned.shutdown() }
+            pump?.cancel(); await upstream.stop()
+            print("syntheticAPIContinuationFailureArtifacts=\(root.path)")
+            throw error
+        }
+    }
+
     func testBundledEngineExecutesPatchAndCommandThenColdResumesSealedReasoning() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Set TEST_RUNNER_COMPUTA_API_ENGINE_TEST=1 for the isolated bundled API harness qualification.")
@@ -19,7 +121,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -222,7 +324,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -331,7 +433,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-14")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -790,6 +892,123 @@ private actor APIHarnessInference {
         var result = Data()
         for value in frames { result.append(Data("data: ".utf8)); result.append(try JSONSerialization.data(withJSONObject: value)); result.append(Data("\n\n".utf8)) }
         result.append(Data("data: [DONE]\n\n".utf8)); return result
+    }
+}
+
+private actor APIHarnessBrowserContinuationInference {
+    struct Receipt: Sendable {
+        var requests = 0
+        var sameCaptureContinued = false
+        var cursorArgumentsExact = false
+        var coldResumePreserved = false
+        var failures = [String]()
+    }
+    private let expectedKey: String
+    private var observations = Receipt()
+    private var source: String?
+    private var cursor: String?
+    private var continuationArguments: String?
+    private var continuationOutput: String?
+    init(expectedKey: String) { self.expectedKey = expectedKey }
+    func receipt() -> Receipt { observations }
+
+    func respond(_ request: APIModelServer.HTTPRequest) -> APIHarnessHTTPFixture.Response {
+        observations.requests += 1
+        do {
+            guard request.method == "POST", request.path == "/v1/chat/completions",
+                  request.headers["authorization"] == "Bearer " + expectedKey,
+                  let body = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                  body["stream"] as? Bool == true,
+                  let messages = body["messages"] as? [[String: Any]],
+                  let tools = body["tools"] as? [[String: Any]] else { throw APIHarnessFailure("continuation_request") }
+            func function(_ nativeName: String) throws -> [String: Any] {
+                let found = tools.compactMap { $0["function"] as? [String: Any] }.filter {
+                    $0["name"] as? String == nativeName
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
+                }
+                guard found.count == 1 else { throw APIHarnessFailure("continuation_tool_not_registered") }
+                return found[0]
+            }
+            let read = try function("browser_read"), continuation = try function("browser_continue")
+            guard let readSchema = read["parameters"] as? [String: Any],
+                  let readProperties = readSchema["properties"] as? [String: Any],
+                  Set(readProperties.keys) == Set(["view", "query"]),
+                  let continueSchema = continuation["parameters"] as? [String: Any],
+                  let continueProperties = continueSchema["properties"] as? [String: Any],
+                  Set(continueProperties.keys) == Set(["cursor"]),
+                  continueSchema["required"] as? [String] == ["cursor"] else { throw APIHarnessFailure("continuation_schema") }
+            func output(_ id: String) throws -> String {
+                let matches = messages.filter { $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == id }
+                guard matches.count == 1, let text = matches[0]["content"] as? String else { throw APIHarnessFailure("continuation_output") }
+                return text
+            }
+            func field(_ name: String, in text: String) throws -> String {
+                let pattern = "(?:^|[ \\n])" + NSRegularExpression.escapedPattern(for: name) + "=([^ \\n]+)"
+                let regex = try NSRegularExpression(pattern: pattern)
+                guard let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                      let range = Range(match.range(at: 1), in: text) else { throw APIHarnessFailure("continuation_field") }
+                return String(text[range])
+            }
+            func call(_ nativeName: String, id: String, arguments: [String: Any]) throws -> [String: Any] {
+                let tool = try function(nativeName)
+                let raw = String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]), as: UTF8.self)
+                return ["role": "assistant", "tool_calls": [["index": 0, "id": id, "type": "function",
+                    "function": ["name": tool["name"]!, "arguments": raw]]]]
+            }
+            let delta: [String: Any]
+            let finish: String
+            switch observations.requests {
+            case 1:
+                delta = try call("browser_tabs", id: "continuation-tabs", arguments: [:]); finish = "tool_calls"
+            case 2:
+                guard try output("continuation-tabs").contains(InertRuntimeBrowser.humanID) else { throw APIHarnessFailure("continuation_inventory") }
+                delta = try call("browser_bind", id: "continuation-bind", arguments: ["tab_id": InertRuntimeBrowser.humanID]); finish = "tool_calls"
+            case 3:
+                _ = try output("continuation-bind")
+                delta = try call("browser_read", id: "continuation-read", arguments: ["view": "all"]); finish = "tool_calls"
+            case 4:
+                let text = try output("continuation-read")
+                source = try field("source_observation", in: text)
+                cursor = try field("next_cursor", in: text)
+                guard let cursor, UUID(uuidString: cursor) != nil else { throw APIHarnessFailure("continuation_cursor") }
+                continuationArguments = String(decoding: try JSONSerialization.data(withJSONObject: ["cursor": cursor], options: [.sortedKeys]), as: UTF8.self)
+                delta = try call("browser_continue", id: "continuation-page", arguments: ["cursor": cursor]); finish = "tool_calls"
+            case 5, 6:
+                let text = try output("continuation-page")
+                let calls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }.filter { $0["id"] as? String == "continuation-page" }
+                guard calls.count == 1, let saved = calls[0]["function"] as? [String: Any],
+                      saved["name"] as? String == continuation["name"] as? String,
+                      saved["arguments"] as? String == continuationArguments,
+                      try field("source_observation", in: text) == source,
+                      try field("observation", in: text) == "retained",
+                      let offset = Int(try field("offset", in: text)), offset > 0 else { throw APIHarnessFailure("continuation_identity") }
+                observations.sameCaptureContinued = true
+                observations.cursorArgumentsExact = true
+                if observations.requests == 5 { continuationOutput = text }
+                else {
+                    guard text == continuationOutput else { throw APIHarnessFailure("continuation_cold_resume_bytes") }
+                    observations.coldResumePreserved = true
+                }
+                delta = ["role": "assistant", "content": "CONTINUATION_OBSERVED"]; finish = "stop"
+            default: throw APIHarnessFailure("continuation_unexpected_replay")
+            }
+            let id = "chatcmpl-browser-\(observations.requests)"
+            let chunks: [[String: Any]] = [
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [["index": 0, "delta": delta, "finish_reason": NSNull()]]],
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [["index": 0, "delta": [:], "finish_reason": finish]]],
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [], "usage": ["prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160]],
+            ]
+            var data = Data()
+            for chunk in chunks {
+                data.append(Data("data: ".utf8)); data.append(try JSONSerialization.data(withJSONObject: chunk)); data.append(Data("\n\n".utf8))
+            }
+            data.append(Data("data: [DONE]\n\n".utf8))
+            return .init(status: "200 OK", body: data)
+        } catch {
+            observations.failures.append((error as? APIHarnessFailure)?.message ?? "continuation_fixture_failed")
+            return .init(status: "400 Bad Request", body: Data("{\"error\":{\"code\":\"fixture_contract_rejected\"}}".utf8), contentType: "application/json")
+        }
     }
 }
 

@@ -911,3 +911,56 @@ inside search output were not evidence of leaked current commands. No settings
 were changed. Owned tabs were cleaned up and the fixture stopped with its eight
 events and single POST unchanged. These failures remain unresolved acceptance
 work; request chronology and record association alone did not solve them.
+
+
+### Build 240: separate fresh reads from continuation
+
+New chats register `browser_read(view?, query?)` for fresh page selections and
+`browser_continue(cursor)` for the latest retained page. The second tool accepts
+only a nonempty cursor: changed filters cannot be attached to a continuation.
+Saved chats retain their registered legacy read contract. Provider projection
+adds no tool identity and preserves completed call names, arguments and IDs.
+Custom schemas do not acquire native compatibility by name alone.
+
+Both forms use the same native cursor path, freshness checks and failure family;
+a successful fresh read on the same document cannot refund continuation failures.
+Tool-neutral footer and error guidance work with either registered catalog. The
+shared authority paragraph now explicitly distinguishes a current requested send
+from a prior task-local read-only instruction, while preserving ongoing user
+restrictions, actual approvals/denials and Stop.
+
+Runtime `mactopus-14` adds typed `continue_v1` provenance bound to the successful
+pending `browser_continue` and exact cursor-only arguments. Latest continuation
+pages stay complete; older eligible pages retain their actual tool identity in
+the existing historical ledger. Existing 32-call, 12 KiB provider and 24 KiB
+canonical receipt limits, action-reference limits and approval checks remain.
+
+Source qualification passed 623 focused Swift tests, 67 isolated exact-source
+Rust checks and 20 version/product checks. The isolated Rust harness uses
+import-only adapters and does not claim full app-server test execution. All four
+actual bundled-engine API cases passed against the final runtime, including a
+new six-inference loopback case: inventory, binding, fresh read, continuation,
+completion and cold resume. It verifies exact native proof names, same captured
+source, retained page offset, unchanged historical call arguments/output and no
+browser mutations. Existing edit, command, reasoning, rate-limit and correction
+coverage also passed. Both final Swift runs recorded unchanged source.
+
+Final runtime patch SHA-256 is
+`c1d9a916ec665601a811b42aee956b82cdebb8cf486489f39919d235a887ef8f`;
+binary SHA-256 is
+`fb02b8498b2b0359829923fce055ccc5d6cde9979c0acdd28e2c81d4db9edcab`.
+Validation receipts are retained under the task's
+`work/action-reliability-20261023/` evidence directory.
+
+Unsuccessful attempts remain recorded: a Rust test incorrectly assumed small
+receipts triggered ledger packing; the first Swift compile used a nonexistent
+trace-loader method; the next Swift run had stale wording/null assertions and
+overlapped runtime signing. The new bundled fixture initially used a symlinked
+`/var` path, correctly rejected by the naming store before provider dispatch;
+using the canonical temporary directory fixed that fixture without weakening
+the store. Final tests supersede these attempts; the initial logs remain.
+
+Installation and live model acceptance are still pending at this checkpoint.
+Build 239's account-picker, ODE follow-up and same-chat send failures are not
+claimed fixed by source tests. The split removes a known invalid-argument choice;
+live evidence must establish whether it improves task completion.

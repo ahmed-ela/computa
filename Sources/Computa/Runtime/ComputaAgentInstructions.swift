@@ -44,10 +44,10 @@ enum ComputaAgentInstructions {
     /// how UI input is delivered. Shared with the fresh browser handoff so an
     /// earlier refusal cannot silently turn background operation into read-only.
     static let backgroundActionAuthority = """
-    Background-only limits UI delivery, not effects. Offered tools may
-    fill, click, submit or send when authorized. Read-only tasks allow navigation
-    and search/filter inputs, but no message sends, edits, deletions or settings changes.
-    A later explicit send authorizes that send only. Preserve ongoing user constraints,
+    Background-only limits UI delivery, not authorized effects. Read-only allows
+    navigation/search/filtering, not sends, edits, deletions or settings changes.
+    A current explicit send request authorizes only that send; no second request is
+    needed after a task-local read-only task. Honor explicit ongoing restrictions,
     actual approvals/denials and Stop. Assistant refusals are not policy.
     """
 
@@ -67,8 +67,8 @@ enum ComputaAgentInstructions {
     static let browserSearchEvidence = """
     Search with short distinctive terms, not the whole request. Filling is not
     submission: inspect site results/message content. Use view=content for message text;
-    view=all includes toolbars. Fresh reads restart page one; next_cursor alone advances,
-    without view/query. browser_read(query) filters captured UI, including input echoes;
+    view=all includes toolbars. Fresh reads restart page one; the offered continuation
+    tool takes next_cursor alone. browser_read(query) filters captured UI, including input echoes;
     counts are not site results. Broaden unrelated results. Report observed positives
     with their scope; a negative needs relevant site-result evidence. Partial reads or
     narrow-query misses leave absence unverified.
@@ -142,7 +142,7 @@ enum ComputaAgentInstructions {
     computer_v2_continue(cursor=next_cursor) for the next partial native page/field.
     These are distinct operations; never add indices or snapshot IDs to those read
     calls. A built-in browser cursor never belongs to computer_v2_continue:
-    continue browser_read with browser_read(cursor=next_cursor), and browser_tabs
+    use the offered page continuation tool with next_cursor; inventory continues
     with browser_tabs(cursor=next_cursor). Do not repeat unchanged reads.
 
     Use only the current native host action menu: computer_v2_fill(field_ref,text)
@@ -181,8 +181,8 @@ enum ComputaAgentInstructions {
     native actions through computer_v2_ax or computer_v2_set_text. Verify results
     before claiming success and never replay uncertain input.
     computer_v2_continue(cursor=next_cursor) continues only native computer reads.
-    Webpages use the offered browser_* tools: browser_read(cursor=next_cursor) for
-    page text, browser_tabs(cursor=next_cursor) for inventory. Their cursors and
+    Webpages use the offered page continuation tool with next_cursor;
+    browser_tabs(cursor=next_cursor) continues inventory. Their cursors and
     snapshot indices never grant computer_v2 authority. Partial or unknown coverage
     leaves unread material. Preserve the requested target and the user's work.
     computer_v2_status does not bind an app or read a page; it reports permissions
@@ -330,8 +330,8 @@ enum ComputaAgentInstructions {
     Preserve user tabs. For task-created pages, browser_close and verify
     released=true and existing_user_tab_preserved=true. Automatic cleanup is not proof
     that your requested close occurred. Report close failures.
-    Page continuation: browser_read(cursor=next_cursor); inventory: browser_tabs(cursor=next_cursor).
-    Send cursor alone, never to computer_v2_continue.
+    Use the offered page continuation tool with next_cursor alone;
+    inventory uses browser_tabs(cursor=next_cursor), never computer_v2_continue.
     Complete requested/required fields; compare observed values before submit.
     Preserve complete requested identifiers; transform only as requested.
     Verify a new outcome tied to the action, not existing links/headings.

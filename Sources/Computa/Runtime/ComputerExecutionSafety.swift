@@ -9,10 +9,18 @@ struct ComputerExecutionFailure: LocalizedError {
 
 struct ComputerUnchangedAttemptGuard {
     static let browserReferenceRoutingKey = "browser-reference-routing"
+    static let browserContinuationKey = "browser_read:continuation"
     private var attempts: [String: Int] = [:]
     private var browserReadScope: EmbeddedBrowserReadFailureScope?
 
     static func key(tool: String, arguments: [String: Any], observedElementIdentity: String? = nil) -> String {
+        // New and saved tool catalogs express the same continuation intent
+        // differently. Neither a changed cursor/filter nor switching names
+        // earns another failure allowance. A fresh read remains distinct.
+        if tool == "browser_continue" || (tool == "browser_read"
+            && arguments["cursor"] != nil && !(arguments["cursor"] is NSNull)) {
+            return browserContinuationKey
+        }
         if tool == "browser_click" || tool == "browser_fill" {
             guard let observedElementIdentity else { return browserReferenceRoutingKey }
             var intent: [String: Any] = ["observed_element_identity": observedElementIdentity]

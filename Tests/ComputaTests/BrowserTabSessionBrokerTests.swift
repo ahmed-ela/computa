@@ -4,6 +4,22 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testContinuationFooterPreservesExactArgumentsWithoutNamingAnUnavailableTool() throws {
+        let cursor = "opaque-\"\\🙂-cursor"
+        let footer = try BrowserCompleteObservation.footer(cursor: cursor)
+        let prefix = "\nBROWSER_ACTION_REFERENCES "
+        XCTAssertTrue(footer.hasPrefix(prefix))
+        let metadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(footer.dropFirst(prefix.count).utf8)) as? [String: Any])
+        let continuation = try XCTUnwrap(metadata["continuation"] as? [String: Any])
+        XCTAssertEqual(Set(continuation.keys), ["arguments"])
+        XCTAssertEqual(continuation["arguments"] as? [String: String], ["cursor": cursor])
+        XCTAssertFalse(footer.contains("browser_continue")); XCTAssertFalse(footer.contains("\"tool\""))
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(footer), 0)
+        let completed = try BrowserCompleteObservation.footer(cursor: nil)
+        let completedMetadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(completed.dropFirst(prefix.count).utf8)) as? [String: Any])
+        XCTAssertNil(completedMetadata["continuation"])
+    }
+
     func testOverviewAssociatesInterleavedRecordHeadingsAndReceiptsWithoutNewAuthority() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         // The live238 Sent view interleaved the fresh heading before the old

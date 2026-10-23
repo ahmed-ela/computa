@@ -12227,7 +12227,7 @@ index 06f1bc7..a48f737 100644
  
  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
-index 478903f..db3a81f 100644
+index 478903f..935d81c 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 @@ -4702,6 +4702,7 @@ fn codex_error_info_serializes_active_turn_not_steerable_turn_kind_in_camel_case
@@ -12261,7 +12261,7 @@ index 478903f..db3a81f 100644
 +        assert_eq!(response.native_browser_read, None);
 +        assert_eq!(serde_json::to_value(response).unwrap(), base);
 +    }
-+    for wire in ["read_v1", "inventory_v1"] {
++    for wire in ["read_v1", "inventory_v1", "continue_v1"] {
 +        let mut input = base.clone(); input["nativeBrowserRead"] = json!(wire);
 +        let response: DynamicToolCallResponse = serde_json::from_value(input.clone()).unwrap();
 +        assert!(response.native_browser_read.is_some());
@@ -12269,7 +12269,7 @@ index 478903f..db3a81f 100644
 +    }
 +}
 diff --git a/codex-rs/app-server/src/dynamic_tools.rs b/codex-rs/app-server/src/dynamic_tools.rs
-index 0069b6d..6fbfd48 100644
+index 0069b6d..64b1406 100644
 --- a/codex-rs/app-server/src/dynamic_tools.rs
 +++ b/codex-rs/app-server/src/dynamic_tools.rs
 @@ -37,6 +37,7 @@ pub(crate) async fn on_call_response(
@@ -12296,7 +12296,7 @@ index 0069b6d..6fbfd48 100644
              content_items: vec![DynamicToolCallOutputContentItem::InputText {
                  text: message.to_string(),
              }],
-@@ -109,3 +112,24 @@ fn fallback_response(message: &str) -> (DynamicToolCallResponse, Option<String>)
+@@ -109,3 +112,34 @@ fn fallback_response(message: &str) -> (DynamicToolCallResponse, Option<String>)
          Some(message.to_string()),
      )
  }
@@ -12319,6 +12319,16 @@ index 0069b6d..6fbfd48 100644
 +            assert_eq!(result.native_browser_read, None);
 +            assert_eq!(result.content_items, vec![DynamicToolCallOutputContentItem::InputText { text:"already completed".to_string() }]);
 +        }
++    }
++
++    #[test]
++    fn completed_continuation_proof_survives_native_response_decode() {
++        let body = json!({"contentItems":[{"type":"inputText","text":"unchanged completed page"}],
++            "success":true,"nativeBrowserRead":"continue_v1"});
++        let (result, error) = decode_response(body.clone());
++        assert!(error.is_none());
++        assert_eq!(result.native_browser_read, Some(codex_protocol::dynamic_tools::NativeBrowserRead::ContinueV1));
++        assert_eq!(serde_json::to_value(result).unwrap(), body);
 +    }
 +}
 diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
@@ -14707,7 +14717,7 @@ index 0000000..5d0ece5
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..df63437
+index 0000000..c6cdf02
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
 @@ -0,0 +1,759 @@
@@ -15020,7 +15030,7 @@ index 0000000..df63437
 +
 +fn has_complete_browser_marker(call: &ResponseItem, output: &FunctionCallOutputPayload) -> bool {
 +    matches!(call, ResponseItem::FunctionCall { name, namespace: None, .. }
-+        if matches!(name.as_str(), "browser_read" | "browser_click" | "browser_fill"))
++        if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill"))
 +        && matches!(&output.body, FunctionCallOutputBody::ContentItems(items)
 +            if matches!(items.first(), Some(FunctionCallOutputContentItem::InputText { text })
 +                if text == COMPLETE_BROWSER_OBSERVATION_MARKER))
@@ -15035,7 +15045,7 @@ index 0000000..df63437
 +    // changes custom/MCP or unmarked output behavior.
 +    let tool = match call {
 +        ResponseItem::FunctionCall { name, namespace: None, .. }
-+            if matches!(name.as_str(), "browser_read" | "browser_click" | "browser_fill") => name.as_str(),
++            if matches!(name.as_str(), "browser_read" | "browser_continue" | "browser_click" | "browser_fill") => name.as_str(),
 +        _ => return Ok(None),
 +    };
 +    let marker = match &output.body {
@@ -15054,7 +15064,7 @@ index 0000000..df63437
 +    let FunctionCallOutputBody::ContentItems(items) = &output.body else { return Err(invalid()); };
 +    let (cue, body, recovery) = match items.as_slice() {
 +        [FunctionCallOutputContentItem::InputText { .. },
-+         FunctionCallOutputContentItem::InputText { text }] if tool == "browser_read" && output.success != Some(false) => (None, text.as_str(), false),
++         FunctionCallOutputContentItem::InputText { text }] if matches!(tool, "browser_read" | "browser_continue") && output.success != Some(false) => (None, text.as_str(), false),
 +        [FunctionCallOutputContentItem::InputText { .. },
 +         FunctionCallOutputContentItem::InputText { text: cue },
 +         FunctionCallOutputContentItem::InputText { text: body }]
@@ -15062,12 +15072,12 @@ index 0000000..df63437
 +        [FunctionCallOutputContentItem::InputText { .. },
 +         FunctionCallOutputContentItem::InputText { text: cue },
 +         FunctionCallOutputContentItem::InputText { text: body }]
-+            if tool != "browser_read" && output.success != Some(false) && valid_browser_dispatch_cue(tool, cue) => (Some(cue.clone()), body.as_str(), false),
++            if matches!(tool, "browser_click" | "browser_fill") && output.success != Some(false) && valid_browser_dispatch_cue(tool, cue) => (Some(cue.clone()), body.as_str(), false),
 +        _ => return Err(invalid()),
 +    };
 +    if body.trim().is_empty() { return Err(invalid()); }
 +    let lines = if complete {
-+        let page = if tool == "browser_read" && !recovery {
++        let page = if matches!(tool, "browser_read" | "browser_continue") && !recovery {
 +            body.to_string()
 +        } else {
 +            let valid = if recovery {
@@ -15472,10 +15482,10 @@ index 0000000..df63437
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..9101121
+index 0000000..1ad74e9
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,2102 @@
+@@ -0,0 +1,2173 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -17356,6 +17366,77 @@ index 0000000..9101121
 +    result
 +}
 +
++fn proven_native_continuation(id: &str, turn: &str, cursor: &str) -> Vec<ResponseItemEnvelope> {
++    let mut result = proven_native_read(id, turn, false);
++    if let ResponseItem::FunctionCall { name, arguments, .. } = &mut result[0].item {
++        *name = "browser_continue".into();
++        *arguments = format!("{{ \"cursor\" : {} }}", serde_json::to_string(cursor).unwrap());
++    }
++    result[1].metadata.as_mut().unwrap().native_browser_read = Some(codex_protocol::dynamic_tools::NativeBrowserRead::ContinueV1);
++    result
++}
++
++#[test]
++fn native_continuation_keeps_latest_page_atomic_and_exact_call_identity_on_reload() {
++    let mut original = proven_native_read("legacy-read", "current", false);
++    original.extend(proven_native_read("inventory", "current", true));
++    original.extend(proven_native_continuation("continue-old", "current", "opaque e\u{301} 🙂"));
++    let mut current = complete_browser_pair("continue-latest", "AXSNAPSHOT id=current\n#1 role=AXStaticText label=\"exact current page\"\n");
++    if let ResponseItem::FunctionCall { name, arguments, .. } = &mut current[0].item {
++        *name = "browser_continue".into();
++        *arguments = r#"{ "cursor" : "latest\\literal" }"#.into();
++    }
++    current[1].metadata.as_mut().unwrap().native_browser_read = Some(codex_protocol::dynamic_tools::NativeBrowserRead::ContinueV1);
++    original.extend(current.clone());
++    original.extend(pair("later-nonbrowser", "current", "actual later result"));
++    let packed = packed_native_reads(&original, "current", &[7, 9]);
++    let mut retained = super::current_turn_receipts(&packed, "current", ReceiptProvider::External).unwrap();
++    assert!(retained.iter().any(|item| item == &current[1]), "latest continuation page stays exact despite later work");
++    for _ in 0..3 {
++        assert_external_receipt_bounds(&retained);
++        let expanded = native_read_ledger::expand(&retained, "current").unwrap();
++        let calls: Vec<_> = expanded.items.iter().filter(|item| matches!(item.item, ResponseItem::FunctionCall { .. })).collect();
++        let originals: Vec<_> = original.iter().filter(|item| matches!(item.item, ResponseItem::FunctionCall { .. })).collect();
++        assert_eq!(calls, originals, "names, raw arguments, local IDs, timestamps and order are exact");
++        assert!(retained.iter().any(|item| item.metadata.as_ref().and_then(|m|m.native_completed_reads.as_ref()).is_some_and(|run|
++            run.records.iter().any(|record| record.kind == codex_protocol::dynamic_tools::NativeBrowserRead::ContinueV1))));
++        let items: Vec<ResponseItem> = serde_json::from_value(serde_json::to_value(retained.iter().map(|e|&e.item).collect::<Vec<_>>()).unwrap()).unwrap();
++        let metadata: Vec<Option<CodexHarnessMetadata>> = serde_json::from_value(serde_json::to_value(retained.iter().map(|e|&e.metadata).collect::<Vec<_>>()).unwrap()).unwrap();
++        let reloaded: Vec<_> = items.into_iter().zip(metadata).map(|(item,metadata)|ResponseItemEnvelope{item,metadata}).collect();
++        let again = super::current_turn_receipts(&reloaded, "current", ReceiptProvider::External).unwrap();
++        assert_eq!(serde_json::to_value(again.iter().map(|e|(&e.item,&e.metadata)).collect::<Vec<_>>()).unwrap(), serde_json::to_value(reloaded.iter().map(|e|(&e.item,&e.metadata)).collect::<Vec<_>>()).unwrap());
++        retained = again;
++    }
++}
++
++#[test]
++fn continuation_ledger_declines_unproven_failed_foreign_or_mixed_argument_pairs() {
++    for variant in 0..6 {
++        let mut original = proven_native_continuation("continue", "current", "exact");
++        match variant {
++            0 => original[1].metadata.as_mut().unwrap().native_browser_read = None,
++            1 => original[1].metadata.as_mut().unwrap().native_browser_read = Some(codex_protocol::dynamic_tools::NativeBrowserRead::ReadV1),
++            2 => if let ResponseItem::FunctionCall { namespace, .. } = &mut original[0].item { *namespace=Some("foreign".into()); },
++            3 => if let ResponseItem::FunctionCallOutput { output, .. } = &mut original[1].item { output.success=Some(false); },
++            4 => if let ResponseItem::FunctionCall { arguments, .. } = &mut original[0].item { *arguments=r#"{"cursor":"x","view":"all"}"#.into(); },
++            _ => if let ResponseItem::FunctionCall { arguments, .. } = &mut original[0].item { *arguments=r#"{"cursor":null}"#.into(); },
++        }
++        assert_eq!(packed_native_reads(&original, "current", &[]), original, "variant {variant}");
++    }
++}
++
++#[test]
++fn continuation_ledger_preserves_existing_call_and_serialized_byte_bounds() {
++    let original: Vec<_> = (0..32).flat_map(|n| proven_native_continuation(&format!("continue-{n}"), "current", "opaque")).collect();
++    let retained = super::current_turn_receipts(&original, "current", ReceiptProvider::External).unwrap();
++    assert_external_receipt_bounds(&retained);
++    let mut overflow = retained;
++    overflow.extend(proven_native_continuation("continue-33", "current", "opaque"));
++    assert!(super::current_turn_receipts(&overflow, "current", ReceiptProvider::External).unwrap_err().to_string().contains("32 completed-function-call bound"));
++    let oversized: Vec<_> = (0..32).flat_map(|n| proven_native_continuation(&format!("continue-{n}"), "current", &"é".repeat(1024))).collect();
++    assert!(super::current_turn_receipts(&oversized, "current", ReceiptProvider::External).is_err(), "valid individual cursors cannot increase aggregate serialized bounds");
++}
++
 +fn packed_native_reads(history: &[ResponseItemEnvelope], turn: &str, protected: &[usize]) -> Vec<ResponseItemEnvelope> {
 +    let indexed: Vec<_> = history.iter().cloned().enumerate().collect();
 +    native_read_ledger::pack(&indexed, history, turn, protected, &HashSet::new(), &HashSet::new(), &HashMap::new()).unwrap().into_iter().map(|(_, item)| item).collect()
@@ -18208,7 +18289,7 @@ index faa1e6d..4b37952 100644
                  } else {
                      ExecCommandStatus::Failed
 diff --git a/codex-rs/core/src/tools/handlers/dynamic.rs b/codex-rs/core/src/tools/handlers/dynamic.rs
-index f2b7860..793aa50 100644
+index f2b7860..4cd01c4 100644
 --- a/codex-rs/core/src/tools/handlers/dynamic.rs
 +++ b/codex-rs/core/src/tools/handlers/dynamic.rs
 @@ -12,6 +12,10 @@ use crate::tools::registry::ToolExposure;
@@ -18222,7 +18303,7 @@ index f2b7860..793aa50 100644
  use codex_protocol::items::DynamicToolCallItem;
  use codex_protocol::items::DynamicToolCallStatus;
  use codex_protocol::items::TurnItem;
-@@ -150,21 +154,106 @@ impl DynamicToolHandler {
+@@ -150,21 +154,114 @@ impl DynamicToolHandler {
              )
          })?;
  
@@ -18238,7 +18319,7 @@ index f2b7860..793aa50 100644
 -            body,
 -            Some(success),
 -        )))
-+        Ok(dynamic_tool_output(&self.tool_name, response))
++        Ok(dynamic_tool_output(&self.tool_name, &arguments, response))
      }
  }
  
@@ -18262,8 +18343,8 @@ index f2b7860..793aa50 100644
 +    }
 +}
 +
-+fn dynamic_tool_output(tool: &ToolName, response: DynamicToolResponse) -> Box<dyn ToolOutput> {
-+    let proof = accepted_native_browser_read(tool, &response);
++fn dynamic_tool_output(tool: &ToolName, arguments: &str, response: DynamicToolResponse) -> Box<dyn ToolOutput> {
++    let proof = accepted_native_browser_read(tool, arguments, &response);
 +    let output = FunctionToolOutput::from_content(
 +        response.content_items.into_iter().map(FunctionCallOutputContentItem::from).collect(),
 +        Some(response.success),
@@ -18274,11 +18355,19 @@ index f2b7860..793aa50 100644
 +    }
 +}
 +
-+fn accepted_native_browser_read(tool: &ToolName, response: &DynamicToolResponse) -> Option<NativeBrowserRead> {
++fn accepted_native_browser_read(tool: &ToolName, arguments: &str, response: &DynamicToolResponse) -> Option<NativeBrowserRead> {
 +    if !response.success || tool.namespace.is_some() { return None; }
 +    let proof = response.native_browser_read?;
++    if proof == NativeBrowserRead::ContinueV1
++        && !serde_json::from_str::<Value>(arguments).is_ok_and(|arguments|
++            codex_protocol::dynamic_tools::valid_native_browser_continue_arguments(&arguments)) {
++        return None;
++    }
 +    let valid = match (proof, tool.name.as_str(), response.content_items.as_slice()) {
 +        (NativeBrowserRead::ReadV1, "browser_read", [
++            DynamicToolCallOutputContentItem::InputText { text: marker },
++            DynamicToolCallOutputContentItem::InputText { text: page },
++        ]) | (NativeBrowserRead::ContinueV1, "browser_continue", [
 +            DynamicToolCallOutputContentItem::InputText { text: marker },
 +            DynamicToolCallOutputContentItem::InputText { text: page },
 +        ]) => marker == r#"{"retention":"complete_browser_observation_v1"}"#
@@ -18341,7 +18430,7 @@ index f2b7860..793aa50 100644
  impl CoreToolRuntime for DynamicToolHandler {}
  
  #[expect(
-@@ -249,3 +338,128 @@ async fn request_dynamic_tool(
+@@ -249,3 +346,163 @@ async fn request_dynamic_tool(
  
      response
  }
@@ -18375,7 +18464,7 @@ index f2b7860..793aa50 100644
 +
 +    fn assert_output_unchanged(tool: &ToolName, response: DynamicToolResponse, expected: Option<NativeBrowserRead>) {
 +        let ordinary = FunctionToolOutput::from_content(response.content_items.clone().into_iter().map(FunctionCallOutputContentItem::from).collect(), Some(response.success));
-+        let output = dynamic_tool_output(tool, response);
++        let output = dynamic_tool_output(tool, "{}", response);
 +        let payload = ToolPayload::Function { arguments:"{ \"literal\": \"unchanged\" }".to_string() };
 +        assert_eq!(output.native_browser_read(), expected);
 +        assert_eq!(output.to_response_item("exact-call-id", &payload), ordinary.to_response_item("exact-call-id", &payload));
@@ -18401,6 +18490,41 @@ index f2b7860..793aa50 100644
 +                _ => response.content_items[1] = DynamicToolCallOutputContentItem::InputText { text:format!("AXSNAPSHOT id=a\nREAD view=all\n{}\nBROWSER_ACTION_REFERENCES {{}}", "x".repeat(4096)) },
 +            }
 +            assert_output_unchanged(&tool, response, None);
++        }
++    }
++
++    #[test]
++    fn continuation_proof_requires_exact_pending_tool_arguments_and_success() {
++        let base_tool = ToolName::new(None, "browser_continue".to_string());
++        let raw = "{ \"cursor\" : \"opaque-\\u00e9\" }";
++        for variant in 0..12 {
++            let mut tool = base_tool.clone();
++            let mut response = read_response();
++            response.native_browser_read = Some(NativeBrowserRead::ContinueV1);
++            let arguments = match variant {
++                1 => "{}".to_string(),
++                2 => r#"{"cursor":null}"#.into(),
++                3 => r#"{"cursor":""}"#.into(),
++                4 => r#"{"cursor":"x","view":"content"}"#.into(),
++                5 => r#"{"cursor":"x","query":"same"}"#.into(),
++                6 => json!({"cursor":"é".repeat(1024)+"x"}).to_string(),
++                _ => raw.to_string(),
++            };
++            match variant {
++                7 => response.native_browser_read = None,
++                8 => response.native_browser_read = Some(NativeBrowserRead::ReadV1),
++                9 => tool.name = "browser_read".into(),
++                10 => tool.namespace = Some("foreign".into()),
++                11 => response.success = false, // A rejected/stale cursor is never a completed read proof.
++                _ => {},
++            }
++            let ordinary = FunctionToolOutput::from_content(response.content_items.clone().into_iter().map(FunctionCallOutputContentItem::from).collect(), Some(response.success));
++            let output = dynamic_tool_output(&tool, &arguments, response);
++            assert_eq!(output.native_browser_read(), (variant == 0).then_some(NativeBrowserRead::ContinueV1), "variant {variant}");
++            let payload = ToolPayload::Function { arguments: arguments.clone() };
++            assert_eq!(output.to_response_item("continue-call-id", &payload), ordinary.to_response_item("continue-call-id", &payload));
++            assert_eq!(output.log_output(), ordinary.log_output());
++            assert_eq!(output.success_for_logging(), ordinary.success_for_logging());
 +        }
 +    }
 +
@@ -18507,7 +18631,7 @@ index addf027..7a9d3f2 100644
          self.original.log_output()
      }
 diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
-index b09d12b..be85b01 100644
+index b09d12b..c11cb75 100644
 --- a/codex-rs/core/src/tools/registry_tests.rs
 +++ b/codex-rs/core/src/tools/registry_tests.rs
 @@ -840,3 +840,70 @@ fn test_invocation(
@@ -18536,7 +18660,7 @@ index b09d12b..be85b01 100644
 +#[test]
 +fn native_read_proof_is_canonical_only_and_keeps_fallback_budget() {
 +    use codex_protocol::dynamic_tools::NativeBrowserRead;
-+    for proof in [None, Some(NativeBrowserRead::ReadV1), Some(NativeBrowserRead::InventoryV1)] {
++    for proof in [None, Some(NativeBrowserRead::ReadV1), Some(NativeBrowserRead::InventoryV1), Some(NativeBrowserRead::ContinueV1)] {
 +        // Generic metadata may imitate the field but is never the typed accessor.
 +        let original: Box<dyn ToolOutput> = Box::new(NativeReadProofTestOutput {
 +            proof, generic_metadata: serde_json::json!({"native_browser_read":"read_v1"}),
@@ -22025,10 +22149,10 @@ index 2be3590..5017022 100644
      pub fn new(item: ResponseItem) -> Self {
 diff --git a/codex-rs/history/src/native_browser_reads.rs b/codex-rs/history/src/native_browser_reads.rs
 new file mode 100644
-index 0000000..8582f3f
+index 0000000..12bf97c
 --- /dev/null
 +++ b/codex-rs/history/src/native_browser_reads.rs
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,297 @@
 +//! History-only, versioned receipts for completed native browser reads.
 +//!
 +//! This is deliberately not a public Responses item or a replay format. The
@@ -22148,6 +22272,7 @@ index 0000000..8582f3f
 +        match self.kind {
 +            NativeBrowserRead::ReadV1 => "browser_read",
 +            NativeBrowserRead::InventoryV1 => "browser_tabs",
++            NativeBrowserRead::ContinueV1 => "browser_continue",
 +        }
 +    }
 +
@@ -22164,6 +22289,12 @@ index 0000000..8582f3f
 +            return Err("invalid native read cursor");
 +        }
 +        match self.kind {
++            NativeBrowserRead::ContinueV1 => {
++                if !codex_protocol::dynamic_tools::valid_native_browser_continue_arguments(&value) {
++                    return Err("invalid native continuation arguments");
++                }
++                Ok("Continue page.".to_string())
++            }
 +            NativeBrowserRead::InventoryV1 => {
 +                if arguments.keys().any(|key| key != "cursor") {
 +                    return Err("unknown native inventory argument");
@@ -22293,6 +22424,31 @@ index 0000000..8582f3f
 +        value.records[0].arguments = r#"{"count":2}"#.into();
 +        assert!(value.validate().is_err());
 +    }
++
++    #[test]
++    fn native_completed_continuation_keeps_exact_identity_and_rejects_mixed_arguments() {
++        let mut value = run();
++        value.records[0].kind = NativeBrowserRead::ContinueV1;
++        let raw = "{ \"cursor\" : \"opaque-\\u00e9\" }";
++        value.records[0].arguments = raw.into();
++        let decoded: NativeCompletedReads = serde_json::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap();
++        assert_eq!(decoded, value);
++        assert_eq!(decoded.records[0].tool_name(), "browser_continue");
++        assert_eq!(decoded.records[0].arguments, raw);
++        assert!(decoded.display().unwrap().ends_with("Continue page."));
++        for raw in [r#"{}"#, r#"{"cursor":null}"#, r#"{"cursor":""}"#,
++            r#"{"cursor":"x","view":"all"}"#, r#"{"cursor":"x","query":""}"#] {
++            value.records[0].arguments = raw.into();
++            assert!(value.validate().is_err());
++        }
++        value.records[0].arguments = serde_json::json!({"cursor":"x".repeat(2049)}).to_string();
++        assert!(value.validate().is_err());
++        // Prior saved read-with-cursor records retain their genuine tool name.
++        value.records[0].kind = NativeBrowserRead::ReadV1;
++        value.records[0].arguments = r#"{"cursor":"legacy","view":"content"}"#.into();
++        assert!(value.validate().is_ok());
++        assert_eq!(value.records[0].tool_name(), "browser_read");
++    }
 +}
 diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
 index b04d244..fbff14f 100644
@@ -22415,10 +22571,10 @@ index d9e1555..be4fe7e 100644
      credentials
  }
 diff --git a/codex-rs/protocol/src/dynamic_tools.rs b/codex-rs/protocol/src/dynamic_tools.rs
-index bbe92b8..69d3c9c 100644
+index bbe92b8..cec3e05 100644
 --- a/codex-rs/protocol/src/dynamic_tools.rs
 +++ b/codex-rs/protocol/src/dynamic_tools.rs
-@@ -55,11 +55,34 @@ pub struct DynamicToolCallRequest {
+@@ -55,11 +55,45 @@ pub struct DynamicToolCallRequest {
      pub arguments: JsonValue,
  }
  
@@ -22430,6 +22586,17 @@ index bbe92b8..69d3c9c 100644
 +pub enum NativeBrowserRead {
 +    ReadV1,
 +    InventoryV1,
++    ContinueV1,
++}
++
++/// The split continuation contract accepts one opaque cursor only. This checks
++/// shape, not cursor authority; the native browser owns lifetime and admission.
++pub fn valid_native_browser_continue_arguments(arguments: &JsonValue) -> bool {
++    arguments.as_object().is_some_and(|arguments| {
++        arguments.len() == 1
++            && arguments.get("cursor").and_then(JsonValue::as_str)
++                .is_some_and(|cursor| !cursor.is_empty() && cursor.len() <= 2_048)
++    })
 +}
 +
 +/// Optional forward-compatible evidence must not change an already completed
@@ -22453,7 +22620,7 @@ index bbe92b8..69d3c9c 100644
  }
  
  #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
-@@ -173,3 +196,28 @@ where
+@@ -173,3 +207,40 @@ where
          .map(Some)
          .map_err(D::Error::custom)
  }
@@ -22465,6 +22632,18 @@ index bbe92b8..69d3c9c 100644
 +    use serde_json::json;
 +
 +    #[test]
++    fn continuation_arguments_are_cursor_only_and_bounded_by_utf8_bytes() {
++        for value in [json!({"cursor":"opaque"}), json!({"cursor":"é".repeat(1024)})] {
++            assert!(valid_native_browser_continue_arguments(&value));
++        }
++        for value in [json!({}), json!(null), json!({"cursor":null}), json!({"cursor":""}),
++            json!({"cursor":3}), json!({"cursor":"x","view":"all"}),
++            json!({"cursor":"x","query":""}), json!({"cursor":"é".repeat(1024)+"x"})] {
++            assert!(!valid_native_browser_continue_arguments(&value));
++        }
++    }
++
++    #[test]
 +    fn optional_native_read_proof_is_tolerant_without_altering_result() {
 +        let base = json!({"contentItems":[{"type":"inputText","text":"unchanged e\u{301} 🙂\nresult"}],"success":true});
 +        for invalid in [JsonValue::Null, json!("future_v2"), json!(false), json!(7), json!({"read_v1":true}), json!([])] {
@@ -22474,7 +22653,7 @@ index bbe92b8..69d3c9c 100644
 +            assert_eq!(serde_json::to_value(result).unwrap(), base);
 +        }
 +        assert_eq!(serde_json::from_value::<DynamicToolResponse>(base.clone()).unwrap().native_browser_read, None);
-+        for (wire, proof) in [("read_v1", NativeBrowserRead::ReadV1), ("inventory_v1", NativeBrowserRead::InventoryV1)] {
++        for (wire, proof) in [("read_v1", NativeBrowserRead::ReadV1), ("inventory_v1", NativeBrowserRead::InventoryV1), ("continue_v1", NativeBrowserRead::ContinueV1)] {
 +            let mut value = base.clone(); value["nativeBrowserRead"] = json!(wire);
 +            let result: DynamicToolResponse = serde_json::from_value(value.clone()).unwrap();
 +            assert_eq!(result.native_browser_read, Some(proof));

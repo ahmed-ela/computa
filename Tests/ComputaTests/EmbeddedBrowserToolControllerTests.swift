@@ -8,6 +8,159 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    func testFreshReadAndContinueHaveDisjointSchemasWithFrozenLegacyDefinition() throws {
+        let definitions = EmbeddedBrowserTools.definitions()
+        let read = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_read" })
+        let schema = try XCTUnwrap(read["inputSchema"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(schema["properties"] as? [String: Any]).keys), ["view", "query"])
+        XCTAssertEqual(schema["required"] as? [String], [])
+        XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+        XCTAssertFalse((read["description"] as? String)?.contains("browser_read(cursor=") == true)
+        let next = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_continue" })
+        let nextSchema = try XCTUnwrap(next["inputSchema"] as? [String: Any])
+        let properties = try XCTUnwrap(nextSchema["properties"] as? [String: Any])
+        XCTAssertEqual(Set(properties.keys), ["cursor"])
+        XCTAssertEqual(nextSchema["required"] as? [String], ["cursor"])
+        XCTAssertEqual(nextSchema["additionalProperties"] as? Bool, false)
+        let cursor = try XCTUnwrap(properties["cursor"] as? [String: Any])
+        XCTAssertEqual(cursor["type"] as? String, "string"); XCTAssertEqual(cursor["minLength"] as? Int, 1)
+        XCTAssertFalse(EmbeddedBrowserTools.requiresApproval(tool: "browser_continue"))
+        let legacy = EmbeddedBrowserTools.legacyReadDefinition
+        let legacySchema = try XCTUnwrap(legacy["inputSchema"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(legacySchema["properties"] as? [String: Any]).keys), ["view", "query", "cursor"])
+        XCTAssertTrue((legacy["description"] as? String)?.contains("browser_read(cursor=next_cursor)") == true)
+        XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["cursor": NSNull()]))
+        XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["cursor": "legacy", "view": "all"]))
+    }
+
+    func testContinueInvalidArgumentsNeverBecomeFreshReadsOrGrantBindings() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let invalid: [[String: Any]] = [[:], ["cursor": NSNull()], ["cursor": ""], ["cursor": 1],
+            ["cursor": true], ["cursor": ["cursor"]], ["cursor": String(repeating: "é", count: 1_025)],
+            ["cursor": "unissued", "view": "content"], ["cursor": "unissued", "query": "text"],
+            ["cursor": "unissued", "snapshot_id": UUID().uuidString]]
+        let before = await backend.counts()
+        for arguments in invalid {
+            do { _ = try await call(controller, "browser_continue", arguments); XCTFail("Invalid continuation must reject before binding") }
+            catch { XCTAssertTrue(error is BrowserTabBrokerError); XCTAssertFalse(error is EmbeddedBrowserPreflightRecoveryFailure) }
+        }
+        let after = await backend.counts(); XCTAssertEqual(after, before)
+        do { _ = try await call(controller, "browser_continue", ["cursor": "unissued"]); XCTFail("A cursor cannot create a binding") }
+        catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure) }
+        let unbound = await backend.counts(); XCTAssertEqual(unbound, before)
+        _ = await controller.shutdown()
+    }
+
+    func testContinueUsesSameImmutableCaptureAndCursorStateAsLegacyRead() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showManyControls(count: 200)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try await call(controller, "browser_read", ["view": "all", "query": "Extra control"])
+        let firstCursor = try field("next_cursor", in: first), source = try field("source_observation", in: first)
+        let before = await backend.counts()
+        let second = try await controller.executeResult(taskKey: "turn-a", tool: "browser_continue",
+            arguments: JSONSerialization.data(withJSONObject: ["cursor": firstCursor]))
+        XCTAssertEqual(second.nativeRead?.rawValue, "continue_v1")
+        XCTAssertTrue(second.completeObservation); XCTAssertNil(second.actionReceipt)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(second.response), 0)
+        XCTAssertEqual(try field("source_observation", in: second.response), source)
+        XCTAssertEqual(try field("view", in: second.response), "all")
+        XCTAssertTrue(second.response.contains("Extra control")); XCTAssertFalse(second.response.contains("Flight number"))
+        let secondCursor = try field("next_cursor", in: second.response)
+        let third = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read",
+            arguments: JSONSerialization.data(withJSONObject: ["cursor": secondCursor]))
+        XCTAssertEqual(third.nativeRead, .read, "Legacy genuine call identity keeps its original proof kind")
+        XCTAssertEqual(try field("source_observation", in: third.response), source)
+        let continued = await backend.counts()
+        XCTAssertEqual(continued.observes, before.observes + 2, "Each mode keeps exactly the existing document freshness probe")
+        for tool in ["browser_read", "browser_continue"] {
+            for cursor in [firstCursor, secondCursor] {
+                do { _ = try await call(controller, tool, ["cursor": cursor]); XCTFail("Names share the same latest cursor") }
+                catch { assertNoncurrentReadCursor(error) }
+            }
+        }
+        let after = await backend.counts(); XCTAssertEqual(after, continued)
+        let thirdCursor = try field("next_cursor", in: third.response)
+        let fresh = try await call(controller, "browser_read", ["view": "all", "query": "Flight number"])
+        XCTAssertNotEqual(try field("source_observation", in: fresh), source)
+        let afterFresh = await backend.counts()
+        do { _ = try await call(controller, "browser_continue", ["cursor": thirdCursor]); XCTFail("Fresh filters replace the old continuation") }
+        catch { assertNoncurrentReadCursor(error) }
+        let final = await backend.counts(); XCTAssertEqual(final, afterFresh)
+        XCTAssertEqual(final.presses, 0); XCTAssertEqual(final.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testContinueRejectsForeignAndInventoryCursorsWithoutConsumingCurrentReference() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showManyControls(); await backend.addLongInventory()
+        let inventory = try jsonObject(await call(controller, "browser_tabs"))
+        let inventoryCursor = try XCTUnwrap(inventory["next_cursor"] as? String)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let page = try await call(controller, "browser_read", ["view": "all"])
+        let pageID = try snapshotID(page), reference = try XCTUnwrap(publishedTargets[pageID]?[1]?.clickRef)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], key: "turn-b")
+        let foreign = try await call(controller, "browser_read", ["view": "all"], key: "turn-b")
+        let before = await backend.counts()
+        for cursor in [inventoryCursor, try field("next_cursor", in: foreign), pageID, reference, UUID().uuidString] {
+            do { _ = try await call(controller, "browser_continue", ["cursor": cursor]); XCTFail("Wrong-route cursor cannot refresh or rebind") }
+            catch { assertNoncurrentReadCursor(error) }
+        }
+        let rejected = await backend.counts(); XCTAssertEqual(rejected, before)
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: ["click_ref": reference]))
+        let next = try await call(controller, "browser_continue", ["cursor": field("next_cursor", in: page)])
+        XCTAssertEqual(try field("source_observation", in: next), try field("source_observation", in: page))
+        _ = await controller.release(taskKey: "turn-a")
+        let retired = await backend.counts()
+        do { _ = try await call(controller, "browser_continue", ["cursor": field("next_cursor", in: next)]); XCTFail("Retired turn cannot continue") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        let final = await backend.counts(); XCTAssertEqual(final, retired)
+        XCTAssertEqual(final.presses, 0); XCTAssertEqual(final.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testContinueRejectsChangedFiltersWithoutRecoveryAndInputRetiresItsCursor() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showManyControls()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try await call(controller, "browser_read", ["view": "all"])
+        let cursor = try field("next_cursor", in: first), id = try snapshotID(first)
+        let before = await backend.counts()
+        do { _ = try await call(controller, "browser_continue", ["cursor": cursor, "view": "content"]); XCTFail("Continue has no filter-changing mode") }
+        catch { XCTAssertTrue(error is BrowserTabBrokerError); XCTAssertFalse(error is EmbeddedBrowserPreflightRecoveryFailure) }
+        let rejected = await backend.counts(); XCTAssertEqual(rejected, before)
+        let filled = try await call(controller, "browser_fill", ["snapshot_id": id, "element_index": 0, "text": "UA 4629"])
+        XCTAssertEqual(try jsonObject(filled)["dispatched"] as? Bool, true)
+        let afterInput = await backend.counts()
+        for tool in ["browser_read", "browser_continue"] {
+            do { _ = try await call(controller, tool, ["cursor": cursor]); XCTFail("Admitted input consumes both routes' old cursor") }
+            catch { assertNoncurrentReadCursor(error) }
+        }
+        let final = await backend.counts(); XCTAssertEqual(final, afterInput)
+        XCTAssertEqual(final.fills, 1); XCTAssertEqual(final.presses, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testContinueCannotPublishAfterCancellationOrReleaseDuringFreshnessProbe() async throws {
+        for release in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.showManyControls()
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let page = try await call(controller, "browser_read", ["view": "all"])
+            let arguments = try JSONSerialization.data(withJSONObject: ["cursor": field("next_cursor", in: page)])
+            await backend.holdNextRead()
+            let operation = Task { try await controller.executeResult(taskKey: "turn-a", tool: "browser_continue", arguments: arguments) }
+            await backend.waitUntilObservationHeld()
+            if release { _ = await controller.release(taskKey: "turn-a") } else { operation.cancel() }
+            await backend.resumeObservation()
+            do { _ = try await operation.value; XCTFail("Cancelled or retired continuation cannot publish a complete page/proof") }
+            catch { XCTAssertTrue(error is BrowserTabBrokerError || error is CancellationError) }
+            let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
     func testInvalidEventFeedbackParticipatesInPageBudgetWithoutSkippingContinuationRows() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         await backend.showManyControls()
@@ -81,8 +234,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
         var arguments: [String: Any] = ["view": "all"], pages = 0, observed = ""
         while true {
-            let result = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read",
+            let result = try await controller.executeResult(taskKey: "turn-a", tool: arguments["cursor"] == nil ? "browser_read" : "browser_continue",
                 arguments: JSONSerialization.data(withJSONObject: arguments))
+            XCTAssertEqual(result.nativeRead, arguments["cursor"] == nil ? .read : .continuation)
             XCTAssertTrue(result.completeObservation)
             let items = [["type": "inputText", "text": BrowserCompleteObservation.marker],
                          ["type": "inputText", "text": result.response]]
@@ -112,8 +266,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         var arguments: [String: Any] = ["view": "all"]
         var seen = Set<String>(), pages = 0, firstReference: String?
         while true {
-            let result = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read",
+            let result = try await controller.executeResult(taskKey: "turn-a", tool: arguments["cursor"] == nil ? "browser_read" : "browser_continue",
                 arguments: JSONSerialization.data(withJSONObject: arguments))
+            XCTAssertEqual(result.nativeRead, arguments["cursor"] == nil ? .read : .continuation)
             XCTAssertTrue(result.completeObservation); XCTAssertNil(result.actionReceipt)
             let items = [["type": "inputText", "text": BrowserCompleteObservation.marker],
                          ["type": "inputText", "text": result.response]]
@@ -1588,7 +1743,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let links = try await call(controller, "browser_read", ["view": "links"])
             let lines = links.split(separator: "\n")
             XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
-            XCTAssertTrue(links.contains("VIEW links omits other node kinds. Use content for message/document text; all includes toolbars."))
+            XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim."))
             XCTAssertTrue(links.contains("not website search or proof of relevance/absence"))
             XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
             if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }
@@ -1809,20 +1964,22 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     }
 
     func testReadContinuationNeverRestartsAfterNavigation() async throws {
-        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
-        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
-        await backend.showManyControls()
-        let first = try await call(controller, "browser_read", ["view": "all"])
-        let cursor = try field("next_cursor", in: first)
-        XCTAssertNotEqual(cursor, "none")
-        let before = await backend.counts()
-        await backend.failObservations([.staleDocument])
-        do { _ = try await call(controller, "browser_read", ["cursor": cursor]); XCTFail("A stale continuation cannot become a new read") }
-        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
-        let after = await backend.counts()
-        XCTAssertEqual(after.observes, before.observes + 1)
-        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
-        _ = await controller.shutdown()
+        for tool in ["browser_read", "browser_continue"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let first = try await call(controller, "browser_read", ["view": "all"])
+            let cursor = try field("next_cursor", in: first)
+            XCTAssertNotEqual(cursor, "none")
+            let before = await backend.counts()
+            await backend.failObservations([.staleDocument])
+            do { _ = try await call(controller, tool, ["cursor": cursor]); XCTFail("A stale continuation cannot become a new read") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + 1)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
     }
 
     func testCompletedReadOffersNoPlaceholderCursorAndInventedNoneStillRejectsWithoutDispatch() async throws {
@@ -1850,8 +2007,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let first = try await call(controller, "browser_read", ["view": "overview", "query": "Extra control"])
         let metadata = try actionReferenceMetadata(first)
         let continuation = try XCTUnwrap(metadata["continuation"] as? [String: Any])
-        XCTAssertEqual(Set(continuation.keys), ["tool", "arguments"])
-        XCTAssertEqual(continuation["tool"] as? String, "browser_read")
+        XCTAssertEqual(Set(continuation.keys), ["arguments"])
+        XCTAssertNil(continuation["tool"], "The native page must not prescribe a tool absent from a saved catalog")
         let arguments = try XCTUnwrap(continuation["arguments"] as? [String: Any])
         XCTAssertEqual(Set(arguments.keys), ["cursor"], "Do not suggest a new view/query beside a retained cursor")
         XCTAssertEqual(arguments["cursor"] as? String, try field("next_cursor", in: first))
@@ -2198,7 +2355,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 let cursor = try field("next_cursor", in: fresh)
                 let source = try field("source_observation", in: fresh)
                 let continuation = try XCTUnwrap(try actionReferenceMetadata(fresh)["continuation"] as? [String: Any])
-                XCTAssertEqual(continuation["tool"] as? String, "browser_read")
+                XCTAssertNil(continuation["tool"], "The exact arguments work with the admitted continuation tool")
                 let arguments = try XCTUnwrap(continuation["arguments"] as? [String: String])
                 XCTAssertEqual(arguments, ["cursor": cursor], "Post-input overview supplies a cursor-only call too")
                 let next = try await call(controller, "browser_read", arguments)
@@ -2506,7 +2663,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     }
 
     func testBuiltInContinuationSchemasNameTheirOwnCursorTools() throws {
-        for name in ["browser_read", "browser_tabs"] {
+        for name in ["browser_continue", "browser_tabs"] {
             let spec = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
             let description = try XCTUnwrap(spec["description"] as? String)
             XCTAssertTrue(description.contains(name + "(cursor=next_cursor)"))
@@ -2517,7 +2674,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 
     func testOptionalBrowserReadArgumentsAdvertiseOmissionAndRejectEmptyStrings() throws {
         for name in ["browser_tabs", "browser_read"] {
-            let specification = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            let specification: [String: Any]
+            if name == "browser_read" { specification = EmbeddedBrowserTools.legacyReadDefinition }
+            else { specification = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }) }
             let schema = try XCTUnwrap(specification["inputSchema"] as? [String: Any])
             let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
             let required = try XCTUnwrap(schema["required"] as? [String])
@@ -2705,19 +2864,21 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     }
 
     func testExactCurrentReadCursorStillReportsExpiryInsteadOfInvalidIdentifier() async throws {
-        let backend = EmbeddedBrowserFixtureBackend()
-        let controller = EmbeddedBrowserToolController(transport: backend, readLifetime: .zero)
-        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
-        await backend.showManyControls()
-        let page = try await call(controller, "browser_read", ["view": "all"])
-        let before = await backend.counts()
-        do {
-            _ = try await call(controller, "browser_read", ["cursor": field("next_cursor", in: page)])
-            XCTFail("An issued but expired cursor must not become a fresh read")
-        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
-        let after = await backend.counts()
-        XCTAssertEqual(after, before)
-        _ = await controller.shutdown()
+        for tool in ["browser_read", "browser_continue"] {
+            let backend = EmbeddedBrowserFixtureBackend()
+            let controller = EmbeddedBrowserToolController(transport: backend, readLifetime: .zero)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let page = try await call(controller, "browser_read", ["view": "all"])
+            let before = await backend.counts()
+            do {
+                _ = try await call(controller, tool, ["cursor": field("next_cursor", in: page)])
+                XCTFail("An issued but expired cursor must not become a fresh read")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            let after = await backend.counts()
+            XCTAssertEqual(after, before)
+            _ = await controller.shutdown()
+        }
     }
 
     func testNullReadCursorDoesNotRelaxOtherArgumentsOrRefundRecoveryBudget() async throws {
@@ -2809,7 +2970,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertTrue(detail.contains("admitted input invalidates them"), file: file, line: line)
         XCTAssertFalse(detail.contains("snapshot ID or tab handle"), "An earlier issued cursor is not necessarily an identifier of another kind", file: file, line: line)
         XCTAssertTrue(detail.contains("No read or input was dispatched"), file: file, line: line)
-        XCTAssertTrue(detail.contains("Omit cursor or use null"), file: file, line: line)
+        XCTAssertTrue(detail.contains("Use browser_read without cursor"), file: file, line: line)
         XCTAssertLessThanOrEqual(detail.utf8.count, 384, file: file, line: line)
     }
 

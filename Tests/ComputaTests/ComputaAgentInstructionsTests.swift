@@ -144,7 +144,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 XCTAssertFalse(instructions.contains(tool), tool)
             }
             XCTAssertFalse(instructions.contains("Chrome"))
-            XCTAssertTrue(instructions.contains("browser_read(cursor=next_cursor)"))
+            XCTAssertTrue(instructions.contains("offered page continuation tool with next_cursor"))
             XCTAssertTrue(instructions.contains("browser_tabs(cursor=next_cursor)"))
             XCTAssertTrue(instructions.contains("computer_v2_open"))
             XCTAssertTrue(instructions.contains("computer_v2_status does not bind an app or read a page"))
@@ -157,7 +157,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "functions.browser_read": "browser_read", "functions.browser_tabs": "browser_tabs", "computer_v2_continue": "computer_v2_continue",
         ])
         XCTAssertFalse(contract.contains("Chrome"))
-        XCTAssertTrue(contract.contains("browser_read(cursor=next_cursor)"))
+        XCTAssertTrue(contract.contains("offered page continuation tool with next_cursor"))
         XCTAssertTrue(contract.contains("browser_tabs(cursor=next_cursor)"))
     }
     func testAppOwnedInstructionsPreservePermissionsAndEvidenceWithoutForeignPolicy() {
@@ -213,7 +213,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertEqual(legacy, ComputaAgentInstructions.nativeLegacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.diagnosticEvidence + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_snapshot(view=all or content)"))
         XCTAssertFalse(legacy.contains("computer_v2_follow_link"))
-        XCTAssertTrue(legacy.contains("browser_read(cursor=next_cursor)"))
+        XCTAssertTrue(legacy.contains("offered page continuation tool with next_cursor"))
         XCTAssertFalse(legacy.contains("computer_v2_read_region"))
     }
 
@@ -401,6 +401,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
         let refusal = "Under the current background-only interaction policy, I am limited to read-only operations. Sending an email is not permitted."
         let current = "Send the requested message to recipient@example.test."
+        let ongoing = "For this entire conversation, never send outside example.test."
         let authority = ComputaAgentInstructions.backgroundActionAuthority
         // Cold-resumed threads can retain the original developer message. The
         // current host suffix and website handoff must not depend on replacing it.
@@ -408,6 +409,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                                                    with: "Bind anew each turn.").replacingOccurrences(of: ComputaAgentInstructions.browserSearchEvidence, with: "")
         let input: [[String: Any]] = [
             ["role": "developer", "content": retained],
+            ["role": "user", "content": ongoing],
             ["role": "user", "content": "Find the attachment. Read only; do not send anything."],
             ["role": "assistant", "content": refusal],
             ["role": "user", "content": [["type": "input_text", "text": current],
@@ -424,11 +426,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let afterHistory = String(web.prompt[end.upperBound...])
         XCTAssertEqual(afterHistory.components(separatedBy: authority).count - 1, 1,
                        "The fresh browser handoff cannot be suppressed by old retained instructions or refusals")
-        XCTAssertTrue(afterHistory.contains("Read-only tasks allow navigation"))
-        XCTAssertTrue(afterHistory.contains("and search/filter inputs, but no message sends, edits, deletions or settings changes"))
-        XCTAssertTrue(afterHistory.contains("Preserve ongoing user constraints"))
+        XCTAssertTrue(afterHistory.contains("Read-only allows"))
+        XCTAssertTrue(afterHistory.contains("navigation/search/filtering, not sends, edits, deletions or settings changes"))
+        XCTAssertTrue(afterHistory.contains("Honor explicit ongoing restrictions"))
         XCTAssertTrue(afterHistory.contains("actual approvals/denials and Stop"))
-        XCTAssertTrue(afterHistory.contains("A later explicit send authorizes that send only"))
+        XCTAssertTrue(afterHistory.contains("A current explicit send request authorizes only that send"))
+        XCTAssertTrue(afterHistory.contains("no second request is"))
+        XCTAssertTrue(afterHistory.contains("needed after a task-local read-only task"))
         let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: web.continuationRequest) as? NSDictionary)
         XCTAssertEqual(continued, original as NSDictionary, "Current guidance must not rewrite earlier user constraints or history")
 
@@ -444,6 +448,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: api.body) as? [String: Any])
         let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
         XCTAssertTrue(messages.contains { $0["role"] as? String == "assistant" && $0["content"] as? String == refusal })
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["content"] as? String == ongoing },
+                      "Current-send clarification must not rewrite or promote an ongoing user restriction")
         XCTAssertTrue(messages.contains { $0["role"] as? String == "developer" && $0["content"] as? String == retained })
         let latest = try XCTUnwrap(messages.last { $0["role"] as? String == "user" })
         let latestText = try XCTUnwrap(latest["content"] as? String)
@@ -452,6 +458,15 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(latestText.contains(authority))
         XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserTurnLifecycle))
         XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserSearchEvidence))
+        let responsesProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let responses = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: apiInput),
+            selection: .init(provider: responsesProvider, model: responsesProvider.models[0]),
+            threadID: "550e8400-e29b-41d4-a716-446655440000",
+            capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+        let responsesBody = try XCTUnwrap(JSONSerialization.jsonObject(with: responses.body) as? [String: Any])
+        XCTAssertEqual(responsesBody["input"] as? NSArray, input as NSArray,
+                       "Explicit ongoing restrictions, task-local bounds and the new request preserve their original user authority and bytes")
         XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserTurnLifecycle).count - 1, 1)
         XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserSearchEvidence).count - 1, 1)
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(authority),
@@ -474,7 +489,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Broaden unrelated results"))
         XCTAssertTrue(text.contains("Use view=content for message text"))
         XCTAssertTrue(text.contains("view=all includes toolbars"))
-        XCTAssertTrue(text.contains("Fresh reads restart page one; next_cursor alone advances, without view/query"))
+        XCTAssertTrue(text.contains("Fresh reads restart page one; the offered continuation tool takes next_cursor alone"))
         XCTAssertTrue(text.contains("Partial reads or narrow-query misses leave absence unverified"))
         XCTAssertTrue(text.contains("including input echoes; counts are not site results"))
         XCTAssertTrue(text.contains("Report observed positives with their scope"))
@@ -767,7 +782,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("browser_fill: field's fill_ref, not its label's"))
         XCTAssertTrue(text.contains("Snapshot IDs/indices are not browser input references"))
         XCTAssertTrue(text.contains("Input is not outcome proof"))
-        XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
+        XCTAssertTrue(text.contains("offered page continuation tool with next_cursor"))
     }
 
     func testBrowserLifecycleContractSurvivesNativeAndFreshWebsiteHandoffs() {

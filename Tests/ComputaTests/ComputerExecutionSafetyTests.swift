@@ -142,6 +142,36 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         XCTAssertTrue(key.contains("snapshot_id=literal user text"))
     }
 
+    func testLegacyAndSplitContinuationsShareFailureBudgetWithoutFreshReadRefund() {
+        let legacy = ComputerUnchangedAttemptGuard.key(tool: "browser_read",
+            arguments: ["cursor": "old", "view": "content"])
+        let split = ComputerUnchangedAttemptGuard.key(tool: "browser_continue",
+            arguments: ["cursor": "different"])
+        XCTAssertEqual(legacy, split)
+        for arguments in [[String: Any](), ["cursor": NSNull()], ["cursor": 42],
+                          ["cursor": "", "view": "all"]] {
+            XCTAssertEqual(split, ComputerUnchangedAttemptGuard.key(tool: "browser_continue", arguments: arguments))
+        }
+        XCTAssertEqual(legacy, ComputerUnchangedAttemptGuard.key(tool: "browser_read",
+            arguments: ["cursor": "changed", "query": "another query", "view": "all"]))
+        let fresh = ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: [:])
+        XCTAssertNotEqual(fresh, split)
+        XCTAssertEqual(fresh, ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["cursor": NSNull()]))
+        var guardrail = ComputerUnchangedAttemptGuard()
+        let scope = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        guardrail.observedBrowserReadScope(scope)
+        XCTAssertFalse(guardrail.failed(key: legacy))
+        guardrail.succeeded(key: fresh)
+        guardrail.observedBrowserReadScope(scope)
+        XCTAssertFalse(guardrail.failed(key: split))
+        XCTAssertTrue(guardrail.failed(key: legacy))
+        guardrail.succeeded(key: split)
+        XCTAssertFalse(guardrail.failed(key: legacy), "Only an actual matching successful continuation resets this family")
+        XCTAssertFalse(guardrail.failed(key: split))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: scope.bindingHandle, committedDocumentID: UUID()))
+        XCTAssertFalse(guardrail.failed(key: split), "A genuinely changed native document establishes a new read scope")
+    }
+
     func testObservedStableControlIdentitySurvivesSnapshotReindexing() {
         let first: [String: Any] = ["snapshot_id": "one", "element_index": 7, "text": "query"]
         let later: [String: Any] = ["snapshot_id": "two", "element_index": 22, "text": "query"]

@@ -10,17 +10,62 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
+    enum BrowserReadMode: Sendable, Equatable { case fresh, continuation }
+
+    /// Capability comes from the exact registered native shape, never its name
+    /// alone. The engine can omit scalar constraints while retaining structure.
+    static func browserReadMode(name: String, namespace: String?, schema: [String: Any]) -> BrowserReadMode? {
+        guard namespace == nil || namespace == "functions",
+              name == "browser_read" || name == "browser_continue",
+              let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
+              matchesNativeReadSchema(schema, current) else { return nil }
+        return name == "browser_read" ? .fresh : .continuation
+    }
+
+    private static func matchesNativeReadSchema(_ schema: [String: Any], _ canonical: [String: Any]) -> Bool {
+        let omittable: Set<String> = ["minLength", "maxLength", "pattern"]
+        guard schema["type"] as? String == "object",
+              Set(schema.keys).subtracting(["description"]).isSubset(of: Set(canonical.keys)),
+              let properties = schema["properties"] as? [String: [String: Any]],
+              let expected = canonical["properties"] as? [String: [String: Any]], Set(properties.keys) == Set(expected.keys),
+              let required = schema["required"] as? [String], let wanted = canonical["required"] as? [String],
+              Set(required) == Set(wanted), Set(required).count == required.count else { return false }
+        guard let additional = schema["additionalProperties"] as? NSNumber,
+              CFGetTypeID(additional) == CFBooleanGetTypeID(), !additional.boolValue else { return false }
+        for (name, property) in properties {
+            guard let target = expected[name],
+                  Set(property.keys).subtracting(["description"]).isSubset(of: Set(target.keys)),
+                  Set(target.keys).subtracting(omittable.union(["description"])).isSubset(of: Set(property.keys)) else { return false }
+            for (key, value) in property where key != "description" {
+                guard let wanted = target[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return false }
+            }
+        }
+        return true
+    }
+
     /// Recognize complete app-owned read versions only. Native cursor state
     /// decides whether repeated filters match; historical calls stay byte-exact.
     static func browserCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
         -> (historical: [String: Any], current: [String: Any])? {
+        if name == "browser_read", browserReadMode(name: name, namespace: namespace, schema: schema) == .fresh,
+           let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
+           var historical = EmbeddedBrowserTools.legacyReadDefinition["inputSchema"] as? [String: Any],
+           var properties = historical["properties"] as? [String: Any],
+           let saved = schema["properties"] as? [String: Any] {
+            // Completed calls retain known legacy syntax, not an identity alias.
+            // Preserve saved scalar constraints on the fresh view/query fields.
+            for (key, value) in saved { properties[key] = value }
+            historical["properties"] = properties
+            return (historical, current)
+        }
         var canonical: [String: [String: Any]] = ["cursor": ["type": ["string", "null"], "minLength": 1]]
         if name == "browser_read" {
             canonical["view"] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
             canonical["query"] = ["type": "string", "minLength": 1]
         }
         guard ["browser_read", "browser_tabs"].contains(name), namespace == nil || namespace == "functions",
-              let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
+              let current = (name == "browser_read" ? EmbeddedBrowserTools.legacyReadDefinition :
+                EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name }))?["inputSchema"] as? [String: Any],
               schema["type"] as? String == "object",
               Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description", "oneOf"]),
               let properties = schema["properties"] as? [String: [String: Any]], Set(properties.keys) == Set(canonical.keys),
@@ -167,10 +212,21 @@ enum ComputaModelToolCatalog {
                   let properties = schema["properties"] as? [String: Any] else { return }
             result[name] = properties
         }
-        func visible(_ definition: [String: Any], namespace: String? = nil) -> [String: Any]? {
+        func hasContinuation(_ values: [[String: Any]], namespace: String?) -> Bool {
+            values.contains { definition in
+                guard definition["type"] as? String == "function", definition["name"] as? String == "browser_continue" else { return false }
+                let schemas = ["parameters", "inputSchema"].compactMap { definition[$0] as? [String: Any] }
+                return !schemas.isEmpty && schemas.allSatisfy {
+                    browserReadMode(name: "browser_continue", namespace: namespace, schema: $0) == .continuation
+                }
+            }
+        }
+        func visible(_ definition: [String: Any], namespace: String? = nil, continuation: Bool) -> [String: Any]? {
             var value = definition
             if value["type"] as? String == "namespace", let children = value["tools"] as? [[String: Any]] {
-                let tools = children.compactMap { visible($0, namespace: value["name"] as? String) }
+                let childNamespace = value["name"] as? String
+                let hasContinue = hasContinuation(children, namespace: childNamespace)
+                let tools = children.compactMap { visible($0, namespace: childNamespace, continuation: hasContinue) }
                 guard !tools.isEmpty else { return nil }
                 value["tools"] = tools
                 return value
@@ -184,10 +240,32 @@ enum ComputaModelToolCatalog {
                 for key in ["parameters", "inputSchema"] {
                     guard let schema = value[key] as? [String: Any],
                           let variants = browserCursorSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
-                    value[key] = variants.current
-                    value["description"] = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"]
+                    let definition = name == "browser_read" && !continuation &&
+                        browserReadMode(name: name, namespace: namespace, schema: schema) != .fresh
+                        ? EmbeddedBrowserTools.legacyReadDefinition
+                        : EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }
+                    value[key] = continuation && name == "browser_read" ? definition?["inputSchema"] : variants.current
+                    value["description"] = definition?["description"]
+                    if name == "browser_read", !continuation,
+                       browserReadMode(name: name, namespace: namespace, schema: schema) == .fresh,
+                       let description = value["description"] as? String {
+                        value["description"] = description.replacingOccurrences(
+                            of: "Use browser_continue(cursor=next_cursor) to advance the same capture; changing filters requires this fresh tool.",
+                            with: "Use a page continuation tool only if offered; changing filters requires this fresh tool.")
+                    }
                 }
                 // Do not widen optionality or repair a modified/foreign schema.
+                return value
+            }
+            if name == "browser_continue" {
+                guard value["type"] as? String == "function" else { return value }
+                for key in ["parameters", "inputSchema"] {
+                    guard let schema = value[key] as? [String: Any],
+                          browserReadMode(name: name, namespace: namespace, schema: schema) == .continuation,
+                          let canonical = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name }) else { continue }
+                    value[key] = canonical["inputSchema"]
+                    value["description"] = canonical["description"]
+                }
                 return value
             }
             if value["type"] as? String == "function", ["browser_click", "browser_fill"].contains(name) {
@@ -239,7 +317,8 @@ enum ComputaModelToolCatalog {
             }
             return value
         }
-        return definitions.compactMap { visible($0) }
+        let continuation = hasContinuation(definitions, namespace: nil)
+        return definitions.compactMap { visible($0, continuation: continuation) }
     }
 
     static func nativeToolDescriptions(modelID: String) -> [String: String] {

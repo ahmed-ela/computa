@@ -193,7 +193,7 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
                   timestamp: outcome.timestamp)
         }
         let expected = ["browser_tabs", "browser_open", "browser_bind", "browser_navigate",
-                        "browser_read", "browser_click", "browser_fill", "browser_wait", "browser_close"].map { record($0) }
+                        "browser_read", "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close"].map { record($0) }
         for value in expected { try store.append(value) }
         XCTAssertEqual(try NativeFailureEvidenceStore(directory: directory).load(threadID: outcome.threadID), expected)
 

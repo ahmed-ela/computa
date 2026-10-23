@@ -163,7 +163,7 @@ enum APIModelResponseCodec {
     /// names, schema keys and rejected argument values never enter diagnostics.
     enum DiagnosticBuiltinTool: String, Codable, Sendable {
         case browserTabs = "browser_tabs", browserOpen = "browser_open", browserBind = "browser_bind"
-        case browserNavigate = "browser_navigate", browserRead = "browser_read", browserClick = "browser_click"
+        case browserNavigate = "browser_navigate", browserRead = "browser_read", browserContinue = "browser_continue", browserClick = "browser_click"
         case browserFill = "browser_fill", browserWait = "browser_wait", browserClose = "browser_close"
     }
     enum DiagnosticSchemaField: String, Codable, Sendable {
@@ -192,7 +192,7 @@ enum APIModelResponseCodec {
             // decoding only recognizes this closed historical vocabulary.
             let fields: Set<DiagnosticSchemaField>
             switch tool {
-            case .browserTabs: fields = [.cursor]
+            case .browserTabs, .browserContinue: fields = [.cursor]
             case .browserOpen, .browserNavigate: fields = [.url]
             case .browserBind: fields = [.tabID]
             case .browserRead: fields = [.cursor, .query, .view]
@@ -1385,12 +1385,17 @@ enum APIModelResponseCodec {
                      finalTextSource: reply.finalTextSource)
     }
 
-    private static func diagnosticBuiltinSchema(_ tool: DiagnosticBuiltinTool) -> [String: Any]? {
-        EmbeddedBrowserTools.definitions().first { $0["name"] as? String == tool.rawValue }?["inputSchema"] as? [String: Any]
+    private static func diagnosticBuiltinSchema(_ tool: Tool, known: DiagnosticBuiltinTool) -> [String: Any]? {
+        if known == .browserRead,
+           (tool.schema["properties"] as? [String: Any])?["cursor"] != nil,
+           ComputaModelToolCatalog.browserCursorSchemaVariants(name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil {
+            return EmbeddedBrowserTools.legacyReadDefinition["inputSchema"] as? [String: Any]
+        }
+        return EmbeddedBrowserTools.definitions().first { $0["name"] as? String == known.rawValue }?["inputSchema"] as? [String: Any]
     }
     private static func builtinSchemaLocation(tool: Tool, violation: SchemaViolation) -> BuiltinSchemaLocation? {
         guard !tool.custom, tool.namespace == nil || tool.namespace == "functions",
-              let known = DiagnosticBuiltinTool(rawValue: tool.name), let canonical = diagnosticBuiltinSchema(known),
+              let known = DiagnosticBuiltinTool(rawValue: tool.name), let canonical = diagnosticBuiltinSchema(tool, known: known),
               let actualType = violation.actualType, violation.path.count <= 1,
               tool.schema["type"] as? String == "object", strictBool(tool.schema["additionalProperties"]) == false,
               Set(tool.schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description", "oneOf"]),

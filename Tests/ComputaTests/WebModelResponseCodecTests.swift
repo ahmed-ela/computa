@@ -168,8 +168,67 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testSplitBrowserReadAndContinueContractsPreserveWebsiteHistoryAndRegisteredNames() throws {
+        func function(_ name: String) throws -> [String: Any] {
+            var tool = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            tool["parameters"] = tool.removeValue(forKey: "inputSchema")
+            return tool
+        }
+        let read = try function("browser_read"), next = try function("browser_continue")
+        var legacy = EmbeddedBrowserTools.legacyReadDefinition
+        legacy["parameters"] = legacy.removeValue(forKey: "inputSchema")
+        let oldArgs = " { \"cursor\":\"old\", \"view\":\"content\", \"query\":\"é\" } "
+        let history: [[String: Any]] = [
+            ["type": "function_call", "call_id": "old-read", "name": "browser_read", "namespace": "functions", "arguments": oldArgs],
+            ["type": "function_call_output", "call_id": "old-read", "output": "Historical page"],
+            ["role": "user", "content": "Continue the current page."]]
+        for provider in ["chatgpt", "gemini"] {
+            let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [read, next]]]
+            let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": history, "tools": tools])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            XCTAssertEqual(prepared.offeredToolNames, ["functions.browser_read", "functions.browser_continue"])
+            try assertContiguousRequestValues(original, in: prepared, expectedToolDefinitions: tools)
+            XCTAssertEqual(prepared.continuationRequest, original)
+            for (name, arguments) in [("browser_read", #"{"view":"content"}"#), ("browser_continue", #"{"cursor":"exact-issued-é"}"#)] {
+                let text = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"functions.\(name)\",\"arguments\":\(arguments)}]}"
+                let reply = try WebModelResponseCodec.parseReply(text, request: prepared, requireEnvelope: true)
+                let response = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelResponseCodec.completedResponse(for: reply, request: prepared)) as? [String: Any])
+                let call = try XCTUnwrap((response["output"] as? [[String: Any]])?.first)
+                XCTAssertEqual(call["name"] as? String, name)
+                let nextHistory = history + [call, ["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"]), "output": "Next observation"]]
+                let nextBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": nextHistory, "tools": tools])
+                let continued = try WebModelResponseCodec.prepareRequest(nextBody)
+                XCTAssertEqual(continued.continuationRequest, nextBody)
+                try assertContiguousRequestValues(nextBody, in: continued, expectedToolDefinitions: tools)
+            }
+            for (name, arguments) in [("browser_read", #"{"cursor":null}"#), ("browser_read", #"{"cursor":"issued"}"#),
+                                     ("browser_continue", "{}"), ("browser_continue", #"{"cursor":null}"#),
+                                     ("browser_continue", #"{"cursor":""}"#), ("browser_continue", #"{"cursor":"issued","view":"all"}"#)] {
+                let text = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"functions.\(name)\",\"arguments\":\(arguments)}]}"
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared, requireEnvelope: true)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidBrowserReadArguments)
+                }
+            }
+            let oldBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": history,
+                "tools": [["type": "namespace", "name": "functions", "tools": [legacy]]]])
+            let saved = try WebModelResponseCodec.prepareRequest(oldBody)
+            XCTAssertEqual(saved.offeredToolNames, ["functions.browser_read"])
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"functions.browser_continue","arguments":{"cursor":"issued"}}]}"#,
+                request: saved, requireEnvelope: true)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("functions.browser_continue"))
+            }
+            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"functions.browser_read","arguments":{"cursor":"issued","view":"content"}}]}"#,
+                request: saved, requireEnvelope: true))
+        }
+        let foreignBody = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": "Use the custom contract.",
+            "tools": [["type": "namespace", "name": "mcp_external", "tools": [next]]]])
+        let foreign = try WebModelResponseCodec.prepareRequest(foreignBody)
+        XCTAssertNoThrow(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"mcp_external.browser_continue","arguments":{"cursor":null}}]}"#,
+            request: foreign, requireEnvelope: true), "The new native-only validator must not replace foreign executor semantics")
+    }
+
     func testSavedFlatAndComposedReadSchemasRefreshWithoutRewritingWebsiteContinuation() throws {
-        let native = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+        let native = EmbeddedBrowserTools.legacyReadDefinition
         var current = native
         current["parameters"] = current.removeValue(forKey: "inputSchema")
         var savedSchema = try XCTUnwrap(current["parameters"] as? [String: Any])
@@ -431,8 +490,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                     XCTAssertTrue(description.contains("native app already bound with computer_v2_open"), file: file, line: line)
                     XCTAssertTrue(description.contains("computer_v2_status does not bind or read a page"), file: file, line: line)
                     XCTAssertTrue(description.contains("unbound read requires computer_v2_open first"), file: file, line: line)
-                    XCTAssertTrue(description.contains("Webpage tasks use browser_* directly without native app discovery/status"), file: file, line: line)
-                    XCTAssertTrue(description.contains("pages and cursors belong to browser_read"), file: file, line: line)
+                    XCTAssertTrue(description.contains("Webpages use browser_read and the offered browser page-continuation tool without native app discovery/status"), file: file, line: line)
+                    XCTAssertFalse(description.contains("browser_read(cursor="), file: file, line: line)
                     XCTAssertFalse(description.lowercased().contains("chrome"), file: file, line: line)
                 }
                 dictionary.removeValue(forKey: "description")
