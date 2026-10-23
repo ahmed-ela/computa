@@ -194,6 +194,18 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let computerInstructions = ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.capabilityEvidence
         XCTAssertLessThan(computerInstructions.utf8.count, 4_600, "The reference interface retains its existing instruction budget.")
         XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_900, "CLI guidance includes bounded repository and per-command outcome context.")
+        let commandInstructions = ComputaAgentInstructions.commandLine.replacingOccurrences(of: "\n", with: " ")
+        for rule in [
+            "Use observed absolute paths or \"$HOME/...\"; quoted ~ is literal",
+            "Locate files before content search; prefer rg with bounded output",
+            "Scope product diagnostics to relevant config/help files; skip histories/logs unless needed",
+            "Fix observed path errors before repeating",
+            "Commands use a private HOME and no login-shell initialization",
+            "never bypass permissions, browser controls, site access restrictions, or a denied command with another tool",
+            "Do not replay uncertain commands",
+        ] { XCTAssertTrue(commandInstructions.contains(rule), rule) }
+        XCTAssertTrue(ComputaAgentInstructions.commandLine.hasSuffix(ComputaAgentInstructions.commandChecks),
+                      "Path and search guidance must preserve the shared command outcome checks.")
     }
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {

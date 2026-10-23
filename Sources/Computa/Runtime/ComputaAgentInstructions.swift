@@ -241,6 +241,10 @@ enum ComputaAgentInstructions {
     Commands use a private HOME and no login-shell initialization, so personal CLI
     configuration or credentials may be unavailable. Do not copy credentials or
     alter security settings to work around that boundary.
+    Use observed absolute paths or "$HOME/..."; quoted ~ is literal. Locate files
+    before content search; prefer rg with bounded output. Scope product diagnostics
+    to relevant config/help files; skip histories/logs unless needed. Fix observed
+    path errors before repeating.
     A running process/session ID is not success. Poll that exact returned session
     with write_stdin and empty chars; use nonempty stdin only for the intended input.
     Verify output and the final exit code before claiming completion. On failure,

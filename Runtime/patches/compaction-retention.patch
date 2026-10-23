@@ -2650,10 +2650,10 @@ index 0000000..f24d6ff
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..e4db142
+index 0000000..ece90e6
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,675 @@
+@@ -0,0 +1,697 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
@@ -2817,13 +2817,17 @@ index 0000000..e4db142
 +        latest_output_index.is_some_and(|index| browser_outputs.get(&index).is_some_and(|value| value.complete));
 +    // Try all bounded historical excerpts before reducing the latest observation. No receipt
 +    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
-+    for (latest_text_cap, older_text_cap) in
++    for (latest_text_cap, older_text_cap, omit_optional_context) in
 +        LATEST_OUTPUT_TEXT_CAPS.into_iter().flat_map(|latest| {
 +            OUTPUT_TEXT_CAPS
 +                .into_iter()
 +                .filter(move |older| *older <= latest)
-+                .map(move |older| (latest, older))
-+        })
++                .map(move |older| (latest, older, false))
++        }).chain(std::iter::once((
++            MAX_LATEST_OUTPUT_TEXT_BYTES,
++            OUTPUT_TEXT_CAPS[OUTPUT_TEXT_CAPS.len() - 1],
++            true,
++        )))
 +    {
 +        let mut retained = Vec::new();
 +        let mut retained_bytes = 2usize; // Provider input-array brackets.
@@ -2861,7 +2865,11 @@ index 0000000..e4db142
 +                // the producer's complete page, or fail within existing bounds.
 +                output.clone()
 +            } else if let Some(observation) = browser_outputs.get(&output_index) {
-+                historical_browser_output(output, observation, text_cap)
++                let mut excerpt = historical_browser_output(output, observation, text_cap);
++                if omit_optional_context {
++                    omit_historical_browser_context(&mut excerpt);
++                }
++                excerpt
 +            } else {
 +                bounded_output(output, text_cap, keep_image)?
 +            };
@@ -3126,6 +3134,20 @@ index 0000000..e4db142
 +    FunctionCallOutputPayload { body: FunctionCallOutputBody::ContentItems(items), success: source.success }
 +}
 +
++// A final, bounded candidate can omit optional historical context when the
++// ordinary candidates exhaust the aggregate budget. Apply this only to the
++// typed excerpt just produced above, after row selection: freed bytes are not
++// refilled with different rows, and the latest complete observation is untouched.
++fn omit_historical_browser_context(output: &mut FunctionCallOutputPayload) {
++    let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { return };
++    if !matches!(items.first(), Some(FunctionCallOutputContentItem::InputText { text })
++        if text == HISTORICAL_BROWSER_OBSERVATION_MARKER) { return; }
++    let Some(FunctionCallOutputContentItem::InputText { text }) = items.last_mut() else { return };
++    *text = text.split('\n').filter(|line| {
++        !line.starts_with("observed_url=") && !line.starts_with("observed_title_fragment=")
++    }).collect::<Vec<_>>().join("\n");
++}
++
 +fn valid_browser_dispatch_cue(tool: &str, receipt: &str) -> bool {
 +    // The small native dispatch cue remains a separate item. It confirms input
 +    // dispatch only, never that the website accepted or completed the action.
@@ -3331,10 +3353,10 @@ index 0000000..e4db142
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..7b5dfc2
+index 0000000..58c0662
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,1579 @@
+@@ -0,0 +1,1687 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -4170,6 +4192,106 @@ index 0000000..7b5dfc2
 +    assert_receipt_bounds(&reduced);
 +}
 +
++fn minimum_receipt_candidate(history: &[ResponseItemEnvelope], omit_context: bool) -> Vec<ResponseItemEnvelope> {
++    let mut result = history.to_vec();
++    let latest = history.len() - 1;
++    for index in (1..history.len()).step_by(2) {
++        let ResponseItem::FunctionCallOutput { output, .. } = &history[index].item else { unreachable!() };
++        let browser = browser_observation_retention(&history[index - 1].item, output, index == latest).unwrap();
++        let mut body = if index == latest && browser.as_ref().is_some_and(|value| value.complete) { output.clone() }
++            else if let Some(observation) = browser { historical_browser_output(output, &observation, 256) }
++            else { bounded_output(output, 256, false).unwrap() };
++        if omit_context && index != latest { omit_historical_browser_context(&mut body); }
++        let ResponseItem::FunctionCallOutput { output, .. } = &mut result[index].item else { unreachable!() }; *output = body;
++    }
++    result
++}
++
++fn external_receipt_bytes(history: &[ResponseItemEnvelope]) -> usize {
++    let mut items: Vec<_> = history.iter().map(|entry| entry.item.clone()).collect();
++    prepare_input_for_non_openai_provider(&mut items);
++    serde_json::to_vec(&items).unwrap().len()
++}
++
++#[test]
++fn final_historical_context_candidate_recovers_recorded_seventeen_pair_byte_pressure() {
++    // Same native tool sequence and latest 3,905-byte text size as the recorded
++    // 227 failure, using public synthetic content. Whitespace-only argument
++    // padding calibrates its exact 12,982-byte pre-fallback provider total.
++    let names = ["browser_tabs", "browser_open", "browser_read", "browser_read", "browser_navigate",
++        "browser_click", "browser_read", "browser_read", "browser_read", "browser_navigate",
++        "browser_read", "browser_read", "browser_click", "browser_read", "browser_fill", "browser_read", "browser_click"];
++    let mut history = Vec::new();
++    for (index, name) in names.iter().enumerate() {
++        let id = format!("recorded-shape-{index:02}");
++        let mut entries = if [2, 6, 7, 8, 10, 11, 13, 15].contains(&index) {
++            complete_browser_pair(&id, &native_browser_page(&[native_browser_row(0, &"a sufficiently long observed label ".repeat(10), "old-target")]))
++        } else if index == 14 || index == 16 {
++            complete_browser_action_pair(&id, if index == 14 { "fill" } else { "click" }, "x")
++        } else { pair(&id, "current", &"bounded prior evidence ".repeat(50)) };
++        if let ResponseItem::FunctionCall { name: tool, .. } = &mut entries[0].item { *tool = name.to_string(); }
++        history.extend(entries);
++    }
++    let latest_index = history.len() - 1;
++    let ResponseItem::FunctionCallOutput { output, .. } = &mut history[latest_index].item else { unreachable!() };
++    let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++    let FunctionCallOutputContentItem::InputText { text: cue } = &mut items[1] else { unreachable!() };
++    let mut value: serde_json::Value = serde_json::from_str(cue).unwrap();
++    value["label"] = json!(""); let label_len = 128 - value.to_string().len(); value["label"] = json!("a".repeat(label_len)); *cue = value.to_string();
++    let FunctionCallOutputContentItem::InputText { text: body } = &mut items[2] else { unreachable!() };
++    let mut value: serde_json::Value = serde_json::from_str(body).unwrap(); value["current_observation"]["text"] = json!("");
++    let page_len = 3728 - value.to_string().len(); value["current_observation"]["text"] = json!("x".repeat(page_len)); *body = value.to_string();
++    assert_eq!(output_text_bytes(&output.body), 3905);
++    let base = external_receipt_bytes(&minimum_receipt_candidate(&history, false));
++    assert!(base < 12982);
++    if let ResponseItem::FunctionCall { arguments, .. } = &mut history[latest_index - 1].item { arguments.push_str(&" ".repeat(12982 - base)); }
++    let ordinary = minimum_receipt_candidate(&history, false);
++    assert_eq!(external_receipt_bytes(&ordinary), 12982);
++    let expected = minimum_receipt_candidate(&history, true);
++    assert!(external_receipt_bytes(&expected) <= MAX_RECEIPT_BYTES);
++    let retained = super::current_turn_receipts(&history, "current", ReceiptProvider::External).unwrap();
++    assert_eq!(retained, expected);
++    assert_receipt_identity(&history, &retained);
++    assert_eq!(retained.last(), history.last());
++    assert_external_receipt_bounds(&retained);
++    assert_eq!(super::current_turn_receipts(&retained, "current", ReceiptProvider::External).unwrap(), retained);
++    // Exactly fill the fixed provider budget, then exceed it by one byte. The
++    // final candidate must not erase any further call, cue, row, or latest text.
++    let spare = MAX_RECEIPT_BYTES - external_receipt_bytes(&expected);
++    let mut boundary = history.clone();
++    if let ResponseItem::FunctionCall { arguments, .. } = &mut boundary[latest_index - 1].item { arguments.push_str(&" ".repeat(spare)); }
++    let exact = super::current_turn_receipts(&boundary, "current", ReceiptProvider::External).unwrap();
++    assert_eq!(external_receipt_bytes(&exact), MAX_RECEIPT_BYTES);
++    if let ResponseItem::FunctionCall { arguments, .. } = &mut boundary[latest_index - 1].item { arguments.push(' '); }
++    assert!(super::current_turn_receipts(&boundary, "current", ReceiptProvider::External).unwrap_err().to_string().contains("12 KiB"));
++}
++
++#[test]
++fn optional_historical_context_omission_does_not_refill_or_change_rows_cues_or_failures() {
++    let rows = vec![native_browser_row(0, "First target", "first"), native_browser_row(1, "Later target", "later")];
++    for kind in ["read", "click", "fill"] {
++        let pair = if kind == "read" { complete_browser_pair("old", &native_browser_page(&rows)) }
++            else { complete_browser_action_pair("old", kind, &native_browser_page(&rows)) };
++        let ResponseItem::FunctionCallOutput { output, .. } = &pair[1].item else { unreachable!() };
++        let observation = browser_observation_retention(&pair[0].item, output, false).unwrap().unwrap();
++        for cap in [256, 384, 512, 768, 1024, 2048] {
++            let selected = historical_browser_output(output, &observation, cap);
++            let mut omitted = selected.clone(); omit_historical_browser_context(&mut omitted);
++            assert_eq!(omitted.success, selected.success);
++            let before = selected.content_items().unwrap(); let after = omitted.content_items().unwrap();
++            assert_eq!(before.len(), after.len());
++            assert_eq!(&before[..before.len() - 1], &after[..after.len() - 1]);
++            let FunctionCallOutputContentItem::InputText { text: old_text } = before.last().unwrap() else { unreachable!() };
++            let FunctionCallOutputContentItem::InputText { text: new_text } = after.last().unwrap() else { unreachable!() };
++            assert_eq!(old_text.lines().filter(|line| line.starts_with('#')).collect::<Vec<_>>(), new_text.lines().filter(|line| line.starts_with('#')).collect::<Vec<_>>());
++            assert!(!new_text.contains("observed_url=") && !new_text.contains("observed_title_fragment="));
++            assert!(output_text_bytes(&omitted.body) <= output_text_bytes(&selected.body));
++            assert!(browser_observation_retention(&pair[0].item, &omitted, false).unwrap().is_some());
++            let first = omitted.clone(); omit_historical_browser_context(&mut omitted); assert_eq!(omitted, first);
++        }
++    }
++}
++
 +#[test]
 +fn historical_browser_maximum_dispatch_cue_fits_existing_minimum_text_cap() {
 +    for kind in ["click", "fill"] {
@@ -4258,6 +4380,14 @@ index 0000000..7b5dfc2
 +                .flat_map(|index| pair(&format!("old-{index}"), "current", &"old evidence ".repeat(500)))
 +                .collect();
 +            history.extend(complete_browser_action_pair("input", kind, &page));
++            if kind == "click" {
++                let ResponseItem::FunctionCallOutput { output, .. } = &mut history.last_mut().unwrap().item else { unreachable!() };
++                let FunctionCallOutputBody::ContentItems(items) = &mut output.body else { unreachable!() };
++                let FunctionCallOutputContentItem::InputText { text } = &mut items[2] else { unreachable!() };
++                let mut body: serde_json::Value = serde_json::from_str(text).unwrap();
++                body["input_feedback"] = json!({"kind":"native_constraint_validation_observed","during":"synchronous_click", "fields":[{"label":"Message","partial":false,"issues":["value_missing"]}],"fields_omitted":false,"next":"Native invalid events occurred during this click. Inspect current field constraints before a new action. Page handlers may still have acted; submission and delivery remain unverified. Do not replay."});
++                *text = body.to_string();
++            }
 +            let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
 +            assert_receipt_identity(&history, &retained);
 +            assert_eq!(retained.last(), history.last());

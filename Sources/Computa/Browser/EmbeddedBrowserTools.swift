@@ -692,8 +692,9 @@ actor EmbeddedBrowserToolController {
             // mutation consumes it synchronously before the first input await.
             contexts[taskKey]?.snapshot = nil
             contexts[taskKey]?.actionReferences.retireCurrent()
+            var feedback: BrowserInputFeedback?
             if tool == "browser_click" {
-                try await broker.perform(
+                feedback = try await broker.perform(
                     taskKey: taskKey, binding: binding, witness: witness,
                     action: "AXPress")
             } else {
@@ -704,7 +705,7 @@ actor EmbeddedBrowserToolController {
             // Input has already completed. Observation failure must not turn
             // that dispatch into an apparent input failure that invites replay.
             let response = try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope,
-                                                      wasFill: tool == "browser_fill", receipt: receipt.compactText)
+                                                      wasFill: tool == "browser_fill", receipt: receipt.compactText, feedback: feedback)
             return .init(response: response.text, actionReceipt: receipt,
                 readFailureScope: contexts[taskKey]?.snapshot.flatMap(EmbeddedBrowserReadFailureScope.init(snapshot:)),
                 completeObservation: response.complete)
@@ -976,18 +977,18 @@ actor EmbeddedBrowserToolController {
     }
 
     private func postInputResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?, wasFill: Bool,
-                                   receipt: String) async throws -> (text: String, complete: Bool) {
+                                   receipt: String, feedback: BrowserInputFeedback?) async throws -> (text: String, complete: Bool) {
         var result: [String: Any] = ["dispatched": true, "no_replay": true, "result_verified": false,
                                      "input_kind": wasFill ? "fill" : "click"]
         let effect = wasFill
             ? "Field replacement and input/change events were dispatched; no Enter key or submit-control click was sent. Page handlers may react."
             : "Click already dispatched."
         do {
-            let encoding = BrowserCompleteObservation.Encoding.input(wasFill: wasFill, receipt: receipt)
+            let encoding = BrowserCompleteObservation.Encoding.input(wasFill: wasFill, receipt: receipt, feedback: feedback)
             let snapshot = try await currentReadObservation(taskKey: taskKey, contextID: contextID,
                 scope: scope, read: SemanticReadRequest(view: .overview), compact: true, compactEncoding: encoding)
             let text = try readResponse(snapshot, taskKey: taskKey, compact: true)
-            let encoded = try encoding.encode(text, snapshotID: snapshot.id)
+            let encoded = try encoding.encode(text, snapshotID: snapshot.id, page: .init(snapshot: snapshot))
             // The broker fits the same envelope before issuing its cursor.
             // Recheck actual published refs; never truncate a capability row.
             guard try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: receipt) == 0 else {
@@ -1000,6 +1001,9 @@ actor EmbeddedBrowserToolController {
                 contexts[taskKey]?.actionReferences.retireCurrent()
             }
             result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
+            if !wasFill, let feedback, !Task.isCancelled, (try? check(taskKey, contextID)) != nil {
+                result["input_feedback"] = feedback.presentation(page: nil)
+            }
             result["action_references"] = ["consumed": true, "next": "browser_read"]
             result["next"] = effect + " Do not repeat this input. Use browser_read for current evidence and new references if the bound tab is still available."
             return (try json(result), false)

@@ -8,6 +8,72 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    func testInvalidEventFeedbackParticipatesInPageBudgetWithoutSkippingContinuationRows() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showManyControls()
+        await backend.reportInvalidFieldOnPress()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let original = try await call(controller, "browser_read")
+        let before = await backend.counts()
+        let clicked = try await controller.executeResult(taskKey: "turn-a", tool: "browser_click",
+            arguments: argumentData(["snapshot_id": snapshotID(original), "element_index": 1]))
+        try assertCompleteActionObservation(clicked)
+        let body = try jsonObject(clicked.response), feedback = try XCTUnwrap(body["input_feedback"] as? [String: Any])
+        let fields = try XCTUnwrap(feedback["fields"] as? [[String: Any]])
+        XCTAssertEqual(fields.first?["label"] as? String, "Flight number")
+        XCTAssertEqual(fields.first?["issues"] as? [String], ["value_missing"])
+        let after = await backend.counts()
+        XCTAssertEqual(after.presses, 1); XCTAssertEqual(after.observes - before.observes, 2)
+        var page = try availableObservation(clicked.response), labels = Set<String>(), pages = 0
+        while true {
+            pages += 1; XCTAssertLessThan(pages, 32)
+            for row in page.split(separator: "\n") where row.hasPrefix("#") {
+                if let label = try publishedString("label", in: String(row)) {
+                    XCTAssertTrue(labels.insert(label).inserted, "Short rows must not be duplicated or skipped while packing feedback")
+                }
+            }
+            guard let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] else { break }
+            page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertTrue(labels.contains("Flight number")); XCTAssertTrue(labels.contains("Check flight"))
+        for index in 10..<110 { XCTAssertTrue(labels.contains("Extra control \(index)")) }
+        let final = await backend.counts()
+        XCTAssertEqual(final.presses, 1); XCTAssertEqual(final.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testInvalidEventFeedbackWithoutCurrentPageHasNoLabelsAndRetiredTurnHasNoFeedback() async throws {
+        for interruption in ["none", "release", "cancel"] {
+            let retired = interruption != "none"
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.reportInvalidFieldOnPress()
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let read = try await call(controller, "browser_read")
+            let input = try argumentData(["snapshot_id": snapshotID(read), "element_index": 1])
+            await backend.configureAfterInput(retired ? "hold_observation" : "read_failed")
+            let operation = Task { try await controller.executeResult(taskKey: "turn-a", tool: "browser_click", arguments: input) }
+            if retired {
+                await backend.waitUntilObservationHeld()
+                if interruption == "release" { _ = await controller.release(taskKey: "turn-a") }
+                else { operation.cancel() }
+                await backend.resumeObservation()
+            }
+            let result = try await operation.value, body = try jsonObject(result.response)
+            XCTAssertFalse(result.completeObservation)
+            XCTAssertEqual(body["dispatched"] as? Bool, true); XCTAssertEqual(body["result_verified"] as? Bool, false)
+            if retired { XCTAssertNil(body["input_feedback"]) }
+            else {
+                let feedback = try XCTUnwrap(body["input_feedback"] as? [String: Any])
+                XCTAssertEqual((feedback["fields"] as? [[String: Any]])?.count, 0)
+                XCTAssertEqual(feedback["fields_omitted"] as? Bool, true)
+                XCTAssertFalse(result.response.contains("Flight number"))
+            }
+            let counts = await backend.counts(); XCTAssertEqual(counts.presses, 1)
+            _ = await controller.shutdown()
+        }
+    }
+
     func testCompleteReadSerializedLimitIncludesEscapingAndPublishedReferenceSuffixes() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         let label = String(repeating: "🙂\\\"\n\u{0001}", count: 300) + " exact final label"
@@ -2961,6 +3027,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var shouldFailClose = false
     private var createWaiters=[CheckedContinuation<Void,Never>](), mutationWaiters=[CheckedContinuation<Void,Never>]()
     private var afterInputScenario: String?, postInputPending = false, manyControls = false
+    private var invalidFieldOnPress = false
     private var extraControlCount = 100, buttonAfterControls = false
     private var protectedTargets = Set<String>()
     private var observationHeld = false, observationContinuation: CheckedContinuation<Void, Never>?
@@ -2972,6 +3039,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
+    func reportInvalidFieldOnPress() { invalidFieldOnPress = true; committedIdentityExposed = true }
     func hideCommittedDocumentIdentity() { committedIdentityExposed = false }
     func exposeCommittedDocumentIdentity() { committedIdentityExposed = true }
     func fieldValue() -> String { field }
@@ -3120,6 +3188,13 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             await withCheckedContinuation { mutationContinuation=$0 }
         }
         try permit.commit { stats.presses += 1; result="\(field) departs at 18:45"; didInput(target) }
+    }
+    func pressWithFeedback(target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+                           permit: BrowserMutationPermit) async throws -> BrowserInputFeedback? {
+        try await press(target: target, backendNodeID: backendNodeID, document: document, permit: permit)
+        return invalidFieldOnPress ? .init(loaderID: document.loaderID, documentURL: document.url,
+            fields: [.init(backendNodeID: 1, issues: [.valueMissing])], truncated: false,
+            committedDocumentID: document.committedDocumentID) : nil
     }
     func setText(target:BrowserTarget,backendNodeID:Int64,text:String,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws { try permit.commit { stats.fills += 1; field=text; didInput(target) } }
     func navigate(target:BrowserTarget,url:URL,permit:BrowserMutationPermit) async throws {

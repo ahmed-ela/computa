@@ -246,16 +246,24 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
         permit: BrowserMutationPermit
     ) async throws {
-        try await mutate(
+        _ = try await mutate(
             target: target, nodeID: backendNodeID, document: document, operation: "press", text: nil,
             permit: permit)
+    }
+
+    func pressWithFeedback(
+        target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+        permit: BrowserMutationPermit
+    ) async throws -> BrowserInputFeedback? {
+        try await mutate(target: target, nodeID: backendNodeID, document: document, operation: "press", text: nil,
+                         permit: permit)
     }
 
     func setText(
         target: BrowserTarget, backendNodeID: Int64, text: String, document: BrowserDocumentObservation,
         permit: BrowserMutationPermit
     ) async throws {
-        try await mutate(
+        _ = try await mutate(
             target: target, nodeID: backendNodeID, document: document, operation: "fill", text: text,
             permit: permit)
     }
@@ -263,7 +271,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private func mutate(
         target: BrowserTarget, nodeID: Int64, document: BrowserDocumentObservation,
         operation: String, text: String?, permit: BrowserMutationPermit
-    ) async throws {
+    ) async throws -> BrowserInputFeedback? {
         let id = try exactID(target)
         let generation = try generation(for: id)
         guard document.loaderID == generation.uuidString, session.humanTab(id: id)?.url == document.url,
@@ -288,12 +296,13 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         let result = try await run(
             id: id, generation: generation, input: input, timeoutMS: 5_000, permit: permit, mutation: true
         )
-        guard let object = try JSONSerialization.jsonObject(with: result) as? [String: Bool],
-            object["dispatched"] == true
+        guard let object = try JSONSerialization.jsonObject(with: result) as? [String: Any],
+            object["dispatched"] as? Bool == true
         else {
             throw BrowserTabBrokerError.mutationRejected(
                 "The built-in action was not dispatched; no replay is allowed.")
         }
+        return operation == "press" ? BrowserInputFeedback.decode(object["constraintFeedback"], document: document) : nil
     }
 
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws {

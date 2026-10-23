@@ -249,6 +249,15 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(result["no_replay"] as? Bool, true)
         XCTAssertEqual(result["result_verified"] as? Bool, false)
         XCTAssertTrue(clicked.contains("value_missing"))
+        let feedback = try XCTUnwrap(result["input_feedback"] as? [String: Any])
+        XCTAssertEqual(feedback["kind"] as? String, "native_constraint_validation_observed")
+        XCTAssertEqual(feedback["during"] as? String, "synchronous_click")
+        let fields = try XCTUnwrap(feedback["fields"] as? [[String: Any]])
+        XCTAssertEqual(fields.count, 1)
+        XCTAssertEqual(fields.first?["label"] as? String, "Message")
+        XCTAssertEqual(fields.first?["partial"] as? Bool, false)
+        XCTAssertEqual(fields.first?["issues"] as? [String], ["value_missing"])
+        XCTAssertFalse(clicked.contains("backendNodeID"))
         let firstCounts = try await script(view, "return {clicks:window.clicks,invalids:window.invalids,submits:window.submits};")
         XCTAssertEqual(try JSONSerialization.jsonObject(with: firstCounts) as? [String: Int], ["clicks": 1, "invalids": 1, "submits": 0])
         do {
@@ -266,6 +275,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let submitted = try await controller.execute(taskKey: "form", tool: "browser_click", arguments: newClick)
         let newResult = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(submitted.utf8)) as? [String: Any])
         XCTAssertEqual(newResult["result_verified"] as? Bool, false, "A native submit event is not a delivery receipt")
+        XCTAssertNil(newResult["input_feedback"], "Old invalid events are not reused by a later valid click")
         let finalCounts = try await script(view, "return {clicks:window.clicks,invalids:window.invalids,submits:window.submits};")
         XCTAssertEqual(try JSONSerialization.jsonObject(with: finalCounts) as? [String: Int], ["clicks": 2, "invalids": 1, "submits": 1])
         _ = await controller.shutdown()
@@ -291,10 +301,82 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             let observed = try await transport.observe(target: target)
             XCTAssertEqual(observed.nodes.first { $0.name == "Message" }?.constraintValidation?.issues, [.valueMissing])
             let button = try XCTUnwrap(observed.nodes.first { $0.role == "button" })
-            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            let feedback = try await transport.pressWithFeedback(target: target, backendNodeID: XCTUnwrap(button.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            XCTAssertNil(feedback, "Passive invalid flags cannot substitute for actual events: \(mode)")
             let counts = try await script(view, "return {invalids:window.invalids,submits:window.submits};")
             XCTAssertEqual(try JSONSerialization.jsonObject(with: counts) as? [String: Int], ["invalids": 0, "submits": 1], mode)
         }
+    }
+
+    func testRealWebKitInvalidFeedbackExcludesForeignSyntheticHiddenSecureAndNewFieldsAndRemovesListener() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js"), encoding: .utf8)
+        // Instrument only registration/removal of the actual production listener
+        // in its isolated world. The DOM flag is an independent test oracle.
+        let add = "if (form) window.addEventListener('invalid', invalid, true);"
+        let remove = "if (form) window.removeEventListener('invalid', invalid, true);"
+        XCTAssertEqual(source.components(separatedBy: add).count, 2)
+        XCTAssertEqual(source.components(separatedBy: remove).count, 2)
+        let instrumented = source.replacingOccurrences(of: add, with: add + " document.documentElement.dataset.listenerActive = form ? '1' : '0';")
+            .replacingOccurrences(of: remove, with: remove + " document.documentElement.dataset.listenerActive = '0';")
+        let html = """
+        <!doctype html><body><form id="other"><input id="foreign" aria-label="Foreign" required></form>
+        <form id="form"><input id="visible" aria-label="Visible field" required>
+        <input aria-label="Second field" required><input aria-label="Third field" required><input aria-label="Fourth field" required>
+        <input id="synthetic" aria-label="Synthetic field" required>
+        <input id="secret" type="password" aria-label="Secure field" required>
+        <input id="hidden" style="display:none" aria-label="Hidden field" required>
+        <section hidden><input aria-label="Hidden ancestor field" required></section>
+        <button id="send" type="submit">Continue</button><button id="ordinary" type="button">Ordinary</button></form>
+        <script>window.clicks=0;window.requests=0;window.submits=0;
+        document.getElementById('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});
+        document.getElementById('send').addEventListener('click',()=>{
+          window.clicks++;window.requests++;fetch('data:text/plain,independent-handler-request');
+          document.getElementById('foreign').checkValidity();
+          document.getElementById('synthetic').dispatchEvent(new Event('invalid',{bubbles:false}));
+          document.getElementById('synthetic').value='now valid';
+          let fresh=document.createElement('input');fresh.required=true;fresh.setAttribute('aria-label','Uncaptured field');document.getElementById('form').append(fresh);
+        });
+        document.getElementById('ordinary').addEventListener('click',()=>document.getElementById('visible').checkValidity());
+        </script></body>
+        """
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let transport = EmbeddedBrowserTabTransport(session: session, script: instrumented)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/feedback"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let visibility = try await script(view, """
+        const form=document.getElementById('form');
+        return {clobbered:form.hidden===document.getElementById('hidden'),attribute:Element.prototype.hasAttribute.call(form,'hidden')};
+        """)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: visibility) as? [String: Bool], ["clobbered": true, "attribute": false])
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let observed = try await transport.observe(target: target)
+        XCTAssertFalse(observed.nodes.contains { ["Hidden field", "Hidden ancestor field"].contains($0.name) })
+        let button = try XCTUnwrap(observed.nodes.first { $0.name == "Continue" })
+        let response = try await transport.pressWithFeedback(target: target, backendNodeID: XCTUnwrap(button.backendNodeID),
+            document: observed, permit: BrowserMutationPermit())
+        let feedback = try XCTUnwrap(response)
+        XCTAssertNotNil(feedback.committedDocumentID)
+        XCTAssertEqual(feedback.committedDocumentID, observed.committedDocumentID)
+        XCTAssertEqual(feedback.fields.map(\.backendNodeID), try ["Visible field", "Second field", "Third field"].map { label in
+            try XCTUnwrap(observed.nodes.first { $0.name == label }?.backendNodeID)
+        })
+        XCTAssertEqual(feedback.fields.first?.issues, [.valueMissing])
+        XCTAssertTrue(feedback.truncated, "Extra visible invalid fields stay bounded rather than expanding the result")
+        let counts = try await script(view, "return {clicks:window.clicks,requests:window.requests,submits:window.submits,active:Number(document.documentElement.dataset.listenerActive)};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: counts) as? [String: Int],
+                       ["clicks": 1, "requests": 1, "submits": 0, "active": 0],
+                       "An invalid event does not prove that a click handler made no independent request")
+        let fresh = try await transport.observe(target: target)
+        let ordinary = try XCTUnwrap(fresh.nodes.first { $0.name == "Ordinary" })
+        let later = try await transport.pressWithFeedback(target: target, backendNodeID: XCTUnwrap(ordinary.backendNodeID),
+            document: fresh, permit: BrowserMutationPermit())
+        XCTAssertNil(later, "Non-submit clicks must not adopt unrelated invalid events")
+        let inactive = try await script(view, "return document.documentElement.dataset.listenerActive;")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: inactive, options: [.fragmentsAllowed]) as? String, "0")
     }
 
     func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {

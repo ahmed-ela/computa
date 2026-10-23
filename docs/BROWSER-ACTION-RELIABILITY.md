@@ -347,8 +347,62 @@ Remote Cerebras GPT-OSS120b at medium effort produced mixed installed results:
   The failed stale action dispatched nothing. This is a recovered outcome pass,
   not an error-free run or proof of real-provider mail delivery.
 - Fresh Outlook lookup remained unqualified: it stopped at the unchanged receipt
-  byte limit before a final answer. Its precise budget pressure is under review.
+  byte limit before a final answer. Its seventeen call/result pairs occupied
+  12,982 provider-input bytes at the smallest existing retention candidate, above
+  the 12,288-byte limit. The canonical total (17,946 bytes) and latest observation
+  (3,905 text bytes) fit their separate limits. Eight historical reads repeated
+  optional URL/title context; omitting those metadata lines alone saved 770
+  serialized provider bytes. An offline replay then admitted the same genuine
+  calls, results, dispatch cues and complete latest observation in 12,212 bytes.
+  This identifies one avoidable stop, not a general task-capacity guarantee.
 
 All four completed attempts closed their owned tabs and preserved existing user
 tabs. Failed attempts remain part of qualification; a successful control does
 not establish general reliability or resolve the goal.
+
+A fifth, fresh read-only diagnostics test made five shell calls and failed before
+answering. Three commands quoted tilde-prefixed paths, which the shell correctly
+treated as literal paths; later commands scanned too broadly. An earlier schema
+correction in the same turn was accepted. The final response contained valid JSON
+with schema-invalid arguments and exhausted the existing correction allowance;
+none of its tools executed. The finite diagnostic does not identify that rejected
+field, so it is not attributed to a particular tool. No configuration changes or
+browser actions were observed.
+
+## Build 228 changes awaiting installed qualification
+
+Runtime `mactopus-10` adds one final bounded retention candidate after the existing
+candidates fail. It omits optional URL/title lines from already selected historical
+browser excerpts without refilling the freed space or altering rows, dispatch
+cues, call/result identity or the complete latest observation. Recompaction is
+idempotent and rejects malformed excerpt shapes. The existing aggregate limits
+remain active; another large observation can still exhaust them.
+
+Native submit-control clicks now observe trusted synchronous invalid events for
+already captured, visible, nonsecure fields in that exact form. Bounded feedback
+contains fixed validity reasons and labels drawn only from the fresh post-input
+page's published spans with an equal known native document identity. Same-URL
+reloads or unknown document identity cannot reassign old event reasons to new
+field labels. It invokes no extra input or validation method. Native
+invalid events do not establish that page handlers made no request; dispatch,
+no-replay and unverified-outcome semantics remain unchanged. Retired or cancelled
+contexts publish no feedback. The complete encoded feedback is included in the
+existing page budget before cursor advancement.
+
+The WebKit regression also exposed form named-property shadowing: a child field
+named `hidden` made a visible form's `hidden` property truthy. Visibility now reads
+the actual hidden attribute through the native Element prototype; the offending
+fixture remains covered, alongside real hidden-subtree exclusion.
+
+General terminal guidance now calls for observed absolute paths or correctly
+expanded private HOME paths, locating files before bounded content searches,
+scoping diagnostics to relevant files, and fixing observed path errors before
+repeating them. It does not rewrite shell commands or change permissions, working
+directories, retry allowances or the model's responsibility for valid arguments.
+
+The final selected native/integration union passed 569 tests without skips,
+including three enabled bundled-engine integration cases. The runtime receipt
+suite passed 35 tests with one intentional private diagnostic-export skip, and
+version/product-identity checks passed 20 tests. The initial native run's one
+failure remains recorded; the fixed-source rerun passed all 299 affected tests.
+Installed model-driven qualification remains separate and pending at this point.

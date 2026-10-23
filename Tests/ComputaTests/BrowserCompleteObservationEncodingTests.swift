@@ -1,9 +1,56 @@
 import Foundation
+import AutomationCore
 import XCTest
 @testable import Computa
 
 final class BrowserCompleteObservationEncodingTests: XCTestCase {
     private let snapshotID = UUID(uuidString: "00000000-0000-0000-0000-000000000227")!
+
+    func testInvalidEventFeedbackUsesOnlyPublishedUTF8LabelSpansAndFitsActualEnvelope() throws {
+        let url = URL(string: "http://localhost/form")!, label = "UNEXPOSED_PREFIXe\u{301}🙂\\\"TAIL"
+        let committedDocumentID = UUID()
+        let fragment = "e\u{301}🙂\\\"", start = "UNEXPOSED_PREFIX".utf8.count
+        let element = BrowserTabElement(index: 0, backendNodeID: 1, role: "AXTextField", label: label,
+            value: "PRIVATE_VALUE", isEnabled: true, supportsPress: false, supportsSetText: true)
+        func page(loader: String = "native", field: SemanticReadField = .label, begin: Int = start,
+                  end: Int = start + fragment.utf8.count, commit: UUID? = committedDocumentID) -> BrowserInputFeedback.PublishedPage {
+            let receipt = SemanticReadReceipt(id: snapshotID, sourceID: UUID(), targetGeneration: "native",
+                consistency: .immutableCapture, view: .overview, query: nil, subtreeNodeID: nil,
+                selectedElementCount: 1, selectedFieldCount: 2, sourceTruncated: false, fieldTruncated: true,
+                outputTruncated: true, exposures: [.init(nodeID: "backend:1", field: field, startUTF8: begin,
+                    endUTF8: end, totalUTF8: label.utf8.count, kind: .control, provenance: .main)])
+            return .init(loaderID: loader, documentURL: url, elements: [element], receipt: receipt, committedDocumentID: commit)
+        }
+        let feedback = BrowserInputFeedback(loaderID: "native", documentURL: url,
+            fields: [.init(backendNodeID: 1, issues: [.valueMissing])], truncated: false, committedDocumentID: committedDocumentID)
+        let encoding = BrowserCompleteObservation.Encoding.input(wasFill: false, receipt: cue(wasFill: false), feedback: feedback)
+        let encoded = try encoding.encode("published fragment", snapshotID: snapshotID, page: page())
+        let body = try object(encoded), info = try XCTUnwrap(body["input_feedback"] as? [String: Any])
+        let fields = try XCTUnwrap(info["fields"] as? [[String: Any]])
+        XCTAssertEqual(fields.count, 1)
+        XCTAssertEqual(Array(try XCTUnwrap(fields.first?["label"] as? String).utf8), Array(fragment.utf8))
+        XCTAssertEqual(fields.first?["partial"] as? Bool, true)
+        XCTAssertEqual(fields.first?["issues"] as? [String], ["value_missing"])
+        XCTAssertEqual(body["result_verified"] as? Bool, false)
+        for hidden in ["UNEXPOSED_PREFIX", "TAIL", "PRIVATE_VALUE", "backendNodeID"] { XCTAssertFalse(encoded.contains(hidden)) }
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: cue(wasFill: false)), 0)
+        for unexposed in [page(loader: "different"), page(field: .value), page(begin: start + 4), page(commit: UUID()), page(commit: nil)] {
+            let value = feedback.presentation(page: unexposed)
+            XCTAssertEqual((value["fields"] as? [[String: Any]])?.count, 0)
+            XCTAssertEqual(value["fields_omitted"] as? Bool, true)
+        }
+        let unknownCommit = BrowserInputFeedback(loaderID: "native", documentURL: url,
+            fields: feedback.fields, truncated: false)
+        XCTAssertEqual((unknownCommit.presentation(page: page())["fields"] as? [[String: Any]])?.count, 0,
+                       "An unknown original committed document cannot acquire labels from a later observation")
+        let fill = try BrowserCompleteObservation.Encoding.input(wasFill: true, receipt: cue(wasFill: true), feedback: feedback)
+            .encode("page", snapshotID: snapshotID, page: page())
+        XCTAssertNil(try object(fill)["input_feedback"], "Only an actual click carries these events")
+        let available = 4_096 - rawBytes(encoded, receipt: cue(wasFill: false))
+        let boundary = try encoding.encode(String(repeating: "x", count: available) + "published fragment", snapshotID: snapshotID, page: page())
+        XCTAssertEqual(rawBytes(boundary, receipt: cue(wasFill: false)), 4_096)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(boundary, actionReceipt: cue(wasFill: false)), 0)
+    }
 
     func testInputEnvelopePreservesSendAndSentRowsAndDispatchOnlyMeaningThroughWireEscaping() throws {
         // Build226's generic head/tail excerpt dropped the Send message row

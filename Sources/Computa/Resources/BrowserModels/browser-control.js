@@ -26,7 +26,10 @@ const idFor = node => {
 };
 const allowedByAncestors = element => {
   for (let node = element; node; node = node.parentElement) {
-    if (node.hidden || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert')) return false;
+    // Form named properties can shadow HTMLElement.hidden with a child input.
+    // Only the actual attribute hides this ancestor.
+    if (Element.prototype.hasAttribute.call(node, 'hidden')
+        || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert')) return false;
     const style = getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
   }
@@ -323,10 +326,32 @@ const requireUnobstructed = () => {
 const current = revalidateElement();
 element.scrollIntoView({block:'center',inline:'center'});
 requireUnobstructed();
+let constraintFeedback = null;
 if (input.operation === 'press') {
   if (!current.isDOMClickable || typeof element.click !== 'function') throw new Error('unsupported_action');
   if (element.tagName === 'A' && element.target && !['_self','_top','_parent'].includes(element.target.toLowerCase())) throw new Error('popup_unsupported');
-  element.click();
+  // Observe only native synchronous invalid events in this exact submit
+  // control's form. This neither validates the form nor changes event delivery.
+  // A click handler may still perform another action, including a request.
+  const submit = (element.tagName === 'BUTTON' && element.type === 'submit')
+    || (element.tagName === 'INPUT' && ['submit','image'].includes(element.type));
+  const form = submit ? element.form : null;
+  const fields = [], seen = new Set();
+  let truncated = false;
+  const invalid = event => {
+    const field = event.target, id = state.ids.get(field);
+    if (!event.isTrusted || !form || field.form !== form || !id
+        || state.nodes.get(id) !== field || !visible(field) || seen.has(id)) return;
+    const constraints = constraintsFor(field, false);
+    if (!constraints?.candidate || constraints.valid || !constraints.issues.length) return;
+    if (fields.length >= 3) { truncated = true; return; }
+    seen.add(id);
+    fields.push({backendNodeID:id, issues:constraints.issues});
+  };
+  if (form) window.addEventListener('invalid', invalid, true);
+  try { element.click(); }
+  finally { if (form) window.removeEventListener('invalid', invalid, true); }
+  if (fields.length) constraintFeedback = {fields, truncated};
 } else {
   if (!current.isEditable || current.isReadOnly) throw new Error('unsupported_action');
   if (typeof element.focus !== 'function') throw new Error('unsupported_action');
@@ -346,4 +371,4 @@ if (input.operation === 'press') {
   element.dispatchEvent(new Event('input',{bubbles:true}));
   element.dispatchEvent(new Event('change',{bubbles:true}));
 }
-return {dispatched:true, noReplay:true};
+return {dispatched:true, noReplay:true, constraintFeedback};

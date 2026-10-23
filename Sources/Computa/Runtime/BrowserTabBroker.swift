@@ -27,19 +27,19 @@ enum BrowserCompleteObservation {
     /// dispatch receipt remains separate from the observation through compaction.
     enum Encoding: Sendable {
         case read
-        case input(wasFill: Bool, receipt: String)
+        case input(wasFill: Bool, receipt: String, feedback: BrowserInputFeedback? = nil)
 
         var actionReceipt: String? {
-            if case let .input(_, receipt) = self { return receipt }
+            if case let .input(_, receipt, _) = self { return receipt }
             return nil
         }
 
-        func encode(_ text: String, snapshotID: UUID) throws -> String {
-            guard case let .input(wasFill, _) = self else { return text }
+        func encode(_ text: String, snapshotID: UUID, page: BrowserInputFeedback.PublishedPage? = nil) throws -> String {
+            guard case let .input(wasFill, _, feedback) = self else { return text }
             let effect = wasFill
                 ? "Fill dispatched; no Enter or submit click. Page handlers may react. Compare the complete field value before a distinct submit action."
                 : "Click dispatched. If unchanged, wait/read."
-            let result: [String: Any] = [
+            var result: [String: Any] = [
                 "dispatched": true, "no_replay": true, "result_verified": false,
                 "input_kind": wasFill ? "fill" : "click",
                 "current_observation": ["status": "available", "view": "overview",
@@ -47,6 +47,7 @@ enum BrowserCompleteObservation {
                 "action_references": ["consumed": true, "next": "current_observation"],
                 "next": effect + " Recheck current labels/actions. Prior refs are consumed; do not repeat input. Verify a new outcome."
             ]
+            if !wasFill, let feedback { result["input_feedback"] = feedback.presentation(page: page) }
             let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
             return String(decoding: data, as: UTF8.self)
         }
@@ -103,6 +104,95 @@ struct BrowserConstraintValidation: Codable, Equatable, Sendable {
         let names = Issue.allCases.filter { issues.contains($0) }.map(\.rawValue).joined(separator: ",")
         let state = !candidate ? "not_candidate" : valid ? "valid" : "invalid[\(names)]"
         return (required ? " required=true" : "") + " constraint=\(state)"
+    }
+}
+
+/// Events observed during one dispatched click, not proof that submission or
+/// any page-handler request did or did not occur. IDs never leave native code.
+struct BrowserInputFeedback: Equatable, Sendable {
+    struct Field: Codable, Equatable, Sendable {
+        let backendNodeID: Int64
+        let issues: [BrowserConstraintValidation.Issue]
+    }
+    let loaderID: String
+    let documentURL: URL
+    let fields: [Field]
+    let truncated: Bool
+    let committedDocumentID: UUID?
+
+    init(loaderID: String, documentURL: URL, fields: [Field], truncated: Bool, committedDocumentID: UUID? = nil) {
+        self.loaderID = loaderID; self.documentURL = documentURL
+        self.fields = fields; self.truncated = truncated; self.committedDocumentID = committedDocumentID
+    }
+
+    struct PublishedPage: Sendable {
+        let loaderID: String
+        let documentURL: URL
+        let elements: [BrowserTabElement]
+        let receipt: SemanticReadReceipt
+        let committedDocumentID: UUID?
+
+        init(loaderID: String, documentURL: URL, elements: [BrowserTabElement], receipt: SemanticReadReceipt,
+             committedDocumentID: UUID? = nil) {
+            self.loaderID = loaderID; self.documentURL = documentURL
+            self.elements = elements; self.receipt = receipt; self.committedDocumentID = committedDocumentID
+        }
+
+        init?(snapshot: BrowserTabSnapshot) {
+            guard let receipt = snapshot.readReceipt, receipt.id == snapshot.id else { return nil }
+            self.init(loaderID: snapshot.loaderID, documentURL: snapshot.documentURL,
+                      elements: snapshot.elements, receipt: receipt,
+                      committedDocumentID: snapshot.evidenceDocument?.committedDocumentID)
+        }
+    }
+
+    /// Malformed optional feedback is discarded. It must never turn an already
+    /// dispatched click into an apparent input failure or invite replay.
+    static func decode(_ raw: Any?, document: BrowserDocumentObservation) -> Self? {
+        guard let object = raw as? [String: Any], Set(object.keys) == ["fields", "truncated"],
+              let rawFields = object["fields"] as? [[String: Any]], (1...3).contains(rawFields.count),
+              rawFields.allSatisfy({ Set($0.keys) == ["backendNodeID", "issues"] }),
+              let bytes = try? JSONSerialization.data(withJSONObject: object), bytes.count <= 2_048 else { return nil }
+        struct Payload: Decodable { let fields: [Field]; let truncated: Bool }
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: bytes),
+              Set(payload.fields.map(\.backendNodeID)).count == payload.fields.count,
+              payload.fields.allSatisfy({ field in
+                  field.backendNodeID > 0 && !field.issues.isEmpty
+                      && field.issues.count <= BrowserConstraintValidation.Issue.allCases.count
+                      && Set(field.issues).count == field.issues.count
+                      && document.nodes.contains { $0.backendNodeID == field.backendNodeID && $0.constraintValidation != nil }
+              }) else { return nil }
+        return .init(loaderID: document.loaderID, documentURL: document.url,
+                     fields: payload.fields, truncated: payload.truncated, committedDocumentID: document.committedDocumentID)
+    }
+
+    func presentation(page: PublishedPage?) -> [String: Any] {
+        var exposed: [[String: Any]] = []
+        if let page, let committedDocumentID, page.committedDocumentID == committedDocumentID,
+           page.loaderID == loaderID, page.documentURL == documentURL {
+            for field in fields {
+                guard let element = page.elements.first(where: { $0.backendNodeID == field.backendNodeID }) else { continue }
+                let bytes = Array(element.label.utf8)
+                guard let span = page.receipt.exposures.first(where: {
+                    $0.nodeID == "backend:\(field.backendNodeID)" && $0.field == .label
+                        && $0.totalUTF8 == bytes.count && $0.startUTF8 >= 0
+                        && $0.endUTF8 >= $0.startUTF8 && $0.endUTF8 <= bytes.count
+                        && ($0.startUTF8 < $0.endUTF8 || bytes.isEmpty && $0.startUTF8 == 0)
+                }), let fragment = String(bytes: bytes[span.startUTF8..<span.endUTF8], encoding: .utf8) else { continue }
+                var label = ""
+                for character in fragment {
+                    let candidate = label + String(character)
+                    guard let encoded = try? JSONSerialization.data(withJSONObject: [candidate]), encoded.count <= 84 else { break }
+                    label = candidate
+                }
+                exposed.append(["label": label,
+                    "partial": span.startUTF8 != 0 || span.endUTF8 != bytes.count || !label.utf8.elementsEqual(fragment.utf8),
+                    "issues": field.issues.map(\.rawValue)])
+            }
+        }
+        return ["kind": "native_constraint_validation_observed", "during": "synchronous_click",
+            "fields": exposed, "fields_omitted": truncated || exposed.count < fields.count,
+            "next": "Native invalid events occurred during this click. Inspect current field constraints before a new action. Page handlers may still have acted; submission and delivery remain unverified. Do not replay."]
     }
 }
 
@@ -215,6 +305,10 @@ protocol BrowserTabTransport: Sendable {
         document: BrowserDocumentObservation,
         permit: BrowserMutationPermit
     ) async throws
+    func pressWithFeedback(
+        target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+        permit: BrowserMutationPermit
+    ) async throws -> BrowserInputFeedback?
     func setText(
         target: BrowserTarget,
         backendNodeID: Int64,
@@ -225,6 +319,13 @@ protocol BrowserTabTransport: Sendable {
 }
 
 extension BrowserTabTransport {
+    func pressWithFeedback(
+        target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+        permit: BrowserMutationPermit
+    ) async throws -> BrowserInputFeedback? {
+        try await press(target: target, backendNodeID: backendNodeID, document: document, permit: permit)
+        return nil
+    }
     func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         try await observe(target: target)
     }
@@ -912,7 +1013,9 @@ actor BrowserTabSessionBroker {
                 retainedObservation: retainingObservation, compact: compact)
             if !compact { break }
             let withFooter = formatted + (try BrowserCompleteObservation.footer(cursor: nextCursor))
-            let encoded = try compactEncoding.encode(withFooter, snapshotID: snapshotID)
+            let encoded = try compactEncoding.encode(withFooter, snapshotID: snapshotID,
+                page: .init(loaderID: document.loaderID, documentURL: document.url, elements: page.elements, receipt: receipt,
+                            committedDocumentID: document.committedDocumentID))
             let excess = try BrowserCompleteObservation.excessBytes(encoded,
                 referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) },
                 actionReceipt: compactEncoding.actionReceipt)
@@ -1024,26 +1127,26 @@ actor BrowserTabSessionBroker {
         }
     }
 
-    func perform(
+    @discardableResult func perform(
         taskKey: String,
         binding suppliedBinding: BrowserTabBinding,
         snapshot suppliedSnapshot: BrowserTabSnapshot,
         elementIndex: Int,
         action: String,
         verificationPlan: BrowserActionVerification.Plan? = nil
-    ) async throws {
+    ) async throws -> BrowserInputFeedback? {
         try await perform(taskKey: taskKey, binding: suppliedBinding,
             captured: .snapshot(suppliedSnapshot, elementIndex), action: action, verificationPlan: verificationPlan)
     }
 
-    func perform(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
-                 action: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws {
+    @discardableResult func perform(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
+                 action: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws -> BrowserInputFeedback? {
         try await perform(taskKey: taskKey, binding: binding, captured: .published(witness),
                           action: action, verificationPlan: verificationPlan)
     }
 
     private func perform(taskKey: String, binding suppliedBinding: BrowserTabBinding, captured: CapturedTarget,
-                         action: String, verificationPlan: BrowserActionVerification.Plan?) async throws {
+                         action: String, verificationPlan: BrowserActionVerification.Plan?) async throws -> BrowserInputFeedback? {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
         guard action == "AXPress" else {
@@ -1102,7 +1205,7 @@ actor BrowserTabSessionBroker {
         var dispatchedDocument = currentDocument
         dispatchedDocument.verificationPlan = verificationPlan
 
-        try await transport.press(
+        return try await transport.pressWithFeedback(
             target: target,
             backendNodeID: approvedElement.backendNodeID,
             document: dispatchedDocument,

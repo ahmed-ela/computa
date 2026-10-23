@@ -4,6 +4,22 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testLegacyPressBackendDefaultFeedbackAdapterDispatchesExactlyOnce() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let feedback = try await fixture.broker.perform(taskKey: "task-a", binding: fixture.observation.binding,
+            snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress")
+        XCTAssertNil(feedback)
+        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
+        XCTAssertEqual(count, 1)
+        do {
+            _ = try await fixture.broker.perform(taskKey: "task-a", binding: fixture.observation.binding,
+                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress")
+            XCTFail("A consumed click cannot be replayed by the optional feedback adapter")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let unchanged = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
+        XCTAssertEqual(unchanged, 1)
+    }
+
     func testCompactPagesPreserveEveryEscapedFieldByteAndFollowingRowsWithoutCursorSkips() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let label = "e\u{301}" + String(repeating: "🙂\\\"\n\t\u{0001}", count: 220) + " EXACT_LABEL_TAIL"
