@@ -67,6 +67,13 @@ old stop notice was appended after every subsequent turn, making it appear curre
   with an outdated restriction. Stop, turn replacement and shutdown discard the
   pending update. The supported compaction prompt also identifies itself as
   maintenance, not a new human request.
+- Fresh content reads wait for content readiness, rather than treating an
+  already-loaded toolbar as proof that asynchronous message results have arrived.
+  The built-in transport uses its existing page-event observer and bounded
+  deadline. Readable results, listbox options and explicit empty-result text can
+  establish readiness; search-field echoes and navigation controls cannot.
+  Broad reads, continuations and input preflight retain their existing behavior.
+  Deadline expiration remains an incomplete observation, never proof of absence.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host

@@ -86,14 +86,18 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
-        try await observe(target: target, waitForSemanticReadiness: false)
+        try await observe(target: target, readiness: nil)
     }
 
     func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
-        try await observe(target: target, waitForSemanticReadiness: true)
+        try await observeForRead(target: target, readiness: .semanticContent)
     }
 
-    private func observe(target: BrowserTarget, waitForSemanticReadiness: Bool) async throws -> BrowserDocumentObservation {
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
+        try await observe(target: target, readiness: readiness)
+    }
+
+    private func observe(target: BrowserTarget, readiness requestedReadiness: BrowserReadReadiness?) async throws -> BrowserDocumentObservation {
         let id = try exactID(target)
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation(for: id))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
@@ -101,7 +105,8 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation)
         let data = try await run(
             id: id, generation: generation,
-            input: ["operation": "observe", "awaitSemanticReadiness": waitForSemanticReadiness, "timeoutMS": 10_000],
+            input: ["operation": "observe", "awaitSemanticReadiness": requestedReadiness != nil,
+                    "readinessView": requestedReadiness?.rawValue ?? "immediate", "timeoutMS": 10_000],
             timeoutMS: 12_000)
         guard data.count <= 1_000_000,
             let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -115,7 +120,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 "The built-in page returned an invalid bounded observation.")
         }
         let readiness: BrowserDocumentObservation.SemanticReadiness?
-        if waitForSemanticReadiness {
+        if requestedReadiness != nil {
             guard let value = raw["semanticReadiness"] as? String,
                   let parsed = BrowserDocumentObservation.SemanticReadiness(rawValue: value) else {
                 throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid semantic readiness.")

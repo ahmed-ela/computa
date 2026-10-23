@@ -4,6 +4,28 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testContentReadinessIsRequestedOnlyForFreshContentNotQueryContinuationOrSubtree() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes:
+            (0..<100).map { semanticNode($0, role: "StaticText", name: "Observed row \($0)") })
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Observed", view: .content))
+        let cursor = try XCTUnwrap(first.snapshot.nextCursor)
+        let continuation = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(cursor: cursor))
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: continuation.binding,
+            bundleIdentifier: "com.ahmedelamin.computa",
+            read: .init(view: .content, snapshotID: continuation.snapshot.id, elementIndex: 0))
+        XCTAssertEqual(subtree.snapshot.elements.count, 1)
+        let afterRetained = await fixture.transport.readinessRequests()
+        XCTAssertEqual(afterRetained, [.semanticContent, .content], "Retained reads stay immutable and use only immediate identity preflight")
+        _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Absent", view: .all))
+        let afterAll = await fixture.transport.readinessRequests()
+        XCTAssertEqual(afterAll, [.semanticContent, .content, .semanticContent], "Query text does not determine the readiness mode")
+        await fixture.assertNoInput()
+    }
+
     func testPresentationOffersFillWithoutPressForEditableTextFieldsAndPreservesOtherControls() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = [
@@ -2281,6 +2303,14 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
     private var foregroundTargetID: String?
     private var nextObservationHook: (@Sendable () async throws -> Void)?
     private var nextMutationHook: (@Sendable () async throws -> Void)?
+    private var requestedReadiness = [BrowserReadReadiness]()
+
+    func readinessRequests() -> [BrowserReadReadiness] { requestedReadiness }
+
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
+        requestedReadiness.append(readiness)
+        return try await observe(target: target)
+    }
 
     func onNextCreation(_ hook: @escaping @Sendable () async throws -> Void) {
         nextCreationHook = hook

@@ -394,6 +394,112 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(observed.title, "Outlook")
     }
 
+    func testFreshContentReadWaitsForAsyncSearchBodyDespiteReadyToolbarAndPreservesResultActions() async throws {
+        let body = """
+        <div role="toolbar"><input id="query" type="search" aria-label="Search query">
+        <button id="search">Search</button><p>Toolbar text is not a result</p></div>
+        <nav><p>Navigation text is not a result</p></nav><footer>Footer text is not a result</footer>
+        <div id="results"></div>
+        <script>document.getElementById('search').onclick=()=>{
+          window.submitted=document.getElementById('query').value;
+          window.searches=(window.searches||0)+1;
+          document.getElementById('results').replaceChildren();
+          new Promise(resolve=>window.releaseSearch=resolve).then(html=>{
+            document.getElementById('results').innerHTML=html;window.rendered=true;
+          });
+        };</script>
+        """
+        let cases: [(String, String, String)] = [
+            ("positive", "<main><p>Fixture announcement: ODE exam on 8 November.</p></main>", "Fixture announcement: ODE exam on 8 November."),
+            ("negative", "<main><p>No messages match the fixture query.</p></main>", "No messages match the fixture query."),
+            ("unknown-scope", "<p>Readable fixture without landmarks.</p>", "Readable fixture without landmarks."),
+            ("listbox", "<aside aria-label='Message list'><div role='listbox'><div role='group'><div id='result' role='option' onclick='window.resultOpens=(window.resultOpens||0)+1'>Selectable fixture announcement</div></div></div></aside>", "Selectable fixture announcement"),
+        ]
+        for (name, markup, expected) in cases {
+            let (session, transport, view, target) = try await semanticReadinessFixture(body: body)
+            defer { session.shutdown() }
+            let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+            let binding = try await broker.bindBorrowed(taskKey: name, processIdentifier: 42, target: target)
+            let first = try await broker.snapshot(taskKey: name, binding: binding,
+                bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+            let field = try XCTUnwrap(first.snapshot.elements.first { $0.label == "Search query" })
+            try await broker.setText(taskKey: name, binding: first.binding, snapshot: first.snapshot,
+                elementIndex: field.index, text: "ODE")
+            let filled = try await broker.snapshot(taskKey: name, binding: first.binding,
+                bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+            let button = try XCTUnwrap(filled.snapshot.elements.first { $0.label == "Search" })
+            try await broker.perform(taskKey: name, binding: filled.binding, snapshot: filled.snapshot,
+                elementIndex: button.index, action: "AXPress")
+            let submitted = try await script(view, "return {query:window.submitted,count:window.searches,rendered:window.rendered||false};")
+            let submission = try XCTUnwrap(JSONSerialization.jsonObject(with: submitted) as? [String: Any])
+            XCTAssertEqual(submission["query"] as? String, "ODE"); XCTAssertEqual(submission["count"] as? Int, 1)
+            XCTAssertEqual(submission["rendered"] as? Bool, false)
+            let fast = try await transport.observeForRead(target: target)
+            XCTAssertEqual(fast.semanticReadiness, .ready, "Broad/post-action reads retain their fast toolbar observation")
+            let before = try await script(view, "return document.documentElement.hasAttribute('data-computa-readiness-test-armed');")
+            XCTAssertEqual(before, Data("false".utf8), "Binding, action preflight and broad reads do not await body text")
+
+            let pending = Task { try await broker.snapshot(taskKey: name, binding: filled.binding,
+                bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content)) }
+            try await waitForSemanticObserver(view)
+            let literal = String(decoding: try JSONSerialization.data(withJSONObject: markup, options: .fragmentsAllowed), as: UTF8.self)
+            _ = try await script(view, "window.releaseSearch(\(literal));return true;")
+            let result = try await pending.value
+            XCTAssertTrue(result.snapshot.formattedText.contains("semantic_readiness=ready"))
+            XCTAssertTrue(result.snapshot.elements.contains { $0.label == expected }, name)
+            XCTAssertFalse(result.snapshot.elements.contains { $0.label.contains("not a result") || $0.value == "ODE" })
+            XCTAssertEqual(result.snapshot.loaderID, first.snapshot.loaderID)
+            XCTAssertEqual(result.snapshot.tabHandle, first.snapshot.tabHandle)
+            XCTAssertNotEqual(result.snapshot.id, filled.snapshot.id)
+            XCTAssertFalse(result.snapshot.sourceTruncated)
+            if name == "listbox" {
+                let option = try XCTUnwrap(result.snapshot.elements.first { $0.semanticRole == "option" })
+                XCTAssertEqual(option.contentScope, .complementary); XCTAssertEqual(option.contentKind, .control)
+                XCTAssertTrue(option.supportsPress)
+                try await broker.perform(taskKey: name, binding: result.binding, snapshot: result.snapshot,
+                    elementIndex: option.index, action: "AXPress")
+                let opened = try await script(view, "return window.resultOpens;")
+                XCTAssertEqual(opened, Data("1".utf8), "The ready result retains its own current action reference")
+            }
+            _ = try await script(view, "document.documentElement.removeAttribute('data-computa-readiness-test-armed');return true;")
+            let miss = try await broker.snapshot(taskKey: name, binding: result.binding,
+                bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "unique-local-filter-miss", view: .content))
+            XCTAssertTrue(miss.snapshot.elements.isEmpty)
+            XCTAssertTrue(miss.snapshot.formattedText.contains("semantic_readiness=ready"))
+            XCTAssertTrue(miss.snapshot.formattedText.contains("site_search_evaluated\":false"))
+            let after = try await script(view, "return document.documentElement.hasAttribute('data-computa-readiness-test-armed');")
+            XCTAssertEqual(after, Data("false".utf8), "A local query miss never waits for a website search or hides its actual empty state")
+            try await broker.revoke(taskKey: name, binding: miss.binding)
+        }
+    }
+
+    func testContentReadDeadlineDoesNotTreatControlsHiddenFrameOrShadowTextAsBody() async throws {
+        let body = """
+        <div role='toolbar'><input aria-label='Query' value='Input echo'><button>Search</button><p>Toolbar preview</p></div>
+        <nav><p>Navigation preview</p></nav><main aria-label='Region metadata'><p hidden>Hidden body sentinel</p></main>
+        <iframe srcdoc='<p>Frame body sentinel</p>'></iframe><div id='shadow' style='height:20px'></div>
+        <script>document.getElementById('shadow').attachShadow({mode:'open'}).innerHTML='<p>Shadow body sentinel</p>';</script>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "content-timeout", processIdentifier: 42, target: target)
+        let fast = try await transport.observeForRead(target: target)
+        XCTAssertEqual(fast.semanticReadiness, .ready)
+        let pending = Task { try await broker.snapshot(taskKey: "content-timeout", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content)) }
+        try await waitForSemanticObserver(view)
+        let read = try await pending.value
+        XCTAssertTrue(read.snapshot.elements.isEmpty)
+        XCTAssertTrue(read.snapshot.formattedText.contains("semantic_readiness=empty_at_deadline"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("Controls may already be present"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("does not establish website search results or absent content"))
+        XCTAssertFalse(read.snapshot.formattedText.contains("Only a document shell or footer"))
+        XCTAssertTrue(read.snapshot.sourceTruncated, "Frame/shadow boundaries remain explicit; no extra capture was attempted")
+        XCTAssertFalse(read.snapshot.formattedText.contains("body sentinel"))
+        try await broker.revoke(taskKey: "content-timeout", binding: read.binding)
+    }
+
     func testBlankBindingAndMutationPreflightUseImmediateObservationWithoutWaitingForContent() async throws {
         let (session, transport, view, target) = try await semanticReadinessFixture()
         defer { session.shutdown() }
@@ -419,21 +525,24 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     }
 
     func testSemanticReadinessNavigationContextFailureRemainsAStaleRead() async throws {
+        for readiness in [BrowserReadReadiness.semanticContent, .content] {
         let (session, transport, view, target) = try await semanticReadinessFixture()
         defer { session.shutdown() }
-        let pending = Task { try await transport.observeForRead(target: target) }
+        let pending = Task { try await transport.observeForRead(target: target, readiness: readiness) }
         try await waitForSemanticObserver(view)
         let id = try XCTUnwrap(UUID(uuidString: target.targetID))
         try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
         do { _ = try await pending.value; XCTFail("The old document cannot publish after navigation destroys its context") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
         XCTAssertTrue(session.webView(for: id) === view)
+        }
     }
 
     func testSemanticReadinessCannotPublishAfterCancellationOrTabClosure() async throws {
+        for readiness in [BrowserReadReadiness.semanticContent, .content] {
         for closed in [false, true] {
             let (session, transport, view, target) = try await semanticReadinessFixture()
-            let pending = Task { try await transport.observeForRead(target: target) }
+            let pending = Task { try await transport.observeForRead(target: target, readiness: readiness) }
             try await waitForSemanticObserver(view)
             let id = try XCTUnwrap(UUID(uuidString: target.targetID))
             if closed { session.closeTab(id) } else { pending.cancel() }
@@ -446,6 +555,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 else { XCTAssertTrue(error is CancellationError) }
             }
             session.shutdown()
+        }
         }
     }
 
@@ -705,7 +815,9 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertFalse(fresh.nodes.contains { $0.value=="MUST_NOT_APPEAR" })
     }
 
-    private func semanticReadinessFixture() async throws -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget) {
+    private func semanticReadinessFixture(
+        body: String = "<main aria-label='Outlook'></main>", timeoutMS: Int? = nil
+    ) async throws -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget) {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let resource = root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js")
         let source = try String(contentsOf: resource, encoding: .utf8)
@@ -713,13 +825,13 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: registration).count, 2)
         // A fixture-only DOM signal lets the test await actual observer
         // registration, without timing sleeps or polling either WebView.
-        let instrumented = source.replacingOccurrences(of: registration, with:
+        let instrumented = (timeoutMS.map { "input.timeoutMS = \($0);\n" } ?? "") + source.replacingOccurrences(of: registration, with:
             registration + "\ndocument.documentElement.setAttribute('data-computa-readiness-test-armed','yes');")
         let session = EmbeddedBrowserSession(persistent: false)
         let transport = EmbeddedBrowserTabTransport(session: session, script: instrumented)
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
         view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-        view.loadHTMLString("<!doctype html><title>Outlook</title><body><main aria-label='Outlook'></main></body>",
+        view.loadHTMLString("<!doctype html><title>Outlook</title><body>\(body)</body>",
                             baseURL: URL(string: "http://localhost:8123/semantic-readiness"))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
         let available = try await transport.target(id: id.uuidString)

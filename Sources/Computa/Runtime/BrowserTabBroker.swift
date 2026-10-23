@@ -90,6 +90,13 @@ struct BrowserDocumentObservation: Equatable, Sendable {
     }
 }
 
+/// Readiness concerns the requested view, never whether its optional local
+/// query matches. Query misses cannot become a reason to wait for site results.
+enum BrowserReadReadiness: String, Equatable, Sendable {
+    case semanticContent = "semantic_content"
+    case content
+}
+
 protocol BrowserTabTransport: Sendable {
     func createTarget(url: URL) async throws -> BrowserTarget
     func target(id: String) async throws -> BrowserTarget?
@@ -99,6 +106,7 @@ protocol BrowserTabTransport: Sendable {
     /// Fresh user reads may await semantic content. Binding, continuation and
     /// mutation preflight retain the immediate observation contract.
     func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation
     func press(
         target: BrowserTarget,
         backendNodeID: Int64,
@@ -117,6 +125,10 @@ protocol BrowserTabTransport: Sendable {
 extension BrowserTabTransport {
     func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         try await observe(target: target)
+    }
+
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
+        try await observeForRead(target: target)
     }
 }
 
@@ -639,7 +651,8 @@ actor BrowserTabSessionBroker {
         }
         let freshDocument: BrowserDocumentObservation
         if read.cursor == nil, read.snapshotID == nil {
-            freshDocument = try await transport.observeForRead(target: target)
+            freshDocument = try await transport.observeForRead(
+                target: target, readiness: read.view == .content ? .content : .semanticContent)
         } else {
             freshDocument = try await transport.observe(target: target)
         }
@@ -1651,7 +1664,9 @@ actor BrowserTabSessionBroker {
         }
         lines.append(contentsOf: rows)
         if document.semanticReadiness == .emptyAtDeadline {
-            lines.append("Only a document shell or footer was observed before the readiness deadline; meaningful page content is still unresolved. This does not establish that requested content is absent.")
+            lines.append(read.view == .content
+                ? "No readable content or qualifying listbox options were observed before the content-readiness deadline. Controls may already be present; this bounded read does not establish website search results or absent content."
+                : "Only a document shell or footer was observed before the readiness deadline; meaningful page content is still unresolved. This does not establish that requested content is absent.")
         }
         lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
         lines.append("Readable fields are distinct from controls and metadata. Use view=all or links for navigation/controls. Exhausting a captured selection does not establish that virtualized or uncaptured content is absent.")

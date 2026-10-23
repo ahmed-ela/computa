@@ -163,6 +163,48 @@ const hasSemanticContent = snapshot => {
   }
   return snapshot.nodes.some(node => isSemanticNode(node) && !footerScope.has(node.nodeID));
 };
+// Keep this predicate aligned with BrowserTabSessionBroker's content view:
+// readable fields outside controls/navigation, plus observed listbox options
+// and their text. A toolbar, input echo, or region label cannot release an
+// explicit content read while an application is still rendering its body.
+// No query text enters this readiness decision and no new DOM is traversed.
+const hasReadableContent = snapshot => {
+  const byID = new Map(snapshot.nodes.map(node => [node.nodeID, node]));
+  const textRoles = new Set(['statictext','inlinetextbox','text','heading','paragraph','listitem','term',
+    'definition','code','blockquote','cell','gridcell','rowheader','columnheader','caption','label']);
+  const controls = new Set(['button','checkbox','combobox','searchbox','textbox','menu','menubar','menuitem',
+    'menuitemcheckbox','menuitemradio','radio','radiogroup','switch','tab','tablist','toolbar','slider',
+    'spinbutton','listbox','option','treeitem']);
+  const navigation = new Set(['link','navigation','complementary','banner','contentinfo']);
+  const optionExcluded = new Set([...controls].filter(role => !['listbox','option'].includes(role))
+    .concat(['link','navigation','banner','contentinfo']));
+  return snapshot.nodes.some(node => {
+    if (!(trim(node.name) || String(node.value ?? '')) || !(textRoles.has(node.role) || node.role === 'option')) return false;
+    const seen = new Set();
+    let current = node, readable = textRoles.has(node.role), option = true;
+    let optionSeen = false, listboxSeen = false;
+    for (let depth = 0; depth < 128; depth++) {
+      if (!current.nodeID || byID.get(current.nodeID) !== current || seen.has(current.nodeID)) return false;
+      seen.add(current.nodeID);
+      const role = current.role;
+      if (controls.has(role) || navigation.has(role)) readable = false;
+      if (optionExcluded.has(role)) option = false;
+      if (role === 'option') {
+        if (optionSeen) option = false;
+        optionSeen = true;
+      } else if (role === 'listbox') {
+        if (!optionSeen || listboxSeen) option = false;
+        listboxSeen = true;
+      }
+      if (!current.parentNodeID) return readable || (option && optionSeen && listboxSeen);
+      current = byID.get(current.parentNodeID);
+      if (!current) return false;
+    }
+    // The native readable classifier remains permissive for unknown ancestry;
+    // listbox-option selection requires its complete observed ancestor chain.
+    return readable;
+  });
+};
 // Empty and footer-only shells wait. A meaningful page returns immediately;
 // expiration is a bounded observation, never proof that requested content is absent.
 const waitForCapture = async matches => {
@@ -189,7 +231,7 @@ const waitForCapture = async matches => {
 };
 if (input.operation === 'observe') {
   if (input.awaitSemanticReadiness !== true) return capture();
-  const result = await waitForCapture(hasSemanticContent);
+  const result = await waitForCapture(input.readinessView === 'content' ? hasReadableContent : hasSemanticContent);
   return {...result.snapshot, semanticReadiness:result.matched ? 'ready' : 'empty_at_deadline'};
 }
 if (input.operation === 'wait') {
