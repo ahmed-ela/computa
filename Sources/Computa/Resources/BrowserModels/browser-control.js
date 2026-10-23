@@ -47,7 +47,7 @@ const visibleText = node => {
   range.selectNodeContents(node);
   return range.getClientRects().length > 0;
 };
-const roleFor = element => {
+const semanticRoleFor = element => {
   // Page-provided ARIA cannot turn a native secure field into a control whose
   // accessible-name fallback would reveal its value attribute.
   if (element.tagName === 'INPUT' && element.type === 'password') return 'textbox';
@@ -69,7 +69,32 @@ const roleFor = element => {
     ul:'list', ol:'list', li:'listitem', p:'statictext', pre:'statictext', blockquote:'statictext', img:'image',
     section: element.getAttribute('aria-label') ? 'region' : null, output:'status'})[tag] || null;
 };
+// Only explicit, rendered naming establishes passive container ancestry. Do
+// not manufacture a group name from all of its descendants or field values.
+const explicitContainerName = element => {
+  const labelled = trim(element.getAttribute('aria-labelledby'));
+  if (labelled) {
+    if (labelled.length > 4096) return '';
+    const ids = labelled.split(' ');
+    if (ids.length > 32 || new Set(ids).size !== ids.length) return '';
+    const names = [];
+    for (const id of ids) {
+      const label = document.getElementById(id);
+      if (!label || !visible(label) || label.matches('input,textarea,select,[contenteditable]')
+          || label.querySelector('input,textarea,select,[contenteditable],[hidden],[aria-hidden="true"],[inert]')) return '';
+      const name = trim(label.innerText);
+      if (!name) return '';
+      names.push(name);
+    }
+    return trim(names.join(' '));
+  }
+  return trim(element.getAttribute('aria-label'));
+};
+const isPassiveContainer = element => ['DIV','SECTION'].includes(element.tagName)
+  && !trim(element.getAttribute('role')) && !semanticRoleFor(element) && !!explicitContainerName(element);
+const roleFor = element => semanticRoleFor(element) || (isPassiveContainer(element) ? 'group' : null);
 const nameFor = (element, role, boxlessContents = false) => {
+  if (role === 'group' && isPassiveContainer(element)) return explicitContainerName(element);
   const labelled = trim(element.getAttribute('aria-labelledby'));
   if (labelled) {
     const text = trim(labelled.split(' ').map(id => document.getElementById(id)?.textContent || '').join(' '));
@@ -109,6 +134,7 @@ const constraintsFor = (element, boxlessContents) => {
 };
 const metaFor = (element, role, boxlessContents = false) => {
   const name = nameFor(element, role, boxlessContents);
+  const passiveContainer = role === 'group' && isPassiveContainer(element);
   const editableRole = ['textbox','searchbox','combobox'].includes(role);
   const nativeEditable = element.isContentEditable || ['TEXTAREA','SELECT'].includes(element.tagName)
     || (element.tagName === 'INPUT' && ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type));
@@ -126,13 +152,14 @@ const metaFor = (element, role, boxlessContents = false) => {
     && ['option','treeitem','menuitemcheckbox','menuitemradio'].includes(role)
     && trim(element.getAttribute('role')).toLowerCase() === role;
   const tooLarge = name.length > 4096 || (value?.length || 0) > 4096 || (link?.length || 0) > 2048;
-  const disabled = !!element.disabled || !!element.closest('[disabled], [aria-disabled="true"]') || password || tooLarge;
-  const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || (editableRole && !nativeEditable);
+  const disabled = !!element.disabled || !!element.closest('[disabled], [aria-disabled="true"]') || password || tooLarge || passiveContainer;
+  const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || passiveContainer || (editableRole && !nativeEditable);
   return {role, name:name.slice(0,4096), value:password ? null : value?.slice(0,4096) ?? null,
     linkURL:link?.slice(0,2048) ?? null, isDisabled:disabled, isReadOnly:readOnly, isEditable:editable && !readOnly,
     isIgnored:false, isDOMClickable:!popupOnlyLink && (interactiveItem || ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role)),
-    isPressUnsupported:popupOnlyLink,
-    isFocusablePointer:false, constraintValidation:constraintsFor(element, boxlessContents), fieldTruncated:tooLarge};
+    isPressUnsupported:popupOnlyLink || passiveContainer,
+    isFocusablePointer:false, constraintValidation:constraintsFor(element, boxlessContents), fieldTruncated:tooLarge,
+    ...(['group','region'].includes(role) ? {isExplicitlyNamedContainer:!!explicitContainerName(element)} : {})};
 };
 const capture = () => {
   const nodes = [], next = [{node:document.body || document.documentElement, parent:null, suppressText:false}];

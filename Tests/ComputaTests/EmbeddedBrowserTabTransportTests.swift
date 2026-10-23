@@ -1042,6 +1042,125 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(diagnostics.emitted, content.nodes.count)
     }
 
+    func testNamedDOMContainersPreserveConversationAndMessageAncestryWithoutNewActions() async throws {
+        let body = """
+        <main><section aria-label="Conversation">
+          <div aria-label="Message" onclick="window.wrapperClicks=(window.wrapperClicks||0)+1" tabindex="0" style="cursor:pointer">
+            <h2>Shared subject</h2><span>Sender A</span><h3>File-A.pdf</h3>
+            <button onclick="event.stopPropagation();window.childClicks=(window.childClicks||0)+1">Existing child action</button>
+          </div>
+          <div aria-label="Message"><h2>Shared subject</h2><span>Sender B</span><h3>File-B.pdf</h3></div>
+          <div role="group"><p>Unlabeled existing group</p></div>
+          <div role="button" aria-label="Existing explicit action" onclick="window.explicitClicks=1"></div>
+        </section></main>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let raw = try await transport.observe(target: target)
+        let messages = raw.nodes.filter { $0.role == "group" && $0.name == "Message" }
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertTrue(messages.allSatisfy { $0.isExplicitlyNamedContainer && $0.isDisabled && $0.isReadOnly
+            && !$0.isDOMClickable && !$0.isEditable && !$0.isFocusablePointer && $0.isPressUnsupported })
+        XCTAssertFalse(messages.contains { $0.name.contains("Sender") || $0.name.contains("pdf") },
+                       "The passive wrapper's label is not an aggregate of its messages or attachments")
+        let unnamed = try XCTUnwrap(raw.nodes.first { $0.role == "group" && $0.name == "Unlabeled existing group" })
+        XCTAssertFalse(unnamed.isExplicitlyNamedContainer, "Existing descendant-name fallback does not establish a named record")
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "named-records", processIdentifier: 42, target: target)
+        let content = try await broker.snapshot(taskKey: "named-records", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content), compact: true)
+        func path(_ label: String) throws -> [Int] {
+            try XCTUnwrap(content.snapshot.elements.first { $0.label == label }).recordPath
+        }
+        XCTAssertEqual(try path("Sender A"), [1, 2]); XCTAssertEqual(try path("File-A.pdf"), [1, 2])
+        XCTAssertEqual(try path("Sender B"), [1, 3]); XCTAssertEqual(try path("File-B.pdf"), [1, 3])
+        XCTAssertEqual(content.snapshot.elements.filter { $0.label == "Shared subject" }.map(\.recordPath), [[1, 2], [1, 3]])
+        XCTAssertEqual(try path("Unlabeled existing group"), [1])
+        XCTAssertTrue(content.snapshot.formattedText.contains("not authorship"))
+        let text = content.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: content.snapshot.nextCursor))
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text), 0)
+        let all = try await broker.snapshot(taskKey: "named-records", binding: content.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let wrapper = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "group" && $0.label == "Message" })
+        XCTAssertFalse(wrapper.supportsPress); XCTAssertFalse(wrapper.supportsSetText)
+        do {
+            _ = try await broker.perform(taskKey: "named-records", binding: all.binding, snapshot: all.snapshot,
+                elementIndex: wrapper.index, action: "AXPress")
+            XCTFail("Naming never grants the wrapper an action")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .unsupportedAction("AXPress")) }
+        let child = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Existing child action" })
+        XCTAssertTrue(child.supportsPress)
+        try await broker.perform(taskKey: "named-records", binding: all.binding, snapshot: all.snapshot,
+            elementIndex: child.index, action: "AXPress")
+        let counts = try await script(view, "return {wrapper:window.wrapperClicks||0,child:window.childClicks||0};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: counts) as? [String: Int], ["wrapper": 0, "child": 1],
+                       "New passive ancestry must agree with actual input revalidation of the unchanged child")
+        XCTAssertTrue(raw.nodes.contains { $0.name == "Existing explicit action" && $0.isDOMClickable },
+                      "Explicit control semantics remain unchanged")
+    }
+
+    func testPassiveContainerLabelsPreserveHiddenSecureMalformedAndBoxlessBoundaries() async throws {
+        let body = """
+        <main><h2 id="visible-label">Visible reference label</h2>
+          <section aria-labelledby="visible-label"><p>Referenced body</p></section>
+          <div aria-label="Boxless named container" style="display:contents" tabindex="0" onclick="window.bad=1">
+            <p>Boxless body</p><input type="password" aria-label="Secure field" value="EXCLUDED_SECRET_VALUE">
+          </div>
+          <span hidden id="hidden-label">EXCLUDED_HIDDEN_LABEL</span>
+          <div aria-labelledby="hidden-label"><p>Visible body with hidden reference</p></div>
+          <div aria-labelledby="missing"><p>Missing reference body</p></div>
+          <div aria-labelledby="visible-label missing"><p>Partly missing reference body</p></div>
+          <div aria-labelledby="visible-label visible-label"><p>Repeated reference body</p></div>
+          <div aria-labelledby="secure-label"><p>Secure reference body</p></div>
+          <input id="secure-label" type="password" aria-label="Another secure field" value="EXCLUDED_OTHER_SECRET">
+          <span id="aria-mixed">Visible aria label <span aria-hidden="true">EXCLUDED_ARIA_LABEL_CHILD</span></span>
+          <div aria-labelledby="aria-mixed"><p>Aria mixed reference body</p></div>
+          <span id="inert-mixed">Visible inert label <span inert>EXCLUDED_INERT_LABEL_CHILD</span></span>
+          <div aria-labelledby="inert-mixed"><p>Inert mixed reference body</p></div>
+          <span id="hidden-mixed">Visible hidden label <span hidden>EXCLUDED_HIDDEN_LABEL_CHILD</span></span>
+          <div aria-labelledby="hidden-mixed"><p>Hidden mixed reference body</p></div>
+          <div aria-label=" "><p>Empty label body</p></div>
+          <div role="presentation" aria-label="Presentation remains unmapped"><p>Presentation body</p></div>
+          <div hidden aria-label="EXCLUDED_HIDDEN_CONTAINER"><p>EXCLUDED_HIDDEN_BODY</p></div>
+          <div aria-hidden="true" aria-label="EXCLUDED_ARIA_CONTAINER"><p>EXCLUDED_ARIA_BODY</p></div>
+          <div inert aria-label="EXCLUDED_INERT_CONTAINER"><p>EXCLUDED_INERT_BODY</p></div>
+        </main>
+        """
+        let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let raw = try await transport.observe(target: target)
+        let groups = raw.nodes.filter { $0.role == "group" }
+        XCTAssertEqual(Set(groups.map(\.name)), ["Visible reference label", "Boxless named container"])
+        XCTAssertTrue(groups.allSatisfy { $0.isExplicitlyNamedContainer && $0.isDisabled && !$0.isEditable
+            && !$0.isDOMClickable && !$0.isFocusablePointer && $0.isPressUnsupported })
+        XCTAssertFalse(raw.nodes.contains { $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        XCTAssertTrue(raw.nodes.filter { $0.role == "textbox" }.allSatisfy { $0.value == nil && $0.isDisabled && !$0.isEditable })
+        let boxless = try XCTUnwrap(groups.first { $0.name == "Boxless named container" })
+        XCTAssertEqual(raw.nodes.first { $0.name == "Boxless body" }?.parentNodeID, boxless.nodeID)
+        XCTAssertFalse(raw.nodes.contains { $0.name == "Presentation remains unmapped" })
+        XCTAssertFalse(raw.sourceTruncated)
+    }
+
+    func testContainerNamingFlagStrictDecodeAndMissingFlagCompatibility() async throws {
+        let (session, _, _, target) = try await semanticReadinessFixture(body: "<main><p>Fixture body</p></main>")
+        defer { session.shutdown() }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js"), encoding: .utf8)
+        let anchor = "diagnostics.visited = visited; diagnostics.emitted = nodes.length; diagnostics.estimatedBytes = budget;"
+        XCTAssertEqual(source.components(separatedBy: anchor).count, 2)
+        for literal in ["null", "1", "0", "\"true\"", "{}", "[]"] {
+            let modified = source.replacingOccurrences(of: anchor, with: anchor + " nodes[0].isExplicitlyNamedContainer = \(literal);")
+            let transport = EmbeddedBrowserTabTransport(session: session, script: modified)
+            do { _ = try await transport.observe(target: target); XCTFail("Reject malformed passive flag: \(literal)") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("The built-in page returned invalid container naming metadata.")) }
+        }
+        for statement in ["delete nodes[0].isExplicitlyNamedContainer;", "nodes[0].isExplicitlyNamedContainer = false;"] {
+            let modified = source.replacingOccurrences(of: anchor, with: anchor + " " + statement)
+            let observed = try await EmbeddedBrowserTabTransport(session: session, script: modified).observe(target: target)
+            XCTAssertFalse(try XCTUnwrap(observed.nodes.first).isExplicitlyNamedContainer)
+        }
+    }
+
     func testDisplayContentsTraversalDoesNotExposeHiddenAriaHiddenOrInertDescendants() async throws {
         let body = """
         <main><p>VISIBLE_CONTROL_BODY</p>

@@ -67,12 +67,12 @@ enum ComputaAgentInstructions {
     """
 
     static let browserSearchEvidence = """
-    Search distinctive terms. A fill does not press Search: inspect results; if
-    pending, click its observed submit control once. view=content reads message text;
-    view=all includes toolbars. Fresh reads restart page one; the offered continuation
-    tool takes next_cursor alone. browser_read(query) filters captured UI, including input echoes;
-    counts are not site results. Broaden unrelated results. Report observed positives
-    with their scope; a negative needs relevant site-result evidence. Partial reads or
+    Search distinctive terms. Fill does not press Search: inspect results; if pending,
+    click observed submit control once. view=content reads bodies; view=all includes toolbars.
+    Fresh reads restart; offered continuation takes next_cursor alone.
+    browser_read(query) filters captured UI/input echoes; counts aren't site results.
+    Match attachments to the requested sender's own message, not thread/recipient matches.
+    Broaden unrelated results. Negatives need relevant site-result evidence; partial reads or
     narrow-query misses leave absence unverified.
     """
 
@@ -304,7 +304,7 @@ enum ComputaAgentInstructions {
     Claim policy/access denial only from tool evidence.
     \(browserSignInEvidence)
     Report filenames/IDs only as literally observed, never expanded from prose.
-    Verify selected items match the requested person/topic; read attachment controls/links for names.
+    Verify the requested topic; read attachment controls/links for names.
     """
 
     static let builtInBrowser = """

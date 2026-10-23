@@ -491,17 +491,18 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         let text = guidance.replacingOccurrences(of: "\n", with: " ")
         XCTAssertTrue(text.contains("Search distinctive terms"))
-        XCTAssertTrue(text.contains("A fill does not press Search"))
-        XCTAssertTrue(text.contains("inspect results; if pending, click its observed submit control once"),
+        XCTAssertTrue(text.contains("Fill does not press Search"))
+        XCTAssertTrue(text.contains("inspect results; if pending, click observed submit control once"),
                       "Inspect the result first: a fill may trigger page handlers, so submission is conditional rather than a blind repeat")
         XCTAssertTrue(text.contains("Broaden unrelated results"))
-        XCTAssertTrue(text.contains("view=content reads message text"))
+        XCTAssertTrue(text.contains("view=content reads bodies"))
         XCTAssertTrue(text.contains("view=all includes toolbars"))
-        XCTAssertTrue(text.contains("Fresh reads restart page one; the offered continuation tool takes next_cursor alone"))
-        XCTAssertTrue(text.contains("Partial reads or narrow-query misses leave absence unverified"))
-        XCTAssertTrue(text.contains("including input echoes; counts are not site results"))
-        XCTAssertTrue(text.contains("Report observed positives with their scope"))
-        XCTAssertTrue(text.contains("a negative needs relevant site-result evidence"))
+        XCTAssertTrue(text.contains("Fresh reads restart; offered continuation takes next_cursor alone"))
+        XCTAssertTrue(text.contains("partial reads or narrow-query misses leave absence unverified"))
+        XCTAssertTrue(text.contains("filters captured UI/input echoes; counts aren't site results"))
+        XCTAssertTrue(text.contains("Match attachments to the requested sender's own message, not thread/recipient matches"),
+                      "A conversation participant or outgoing recipient does not identify the sender of an attachment")
+        XCTAssertTrue(text.contains("Negatives need relevant site-result evidence"))
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(guidance))
         XCTAssertLessThanOrEqual(guidance.utf8.count, 548, "The replacement must not exceed the previous guidance size")
         XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy().contains("Never replay uncertain input"))
@@ -619,25 +620,30 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
         let filenameRule = "Report filenames/IDs only as literally observed, never expanded from prose."
-        let attachmentRule = "Verify selected items match the requested person/topic; read attachment controls/links for names."
+        let attachmentRule = "Verify the requested topic; read attachment controls/links for names."
+        let senderRule = "Match attachments to the requested sender's own message, not thread/recipient matches."
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
-        let original = try JSONSerialization.data(withJSONObject: [
-            "model": "browser/chatgpt", "input": [
-                ["role": "developer", "content": native],
-                ["role": "assistant", "content": "The first result has an observed attachment name, but the requested person and topic remain unverified."],
-                ["role": "user", "content": "Locate the attachment matching the requested person and topic and report its observed name."],
-            ],
-            "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]],
-        ])
+        let retained = native.replacingOccurrences(of: ComputaAgentInstructions.browserSearchEvidence, with: "")
+        let human = "Find the attachment Alex sent about the project; copy its filename exactly.  e\u{301}\nRead only."
+        let steer = "An attachment I sent to Alex does not satisfy this request. Do not send or modify anything."
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": retained],
+            ["role": "assistant", "content": "The project thread contains Alex and outgoing-cover.pdf, but the file belongs to my outgoing message to Alex. The partial search page showed only unrelated results."],
+            ["role": "user", "content": human],
+            ["role": "user", "content": steer],
+        ]
+        let envelope: [String: Any] = ["model": "browser/chatgpt", "input": input,
+            "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]]]
+        let original = try JSONSerialization.data(withJSONObject: envelope)
         let request = try WebModelResponseCodec.prepareRequest(original)
-        let fresh = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [native])
+        let fresh = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [retained])
         XCTAssertEqual(request.continuationRequest, original, "Grounding is current guidance, not rewritten user/history text")
         let end = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
         let ruleAfterRequest = try XCTUnwrap(request.prompt.range(of: filenameRule,
             range: end.upperBound..<request.prompt.endIndex))
         XCTAssertGreaterThan(ruleAfterRequest.lowerBound, end.upperBound)
         for delivered in [native, fresh] {
-            for rule in [filenameRule, attachmentRule] {
+            for rule in [filenameRule, attachmentRule, senderRule] {
                 XCTAssertEqual(delivered.components(separatedBy: rule).count - 1, 1)
             }
             XCTAssertTrue(delivered.contains("never guess a variant/homepage"))
@@ -650,7 +656,61 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertTrue(native.contains("Never repeat uncertain input"))
         XCTAssertTrue(native.contains("Automatic cleanup is not proof"))
-        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(filenameRule))
+        // The host checkpoint uses this same serializer after native admission.
+        // Old developer text and an earlier assistant attribution must not suppress
+        // current evidence guidance or rewrite the human request/accepted steer.
+        for wireAPI in [APIProviderDefinition.WireAPI.chatCompletions, .responses] {
+            let provider = APIProviderDefinition(id: "attachment-evidence-fixture", name: "Fixture",
+                baseURL: try XCTUnwrap(URL(string: "https://example.invalid/v1")), wireAPI: wireAPI,
+                models: [.init(id: "fixture-model", name: "Fixture")])
+            var apiEnvelope = envelope
+            apiEnvelope["model"] = APIProviderCatalog.appModelID(providerID: provider.id, modelID: provider.models[0].id)
+            let apiOriginal = try JSONSerialization.data(withJSONObject: apiEnvelope)
+            let prepared = try APIModelResponseCodec.prepare(apiOriginal,
+                selection: .init(provider: provider, model: provider.models[0]),
+                threadID: "550e8400-e29b-41d4-a716-446655440000",
+                capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+            let projected = try APIModelResponseCodec.appendingHostDeveloperMessage(
+                ComputaAgentInstructions.runtimeInteractionPolicy(), to: prepared)
+            var before = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            var after = try XCTUnwrap(JSONSerialization.jsonObject(with: projected.body) as? [String: Any])
+            let key = wireAPI == .chatCompletions ? "messages" : "input"
+            let previous = try XCTUnwrap(before.removeValue(forKey: key) as? [[String: Any]])
+            let userTexts = try previous.filter { $0["role"] as? String == "user" }.map { message -> Data in
+                if let text = message["content"] as? String { return Data(text.utf8) }
+                let parts = try XCTUnwrap(message["content"] as? [[String: Any]])
+                XCTAssertEqual(parts.count, 1)
+                return Data(try XCTUnwrap(parts.first?["text"] as? String).utf8)
+            }
+            XCTAssertEqual(userTexts, [Data(human.utf8), Data(steer.utf8)],
+                           "Current request and accepted steer keep exact UTF-8 bytes and user authority")
+            var messages = try XCTUnwrap(after.removeValue(forKey: key) as? [[String: Any]])
+            let checkpoint = try XCTUnwrap(messages.popLast())
+            XCTAssertEqual(messages as NSArray, previous as NSArray,
+                           "The complete translated history, including both exact user inputs, remains in order")
+            XCTAssertEqual(after as NSDictionary, before as NSDictionary)
+            XCTAssertEqual(checkpoint["role"] as? String, "developer")
+            let checkpointText: String
+            if wireAPI == .chatCompletions {
+                checkpointText = try XCTUnwrap(checkpoint["content"] as? String)
+            } else {
+                let parts = try XCTUnwrap(checkpoint["content"] as? [[String: Any]])
+                XCTAssertEqual(parts.count, 1)
+                XCTAssertEqual(parts.first?["type"] as? String, "input_text")
+                checkpointText = try XCTUnwrap(parts.first?["text"] as? String)
+            }
+            XCTAssertEqual(checkpointText.components(separatedBy: senderRule).count - 1, 1)
+            XCTAssertTrue(checkpointText.contains("Negatives need relevant site-result evidence"))
+            XCTAssertTrue(checkpointText.contains("partial reads or\nnarrow-query misses leave absence unverified"))
+            XCTAssertTrue(checkpointText.contains("Never replay uncertain input"))
+            XCTAssertTrue(checkpointText.contains("Honor explicit ongoing user restrictions"))
+        }
+        for names in [[], ["browser_read_notes"], ["exec_command"]] {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: names)
+            XCTAssertFalse(handoff.contains(filenameRule))
+            XCTAssertFalse(handoff.contains(senderRule))
+        }
+        XCTAssertFalse(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: false).contains(senderRule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
     }

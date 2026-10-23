@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 import OSLog
 import WebKit
@@ -212,6 +213,13 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 throw BrowserTabBrokerError.browserUnavailable(
                     "The built-in page returned invalid element metadata.")
             }
+            let explicitlyNamed: Bool
+            if let rawFlag = row["isExplicitlyNamedContainer"] {
+                guard let flag = rawFlag as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else {
+                    throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid container naming metadata.")
+                }
+                explicitlyNamed = flag.boolValue
+            } else { explicitlyNamed = false }
             return BrowserDocumentNode(
                 backendNodeID: number.int64Value, role: role, name: name,
                 value: row["value"] as? String, isDisabled: disabled, isReadOnly: readOnly,
@@ -219,7 +227,8 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 nodeID: nodeID, parentNodeID: row["parentNodeID"] as? String, childNodeIDs: children,
                 linkURL: row["linkURL"] as? String, isDOMClickable: clickable, isFocusablePointer: pointer,
                 isEditable: editable, isPressUnsupported: pressUnsupported,
-                constraintValidation: try BrowserConstraintValidation.decode(row["constraintValidation"]))
+                constraintValidation: try BrowserConstraintValidation.decode(row["constraintValidation"]),
+                isExplicitlyNamedContainer: explicitlyNamed)
         }
         var result = BrowserDocumentObservation(
             loaderID: generation.uuidString, title: title, url: url, nodes: nodes,

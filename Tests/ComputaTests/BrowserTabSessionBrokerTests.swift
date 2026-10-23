@@ -229,6 +229,76 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(finalCount, 1)
     }
 
+    func testNamedContainerAncestryKeepsDuplicateLabelsSeparateAcrossPagesAndSubtrees() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let long = String(repeating: "quoted \\\"cafe\u{301}\\\" 🧭 ", count: 160) + "EXACT_END"
+        let nodes = [
+            semanticNode(0, role: "main", name: "", children: ["n1"]),
+            semanticNode(1, role: "region", name: "Conversation", parent: "n0", children: ["n2", "n6"], namedContainer: true),
+            semanticNode(2, role: "group", name: "Message", parent: "n1", children: ["n3", "n4", "n5"], namedContainer: true),
+            semanticNode(3, role: "heading", name: "Shared subject", parent: "n2"),
+            semanticNode(4, role: "StaticText", name: "Sender A", parent: "n2"),
+            semanticNode(5, role: "StaticText", name: long, parent: "n2"),
+            semanticNode(6, role: "group", name: "Message", parent: "n1", children: ["n7", "n8", "n9"], namedContainer: true),
+            semanticNode(7, role: "heading", name: "Shared subject", parent: "n6"),
+            semanticNode(8, role: "StaticText", name: "Sender B", parent: "n6"),
+            semanticNode(9, role: "StaticText", name: "Other-file.pdf", parent: "n6"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n2" })
+        let source = try XCTUnwrap(all.snapshot.readReceipt?.sourceID)
+        var subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        var reconstructed = "", pages = 0
+        repeat {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(subtree.snapshot.readReceipt?.sourceID, source)
+            let text = subtree.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: subtree.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text), 0)
+            XCTAssertFalse(text.contains("Sender B")); XCTAssertFalse(text.contains("Other-file.pdf"))
+            XCTAssertFalse(text.contains("click_ref=")); XCTAssertFalse(text.contains("fill_ref="))
+            for row in try XCTUnwrap(subtree.snapshot.presentation).rows {
+                XCTAssertEqual(try renderedJSONField("record_path", in: row.text), source.uuidString + "/1/2")
+                if try XCTUnwrap(subtree.snapshot.element(at: row.index)).nodeID == "n5" {
+                    reconstructed += try renderedJSONField("label", in: row.text)
+                }
+            }
+            guard let cursor = subtree.snapshot.nextCursor else { break }
+            subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(Data(reconstructed.utf8), Data(long.utf8))
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings), compact: true)
+        XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Shared subject", "Shared subject"])
+        XCTAssertEqual(fresh.snapshot.elements.map(\.recordPath), [[1, 2], [1, 3]])
+        XCTAssertNotEqual(fresh.snapshot.readReceipt?.sourceID, source)
+        XCTAssertTrue(fresh.snapshot.formattedText.contains("prefixes show nesting, not authorship"))
+        await fixture.assertNoInput()
+    }
+
+    func testGroupRecordAncestryRequiresExplicitNamingEvidenceNotAggregatedText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for role in ["group", "region"] {
+            for named in [false, true] {
+                for name in ["", " \n ", "Observed name"] {
+                    try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                        semanticNode(0, role: role, name: name, children: ["n1"], namedContainer: named),
+                        semanticNode(1, role: "StaticText", name: "Target", parent: "n0")])
+                    let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                        bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Target", view: .content), compact: true)
+                    XCTAssertEqual(page.snapshot.elements.count, 1)
+                    XCTAssertEqual(page.snapshot.elements.first?.recordPath, named && name == "Observed name" ? [1] : [])
+                }
+            }
+        }
+        await fixture.assertNoInput()
+    }
+
     func testRecordAncestryFailsClosedOnIncompleteIgnoredDuplicateCyclicOrDeepAncestors() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let target = semanticNode(1, role: "StaticText", name: "Target", parent: "n2")
@@ -2319,13 +2389,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         _ id: Int, role: String, name: String, parent: String? = nil,
         children: [String] = [], link: String? = nil, value: String? = nil,
         clickable: Bool = false, focusablePointer: Bool = false, disabled: Bool = false, readOnly: Bool = false,
-        editable: Bool = false
+        editable: Bool = false, namedContainer: Bool = false
     ) -> BrowserDocumentNode {
         BrowserDocumentNode(
             backendNodeID: Int64(id + 1), role: role, name: name, value: value,
             isDisabled: disabled, isReadOnly: readOnly, isIgnored: false,
             nodeID: "n\(id)", parentNodeID: parent, childNodeIDs: children, linkURL: link,
-            isDOMClickable: clickable, isFocusablePointer: focusablePointer, isEditable: editable
+            isDOMClickable: clickable, isFocusablePointer: focusablePointer, isEditable: editable,
+            isExplicitlyNamedContainer: namedContainer
         )
     }
 

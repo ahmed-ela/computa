@@ -307,6 +307,9 @@ struct BrowserDocumentNode: Equatable, Sendable {
     /// contenteditable groups out of read-only result verification regions.
     let isEditable: Bool
     let constraintValidation: BrowserConstraintValidation?
+    /// Passive observed naming provenance, not a message/authorship claim or
+    /// input capability. Absent on older/other backends.
+    let isExplicitlyNamedContainer: Bool
 
     init(
         backendNodeID: Int64?, role: String, name: String, value: String?,
@@ -315,7 +318,8 @@ struct BrowserDocumentNode: Equatable, Sendable {
         childNodeIDs: [String] = [], linkURL: String? = nil,
         isDOMClickable: Bool = false, isFocusablePointer: Bool = false,
         isEditable: Bool = false, isPressUnsupported: Bool = false,
-        constraintValidation: BrowserConstraintValidation? = nil
+        constraintValidation: BrowserConstraintValidation? = nil,
+        isExplicitlyNamedContainer: Bool = false
     ) {
         self.backendNodeID = backendNodeID
         self.role = role
@@ -333,6 +337,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
         self.isFocusablePointer = isFocusablePointer
         self.isEditable = isEditable
         self.constraintValidation = constraintValidation
+        self.isExplicitlyNamedContainer = isExplicitlyNamedContainer
     }
 }
 
@@ -1644,7 +1649,9 @@ actor BrowserTabSessionBroker {
         // view/query/page selection. Never publish their DOM IDs or labels.
         let recordRoles: Set<String> = ["article", "listitem", "option", "row"]
         var recordOrdinals: [String: Int] = [:]
-        for node in document.nodes where !node.isIgnored && recordRoles.contains(node.role.lowercased()) {
+        for node in document.nodes where !node.isIgnored && (recordRoles.contains(node.role.lowercased())
+            || (node.isExplicitlyNamedContainer && ["group", "region"].contains(node.role.lowercased())
+                && !node.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)) {
             if let id = node.nodeID, sourceNodes[id] == node {
                 recordOrdinals[id] = recordOrdinals.count + 1
             }
@@ -2353,7 +2360,7 @@ actor BrowserTabSessionBroker {
         return lines.joined(separator: "\n")
     }
 
-    private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting. Records may span pages. Not input targets or verified outcomes."
+    private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes."
 
     private func quote(_ value: String) -> String {
         var result = "\""

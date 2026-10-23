@@ -1327,3 +1327,46 @@ deleted or downloaded. The goal remains unresolved: sender/message association,
 negative-search grounding and literal copying still fail in these samples, and
 diagnostics were not requalified in 244. Earlier failures and all existing limits
 remain preserved.
+
+## Build 245: individual-message evidence
+
+The 244 repeated Outlook lookup exposed two separate gaps. The answer attributed
+a genuine attachment to the wrong participant in a multi-author conversation.
+The opened-conversation tool output also lacked per-message ancestry, while the
+native accessibility view exposed individual message containers. The exact
+Outlook DOM wrapper responsible was not inspected, so this is not a claim that
+one site-specific selector was identified or fixed.
+
+The generic capture now retains rendered DIV/SECTION containers with safe
+explicit accessible names as passive groups. Named groups/regions carry internal
+default-false naming provenance; only that provenance admits them to the existing
+bounded record ancestry. Unnamed wrappers remain flattened. New container names
+never aggregate arbitrary descendant text or hidden, inert or secure label
+subtrees. Containers gain no click/fill capability; a child action still needs
+its own current reference and unchanged semantic parent. Paths describe nesting,
+not authorship or verified outcomes.
+
+The existing refreshed evidence block now requires attachments to belong to the
+requested sender's own message rather than matching a thread participant or
+recipient. It reaches native instructions, resumed API checkpoints and website
+handoffs without adding a new prompt surface. Search evidence remains bounded:
+submission is conditional on pending results; captured-UI filtering is distinct
+from website search; partial or narrow misses do not establish absence. The block
+is 545 bytes, built-in guidance 4,522 bytes and the maximum combined checkpoint
+9,964 bytes, all within unchanged limits.
+
+Validation before installation: 346 focused Swift tests passed with zero failures
+or skips and unchanged source hashes. Five new WebKit/broker cases cover passive
+named containers, duplicate names across bounded pages/subtrees, strict Boolean
+decoding with legacy absence, hidden/secure/malformed labels, and child actions
+under the newly retained parent. Three isolated HTTP mailbox tests also passed.
+
+Two mixed-author fixture trials already passed on build 244: 2.041 and 2.520
+seconds, three calls each, zero tool errors or POSTs. Both expanded and read the
+staff message, rather than using the learner's visible attachment. The missing
+variant's final answer scoped absence correctly but changed a quoted address's
+hyphen. These are baseline controls, not evidence of a 245 repair. The fixture
+uses article roles and does not reproduce Outlook's ungrouped DOM output.
+
+Installation and live build 245 qualification are pending. Runtime `mactopus-15`
+is unchanged. No limit, permission or approval boundary was increased.

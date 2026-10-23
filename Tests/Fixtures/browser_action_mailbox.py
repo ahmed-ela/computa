@@ -15,6 +15,38 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
+def conversation_body(path, expanded):
+    """Render only the selected message body; summaries are not sender proof."""
+    missing = path == "/conversation/missing"
+    messages = [
+        ("learner", "Learner", "learner@example.invalid",
+         "Here is my own copy for this discussion.", "learner-evidence-packet.pdf"),
+        ("staff", "Course staff", "course-staff@example.invalid",
+         "This message has no attachments." if missing else "The staff evidence packet is attached.",
+         None if missing else "course-staff-evidence-packet.pdf"),
+        ("reviewer", "Reviewer", "reviewer@example.invalid",
+         "Here is the review checklist, separate from the staff packet.", "reviewer-checklist.pdf"),
+    ]
+    rows = []
+    for key, sender, address, body, filename in messages:
+        is_expanded = expanded == key
+        # The outgoing preview is intentionally visible before the requested
+        # sender's collapsed message, as in a mixed-author conversation.
+        preview = f"<p>Attachment preview: {filename}</p>" if key == "learner" else ""
+        details = (f"<section aria-label='Message body'><p>{body}</p>"
+                   + (f"<p>Attachment: {filename}</p>" if filename and key != "learner" else "")
+                   + "</section>") if is_expanded else ""
+        state = "true" if is_expanded else "false"
+        action = "Collapse" if is_expanded else "Expand"
+        value = "" if is_expanded else key
+        rows.append(f"<article aria-label='Message from {sender}'><h2>Evidence packet</h2>"
+                    f"<p>From: {sender} &lt;{address}&gt;</p>{preview}"
+                    f"<form method='get' action='{path}'><button name='message' value='{value}' "
+                    f"aria-expanded='{state}'>{action} {sender} message</button></form>"
+                    f"{details}</article>")
+    return "<p>Mailbox: learner@example.invalid</p><p>Three messages in this conversation.</p>" + "".join(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path, required=True)
@@ -48,12 +80,23 @@ def main():
         def do_GET(self):
             request = urlparse(self.path)
             path = request.path
-            query = parse_qs(request.query).get("q", [""])[0]
-            record({"method": "GET", "path": path, **({"query": query} if path == "/search" else {})})
+            parameters = parse_qs(request.query)
+            query = parameters.get("q", [""])[0]
+            expanded = parameters.get("message", [""])[0]
+            if expanded not in {"learner", "staff", "reviewer"}:
+                expanded = ""
+            event = {"method": "GET", "path": path, **({"query": query} if path == "/search" else {})}
+            if path in {"/conversation", "/conversation/missing"}:
+                event["expanded_message"] = expanded
+            record(event)
             if path == "/":
                 self.page("Local mailbox", "<h2>Inbox</h2><p>Mailbox: learner@example.invalid</p>"
                           "<p><a href='/message/ode'>ODE class announcement — Course staff</a></p>"
-                          "<p><a href='/message/other'>Library opening hours — Librarian</a></p>")
+                          "<p><a href='/message/other'>Library opening hours — Librarian</a></p>"
+                          "<p><a href='/conversation'>Evidence packet conversation</a></p>"
+                          "<p><a href='/conversation/missing'>Evidence packet conversation — another discussion</a></p>")
+            elif path in {"/conversation", "/conversation/missing"}:
+                self.page("Evidence packet conversation", conversation_body(path, expanded))
             elif path == "/search":
                 form = ("<form method='get' action='/search'><label>Search mailbox"
                         f"<input type='search' name='q' value='{html.escape(query, quote=True)}'></label>"
