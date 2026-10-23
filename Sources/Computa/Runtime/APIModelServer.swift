@@ -710,7 +710,11 @@ actor APIModelServer {
                 if error is CancellationError || error as? Failure == .cancelled || error as? APIProviderHTTPClient.Failure == .cancelled { terminal = .cancelled }
                 if error as? APIProviderHTTPClient.Failure == .timeout || ContinuousClock.now >= deadline { terminal = .timedOut }
                 if !finished {
-                    do { try accounting.finish(ticket, claimed: secondClaimed, usage: secondUsage, outcome: terminal) }
+                    let finiteSecondValidation = secondDiagnostic.flatMap {
+                        Self.finiteArgumentValidation($0) ? APIModelCorrectionAccounting.FirstValidation($0) : nil
+                    }
+                    do { try accounting.finish(ticket, claimed: secondClaimed, usage: secondUsage, outcome: terminal,
+                        secondValidation: finiteSecondValidation) }
                     catch { Self.responseLog.error("argumentCorrection terminal_accounting_unavailable; first usage remains durable") }
                 }
                 logCorrection(ticket, outcome: terminal)
@@ -817,12 +821,13 @@ actor APIModelServer {
         return String(decoding: data, as: UTF8.self)
     }
     /// Shared by terminal failure logs and durable recovered-response metadata.
-    /// Values and paths are absent from this type; malformed observations cannot
+    /// Values and arbitrary paths are absent; optional builtin paths use closed
+    /// enums checked against the admitted schema. Malformed observations cannot
     /// affect admission, correction eligibility, or the request budget.
     private static func finiteArgumentValidation(_ value: APIModelResponseCodec.ArgumentValidationDiagnostic) -> Bool {
         (0...128).contains(value.callCount) && (1...128).contains(value.rejectedCount)
             && value.rejectedCount <= value.callCount && (value.schemaFailures?.count ?? 0) <= 2
-            && (value.schemaFailures?.allSatisfy { (0..<128).contains($0.toolIndex) } ?? true)
+            && (value.schemaFailures?.allSatisfy { (0..<128).contains($0.toolIndex) && ($0.location?.isConsistent ?? true) } ?? true)
     }
     struct HTTPRequest: Sendable { let method: String; let path: String; let headers: [String: String]; let body: Data }
     static func parseRequest(_ data: Data) throws -> HTTPRequest? {

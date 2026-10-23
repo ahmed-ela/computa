@@ -159,6 +159,71 @@ final class APIModelCorrectionTests: XCTestCase {
             envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
         XCTAssertNil(APIModelCorrectionAccounting.FirstValidation(invalid))
     }
+    func testBuiltinLocationsKeepFirstAndCorrectiveAttemptsDistinctWithinExistingJournalBound() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        func validation(_ field: APIModelResponseCodec.DiagnosticSchemaField,
+                        actual: APIModelResponseCodec.DiagnosticJSONType) throws -> APIModelCorrectionAccounting.FirstValidation {
+            let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .typeMismatch,
+                location: .init(tool: .browserRead, schemaPath: [field], expectedType: .string, actualType: actual))
+            return try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch,
+                schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+                unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+        }
+        let first = try validation(.cursor, actual: .null), second = try validation(.query, actual: .boolean)
+        let maximumUsage = APIModelCorrectionUsage(inputTokens: 100_000_000, outputTokens: 100_000_000,
+            totalTokens: 200_000_000, cachedInputTokens: 100_000_000, reasoningOutputTokens: 100_000_000)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: maximumUsage, firstValidation: first)
+        let firstFile = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let original = try Data(contentsOf: firstFile)
+        try store.claimed(ticket)
+        try store.finish(ticket, claimed: true, usage: maximumUsage, outcome: .argumentsRejected, secondValidation: second)
+        XCTAssertEqual(try Data(contentsOf: firstFile), original)
+        let all = try records(directory), finished = try XCTUnwrap(all.first { $0.phase == "finished" })
+        XCTAssertEqual(all.count, 3); XCTAssertTrue(all.allSatisfy { $0.schemaVersion == 3 && $0.firstValidation == first })
+        XCTAssertTrue(all.filter { $0.phase != "finished" }.allSatisfy { $0.secondValidation == nil })
+        XCTAssertEqual(finished.secondValidation, second); XCTAssertNotEqual(finished.firstValidation, finished.secondValidation)
+        XCTAssertEqual(finished.outcome, .argumentsRejected)
+        func assertNoPrivateKeys(_ value: Any) {
+            if let object = value as? [String: Any] {
+                XCTAssertTrue(Set(object.keys).isDisjoint(with: ["arguments", "prompt", "wireName"]))
+                object.values.forEach(assertNoPrivateKeys)
+            } else if let items = value as? [Any] {
+                items.forEach(assertNoPrivateKeys)
+            }
+        }
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let bytes = try Data(contentsOf: file)
+            XCTAssertLessThanOrEqual(bytes.count, 2_048, "Additional observations must fit the existing journal bound")
+            assertNoPrivateKeys(try JSONSerialization.jsonObject(with: bytes))
+            let text = String(decoding: bytes, as: UTF8.self)
+            for forbidden in ["PRIVATE", "http"] { XCTAssertFalse(text.contains(forbidden)) }
+        }
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(finished)) as? [String: Any])
+        object["schemaVersion"] = 2
+        XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: JSONSerialization.data(withJSONObject: object)))
+        object["schemaVersion"] = 3; object["phase"] = "first_received"
+        XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: JSONSerialization.data(withJSONObject: object)),
+                             "A second validation cannot be presented as first-attempt evidence")
+    }
+    func testBuiltinLocationDecoderRejectsPrivateKeysUnknownEnumsAndWrongToolFields() throws {
+        let valid = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.cursor], expectedType: .string, actualType: .null)
+        let base = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])
+        var variants: [[String: Any]] = []
+        var changed = base; changed["PRIVATE_KEY"] = "PRIVATE_VALUE"; variants.append(changed)
+        changed = base; changed["tool"] = "PRIVATE_TOOL"; variants.append(changed)
+        changed = base; changed["schemaPath"] = ["PRIVATE_FIELD"]; variants.append(changed)
+        changed = base; changed["schemaPath"] = ["url"]; variants.append(changed)
+        changed = base; changed["schemaPath"] = ["cursor", "cursor"]; variants.append(changed)
+        changed = base; changed["expectedType"] = "integer"; variants.append(changed)
+        changed = base; changed["actualType"] = "PRIVATE_VALUE"; variants.append(changed)
+        for value in variants {
+            XCTAssertThrowsError(try JSONDecoder().decode(APIModelResponseCodec.BuiltinSchemaLocation.self,
+                from: JSONSerialization.data(withJSONObject: value)))
+        }
+        XCTAssertEqual(try JSONDecoder().decode(APIModelResponseCodec.BuiltinSchemaLocation.self,
+            from: JSONEncoder().encode(valid)), valid)
+    }
     func testLegacyCorrectionRecordStaysVersionOneAndUnknownRecordFieldsFailClosed() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let store = APIModelCorrectionAccounting(directory: root.appendingPathComponent("journal"))

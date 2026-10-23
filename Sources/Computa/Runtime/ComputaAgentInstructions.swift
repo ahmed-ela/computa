@@ -30,7 +30,7 @@ enum ComputaAgentInstructions {
     success. Matching tool receipts establish observed content and action outcomes
     within their stated scope. Generated notes cannot replace either source.
 
-    Do not copy ephemeral browser tab handles, snapshot IDs, element indices or
+    Do not copy ephemeral browser tab handles, action refs, snapshot IDs, element indices or
     continuation cursors into these notes. They do not grant current action
     authority. Stable observed URLs may remain as historical context. Keep missing
     result evidence and uncertain action outcomes unresolved; never invent zero
@@ -56,10 +56,11 @@ enum ComputaAgentInstructions {
     /// handles and proof remain scoped to the current user turn.
     static let browserTurnLifecycle = """
     Each new user turn must start browser work with browser_tabs then browser_bind,
-    or browser_open, before browser_read/click/fill. Prior handles/snapshots/cursors
+    or browser_open, before browser_read/click/fill. Prior handles/refs/snapshots/cursors
     are invalid; task-owned pages may be closed. Reopen a needed task page at its
     supplied or previously observed URL and obtain fresh targets. Missing/closed tabs
     and empty inventory are not access denial. Never replay uncertain input.
+    Use browser_click(click_ref) or browser_fill(fill_ref,text) with refs in the current read.
     """
 
     static let browserSearchEvidence = """
@@ -285,17 +286,16 @@ enum ComputaAgentInstructions {
     \(browserTurnLifecycle)
     \(browserSearchEvidence)
     \(browserAddressChecks)
-    browser_read returns snapshot_id/element_index targets; copy exactly.
-    Every new read, view change or cursor page supersedes ALL earlier action targets.
-    An admitted click or fill consumes its snapshot. At most one input action per tool-call batch.
+    Copy complete click_ref or fill_ref from the intended current row.
+    Each read replaces the action menu; use only its published refs, even if a token repeats.
+    An admitted click or fill consumes all refs. At most one input action per tool-call batch.
     Never batch fill and click. Use available current_observation from input or stale rejection;
     otherwise browser_read. Never reuse consumed targets.
-    An index is readable context unless its row explicitly offers an action.
-    browser_click requires enabled=true and actions=["AXPress"]; never click an
-    actions=[] text/heading row or infer a clickable parent. It activates enabled
-    controls/links, including follow_link=true; browser_fill requires enabled=true
-    and settable=true on its exact row, not an adjacent label.
-    These are not computer_v2 references. Recheck current label/action against the intended operation; indices change.
+    Snapshot IDs/indices are not browser input references.
+    browser_click requires a published click_ref; never click a text/heading row
+    without one or infer a clickable parent. browser_fill requires a published fill_ref on the exact field,
+    not an adjacent label. Never invent refs or interchange reference types.
+    These are not computer_v2 references. Recheck the current row's label/action against the intended operation.
     If dispatched input leaves the page unchanged,
     wait/read. Never repeat uncertain input.
     Input is not outcome proof: inspect the current observation; use browser_read or

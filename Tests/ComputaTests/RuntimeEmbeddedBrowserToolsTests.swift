@@ -124,9 +124,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@heading", "expected_role": "@headingRole", "expected_label": "@headingLabel"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel", "text": "MUST_NOT_FILL"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "bclick_00000000-0000-4000-8000-000000000000"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@buttonClickRef", "text": "MUST_NOT_FILL"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -135,7 +135,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue((rows[2]["text"] as? String)?.contains("No input was dispatched") == true)
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("No input was dispatched") == true)
             XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill"],
-                           "Passive/non-settable targets must fail before any approval request")
+                           "Unoffered and wrong-kind references must fail before any approval request")
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.fills, 1)
             XCTAssertEqual(counts.presses, 0)
@@ -144,24 +144,22 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testBrowserTargetMismatchDoesNotPromptOrDispatchAndPreservesCurrentRead() async throws {
+    func testLegacyBrowserTargetTupleDoesNotPromptOrDispatchAndPreservesCurrentRead() async throws {
         try await withHarness(approval: true) { harness in
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
                 ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button",
                     "expected_role": "@buttonRole", "expected_label": "Sent"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button",
-                    "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
             ])
             try await self.waitFor { harness.rowCount == 4 && harness.audit.status == .completed }
             let rows = try harness.rows()
             XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true])
             let failure = try XCTUnwrap(rows[2]["text"] as? String)
-            XCTAssertTrue(failure.contains("target_mismatch"))
-            XCTAssertTrue(failure.contains("No input was dispatched"))
+            XCTAssertFalse(failure.isEmpty)
             XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_click"],
-                           "A wrong expected label must fail before approval, without consuming the valid read")
+                           "A retired tuple must fail before approval, without consuming the current typed reference")
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.presses, 1)
             XCTAssertEqual(counts.fills, 0)
@@ -306,9 +304,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -351,6 +349,10 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue(counts.humanIntact)
             XCTAssertEqual(harness.audit.approvals.map(\.kind), [.computerUse, .computerUse, .computerUse])
             XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill", "browser_click"])
+            XCTAssertTrue(harness.audit.approvals[1].details.contains("Search flights"),
+                          "Approval must describe the frozen target, not only its opaque reference")
+            XCTAssertTrue(harness.audit.approvals[1].details.contains("UA 123"))
+            XCTAssertTrue(harness.audit.approvals[2].details.contains("Find flight"))
             XCTAssertFalse(harness.audit.entries.contains { $0.toolEvent?.name.hasPrefix("computer_v2_") == true })
         }
     }
@@ -447,7 +449,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                         ["tool": "browser_tabs", "arguments": [:]],
                         ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
                         ["tool": "browser_read", "arguments": ["view": "all"]],
-                        ["tool": mutation, "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"]],
+                        ["tool": mutation, "arguments": ["fill_ref": "@fieldFillRef", "text": "MUST_NOT_FILL"]],
                     ]
                 try await harness.submit(calls)
                 try await self.waitFor { harness.rowCount == calls.count && harness.audit.status == .completed }
@@ -555,11 +557,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     func testUnboundTurnGuidanceCanRecoverThroughApprovedOpenWithoutReplayingOldInput() async throws {
         try await withHarness(approval: true) { harness in
             try await harness.submit([
-                ["tool": "browser_click", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 1, "expected_role": "AXButton", "expected_label": "Find flight"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "bclick_00000000-0000-4000-8000-000000000000"]],
                 ["tool": "browser_read", "arguments": ["view": "overview"]],
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
             ])
             try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
             let rows = try harness.rows()
@@ -580,12 +582,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testTurnCompletionRetiresOldSnapshotAndPreservesBoundHumanPage() async throws {
+    func testTurnCompletionRetiresOldReferenceAndPreservesBoundHumanPage() async throws {
         try await withHarness(approval: true) { harness in
             try await harness.submit([
                 ["tool": "browser_tabs", "arguments": [:]],
                 ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
-                ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
+                ["tool": "browser_read", "arguments": ["view": "all"], "saveFillRef": "old_fill_ref"],
             ])
             try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
             harness.audit.status = nil
@@ -593,13 +595,13 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["tool": "browser_tabs", "arguments": [:]],
                 ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@old_fill_ref", "text": "MUST_NOT_FILL"]],
             ])
             try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .completed }
             let rows = try harness.rows()
             XCTAssertTrue(rows.prefix(6).allSatisfy { $0["success"] as? Bool == true })
             XCTAssertEqual(rows[6]["success"] as? Bool, false)
-            XCTAssertTrue((rows[6]["text"] as? String)?.lowercased().contains("stale") == true)
+            XCTAssertTrue((rows[6]["text"] as? String)?.contains("browser_action_reference_invalid") == true)
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.mutations, 0)
             XCTAssertEqual(counts.humanCloseAttempts, 0)
@@ -611,10 +613,10 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         try await withHarness(approval: true) { harness in
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
-                ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
+                ["tool": "browser_read", "arguments": ["view": "all"], "saveFillRef": "old_fill_ref"],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"], "captureRecovery": true],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@old_fill_ref", "text": "MUST_NOT_FILL"], "captureRecovery": true],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -635,14 +637,14 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     func testBrowserReadRecoveryDoesNotResetRepeatedFailureStopOrReplayInput() async throws {
         try await withHarness(approval: true) { harness in
             let stale: [String: Any] = ["tool": "browser_fill", "arguments": [
-                "snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL",
+                "fill_ref": "@old_fill_ref", "text": "MUST_NOT_FILL",
             ]]
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
-                ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
+                ["tool": "browser_read", "arguments": ["view": "all"], "saveFillRef": "old_fill_ref"],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
                 stale, stale, stale,
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL_AFTER_STOP"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "MUST_NOT_FILL_AFTER_STOP"]],
             ])
             try await self.waitFor {
                 harness.rowCount == 6 && harness.audit.status == .waiting
@@ -795,24 +797,108 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    func testSuccessfulNewBindingCannotRefundMutationFailures() async throws {
+    func testSuccessfulNewBindingCannotRefundInvalidReferenceFailures() async throws {
         try await withHarness(approval: true) { harness in
             let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
             let mismatch: [String: Any] = ["tool": "browser_click", "arguments": [
-                "snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "MUST_NOT_MATCH",
+                "click_ref": "bclick_00000000-0000-4000-8000-000000000000",
             ]]
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
                 read, mismatch, mismatch,
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/document"]],
                 read, mismatch,
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
             ])
             try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .waiting }
             XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
             XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_open"])
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.created, 2); XCTAssertEqual(counts.mutations, 0)
+        }
+    }
+
+    func testSuccessfulCorrectedInputClearsOnlyPriorReferenceRoutingFailures() async throws {
+        try await withHarness(approval: true) { harness in
+            var calls: [[String: Any]] = [
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+            ]
+            for index in 1...4 {
+                calls.append(["tool": "browser_fill", "arguments": [
+                    "fill_ref": "bfill_00000000-0000-4000-8000-00000000000\(index)",
+                    "text": "MUST_NOT_FILL_\(index)",
+                ]])
+                calls.append(["tool": "browser_fill", "arguments": [
+                    "fill_ref": "@fieldFillRef", "text": "UA \(120 + index)",
+                ]])
+            }
+            try await harness.submit(calls)
+            try await self.waitFor { harness.rowCount == 10 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool },
+                           [true, true, false, true, false, true, false, true, false, true])
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Native action stopped" },
+                           "Successful corrections must prevent unrelated routing errors accumulating into a false stop")
+            XCTAssertEqual(harness.audit.approvals.map(\.summary),
+                           ["browser_open", "browser_fill", "browser_fill", "browser_fill", "browser_fill"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.fills, 4); XCTAssertEqual(counts.presses, 0)
+            XCTAssertTrue((rows.last?["text"] as? String)?.contains("UA 124") == true)
+            XCTAssertFalse((rows.last?["text"] as? String)?.contains("MUST_NOT_FILL") == true)
+        }
+    }
+
+    func testChangingUnknownReferencesAndFillTextCannotRefundRoutingFailures() async throws {
+        try await withHarness(approval: true) { harness in
+            let invalid = (1...3).map { index -> [String: Any] in
+                ["tool": "browser_fill", "arguments": [
+                    "fill_ref": "bfill_00000000-0000-4000-8000-00000000000\(index)",
+                    "text": "MUST_NOT_FILL_\(index)",
+                ]]
+            }
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+            ] + invalid + [
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "MUST_NOT_FILL_AFTER_STOP"]],
+            ])
+            try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, false, false])
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open"])
+            let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+                harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+            XCTAssertEqual(requests.count, 5)
+            XCTAssertEqual(Set(requests.compactMap { $0["reference"] as? String }).count, 3)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.mutations, 0)
+        }
+    }
+
+    func testNewReferencesForTheSameTargetCannotRefundFailedInputAttempts() async throws {
+        try await withHarness(approval: true) { harness in
+            await harness.backend.failPresses(3)
+            let read: [String: Any] = ["tool": "browser_read", "arguments": ["view": "all"]]
+            let press: [String: Any] = ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]]
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                read, press, read, press, read, press,
+                read, press,
+            ])
+            try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, false, true, false])
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_click", "browser_click", "browser_click"])
+            let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+                harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+            XCTAssertEqual(requests.count, 7, "The third unchanged target failure must stop before another read/input")
+            XCTAssertEqual(Set(requests.compactMap { $0["reference"] as? String }).count, 3,
+                           "Each admitted input consumes its reference; newly issued tokens must retain the same failure intent")
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.mutations, 0, "The backend failed before committing any input")
         }
     }
 
@@ -843,7 +929,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["fill_ref": "@fieldFillRef", "text": "UA 123"]],
             ], hold: true)
             try await self.waitForAsync { await harness.backend.isPostInputObservationHeld() }
             XCTAssertEqual(harness.rowCount, 2, "The fill result remains unpublished while its fresh read is pending")
@@ -877,7 +963,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
             ])
             try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
             let last = try XCTUnwrap(harness.rows().last)
@@ -1140,7 +1226,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       if (call.turn === 'wrong') params.turnId = 'wrong-turn';
       if (call.turn === 'previous') params.turnId = `embedded-turn-${turnCount-1}`;
       if (call.turn === 'missing') delete params.turnId;
-      requests.push({turnId, step, tool:call.tool}); save('requests.json', requests);
+      requests.push({turnId, step, tool:call.tool, reference:args.click_ref ?? args.fill_ref}); save('requests.json', requests);
       send({id:`request-${turnCount}-${step}`, method:'item/tool/call', params});
     }
     function received(message) {
@@ -1182,13 +1268,22 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
           const button = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Find flight"'));
           const heading = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="United flight fixture"'));
           const nativeRow = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Pending native selection"'));
-          // Copy assertions only from the exact row returned by the runtime.
-          // Fixture labels are ASCII; no backend or hidden-label lookup is used.
+          // Copy action references only from the exact row returned by the runtime.
+          // Retain row fields solely for the legacy-input rejection test.
           for (const [key, row] of Object.entries({field, button, heading})) {
             if (!row) continue;
             refs[key] = Number(row.match(/^#(\d+)/)[1]);
             refs[`${key}Role`] = JSON.parse(row.match(/role=("[^"]*")/)[1]);
             refs[`${key}Label`] = JSON.parse(row.match(/label=("[^"]*")/)[1]);
+            for (const [field, suffix] of [['click_ref','ClickRef'], ['fill_ref','FillRef']]) {
+              const match = row.match(new RegExp(`(?:^| )${field}="([A-Za-z0-9_-]+)"`));
+              if (match) refs[`${key}${suffix}`] = match[1];
+              else delete refs[`${key}${suffix}`];
+            }
+            if (key === 'field' && plan.calls[step].saveFillRef) {
+              if (!refs.fieldFillRef) throw new Error('Fixture cannot save an unexposed fill reference');
+              refs[plan.calls[step].saveFillRef] = refs.fieldFillRef;
+            }
           }
           if (nativeRow) refs.nativeRow = Number(nativeRow.match(/^#(\d+)/)[1]);
         }
@@ -1291,6 +1386,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var closeWaiter: CheckedContinuation<Void, Never>?
     private var failClose = false
     private var failPress = false
+    private var remainingPressFailures = 0
     private var paginatedRead = false
     private var committedDocuments: [String: UUID] = [humanID: UUID()]
     private var loaderGenerations = [String: UUID]()
@@ -1302,6 +1398,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     func holdNextClose() { holdClose = true }
     func failNextClose() { failClose = true }
     func failNextPress() { failPress = true }
+    func failPresses(_ count: Int) { remainingPressFailures = count }
     func enablePaginatedRead() { paginatedRead = true }
     func configureNavigation(_ mode: String) { navigationMode = mode }
     func isCloseHeld() -> Bool { closeHeld }
@@ -1371,8 +1468,9 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     }
     func press(target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation, permit: BrowserMutationPermit) throws {
         guard backendNodeID == 4 else { throw BrowserTabBrokerError.elementNotFound }
-        if failPress {
+        if failPress || remainingPressFailures > 0 {
             failPress = false
+            remainingPressFailures = max(0, remainingPressFailures - 1)
             throw BrowserTabBrokerError.browserUnavailable("Synthetic press failed")
         }
         try permit.commit { ledger.presses += 1; results[target.targetID] = "UA 123 departs at 14:35" }

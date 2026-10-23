@@ -8,10 +8,18 @@ struct ComputerExecutionFailure: LocalizedError {
 }
 
 struct ComputerUnchangedAttemptGuard {
+    static let browserReferenceRoutingKey = "browser-reference-routing"
     private var attempts: [String: Int] = [:]
     private var browserReadScope: EmbeddedBrowserReadFailureScope?
 
     static func key(tool: String, arguments: [String: Any], observedElementIdentity: String? = nil) -> String {
+        if tool == "browser_click" || tool == "browser_fill" {
+            guard let observedElementIdentity else { return browserReferenceRoutingKey }
+            var intent: [String: Any] = ["observed_element_identity": observedElementIdentity]
+            if tool == "browser_fill", let text = arguments["text"] as? String { intent["text"] = text }
+            let bytes = try? JSONSerialization.data(withJSONObject: intent, options: [.sortedKeys])
+            return tool + ":" + (bytes.flatMap { String(data: $0, encoding: .utf8) } ?? "invalid")
+        }
         // Capability refresh is not a new intent. Keep action/text/element,
         // but do not let fresh opaque IDs evade the no-progress budget.
         var stable = arguments.filter { !["snapshot_id", "capture_id", "cursor", "postcondition"].contains($0.key) }

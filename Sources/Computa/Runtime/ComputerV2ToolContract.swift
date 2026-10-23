@@ -617,11 +617,11 @@ enum ComputerV2ToolContract {
         case .fill:
             properties = ["field_ref": reference, "text": ["type": "string", "minLength": 1, "maxLength": 4_096]]
             required = ["field_ref", "text"]
-            description = "Set the currently published editable native field_ref to text. Does not submit. The host checks its reference and permission, dispatches once and verifies the value. Use browser_fill for a built-in webpage field; its snapshot indices are a separate domain."
+            description = "Set the currently published editable native field_ref to text. Does not submit. The host checks its reference and permission, dispatches once and verifies the value. Use browser_fill with the current fill_ref for a built-in webpage field; browser references are a separate domain."
         case .press:
             properties = ["action_ref": reference, "postcondition": referencePostconditionSchema(reference: reference)]
             required = ["action_ref"]
-            description = "Perform the exact native action bound to a current action_ref. Declare any required native postcondition before input; the host checks permission and dispatches at most once. VERIFIED_PROPERTY proves only its declared property; VERIFICATION_PENDING allows read-only recovery, not replay. Built-in webpages use browser_click with their current snapshot_id and element_index."
+            description = "Perform the exact native action bound to a current action_ref. Declare any required native postcondition before input; the host checks permission and dispatches at most once. VERIFIED_PROPERTY proves only its declared property; VERIFICATION_PENDING allows read-only recovery, not replay. Built-in webpages use browser_click with their current click_ref."
         }
         let result: [String: Any] = ["type": "function", "name": tool.rawValue, "description": description,
                 "inputSchema": ["type": "object", "properties": properties, "required": required, "additionalProperties": false]]

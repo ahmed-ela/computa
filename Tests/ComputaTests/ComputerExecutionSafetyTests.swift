@@ -150,6 +150,31 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         XCTAssertNotEqual(key, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: later, observedElementIdentity: "node:51"))
     }
 
+    func testBrowserUnknownReferencesShareOneRoutingBudgetAcrossKindsAndFillText() {
+        let keys = (0..<3).map { index in
+            ComputerUnchangedAttemptGuard.key(tool: index == 0 ? "browser_click" : "browser_fill",
+                arguments: [index == 0 ? "click_ref" : "fill_ref": UUID().uuidString, "text": "different \(index)"])
+        }
+        XCTAssertEqual(Set(keys), ["browser-reference-routing"])
+        var guardrail = ComputerUnchangedAttemptGuard()
+        XCTAssertFalse(guardrail.failed(key: keys[0])); XCTAssertFalse(guardrail.failed(key: keys[1]))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: UUID(), committedDocumentID: UUID()))
+        XCTAssertTrue(guardrail.failed(key: keys[2]), "A read scope cannot refund unknown-reference routing failures")
+    }
+
+    func testBrowserCanonicalTargetBudgetExcludesTokensAndRowsButPreservesFillIntent() {
+        let identity = "physical-tab:committed-document:loader:backend-node"
+        let first = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "one", "text": "query"], observedElementIdentity: identity)
+        let next = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "query"], observedElementIdentity: identity)
+        XCTAssertEqual(first, next)
+        XCTAssertNotEqual(first, ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "other"], observedElementIdentity: identity))
+        XCTAssertNotEqual(first, ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "query"], observedElementIdentity: "other-physical-target"))
+        var guardrail = ComputerUnchangedAttemptGuard()
+        XCTAssertFalse(guardrail.failed(key: first)); XCTAssertFalse(guardrail.failed(key: next))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: UUID(), committedDocumentID: UUID()))
+        XCTAssertTrue(guardrail.failed(key: first), "New observations and tokens do not refund native target failures")
+    }
+
     func testOnlySuccessfulMatchingOperationResetsItsRetryBudget() {
         var guardrail = ComputerUnchangedAttemptGuard()
         XCTAssertFalse(guardrail.failed(key: "failed-input"))
@@ -165,7 +190,7 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         let first = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
         let second = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
         let read = ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["view": "content", "cursor": "old"])
-        let mutation = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["text": "query", "element_index": 2])
+        let mutation = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["text": "query", "fill_ref": "ref"], observedElementIdentity: "physical-node")
         let native = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_snapshot", arguments: [:])
         guardrail.observedBrowserReadScope(first)
         for key in [read, mutation, native] {

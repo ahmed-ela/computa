@@ -149,12 +149,80 @@ enum APIModelResponseCodec {
         let wireName: String
         let constraint: SchemaConstraint
         let path: [SchemaPathPart]
+        var location: BuiltinSchemaLocation? = nil
     }
     struct FiniteSchemaFailure: Codable, Equatable, Sendable {
         let toolIndex: Int
         let constraint: SchemaConstraint
+        var location: BuiltinSchemaLocation? = nil
     }
-    private struct SchemaViolation { let constraint: SchemaConstraint; let path: [SchemaPathPart] }
+    /// Closed vocabulary for app-owned browser contracts only. Custom/MCP
+    /// names, schema keys and rejected argument values never enter diagnostics.
+    enum DiagnosticBuiltinTool: String, Codable, Sendable {
+        case browserTabs = "browser_tabs", browserOpen = "browser_open", browserBind = "browser_bind"
+        case browserNavigate = "browser_navigate", browserRead = "browser_read", browserClick = "browser_click"
+        case browserFill = "browser_fill", browserWait = "browser_wait", browserClose = "browser_close"
+    }
+    enum DiagnosticSchemaField: String, Codable, Sendable {
+        case cursor, url, tabID = "tab_id", view, query, snapshotID = "snapshot_id", elementIndex = "element_index"
+        case expectedRole = "expected_role", expectedLabel = "expected_label", text, timeoutMS = "timeout_ms"
+        case clickRef = "click_ref", fillRef = "fill_ref"
+    }
+    enum DiagnosticJSONType: String, Codable, Sendable {
+        case missing, null, object, array, string, number, integer, boolean
+    }
+    struct BuiltinSchemaLocation: Codable, Equatable, Sendable {
+        let tool: DiagnosticBuiltinTool
+        /// These browser schemas are flat. An empty path means the object root.
+        let schemaPath: [DiagnosticSchemaField]
+        let expectedType: DiagnosticJSONType
+        let actualType: DiagnosticJSONType
+
+        var isConsistent: Bool {
+            guard schemaPath.count <= 1 else { return false }
+            guard let field = schemaPath.first else { return expectedType == .object && actualType != .missing }
+            // A journal remains readable after an app-owned schema evolves.
+            // Admission is checked against the actual schema at capture time;
+            // decoding only recognizes this closed historical vocabulary.
+            let fields: Set<DiagnosticSchemaField>
+            switch tool {
+            case .browserTabs: fields = [.cursor]
+            case .browserOpen, .browserNavigate: fields = [.url]
+            case .browserBind: fields = [.tabID]
+            case .browserRead: fields = [.cursor, .query, .view]
+            case .browserClick: fields = [.snapshotID, .elementIndex, .expectedRole, .expectedLabel, .clickRef]
+            case .browserFill: fields = [.snapshotID, .elementIndex, .expectedRole, .expectedLabel, .fillRef, .text]
+            case .browserWait: fields = [.text, .timeoutMS]
+            case .browserClose: fields = []
+            }
+            return fields.contains(field) && expectedType == ([.elementIndex, .timeoutMS].contains(field) ? .integer : .string)
+        }
+        init(tool: DiagnosticBuiltinTool, schemaPath: [DiagnosticSchemaField], expectedType: DiagnosticJSONType,
+             actualType: DiagnosticJSONType) {
+            self.tool = tool; self.schemaPath = schemaPath; self.expectedType = expectedType; self.actualType = actualType
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case tool, schemaPath, expectedType, actualType }
+        private struct Key: CodingKey {
+            let stringValue: String; var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+        init(from decoder: any Decoder) throws {
+            let keys = try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue)
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(tool: try values.decode(DiagnosticBuiltinTool.self, forKey: .tool),
+                schemaPath: try values.decode([DiagnosticSchemaField].self, forKey: .schemaPath),
+                expectedType: try values.decode(DiagnosticJSONType.self, forKey: .expectedType),
+                actualType: try values.decode(DiagnosticJSONType.self, forKey: .actualType))
+            guard Set(keys) == Set(CodingKeys.allCases.map(\.stringValue)), isConsistent else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid finite builtin schema location."))
+            }
+        }
+    }
+    private struct SchemaViolation {
+        let constraint: SchemaConstraint; let path: [SchemaPathPart]
+        var actualType: DiagnosticJSONType? = nil
+    }
     /// Finite observations only. This callback cannot authorize correction or
     /// publish any call; all existing complete-envelope gates remain authoritative.
     struct ArgumentValidationDiagnostic: Codable, Equatable, Sendable {
@@ -846,7 +914,7 @@ enum APIModelResponseCodec {
         }
         func emitArgumentRejection(oversized: Bool = false) {
             guard let reason = rejectionReason else { return }
-            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
+            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint, location: $0.location) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
                 envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON,
                 streamShapeAndUsageValid: streamShapeAndUsageValid, knownUsage: correctionUsage(normalizedUsage) != nil,
                 correctionEligible: rawCorrectionEligible && correctionUsage(normalizedUsage) != nil && !oversized))
@@ -857,7 +925,8 @@ enum APIModelResponseCodec {
             }
             do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool, onRejection: observe, onSchemaMismatch: { violation in
                 if rejectionDetails.count < 8, let index = request.tools.firstIndex(where: { $0.wireName == call.tool.wireName }) {
-                    rejectionDetails.append(.init(toolIndex: index, wireName: call.tool.wireName, constraint: violation.constraint, path: violation.path))
+                    rejectionDetails.append(.init(toolIndex: index, wireName: call.tool.wireName, constraint: violation.constraint,
+                        path: violation.path, location: builtinSchemaLocation(tool: request.tools[index], violation: violation)))
                 }
             })) }
             catch let failure as Failure where failure == .invalidArguments {
@@ -1310,6 +1379,53 @@ enum APIModelResponseCodec {
                      finalTextSource: reply.finalTextSource)
     }
 
+    private static func diagnosticBuiltinSchema(_ tool: DiagnosticBuiltinTool) -> [String: Any]? {
+        EmbeddedBrowserTools.definitions().first { $0["name"] as? String == tool.rawValue }?["inputSchema"] as? [String: Any]
+    }
+    private static func builtinSchemaLocation(tool: Tool, violation: SchemaViolation) -> BuiltinSchemaLocation? {
+        guard !tool.custom, tool.namespace == nil || tool.namespace == "functions",
+              let known = DiagnosticBuiltinTool(rawValue: tool.name), let canonical = diagnosticBuiltinSchema(known),
+              let actualType = violation.actualType, violation.path.count <= 1,
+              tool.schema["type"] as? String == "object", strictBool(tool.schema["additionalProperties"]) == false,
+              Set(tool.schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
+              let properties = tool.schema["properties"] as? [String: [String: Any]],
+              let expectedProperties = canonical["properties"] as? [String: [String: Any]],
+              Set(properties.keys) == Set(expectedProperties.keys),
+              let required = tool.schema["required"] as? [String], let expectedRequired = canonical["required"] as? [String],
+              Set(required) == Set(expectedRequired), Set(required).count == required.count else { return nil }
+        // The engine may omit these constraints when projecting dynamic tools.
+        // Types, enums, fields and required membership must still match exactly;
+        // any retained constraint must match the app-owned definition as well.
+        let omittable: Set<String> = ["minimum", "maximum", "minLength", "maxLength", "pattern"]
+        for (name, property) in properties {
+            guard let expected = expectedProperties[name],
+                  Set(property.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)),
+                  Set(expected.keys).subtracting(omittable.union(["description"])).isSubset(of: Set(property.keys)) else { return nil }
+            for (key, value) in property where key != "description" {
+                guard let wanted = expected[key], equalJSON(value, wanted) else { return nil }
+            }
+        }
+        var selected = tool.schema, path: [DiagnosticSchemaField] = []
+        if let part = violation.path.first {
+            guard case .property(let name) = part, let field = DiagnosticSchemaField(rawValue: name),
+                  let property = properties[name] else { return nil }
+            selected = property; path = [field]
+        }
+        guard let type = selected["type"] as? String, let expectedType = DiagnosticJSONType(rawValue: type) else { return nil }
+        let result = BuiltinSchemaLocation(tool: known, schemaPath: path, expectedType: expectedType, actualType: actualType)
+        return result.isConsistent ? result : nil
+    }
+    private static func diagnosticType(_ value: Any) -> DiagnosticJSONType? {
+        if value is NSNull { return .null }
+        if value is [String: Any] { return .object }
+        if value is [Any] { return .array }
+        if value is String { return .string }
+        if strictBool(value) != nil { return .boolean }
+        if let number = value as? NSNumber, number.doubleValue.isFinite {
+            return number.doubleValue.rounded(.towardZero) == number.doubleValue ? .integer : .number
+        }
+        return nil
+    }
     private static func validatedArguments(_ text: String, tool: Tool,
                                            onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil,
                                            onSchemaMismatch: ((SchemaViolation) -> Void)? = nil) throws -> [String: Any] {
@@ -1334,8 +1450,8 @@ enum APIModelResponseCodec {
     }
 
     /// Saved native threads retain their original dynamic schemas. Completed
-    /// browser calls can therefore precede or follow the assertion upgrade in
-    /// either catalog. Only history accepts these two exact shapes; new replies
+    /// browser calls can therefore precede either the assertion or typed-ref
+    /// upgrade under any saved catalog. Only history accepts these exact shapes; new replies
     /// still use validatedArguments with the strict current callable schema.
     private static func validateHistoricalArguments(_ text: String, tool: Tool) throws {
         guard !tool.custom,
@@ -1345,7 +1461,7 @@ enum APIModelResponseCodec {
             return
         }
         let historyTool = Tool(name: tool.name, namespace: tool.namespace, wireName: tool.wireName,
-            custom: false, schema: ["oneOf": [variants.legacy, variants.current]], description: tool.description)
+            custom: false, schema: ["oneOf": variants.historical], description: tool.description)
         _ = try validatedArguments(text, tool: historyTool)
     }
     /// Observational localization after the authoritative matches() has refused
@@ -1359,7 +1475,9 @@ enum APIModelResponseCodec {
         if value is NSNull, strictBool(schema["nullable"]) == true { return nil }
         if let type = schema["type"] {
             let types = (type as? String).map { [$0] } ?? (type as? [String]) ?? []
-            if !types.contains(where: { typeMatches(value, type: $0) }) { return .init(constraint: .typeMismatch, path: path) }
+            if !types.contains(where: { typeMatches(value, type: $0) }) {
+                return .init(constraint: .typeMismatch, path: path, actualType: diagnosticType(value))
+            }
         }
         if schema["enum"] != nil { return .init(constraint: .schemaMismatch, path: []) }
         if let object = value as? [String: Any] {
@@ -1368,14 +1486,16 @@ enum APIModelResponseCodec {
             guard object.count <= 256, properties.count <= 256, required.count <= 256 else { return .init(constraint: .schemaMismatch, path: []) }
             for name in required.sorted() where object[name] == nil {
                 guard properties[name] != nil, name.utf8.count <= 128, path.count < 8 else { return .init(constraint: .schemaMismatch, path: []) }
-                return .init(constraint: .missingRequired, path: path + [.property(name)])
+                return .init(constraint: .missingRequired, path: path + [.property(name)], actualType: .missing)
             }
             for name in properties.keys.sorted() {
                 guard let child = object[name] else { continue }
                 guard name.utf8.count <= 128, path.count < 8 else { return .init(constraint: .schemaMismatch, path: []) }
                 if let failure = localizeSchemaFailure(child, schema: properties[name]!, depth: depth + 1, path: path + [.property(name)], nodes: &nodes) { return failure }
             }
-            if strictBool(schema["additionalProperties"]) == false && object.keys.contains(where: { properties[$0] == nil }) { return .init(constraint: .unexpectedFields, path: path) }
+            if strictBool(schema["additionalProperties"]) == false && object.keys.contains(where: { properties[$0] == nil }) {
+                return .init(constraint: .unexpectedFields, path: path, actualType: .object)
+            }
         }
         if let array = value as? [Any] {
             guard array.count <= 256 else { return .init(constraint: .schemaMismatch, path: []) }

@@ -24,8 +24,9 @@ final class APIModelResponseCodecTests: XCTestCase {
         return try definitions.map { try XCTUnwrap($0["function"] as? [String: Any]) }
     }
     private func correctionResult(_ prepared: APIModelResponseCodec.Request, arguments: String = "{\"path\":false}",
-                                  changes: [String: Any] = [:], additionalCalls: [[String: Any]] = []) throws -> APIProviderHTTPClient.Result {
-        let call: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": arguments]]
+                                  changes: [String: Any] = [:], additionalCalls: [[String: Any]] = [],
+                                  toolIndex: Int = 0) throws -> APIProviderHTTPClient.Result {
+        let call: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[toolIndex].wireName, "arguments": arguments]]
         var envelope: [String: Any] = ["id": "remote-rejected", "model": prepared.model.id,
             "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": [call] + additionalCalls]]],
             "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14,
@@ -201,89 +202,140 @@ final class APIModelResponseCodecTests: XCTestCase {
         return ["type": "object", "properties": properties, "required": properties.keys.sorted(), "additionalProperties": false]
     }
 
+    private func assertedBrowserMutationSchema(_ name: String) -> [String: Any] {
+        var schema = legacyBrowserMutationSchema(name)
+        var properties = schema["properties"] as! [String: Any]
+        properties["expected_role"] = ["type": "string", "minLength": 1, "maxLength": 128]
+        properties["expected_label"] = ["type": "string", "maxLength": 4_096]
+        schema["properties"] = properties; schema["required"] = properties.keys.sorted()
+        return schema
+    }
+
+    private func browserMutationReply(_ arguments: String, request prepared: APIModelResponseCodec.Request,
+                                      callID: String = "new-ref-call") throws -> APIModelResponseCodec.Reply {
+        let tool = try XCTUnwrap(prepared.tools.first)
+        if prepared.provider.wireAPI == .responses {
+            let item: [String: Any] = ["id": "fc-ref", "type": "function_call", "status": "completed",
+                "call_id": callID, "namespace": "functions", "name": tool.name, "arguments": arguments]
+            let data = try JSONSerialization.data(withJSONObject: ["id": "response-ref", "object": "response",
+                "status": "completed", "model": prepared.model.id, "output": [item]])
+            return try APIModelResponseCodec.decode(.init(body: data, contentType: "application/json"), request: prepared)
+        }
+        return try decode(["role": "assistant", "tool_calls": [["id": callID, "type": "function",
+            "function": ["name": tool.wireName, "arguments": arguments]]]], finish: "tool_calls", request: prepared, model: prepared.model.id)
+    }
+
     func testBrowserMutationSchemaUpgradePreservesMixedHistoryAndNextInference() throws {
-        let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
+        let providers = [APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
             baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
-            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
-        for name in ["browser_click", "browser_fill"] {
-            let canonical = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
-            for savedSchema in [legacyBrowserMutationSchema(name), canonical] {
-                let saved: [String: Any] = ["type": "function", "name": name, "parameters": savedSchema]
-                let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
-                var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
-                if name == "browser_fill" { legacy["text"] = "" }
-                let current = legacy.merging(["expected_role": name == "browser_fill" ? "AXTextField" : "AXButton",
-                                             "expected_label": "  Cafe\u{301} \"lookup\"  "]) { _, new in new }
-                func encoded(_ arguments: [String: Any]) throws -> String {
-                    String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]), as: UTF8.self)
+            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")]),
+            APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+                wireAPI: .responses, models: provider.models)]
+        for p in providers {
+            for name in ["browser_click", "browser_fill"] {
+                let canonical = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
+                for savedSchema in [legacyBrowserMutationSchema(name), assertedBrowserMutationSchema(name), canonical] {
+                    let saved: [String: Any] = ["type": "function", "name": name, "parameters": savedSchema]
+                    let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
+                    var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
+                    var current: [String: Any] = [name == "browser_fill" ? "fill_ref" : "click_ref":
+                        (name == "browser_fill" ? "bfill_" : "bclick_") + "11111111-1111-4111-8111-111111111111"]
+                    if name == "browser_fill" { legacy["text"] = "  Complete Cafe\u{301} value\n"; current["text"] = legacy["text"] }
+                    let asserted = legacy.merging(["expected_role": name == "browser_fill" ? "AXTextField" : "AXButton",
+                                                 "expected_label": "  Cafe\u{301} \"lookup\"  "]) { _, new in new }
+                    func encoded(_ arguments: [String: Any]) throws -> String {
+                        String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]), as: UTF8.self)
+                    }
+                    let texts = try [legacy, asserted, current].map(encoded)
+                    func pair(_ id: String, _ text: String) -> [[String: Any]] {
+                        [["type": "function_call", "call_id": id, "namespace": "functions", "name": name, "arguments": text],
+                         ["type": "function_call_output", "call_id": id, "output": "Historical dispatch; outcome unverified."]]
+                    }
+                    let history = pair("legacy-call", texts[0]) + pair("asserted-call", texts[1]) + pair("ref-call", texts[2])
+                        + [["role": "user", "content": "Continue the authorized task."]]
+                    func verifyWire(_ request: APIModelResponseCodec.Request, expectedArguments: [String]) throws {
+                        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+                        let arguments: [String]
+                        let schema: [String: Any]
+                        if p.wireAPI == .responses {
+                            let input = try XCTUnwrap(body["input"] as? [[String: Any]])
+                            arguments = input.filter { $0["type"] as? String == "function_call" }.compactMap { $0["arguments"] as? String }
+                            let namespace = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first)
+                            schema = try XCTUnwrap((namespace["tools"] as? [[String: Any]])?.first?["parameters"] as? [String: Any])
+                        } else {
+                            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                            arguments = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                                .compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
+                            schema = try XCTUnwrap(try wireFunctions(request).first?["parameters"] as? [String: Any])
+                        }
+                        XCTAssertEqual(schema as NSDictionary, canonical as NSDictionary)
+                        XCTAssertEqual(arguments.map { Data($0.utf8) }, expectedArguments.map { Data($0.utf8) })
+                    }
+                    let prepared = try request(["tools": catalog, "input": history], provider: p, toolNaming: .semantic)
+                    try verifyWire(prepared, expectedArguments: texts)
+                    let reply = try browserMutationReply(texts[2], request: prepared)
+                    let newCall = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first { $0["type"] as? String == "function_call" })
+                    XCTAssertEqual((newCall["arguments"] as? String).map { Data($0.utf8) }, Data(texts[2].utf8))
+                    let nextHistory = history + [newCall,
+                        ["type": "function_call_output", "call_id": "new-ref-call", "output": "Current dispatch; outcome unverified."]]
+                    let next = try request(["tools": catalog, "input": nextHistory], provider: p, toolNaming: .semantic)
+                    XCTAssertEqual(next.historyCallIDs, ["legacy-call", "asserted-call", "ref-call", "new-ref-call"])
+                    try verifyWire(next, expectedArguments: texts + [texts[2]])
                 }
-                let oldText = try encoded(legacy), currentText = try encoded(current)
-                func pair(_ id: String, _ text: String) -> [[String: Any]] {
-                    [["type": "function_call", "call_id": id, "namespace": "functions", "name": name, "arguments": text],
-                     ["type": "function_call_output", "call_id": id, "output": "Historical dispatch; outcome unverified."]]
-                }
-                let history = pair("legacy-call", oldText) + pair("asserted-call", currentText)
-                    + [["role": "user", "content": "Continue the authorized task."]]
-                let prepared = try request(["tools": catalog, "input": history], provider: p, toolNaming: .semantic)
-                let wire = try XCTUnwrap(try wireFunctions(prepared).first)
-                XCTAssertEqual(wire["parameters"] as? NSDictionary, canonical as NSDictionary)
-                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
-                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
-                let calls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
-                XCTAssertEqual(calls.compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }.map { Data($0.utf8) },
-                               [oldText, currentText].map { Data($0.utf8) })
-                let alias = try XCTUnwrap(wire["name"] as? String)
-                let reply = try decode(["role": "assistant", "tool_calls": [["id": "new-asserted-call", "type": "function",
-                    "function": ["name": alias, "arguments": currentText]]]], finish: "tool_calls", request: prepared, model: p.models[0].id)
-                let newCall = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first { $0["type"] as? String == "function_call" })
-                XCTAssertEqual((newCall["arguments"] as? String).map { Data($0.utf8) }, Data(currentText.utf8))
-                let nextHistory = history + [newCall,
-                    ["type": "function_call_output", "call_id": "new-asserted-call", "output": "Current dispatch; outcome unverified."]]
-                let next = try request(["tools": catalog, "input": nextHistory], provider: p, toolNaming: .semantic)
-                XCTAssertEqual(next.historyCallIDs, ["legacy-call", "asserted-call", "new-asserted-call"])
-                XCTAssertEqual(try wireFunctions(next).first?["parameters"] as? NSDictionary, canonical as NSDictionary)
             }
         }
     }
 
-    func testBrowserAssertionHistoryCompatibilityNeverAdmitsPartialOrNewLegacyCalls() throws {
-        for name in ["browser_click", "browser_fill"] {
-            let saved: [String: Any] = ["type": "function", "name": name, "parameters": legacyBrowserMutationSchema(name)]
-            var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
-            if name == "browser_fill" { legacy["text"] = "" }
-            let current = legacy.merging(["expected_role": "AXButton", "expected_label": ""]) { _, new in new }
-            let prepared = try request(["tools": [saved]])
-            let alias = try XCTUnwrap(try wireFunctions(prepared).first?["name"] as? String)
-            let invalid = [legacy, legacy.merging(["expected_role": "AXButton"]) { _, new in new },
-                           legacy.merging(["expected_label": ""]) { _, new in new },
-                           current.merging(["expected_role": ""]) { _, new in new },
-                           current.merging(["expected_label": NSNull()]) { _, new in new },
-                           current.merging(["unexpected": true]) { _, new in new }]
-            for (index, arguments) in invalid.enumerated() {
-                let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
-                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "new-call", "type": "function",
-                    "function": ["name": alias, "arguments": text]]]], finish: "tool_calls", request: prepared)) {
-                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
-                }
-                if index > 0 {
-                    let history: [[String: Any]] = [["type": "function_call", "name": name, "call_id": "bad", "arguments": text],
-                        ["type": "function_call_output", "call_id": "bad", "output": "Historical result"]]
-                    XCTAssertThrowsError(try request(["tools": [saved], "input": history])) {
+    func testBrowserHistoryCompatibilityNeverAdmitsPartialOrNewLegacyCalls() throws {
+        let providers = [provider, APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)]
+        for p in providers {
+            for name in ["browser_click", "browser_fill"] {
+                let saved: [String: Any] = ["type": "function", "name": name, "parameters": legacyBrowserMutationSchema(name)]
+                let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
+                var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
+                let key = name == "browser_fill" ? "fill_ref" : "click_ref"
+                var current: [String: Any] = [key: (name == "browser_fill" ? "bfill_" : "bclick_") + UUID().uuidString]
+                if name == "browser_fill" { legacy["text"] = ""; current["text"] = "" }
+                let asserted = legacy.merging(["expected_role": "AXButton", "expected_label": ""]) { _, new in new }
+                let prepared = try request(["tools": catalog], provider: p)
+                let malformed = [legacy.merging(["expected_role": "AXButton"]) { _, new in new },
+                    legacy.merging(["expected_label": ""]) { _, new in new },
+                    asserted.merging(["expected_role": ""]) { _, new in new },
+                    asserted.merging(["expected_label": NSNull()]) { _, new in new },
+                    current.merging(["unexpected": true]) { _, new in new },
+                    current.merging([key: NSNull()]) { _, new in new },
+                    current.merging([key: ""]) { _, new in new },
+                    current.merging(["snapshot_id": legacy["snapshot_id"]!]) { _, new in new },
+                    current.merging(["expected_label": ""]) { _, new in new }]
+                for arguments in [legacy, asserted] + malformed {
+                    let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+                    XCTAssertThrowsError(try browserMutationReply(text, request: prepared)) {
                         XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
                     }
                 }
-            }
-            let text = String(decoding: try JSONSerialization.data(withJSONObject: current), as: UTF8.self)
-            XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [["id": "empty-label", "type": "function",
-                "function": ["name": alias, "arguments": text]]]], finish: "tool_calls", request: prepared))
-            XCTAssertThrowsError(try request(["tools": [saved], "input": [["type": "function_call", "name": name,
-                "call_id": "orphan", "arguments": text]]])) {
-                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+                for arguments in malformed {
+                    let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+                    let history: [[String: Any]] = [["type": "function_call", "namespace": "functions", "name": name,
+                        "call_id": "bad", "arguments": text], ["type": "function_call_output", "call_id": "bad", "output": "Historical result"]]
+                    XCTAssertThrowsError(try request(["tools": catalog, "input": history], provider: p)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    }
+                }
+                let text = String(decoding: try JSONSerialization.data(withJSONObject: current), as: UTF8.self)
+                XCTAssertNoThrow(try browserMutationReply(text, request: prepared))
+                for arguments in [legacy, asserted, current] {
+                    let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+                    XCTAssertThrowsError(try request(["tools": catalog, "input": [["type": "function_call", "namespace": "functions",
+                        "name": name, "call_id": "orphan", "arguments": text]]], provider: p)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+                    }
+                }
             }
         }
     }
 
-    func testBrowserAssertionProjectionDoesNotRewriteCustomMCPOrModifiedSchemas() throws {
+    func testBrowserReferenceProjectionDoesNotRewriteCustomMCPOrModifiedSchemas() throws {
         let modelID = "api/cerebras/model/Z3B0LW9zcy0xMjBi"
         let legacy = legacyBrowserMutationSchema("browser_click")
         let foreign: [String: Any] = ["type": "namespace", "name": "mcp_external", "tools": [
@@ -295,7 +347,21 @@ final class APIModelResponseCodecTests: XCTestCase {
         properties["element_index"] = ["type": "integer", "maximum": 10]
         modified["properties"] = properties
         let restricted: [String: Any] = ["type": "function", "name": "browser_click", "parameters": modified]
-        for definition in [foreign, custom, restricted] {
+        let canonical = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_click" }?["inputSchema"] as? [String: Any])
+        var partialAssertions = assertedBrowserMutationSchema("browser_click")
+        var partialProperties = try XCTUnwrap(partialAssertions["properties"] as? [String: Any])
+        partialProperties.removeValue(forKey: "expected_label")
+        partialAssertions["properties"] = partialProperties; partialAssertions["required"] = partialProperties.keys.sorted()
+        var optionalRef = canonical; optionalRef["required"] = [String]()
+        var narrowerRef = canonical
+        narrowerRef["properties"] = ["click_ref": ["type": "string", "minLength": 1, "maxLength": 32]]
+        var mixed = canonical
+        mixed["properties"] = ["click_ref": ["type": "string"], "snapshot_id": ["type": "string"]]
+        mixed["required"] = ["click_ref", "snapshot_id"]
+        let unrecognized = [partialAssertions, optionalRef, narrowerRef, mixed].map {
+            ["type": "function", "name": "browser_click", "parameters": $0] as [String: Any]
+        }
+        for definition in [foreign, custom, restricted] + unrecognized {
             let projected = ComputaModelToolCatalog.visibleToolDefinitions([definition], modelID: modelID)
             XCTAssertEqual(projected as NSArray, [definition] as NSArray)
         }
@@ -308,11 +374,40 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
         XCTAssertEqual(try wireFunctions(prepared).first?["parameters"] as? NSDictionary, legacy as NSDictionary)
         for key in ["parameters", "inputSchema"] {
-            let saved: [String: Any] = ["type": "function", "name": "browser_click", key: legacy]
-            let refreshed = try XCTUnwrap(ComputaModelToolCatalog.visibleToolDefinitions([saved], modelID: modelID).first)
-            let schema = try XCTUnwrap(refreshed[key] as? [String: Any])
-            XCTAssertEqual(Set(schema["required"] as? [String] ?? []), ["snapshot_id", "element_index", "expected_role", "expected_label"])
-            XCTAssertEqual(saved[key] as? NSDictionary, legacy as NSDictionary)
+            for original in [legacy, assertedBrowserMutationSchema("browser_click"), canonical] {
+                let saved: [String: Any] = ["type": "function", "name": "browser_click", key: original]
+                let refreshed = try XCTUnwrap(ComputaModelToolCatalog.visibleToolDefinitions([saved], modelID: modelID).first)
+                let schema = try XCTUnwrap(refreshed[key] as? [String: Any])
+                XCTAssertEqual(schema as NSDictionary, canonical as NSDictionary)
+                XCTAssertEqual(saved[key] as? NSDictionary, original as NSDictionary)
+            }
+        }
+    }
+
+    func testBrowserHistoryRetainsSavedConstraintsWithoutGrantingLiveLegacyInput() throws {
+        var bounded = legacyBrowserMutationSchema("browser_click")
+        bounded["properties"] = ["snapshot_id": ["type": "string", "minLength": 1],
+            "element_index": ["type": "integer", "minimum": 0, "maximum": 2_999]]
+        let tool: [String: Any] = ["type": "function", "name": "browser_click", "parameters": bounded]
+        for args in [#"{"snapshot_id":"","element_index":0}"#, #"{"snapshot_id":"old","element_index":3000}"#] {
+            let history: [[String: Any]] = [["type": "function_call", "name": "browser_click", "call_id": "old", "arguments": args],
+                ["type": "function_call_output", "call_id": "old", "output": "Historical result"]]
+            XCTAssertThrowsError(try request(["tools": [tool], "input": history])) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+        // An omitted constraint in the saved engine catalog stays omitted for
+        // that historical shape, including a failed call with empty input.
+        let saved: [String: Any] = ["type": "function", "name": "browser_click", "parameters": legacyBrowserMutationSchema("browser_click")]
+        let args = #"{"snapshot_id":"","element_index":0}"#
+        let history: [[String: Any]] = [["type": "function_call", "name": "browser_click", "call_id": "old", "arguments": args],
+            ["type": "function_call_output", "call_id": "old", "output": "Rejected before input"]]
+        let prepared = try request(["tools": [saved], "input": history])
+        XCTAssertEqual(prepared.tools.first?.schema["required"] as? [String], ["click_ref"])
+        XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "new", "type": "function",
+            "function": ["name": try XCTUnwrap(prepared.tools.first?.wireName), "arguments": args]]]],
+            finish: "tool_calls", request: prepared)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
         }
     }
 
@@ -404,7 +499,7 @@ final class APIModelResponseCodecTests: XCTestCase {
         let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
             baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
             models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
-        let constraints: Set<String> = ["minimum", "maximum", "minLength", "pattern"]
+        let constraints: Set<String> = ["minimum", "maximum", "minLength", "maxLength", "pattern"]
         let id = "11111111-1111-4111-8111-111111111111"
         let cases: [(String, [String], [String])] = [
             ("browser_open", [#"{"url":"https://outlook.live.com/mail/"}"#], [#"{"url":""}"#]),
@@ -412,13 +507,10 @@ final class APIModelResponseCodecTests: XCTestCase {
             ("browser_bind", ["{\"tab_id\":\"\(id)\"}"], [#"{"tab_id":""}"#]),
             ("browser_tabs", ["{}"], [#"{"cursor":""}"#]),
             ("browser_read", ["{}", #"{"view":"content"}"#], [#"{"cursor":""}"#, #"{"query":""}"#, #"{"view":"overview"}"#]),
-            ("browser_click", ["{\"snapshot_id\":\"\(id)\",\"element_index\":0}",
-                               "{\"snapshot_id\":\"\(id)\",\"element_index\":2999}"],
-                              [#"{"snapshot_id":"","element_index":0}"#,
-                               "{\"snapshot_id\":\"\(id)\",\"element_index\":-1}",
-                               "{\"snapshot_id\":\"\(id)\",\"element_index\":3000}"]),
-            ("browser_fill", ["{\"snapshot_id\":\"\(id)\",\"element_index\":0,\"text\":\"\"}"],
-                             [#"{"snapshot_id":"","element_index":0,"text":""}"#]),
+            ("browser_click", ["{\"click_ref\":\"bclick_\(id)\"}"],
+                              [#"{"click_ref":""}"#, "{\"click_ref\":\"\(String(repeating: "x", count: 129))\"}"]),
+            ("browser_fill", ["{\"fill_ref\":\"bfill_\(id)\",\"text\":\"\"}"],
+                             [#"{"fill_ref":"","text":""}"#, #"{"fill_ref":null,"text":""}"#]),
             ("browser_wait", ["{}", #"{"text":"Inbox"}"#, #"{"timeout_ms":10000}"#],
                              [#"{"timeout_ms":15000}"#, #"{"text":""}"#, #"{"text":" \t"}"#]),
             ("browser_close", ["{}"], []),
@@ -453,18 +545,11 @@ final class APIModelResponseCodecTests: XCTestCase {
                 ["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
                     "function": ["name": alias, "arguments": arguments]]]]
             }
-            func withAssertions(_ arguments: String) throws -> String {
-                guard ["browser_click", "browser_fill"].contains(name) else { return arguments }
-                var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any])
-                object["expected_role"] = name == "browser_fill" ? "AXTextField" : "AXButton"
-                object["expected_label"] = ""
-                return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
-            }
-            for arguments in try accepted.map(withAssertions) {
+            for arguments in accepted {
                 let reply = try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)
                 XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String, arguments)
             }
-            for arguments in try rejected.map(withAssertions) {
+            for arguments in rejected {
                 XCTAssertThrowsError(try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)) {
                     XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
                 }
@@ -851,6 +936,93 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(Set(finite[0].keys), ["toolIndex", "constraint"])
         let text = String(decoding: encoded, as: UTF8.self)
         for forbidden in [prepared.tools[0].wireName, "path", "PRIVATE_VALID_HALF", "arguments"] { XCTAssertFalse(text.contains(forbidden)) }
+    }
+
+    private func diagnosticBrowserDefinition(_ name: String = "browser_read") throws -> [String: Any] {
+        let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+        return ["type": "function", "name": name, "parameters": try XCTUnwrap(definition["inputSchema"])]
+    }
+    private func observedSchemaFailure(_ prepared: APIModelResponseCodec.Request, arguments: String,
+                                       toolIndex: Int = 0) throws -> APIModelResponseCodec.FiniteSchemaFailure {
+        var observed: APIModelResponseCodec.ArgumentValidationDiagnostic?
+        let result = try correctionResult(prepared, arguments: arguments, toolIndex: toolIndex)
+        guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+            onArgumentRejection: { observed = $0 }) else { throw APIModelResponseCodec.Failure.invalidResponse }
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: prepared), "Diagnostics grant no normal reply or tool publication")
+        return try XCTUnwrap(observed?.schemaFailures?.first)
+    }
+    func testBuiltinSchemaDiagnosticUsesExactAdmittedOrderAndBothNamingStyles() throws {
+        let browser = try diagnosticBrowserDefinition()
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+            for definitions in [[function, browser], [browser, function]] {
+                let prepared = try request(["tools": definitions], toolNaming: naming)
+                let index = try XCTUnwrap(prepared.tools.firstIndex { $0.name == "browser_read" })
+                let failure = try observedSchemaFailure(prepared, arguments: #"{"cursor":null}"#, toolIndex: index)
+                XCTAssertEqual(failure.toolIndex, index)
+                XCTAssertEqual(failure.constraint, .typeMismatch)
+                XCTAssertEqual(failure.location, .init(tool: .browserRead, schemaPath: [.cursor], expectedType: .string, actualType: .null))
+                XCTAssertFalse(String(decoding: try JSONEncoder().encode(failure), as: UTF8.self).contains(prepared.tools[index].wireName))
+            }
+        }
+    }
+    func testBuiltinSchemaDiagnosticDistinguishesMissingNullBooleanAndNumericTypesWithoutValues() throws {
+        let read = try request(["tools": [diagnosticBrowserDefinition()]])
+        for (arguments, actual) in [(#"{"cursor":false}"#, APIModelResponseCodec.DiagnosticJSONType.boolean),
+                                    (#"{"cursor":91234567}"#, .integer), (#"{"cursor":1.25}"#, .number),
+                                    (#"{"cursor":[]}"#, .array), (#"{"cursor":{}}"#, .object)] {
+            let failure = try observedSchemaFailure(read, arguments: arguments)
+            XCTAssertEqual(failure.location?.actualType, actual)
+            XCTAssertEqual(failure.location?.schemaPath, [.cursor])
+            let text = String(decoding: try JSONEncoder().encode(failure), as: UTF8.self)
+            XCTAssertFalse(text.contains("91234567")); XCTAssertFalse(text.contains("1.25"))
+        }
+        let wait = try request(["tools": [diagnosticBrowserDefinition("browser_wait")]])
+        for (arguments, actual) in [(#"{"timeout_ms":"PRIVATE_ARGUMENT_VALUE"}"#, APIModelResponseCodec.DiagnosticJSONType.string),
+                                   (#"{"timeout_ms":true}"#, .boolean)] {
+            let failure = try observedSchemaFailure(wait, arguments: arguments)
+            XCTAssertEqual(failure.location, .init(tool: .browserWait, schemaPath: [.timeoutMS], expectedType: .integer, actualType: actual))
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(failure), as: UTF8.self).contains("PRIVATE"))
+        }
+        let open = try request(["tools": [diagnosticBrowserDefinition("browser_open")]])
+        let missing = try observedSchemaFailure(open, arguments: "{}")
+        XCTAssertEqual(missing.constraint, .missingRequired)
+        XCTAssertEqual(missing.location, .init(tool: .browserOpen, schemaPath: [.url], expectedType: .string, actualType: .missing))
+        guard case .reply = try APIModelResponseCodec.decodeForCorrection(correctionResult(read, arguments: "{}"), request: read) else {
+            return XCTFail("Omitted optional fields remain valid")
+        }
+    }
+    func testUnknownCustomMCPAndModifiedSchemasNeverAcquireBuiltinDiagnosticNames() throws {
+        let browser = try diagnosticBrowserDefinition()
+        var renamed = browser; renamed["name"] = "PRIVATE_TOOL_NAME"
+        var modified = browser
+        var schema = try XCTUnwrap(browser["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        properties["PRIVATE_SCHEMA_FIELD"] = ["type": "string"]
+        schema["properties"] = properties; modified["parameters"] = schema
+        var changedType = browser
+        var typeSchema = try XCTUnwrap(browser["parameters"] as? [String: Any])
+        var typeProperties = try XCTUnwrap(typeSchema["properties"] as? [String: Any])
+        typeProperties["cursor"] = ["type": "integer"]
+        typeSchema["properties"] = typeProperties; changedType["parameters"] = typeSchema
+        let cases: [([[String: Any]], String)] = [
+            ([renamed], #"{"cursor":null}"#),
+            ([["type": "namespace", "name": "PRIVATE_MCP_NAMESPACE", "tools": [browser]]], #"{"cursor":null}"#),
+            ([["type": "custom", "name": "browser_read", "format": ["type": "text"]]], #"{"input":false}"#),
+            ([modified], #"{"PRIVATE_SCHEMA_FIELD":91234567}"#),
+            ([changedType], #"{"cursor":"PRIVATE_VALUE"}"#),
+        ]
+        for (definitions, arguments) in cases {
+            let prepared = try request(["tools": definitions])
+            let failure = try observedSchemaFailure(prepared, arguments: arguments)
+            XCTAssertNil(failure.location)
+            let raw = try JSONEncoder().encode(failure), text = String(decoding: raw, as: UTF8.self)
+            XCTAssertEqual(Set((try JSONSerialization.jsonObject(with: raw) as! [String: Any]).keys), ["toolIndex", "constraint"])
+            XCTAssertFalse(text.contains("PRIVATE")); XCTAssertFalse(text.contains("91234567"))
+        }
+        let prepared = try request(["tools": [browser]])
+        let extra = try observedSchemaFailure(prepared, arguments: #"{"PRIVATE_ARGUMENT_KEY":"PRIVATE_ARGUMENT_VALUE"}"#)
+        XCTAssertEqual(extra.location, .init(tool: .browserRead, schemaPath: [], expectedType: .object, actualType: .object))
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(extra), as: UTF8.self).contains("PRIVATE"))
     }
     func testDocumentedNestedTimingMetadataAllowsOnlyOtherwiseEligibleArgumentCorrection() throws {
         let prepared = try request()

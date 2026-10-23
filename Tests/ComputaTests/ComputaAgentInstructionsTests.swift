@@ -19,7 +19,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "Do not reconstruct current-turn execution from memory",
             "operation chronology only, not website search results, content meaning or task success",
             "Matching tool receipts establish observed content and action outcomes within their stated scope",
-            "Do not copy ephemeral browser tab handles, snapshot IDs, element indices or continuation cursors",
+            "Do not copy ephemeral browser tab handles, action refs, snapshot IDs, element indices or continuation cursors",
             "Keep missing result evidence and uncertain action outcomes unresolved",
             "After maintenance, continue the preserved task",
             "these notes do not instruct the agent to stop or ask again for authorization already supplied by the user",
@@ -474,7 +474,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let instructions = ComputaAgentInstructions.developerInstructions(referenceTools: references,
                 embeddedBrowserTools: true).replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(instructions.contains("Each new user turn must start browser work with browser_tabs then browser_bind, or browser_open"))
-            XCTAssertTrue(instructions.contains("Prior handles/snapshots/cursors are invalid"))
+            XCTAssertTrue(instructions.contains("Prior handles/refs/snapshots/cursors are invalid"))
             XCTAssertTrue(instructions.contains("task-owned pages may be closed"))
             XCTAssertTrue(instructions.contains("Reopen a needed task page at its supplied or previously observed URL"))
             XCTAssertTrue(instructions.contains("Missing/closed tabs and empty inventory are not access denial"))
@@ -671,11 +671,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("functions.browser_open"))
         XCTAssertFalse(browser.contains("No dedicated driver"))
         XCTAssertTrue(browser.contains("Never repeat uncertain input"))
-        XCTAssertTrue(browser.contains("snapshot_id/element_index"))
+        XCTAssertTrue(browser.contains("browser_click(click_ref) or browser_fill(fill_ref,text)"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
-        XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
-        XCTAssertTrue(browser.contains("Recheck current label/action against the intended operation; indices change"))
+        XCTAssertTrue(browser.contains("Recheck the current row's label/action against the intended operation"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
@@ -685,10 +684,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testBuiltInActionGuidanceRequiresPublishedCapabilitiesInsteadOfReadableIndices() {
         let text = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true).replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("browser_click requires enabled=true and actions=[\"AXPress\"]"))
-        XCTAssertTrue(text.contains("click an actions=[] text/heading row or infer a clickable parent"))
-        XCTAssertTrue(text.contains("browser_fill requires enabled=true and settable=true"))
-        XCTAssertTrue(text.contains("An index is readable context unless its row explicitly offers an"))
+        XCTAssertTrue(text.contains("browser_click requires a published click_ref"))
+        XCTAssertTrue(text.contains("never click a text/heading row without one or infer a clickable parent"))
+        XCTAssertTrue(text.contains("browser_fill requires a published fill_ref on the exact field"))
+        XCTAssertTrue(text.contains("Snapshot IDs/indices are not browser input references"))
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
     }
@@ -705,11 +704,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(instructions.contains(browser))
             let text = instructions.replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(text.contains("creates AND binds a task-owned page; read directly without another bind"))
-            XCTAssertTrue(text.contains("Every new read, view change or cursor page supersedes ALL earlier action targets"))
-            XCTAssertTrue(text.contains("An admitted click or fill consumes its snapshot"))
+            XCTAssertTrue(text.contains("Each read replaces the action menu; use only its published refs, even if a token repeats"))
+            XCTAssertTrue(text.contains("An admitted click or fill consumes all refs"))
             XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
             XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
-            XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
+            XCTAssertTrue(text.contains("Recheck the current row's label/action against the intended operation"))
             XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
@@ -734,11 +733,33 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
-        XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
+        XCTAssertTrue(text.contains("Recheck the current row's label/action against the intended operation"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
-                                "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
+                                "Named-service and sign-in/loading guidance retain all reference, approval and cleanup rules.")
+    }
+
+    func testBrowserTypedInputReferencesStayFreshWithoutChangingNativeOrSubtreeContracts() {
+        let calls = "Use browser_click(click_ref) or browser_fill(fill_ref,text) with refs in the current read."
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let fresh = ComputaAgentInstructions.webResponseContract(
+            offeredToolNames: ["functions.browser_click", "functions.browser_fill"],
+            includedInstructionText: [native])
+        for instructions in [native, fresh, ComputaAgentInstructions.runtimeInteractionPolicy()] {
+            XCTAssertTrue(instructions.contains(calls), "Resumed threads need the current browser input contract too")
+        }
+        let browser = ComputaAgentInstructions.builtInBrowser.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(browser.contains("Copy complete click_ref or fill_ref from the intended current row"))
+        XCTAssertTrue(browser.contains("Never invent refs or interchange reference types"))
+        XCTAssertTrue(browser.contains("Snapshot IDs/indices are not browser input references"))
+        XCTAssertFalse(browser.contains("expected_role"))
+        XCTAssertFalse(browser.contains("expected_label"))
+        XCTAssertFalse(browser.contains("browser_read returns snapshot_id/element_index targets"))
+        XCTAssertTrue(ComputaAgentInstructions.nativeScope.contains("computer_v2_fill(field_ref,text)"))
+        XCTAssertTrue(ComputaAgentInstructions.nativeScope.contains("computer_v2_press(action_ref)"))
+        XCTAssertTrue(ComputaAgentInstructions.nativeLegacyScope.contains("observed snapshot_id and element_index"))
+        XCTAssertTrue(ComputaAgentInstructions.compactionPrompt.contains("browser tab handles, action refs, snapshot IDs"))
     }
 
     func testLiteralIdentifierGuidanceIsSharedWithoutChangingExactUserOutputConstraints() {

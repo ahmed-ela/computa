@@ -85,7 +85,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testSavedBrowserMutationSchemasAdvertiseAssertionsAndPreserveWebsiteContinuations() throws {
+    func testSavedBrowserMutationSchemasAdvertiseTypedRefsAndPreserveWebsiteContinuations() throws {
         // Synthetic web-codec/native-contract coverage; no provider or UI is run.
         for provider in ["chatgpt", "claude", "gemini"] {
             for name in ["browser_click", "browser_fill"] {
@@ -93,62 +93,77 @@ final class WebModelResponseCodecTests: XCTestCase {
                 let currentSchema = try XCTUnwrap(native["inputSchema"] as? [String: Any])
                 var current = native
                 current["parameters"] = current.removeValue(forKey: "inputSchema")
-                var properties: [String: Any] = ["snapshot_id": ["type": "string"], "element_index": ["type": "integer"]]
-                if name == "browser_fill" { properties["text"] = ["type": "string"] }
-                let saved: [String: Any] = ["type": "function", "name": name, "description": "Saved pre-assertion native contract",
-                    "parameters": ["type": "object", "properties": properties, "required": properties.keys.sorted(), "additionalProperties": false]]
-                let savedTools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
-                let expectedTools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [current]]]
-                var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
-                if name == "browser_fill" { legacy["text"] = "Complete requested field value" }
-                let label = "  Cafe\u{301} \"lookup\" / _value_  "
-                let asserted = legacy.merging(["expected_role": name == "browser_fill" ? "AXTextField" : "AXButton",
-                                              "expected_label": label]) { _, new in new }
-                let oldArguments = String(decoding: try JSONSerialization.data(withJSONObject: legacy), as: UTF8.self)
-                let history: [[String: Any]] = [["type": "function_call", "name": name, "namespace": "functions",
-                    "call_id": "old-call", "arguments": oldArguments],
-                    ["type": "function_call_output", "call_id": "old-call", "output": "Historical dispatch; outcome unverified."],
-                    ["role": "user", "content": "Continue only the current authorized task."]]
-                let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": history, "tools": savedTools], options: [.sortedKeys])
-                let prepared = try WebModelResponseCodec.prepareRequest(original)
-                try assertContiguousRequestValues(original, in: prepared, expectedToolDefinitions: expectedTools)
-                let displayed = Data(prepared.prompt[try requestRange(in: prepared.prompt)].utf8)
-                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
-                XCTAssertEqual(object["input"] as? NSArray, history as NSArray)
-                XCTAssertEqual(object["tools"] as? NSArray, expectedTools as NSArray)
-                XCTAssertEqual(Set(currentSchema["required"] as? [String] ?? []),
-                    Set(properties.keys).union(["expected_role", "expected_label"]))
-                func parseArguments(_ arguments: [String: Any]) throws -> (WebModelResponseCodec.Reply, WebModelResponseCodec.ToolCall) {
-                    let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
-                        ["name": "functions." + name, "arguments": arguments]]])
-                    let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)
-                    guard case let .toolCalls(calls) = reply else { throw WebModelResponseCodec.Failure.malformedEnvelope }
-                    return (reply, try XCTUnwrap(calls.first))
+                var legacyProperties: [String: Any] = ["snapshot_id": ["type": "string"], "element_index": ["type": "integer"]]
+                if name == "browser_fill" { legacyProperties["text"] = ["type": "string"] }
+                let assertedProperties = legacyProperties.merging(["expected_role": ["type": "string"],
+                    "expected_label": ["type": "string"]]) { _, new in new }
+                let savedSchemas: [[String: Any]] = [legacyProperties, assertedProperties].map {
+                    ["type": "object", "properties": $0, "required": $0.keys.sorted(), "additionalProperties": false]
+                } + [currentSchema]
+                for savedSchema in savedSchemas {
+                    let saved: [String: Any] = ["type": "function", "name": name, "description": "Saved native browser contract",
+                        "parameters": savedSchema]
+                    let savedTools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
+                    let expectedTools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [current]]]
+                    var legacy: [String: Any] = ["snapshot_id": "11111111-1111-4111-8111-111111111111", "element_index": 0]
+                    let key = name == "browser_fill" ? "fill_ref" : "click_ref"
+                    var refs: [String: Any] = [key: (name == "browser_fill" ? "bfill_" : "bclick_") + "11111111-1111-4111-8111-111111111111"]
+                    if name == "browser_fill" { legacy["text"] = "  Complete Cafe\u{301} value\n"; refs["text"] = legacy["text"] }
+                    let label = "  Cafe\u{301} \"lookup\" / _value_  "
+                    let asserted = legacy.merging(["expected_role": name == "browser_fill" ? "AXTextField" : "AXButton",
+                                                  "expected_label": label]) { _, new in new }
+                    var history = [[String: Any]]()
+                    for (index, arguments) in [legacy, asserted, refs].enumerated() {
+                        let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+                        history += [["type": "function_call", "name": name, "namespace": "functions",
+                            "call_id": "old-call-\(index)", "arguments": text],
+                            ["type": "function_call_output", "call_id": "old-call-\(index)", "output": "Historical dispatch; outcome unverified."]]
+                    }
+                    history.append(["role": "user", "content": "Continue only the current authorized task."])
+                    let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": history, "tools": savedTools], options: [.sortedKeys])
+                    let prepared = try WebModelResponseCodec.prepareRequest(original)
+                    try assertContiguousRequestValues(original, in: prepared, expectedToolDefinitions: expectedTools)
+                    XCTAssertEqual(prepared.continuationRequest, original)
+                    let displayed = Data(prepared.prompt[try requestRange(in: prepared.prompt)].utf8)
+                    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+                    XCTAssertEqual(object["input"] as? NSArray, history as NSArray)
+                    XCTAssertEqual(object["tools"] as? NSArray, expectedTools as NSArray)
+                    XCTAssertEqual(Set(currentSchema["required"] as? [String] ?? []), Set(refs.keys))
+                    func parseArguments(_ arguments: [String: Any]) throws -> (WebModelResponseCodec.Reply, WebModelResponseCodec.ToolCall) {
+                        let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
+                            ["name": "functions." + name, "arguments": arguments]]])
+                        let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)
+                        guard case let .toolCalls(calls) = reply else { throw WebModelResponseCodec.Failure.malformedEnvelope }
+                        return (reply, try XCTUnwrap(calls.first))
+                    }
+                    let (reply, call) = try parseArguments(refs)
+                    let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: Any])
+                    XCTAssertEqual(arguments as NSDictionary, refs as NSDictionary)
+                    if let text = refs["text"] as? String { XCTAssertEqual((arguments["text"] as? String).map { Data($0.utf8) }, Data(text.utf8)) }
+                    XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: call.name, arguments: arguments))
+                    // Website decoding preserves objects. Native admission still
+                    // rejects historical, mixed and wrong-type forms for new input.
+                    for invalid in [legacy, asserted, legacy.merging(["expected_role": "AXButton"]) { _, new in new },
+                                    refs.merging(["snapshot_id": legacy["snapshot_id"]!]) { _, new in new },
+                                    refs.merging([key: NSNull()]) { _, new in new }] {
+                        let (_, rejected) = try parseArguments(invalid)
+                        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rejected.argumentsJSON.utf8)) as? [String: Any])
+                        XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: rejected.name, arguments: object))
+                    }
+                    let response = try XCTUnwrap(JSONSerialization.jsonObject(with:
+                        WebModelResponseCodec.completedResponse(for: reply, request: prepared)) as? [String: Any])
+                    let output = try XCTUnwrap((response["output"] as? [[String: Any]])?.first)
+                    let callID = try XCTUnwrap(output["call_id"] as? String)
+                    let nextHistory = history + [output, ["type": "function_call_output", "call_id": callID,
+                        "output": "Current dispatch; outcome unverified."]]
+                    let nextBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": nextHistory, "tools": savedTools])
+                    let next = try WebModelResponseCodec.prepareRequest(nextBody)
+                    try assertContiguousRequestValues(nextBody, in: next, expectedToolDefinitions: expectedTools)
+                    XCTAssertEqual(next.continuationRequest, nextBody)
+                    let nextDisplayed = Data(next.prompt[try requestRange(in: next.prompt)].utf8)
+                    let nextObject = try XCTUnwrap(JSONSerialization.jsonObject(with: nextDisplayed) as? [String: Any])
+                    XCTAssertEqual(nextObject["input"] as? NSArray, nextHistory as NSArray)
                 }
-                let (reply, call) = try parseArguments(asserted)
-                let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: Any])
-                XCTAssertEqual((arguments["expected_label"] as? String).map { Data($0.utf8) }, Data(label.utf8))
-                XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: call.name, arguments: arguments))
-                // Website decoding preserves the JSON object; the actual native
-                // admission remains strict and grants no old-schema bypass.
-                for missing in [legacy, legacy.merging(["expected_role": "AXButton"]) { _, new in new },
-                                legacy.merging(["expected_label": label]) { _, new in new }] {
-                    let (_, rejected) = try parseArguments(missing)
-                    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rejected.argumentsJSON.utf8)) as? [String: Any])
-                    XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: rejected.name, arguments: object))
-                }
-                let response = try XCTUnwrap(JSONSerialization.jsonObject(with:
-                    WebModelResponseCodec.completedResponse(for: reply, request: prepared)) as? [String: Any])
-                let output = try XCTUnwrap((response["output"] as? [[String: Any]])?.first)
-                let callID = try XCTUnwrap(output["call_id"] as? String)
-                let nextHistory = history + [output, ["type": "function_call_output", "call_id": callID,
-                    "output": "Current dispatch; outcome unverified."]]
-                let nextBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": nextHistory, "tools": savedTools])
-                let next = try WebModelResponseCodec.prepareRequest(nextBody)
-                try assertContiguousRequestValues(nextBody, in: next, expectedToolDefinitions: expectedTools)
-                let nextDisplayed = Data(next.prompt[try requestRange(in: next.prompt)].utf8)
-                let nextObject = try XCTUnwrap(JSONSerialization.jsonObject(with: nextDisplayed) as? [String: Any])
-                XCTAssertEqual(nextObject["input"] as? NSArray, nextHistory as NSArray)
             }
         }
     }

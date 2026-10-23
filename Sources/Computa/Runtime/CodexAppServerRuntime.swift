@@ -4283,7 +4283,7 @@ private extension CodexAppServerRuntime {
                 ? "Native apps use computer_v2_read_page, computer_v2_read_region(region_ref), and computer_v2_continue(cursor). Use only their current typed action_ref/field_ref/region_ref."
                 : "Native apps use computer_v2_snapshot and only its current snapshot_id/element_index."
             return configuration.baseInstructions + observationInstructions + "\n" + limits + "\n" + references + "\n" + """
-            Webpages use only Computa's offered browser_* tools. Browser references and cursors belong to those tools: browser_read(cursor=next_cursor) continues page content, browser_tabs(cursor=next_cursor) continues its inventory. Never pass them to computer_v2_continue or computer actions. browser_click/browser_fill use the current published snapshot_id and element_index, then read the resulting page to establish the outcome. Native computer references and actions remain separate.
+            Webpages use only Computa's offered browser_* tools. Browser references and cursors belong to those tools: browser_read(cursor=next_cursor) continues page content, browser_tabs(cursor=next_cursor) continues its inventory. Never pass them to computer_v2_continue or computer actions. browser_click uses the current published click_ref; browser_fill uses fill_ref and text, then read the resulting page to establish the outcome. Native computer references and actions remain separate.
             Respect exact-target checks, native permissions and bounded verification. A dispatch receipt does not establish meaning. VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input; VERIFICATION_PENDING allows read-only recovery only. Filling a search field is not submission. Read actual results and message content before making claims about sender, incoming direction or latest ordering. An overview, selected conversation or captured no_matches does not prove completeness. Report the observed result or the actual blocker; do not replay unchanged failed operations.
             """
         }
@@ -4363,6 +4363,17 @@ private extension CodexAppServerRuntime {
                             ?? error.localizedDescription)
                 }
             }
+            var browserMutation: EmbeddedBrowserActionReferences.Prepared?
+            var browserRoutingError: Error?
+            if policyAdmissionError == nil, ["browser_click", "browser_fill"].contains(tool),
+               let taskID, let controller = embeddedBrowserTools,
+               let lease = embeddedBrowserTurnKeys[taskID], lease.generation == generation,
+               lease.turnID == turnIdentity.activeTurnID(for: taskID) {
+                do {
+                    browserMutation = try await controller.prepareMutation(taskKey: lease.key, tool: tool,
+                        arguments: JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]))
+                } catch { browserRoutingError = error }
+            }
             let callID = params["callId"] as? String ?? UUID().uuidString
             let isComputer = tool.hasPrefix("computer_v2_") || tool == "computer" || tool.hasPrefix("desktop_")
             // Routing rejection occurs before a backend read is admitted.
@@ -4371,7 +4382,7 @@ private extension CodexAppServerRuntime {
             let nativeActionIdentity = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_set_text"].contains(tool)
                 ? await observedNativeActionIdentity(taskID: taskID, arguments: arguments) : nil
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
-            let stableActionIdentity = nativeActionIdentity
+            let stableActionIdentity = nativeActionIdentity ?? browserMutation?.intentIdentity
             let needsProof = ["computer_v2_ax", "computer_v2_set_text", "computer_v2_click", "computer_v2_pointer", "computer_v2_ground_click", "computer_v2_keypress", "computer_v2_type", "desktop_input", "desktop_perform_action", "desktop_set_text"].contains(tool)
                 || requestedAlias == .press || requestedAlias == .fill
             let intentKey = ComputerUnchangedAttemptGuard.key(tool: tool, arguments: arguments,
@@ -4400,6 +4411,7 @@ private extension CodexAppServerRuntime {
                     }
                     computerActiveOperation[taskID] = callID
                 }
+                if let browserRoutingError { throw browserRoutingError }
                 if let referenceRoutingError { throw referenceRoutingError }
                 if let continuationError { throw continuationError }
                 #if DEBUG
@@ -4413,7 +4425,8 @@ private extension CodexAppServerRuntime {
                     tool,
                     arguments: arguments,
                     taskID: taskID,
-                    legacyProcessIdentity: legacyProcessIdentity
+                    legacyProcessIdentity: legacyProcessIdentity,
+                    browserMutation: browserMutation
                 )
                 guard !Task.isCancelled,
                       !isShuttingDown,
@@ -4485,6 +4498,12 @@ private extension CodexAppServerRuntime {
                 if let taskID, let referencePublication { computerV2Sessions[taskID]?.modelReferences = referencePublication.references }
                 if EmbeddedBrowserTools.names.contains(tool), let taskID {
                     computerAttempts[taskID]?.succeeded(key: intentKey)
+                    if tool == "browser_click" || tool == "browser_fill" {
+                        // A successfully published current-ref input proves
+                        // routing recovered. Reads/rebinds and failed input
+                        // cannot clear this shared routing-only counter.
+                        computerAttempts[taskID]?.succeeded(key: ComputerUnchangedAttemptGuard.browserReferenceRoutingKey)
+                    }
                 }
             } catch {
                 guard !Task.isCancelled,
@@ -4786,7 +4805,8 @@ private extension CodexAppServerRuntime {
         /// Browser mechanics live behind a separate controller; this boundary
         /// supplies only current-turn authority and the existing native approval.
         private func executeEmbeddedBrowserTool(_ tool: String, arguments: [String: Any],
-                                                taskID: AgentTask.ID?) async throws -> [[String: Any]] {
+                                                taskID: AgentTask.ID?,
+                                                prepared: EmbeddedBrowserActionReferences.Prepared? = nil) async throws -> [[String: Any]] {
             guard let controller = embeddedBrowserTools, EmbeddedBrowserTools.names.contains(tool),
                   let taskID, let turnID = turnIdentity.activeTurnID(for: taskID),
                   let epoch = computerV2Sessions[taskID]?.epoch,
@@ -4819,11 +4839,16 @@ private extension CodexAppServerRuntime {
                       embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
                 if let scope { computerAttempts[taskID]?.observedBrowserReadScope(scope) }
             }
+            let invocation: EmbeddedBrowserActionReferences.Prepared?
+            if ["browser_click", "browser_fill"].contains(tool) {
+                if let prepared { invocation = prepared }
+                else { invocation = try await controller.prepareMutation(taskKey: key, tool: tool, arguments: input) }
+            } else { invocation = nil }
             if ["browser_click", "browser_fill"].contains(tool) {
                 // Validate the currently published target's eligibility before
                 // asking the user. This read-only check does not consume it;
                 // execute and the backend revalidate after approval as well.
-                do { try await controller.preflightMutation(taskKey: key, tool: tool, arguments: input, scope: scope) }
+                do { try await controller.preflightMutation(taskKey: key, tool: tool, arguments: input, scope: scope, prepared: invocation) }
                 catch let recovery as EmbeddedBrowserPreflightRecoveryFailure {
                     try observeReadScope(recovery.readFailureScope)
                     throw recovery
@@ -4836,7 +4861,7 @@ private extension CodexAppServerRuntime {
             if EmbeddedBrowserTools.requiresApproval(tool: tool) {
                 guard await requestComputerUseApproval(taskID: taskID,
                     title: "Allow built-in browser action?", summary: tool,
-                    details: prettyJSON(arguments)) else {
+                    details: prettyJSON(invocation?.canonicalArguments ?? arguments)) else {
                     throw RuntimeError.serverError("The user declined the built-in browser action. No input was dispatched.")
                 }
             }
@@ -4845,7 +4870,7 @@ private extension CodexAppServerRuntime {
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
             let result: EmbeddedBrowserToolExecution
-            do { result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope) }
+            do { result = try await controller.executeResult(taskKey: key, tool: tool, arguments: input, scope: scope, prepared: invocation) }
             catch let recovery as EmbeddedBrowserPreflightRecoveryFailure {
                 try observeReadScope(recovery.readFailureScope)
                 throw recovery
@@ -4862,12 +4887,13 @@ private extension CodexAppServerRuntime {
             _ tool: String,
             arguments: [String: Any],
             taskID: AgentTask.ID?,
-            legacyProcessIdentity: NativeToolProcessIdentity? = nil
+            legacyProcessIdentity: NativeToolProcessIdentity? = nil,
+            browserMutation: EmbeddedBrowserActionReferences.Prepared? = nil
         ) async throws -> [[String: Any]] {
 
             if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
             if tool.hasPrefix("browser_") {
-                return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID)
+                return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID, prepared: browserMutation)
             }
             if tool.hasPrefix("computer_v2_"), tool != ComputerOutcomeToolContract.name {
                 return try await executeComputerV2(tool, arguments: arguments, taskID: taskID)

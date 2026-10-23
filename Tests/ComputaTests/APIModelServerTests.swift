@@ -413,6 +413,52 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             await server.shutdown()
         }
     }
+    func testBrowserArgumentFailuresJournalBothExactAttemptLocationsWithoutPublishingTools() async throws {
+        let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("accounting")
+        let remote = try APILoopbackFixture { request in
+            await recorder.record(request)
+            let ordinal = await recorder.count(), wire = try! self.offeredName(request)
+            let arguments = ordinal == 1 ? #"{"cursor":null}"# : #"{"query":false}"#
+            let call: [String: Any] = ["id": "PRIVATE_REJECTED_CALL_\(ordinal)", "type": "function",
+                "function": ["name": wire, "arguments": arguments]]
+            let body: [String: Any] = ["id": "fixture-response", "model": "fixture-model",
+                "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": [call]]]],
+                "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]]
+            return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: body))
+        }
+        defer { remote.stop() }
+        let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+            capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+        let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
+            turn = UUID().uuidString.lowercased(), prep = UUID()
+        try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        var request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+        var body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+        body["tools"] = [["type": "function", "name": "browser_read", "parameters": try XCTUnwrap(definition["inputSchema"])]]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (bytes, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        let responseText = String(decoding: bytes, as: UTF8.self)
+        XCTAssertTrue(responseText.contains("invalid_arguments")); XCTAssertFalse(responseText.contains("output_item.done"))
+        XCTAssertFalse(responseText.contains("PRIVATE")); XCTAssertFalse(responseText.contains("schemaPath"))
+        let count = await recorder.count(); XCTAssertEqual(count, 2, "Diagnostics must not add a third corrective request")
+        let records = try correctionRecords(directory), finished = try XCTUnwrap(records.first { $0.phase == "finished" })
+        XCTAssertEqual(records.count, 3); XCTAssertEqual(finished.outcome, .argumentsRejected)
+        let first = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.cursor], expectedType: .string, actualType: .null)
+        let second = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.query], expectedType: .string, actualType: .boolean)
+        XCTAssertTrue(records.allSatisfy { $0.firstValidation?.schemaFailures.first?.location == first })
+        XCTAssertEqual(finished.secondValidation?.schemaFailures.first?.location, second)
+        XCTAssertTrue(records.filter { $0.phase != "finished" }.allSatisfy { $0.secondValidation == nil })
+        for record in records {
+            let encoded = try JSONEncoder().encode(record)
+            XCTAssertLessThanOrEqual(encoded.count, 2_048)
+            XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE"))
+        }
+        await server.shutdown()
+    }
     func testCancelledContextOrSharedDeadlineBeforeCorrectionStartsNoSecondRequestAndKeepsFirstUsage() async throws {
         for cancelContext in [true, false] {
             let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
@@ -653,6 +699,21 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
             argumentDiagnostic: .init(validation: invalid, gate: .accountingDisabled, attempt: 3), context: context))
         XCTAssertFalse(text.contains("argument_validation")); XCTAssertFalse(text.contains("native_context"))
+    }
+    func testBuiltinSchemaFailureLocationsFitExistingLogBoundAndRemainPrivateToDiagnostics() throws {
+        let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .unexpectedFields,
+            location: .init(tool: .browserFill, schemaPath: [.expectedLabel], expectedType: .string, actualType: .boolean))
+        let validation = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128,
+            envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2), context: context))
+        XCTAssertLessThanOrEqual(text.utf8.count, 1_024)
+        XCTAssertTrue(text.contains("expected_label")); XCTAssertTrue(text.contains("browser_fill"))
+        let publicError = String(decoding: try APIModelServer.errorBody(APIModelResponseCodec.Failure.invalidArguments, stage: .decode), as: UTF8.self)
+        XCTAssertFalse(publicError.contains("schemaPath")); XCTAssertFalse(publicError.contains("expected_label"))
+        XCTAssertFalse(publicError.contains("browser_fill"))
     }
     func testActualArgumentDecodeDiagnosticsSeparateUsageEnvelopeAndAccountingWithoutExtraRequests() async throws {
         for mode in ["missing_usage", "envelope_shape", "accounting_disabled", "accounting_unavailable", "second_rejected"] {

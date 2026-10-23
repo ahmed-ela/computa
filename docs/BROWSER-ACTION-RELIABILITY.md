@@ -131,16 +131,32 @@ old stop notice was appended after every subsequent turn, making it appear curre
   authorized task and approvals. The model must not infer that a password or MFA
   is required before observing that requirement. Actual credential requirements,
   account ambiguity and approval boundaries still require appropriate help.
-- New clicks and fills carry `expected_role` and `expected_label` copied from the
-  intended current row. The host compares the exact exposed UTF-8 bytes before
-  approval and again before dispatch. A mismatch leaves the read intact and
-  dispatches nothing; it never searches for a different target. Continuation
-  reads permit only their exposed label fragment, and an absent label cannot be
-  treated as an explicitly empty label. Existing snapshot, document, eligibility
-  and outcome checks remain in effect. Completed historical calls retain their
-  older argument format; only new calls require the current assertions.
-  This catches a wrong index paired with the intended control's label or role.
-  It cannot detect a model consistently choosing the wrong labeled control.
+- New clicks use `click_ref`; fills use `fill_ref` and `text`. Only eligible
+  currently published rows with exposed labels issue these typed references.
+  The host retains the exact snapshot, row, role and exposed UTF-8 label instead
+  of requiring the model to copy a long label and a separate snapshot/index.
+  An absent label is not an explicitly empty label, and a continuation grants
+  only its exposed fragment. References never search for a substitute target.
+- Each read replaces the reference menu. A token survives only when that read
+  explicitly republishes the same native node with identical field exposures
+  and action semantics in the same binding and committed document/generation/URL.
+  Changed or omitted rows expire; admitted input consumes all current refs.
+  The target is frozen before approval and retry accounting, then checked again
+  before dispatch. A later read cannot silently update an approved target.
+  Existing physical checks, permissions and outcome verification remain intact;
+  a model can still choose the wrong currently exposed control.
+- Recognized saved browser catalogs migrate to the strict current schema for
+  inference. Completed v1 snapshot/index, v2 role/label assertion and v3 reference
+  calls retain their original argument bytes and require matching outputs.
+  Current calls accept only v3; custom/MCP schemas remain unchanged. An old chat
+  with no browser tools still needs a new chat to obtain them.
+- Mutation retry keys use native target identity and operation/value, so new
+  tokens or row numbers cannot refund the budget. Unknown or wrong-type refs
+  share a routing-only failure counter and trigger no automatic capture. A
+  successfully published current-ref input clears that counter only; reads,
+  rebinds and failed inputs do not. Other intent counters and unresolved outcomes
+  remain separate. Known stale references retain only bounded read-only recovery,
+  never input replay.
 - DOM capture traverses `display: contents` wrappers even though those wrappers
   have no layout box. Visible descendants and direct text retain their semantic
   ancestry; the wrapper itself receives no input capability. Hidden, inert and

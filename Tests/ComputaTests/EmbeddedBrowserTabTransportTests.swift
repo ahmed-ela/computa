@@ -16,16 +16,19 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         return String(row[range.upperBound...].prefix { $0 != "\"" })
     }
 
-    private func inputReference(_ read: String, label: String) throws -> [String: Any] {
-        let header = try XCTUnwrap(read.split(separator: "\n").first)
-        let id = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
+    private func inputReference(_ read: String, label: String, fill: Bool = false) throws -> [String: Any] {
         let row = try XCTUnwrap(read.split(separator: "\n").first {
             $0.hasPrefix("#") && $0.contains("label=\"\(label)\"")
         })
-        return ["snapshot_id": String(id.dropFirst(3)),
-                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber })),
-                "expected_role": try exposedField("role", in: row),
-                "expected_label": try exposedField("label", in: row)]
+        return reference(in: row, fill: fill)
+    }
+
+    private func reference(in row: Substring, fill: Bool = false) -> [String: Any] {
+        let field = fill ? "fill_ref" : "click_ref"
+        // Read-only rows deliberately have no issued reference; the negative
+        // cases exercise an unknown token rather than synthesizing authority.
+        let token = row.range(of: "\(field)=\"").map { String(row[$0.upperBound...].prefix { $0 != "\"" }) }
+        return [field: token ?? "unpublished-reference"]
     }
 
     func testRealWebKitReadScopeUsesCommittedDocumentAndIgnoresSameDocumentURLChanges() async throws {
@@ -98,7 +101,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertTrue(bodyRow.contains("settable=false actions=[]"))
         XCTAssertFalse(read.contains("SIDEBAR_BODY_SENTINEL")); XCTAssertFalse(read.contains("HIDDEN_BODY_SENTINEL"))
         XCTAssertLessThanOrEqual(rows.count, 18)
-        XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
+        XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 }, 6_000)
         XCTAssertLessThanOrEqual(read.utf8.count, 16_384); XCTAssertLessThanOrEqual(resultText.utf8.count, 20_480)
         do {
             _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click", arguments: send)
@@ -108,7 +111,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click",
                 arguments: JSONSerialization.data(withJSONObject: inputReference(read, label: receipt)))
             XCTFail("A newly published body row has no action authority")
-        } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+        } catch { XCTAssertEqual(error as? EmbeddedBrowserActionReferences.Failure, .invalidReference) }
         _ = try await controller.execute(taskKey: "receipt-body", tool: "browser_click",
             arguments: JSONSerialization.data(withJSONObject: inputReference(read, label: "Inspect record")))
         let counters = try await script(view, "return {submits:window.submits,inspections:window.inspections};")
@@ -214,7 +217,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             XCTFail("Invalid form state cannot revive the consumed input reference")
         } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
         let fresh = try await controller.execute(taskKey: "form", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
-        var fill = try inputReference(fresh, label: "Message"); fill["text"] = "Requested body"
+        var fill = try inputReference(fresh, label: "Message", fill: true); fill["text"] = "Requested body"
         _ = try await controller.execute(taskKey: "form", tool: "browser_fill", arguments: JSONSerialization.data(withJSONObject: fill))
         let completed = try await controller.execute(taskKey: "form", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
         let field = try XCTUnwrap(completed.split(separator: "\n").first { $0.contains("label=\"Message\"") })
@@ -263,15 +266,10 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         <p id="result">Unopened fixture</p></main></body></html>
         """
         func reference(_ read: String, role: String) throws -> [String: Any] {
-            let header = try XCTUnwrap(read.split(separator: "\n").first)
-            let id = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
             let row = try XCTUnwrap(read.split(separator: "\n").first {
                 $0.hasPrefix("#") && $0.contains("semantic_role=\"\(role)\"")
             })
-            let index = try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber }))
-            return ["snapshot_id": String(id.dropFirst(3)), "element_index": index,
-                    "expected_role": try exposedField("role", in: row),
-                    "expected_label": try exposedField("label", in: row)]
+            return self.reference(in: row)
         }
         for change in ["unchanged", "disabled", "replaced"] {
             let session = EmbeddedBrowserSession(persistent: false)
@@ -295,11 +293,11 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             do {
                 try await controller.preflightMutation(taskKey: "grid", tool: "browser_click", arguments: containerData)
                 XCTFail("An enabled content wrapper has no inherited press capability")
-            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserActionReferences.Failure, .invalidReference) }
             do {
                 _ = try await controller.execute(taskKey: "grid", tool: "browser_click", arguments: containerData)
                 XCTFail("Direct execution must not retarget to the child")
-            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserActionReferences.Failure, .invalidReference) }
             let deniedClicks = try await script(view, "return window.clicks || 0;")
             XCTAssertEqual(deniedClicks, Data("0".utf8))
             let links = try await controller.execute(taskKey: "grid", tool: "browser_read",
@@ -612,18 +610,13 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertTrue(popup.contains("enabled=true")); XCTAssertTrue(popup.contains("actions=[]"))
         XCTAssertFalse(popup.contains("follow_link=true"))
         XCTAssertTrue(ordinary.contains("actions=[\"AXPress\"]")); XCTAssertTrue(ordinary.contains("follow_link=true"))
-        let header = try XCTUnwrap(read.split(separator: "\n").first)
-        let snapshot = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
         func arguments(_ row: Substring) throws -> Data {
-            try JSONSerialization.data(withJSONObject: ["snapshot_id": String(snapshot.dropFirst(3)),
-                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber })),
-                "expected_role": try exposedField("role", in: row),
-                "expected_label": try exposedField("label", in: row)])
+            try JSONSerialization.data(withJSONObject: reference(in: row))
         }
         do {
             _ = try await controller.execute(taskKey: "popup-link", tool: "browser_click", arguments: arguments(popup))
             XCTFail("A popup-only link is read-only before any backend input")
-        } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+        } catch { XCTAssertEqual(error as? EmbeddedBrowserActionReferences.Failure, .invalidReference) }
         XCTAssertEqual(session.humanTabs.count, 1)
         _ = try await controller.execute(taskKey: "popup-link", tool: "browser_click", arguments: arguments(ordinary))
         let clicks = try await script(view, "return window.clicks || 0;")

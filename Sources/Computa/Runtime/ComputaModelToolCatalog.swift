@@ -10,11 +10,11 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
-    /// Only the two app-owned argument shapes are eligible for evolution. A
+    /// Only the three app-owned argument shapes are eligible for evolution. A
     /// similarly named MCP/custom tool or a modified schema keeps its contract.
     /// The pinned engine can omit constraints when projecting dynamic schemas.
     static func browserMutationSchemaVariants(name: String, namespace: String?, schema: [String: Any])
-        -> (legacy: [String: Any], current: [String: Any])? {
+        -> (historical: [[String: Any]], current: [String: Any])? {
         if let additional = schema["additionalProperties"] {
             guard let flag = additional as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID(), !flag.boolValue else { return nil }
         }
@@ -22,30 +22,54 @@ enum ComputaModelToolCatalog {
               ["browser_click", "browser_fill"].contains(name),
               let definition = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name }),
               let current = definition["inputSchema"] as? [String: Any],
-              let canonical = current["properties"] as? [String: [String: Any]],
               schema["type"] as? String == "object",
               Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
               let properties = schema["properties"] as? [String: [String: Any]],
               let required = schema["required"] as? [String], Set(required).count == required.count
         else { return nil }
+        guard Set(required) == Set(properties.keys) else { return nil }
+        // Freeze prior contracts independently of the currently callable refs.
+        // Never infer a legacy shape by subtracting fields from a newer version.
+        var indexed: [String: Any] = [
+            "snapshot_id": ["type": "string", "minLength": 1],
+            "element_index": ["type": "integer", "minimum": 0, "maximum": 2_999],
+        ]
+        if name == "browser_fill" { indexed["text"] = ["type": "string"] }
         let assertions: Set<String> = ["expected_role", "expected_label"]
-        let currentKeys = Set(canonical.keys), legacyKeys = currentKeys.subtracting(assertions)
-        guard Set(properties.keys) == legacyKeys || Set(properties.keys) == currentKeys,
-              Set(required) == Set(properties.keys) else { return nil }
-        for (field, property) in properties {
-            guard let expected = canonical[field], property["type"] as? String == expected["type"] as? String,
-                  Set(property.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)) else { return nil }
-            for (key, value) in property where key != "description" {
-                guard let wanted = expected[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return nil }
-            }
+        let asserted = indexed.merging([
+            "expected_role": ["type": "string", "minLength": 1, "maxLength": 128],
+            "expected_label": ["type": "string", "maxLength": 4_096],
+        ]) { _, new in new }
+        func object(_ fields: [String: Any]) -> [String: Any] {
+            ["type": "object", "properties": fields, "required": fields.keys.sorted(), "additionalProperties": false]
         }
-        // Preserve the saved legacy constraints for historical calls. Do not
-        // add fields to that shape or accept a half-upgraded argument object.
-        var legacy = schema
-        legacy["properties"] = properties.filter { !assertions.contains($0.key) }
-        legacy["required"] = required.filter { !assertions.contains($0) }
-        legacy["additionalProperties"] = false
-        return (legacy, current)
+        var historical = [object(indexed), object(asserted), current]
+        let matched = historical.firstIndex { candidate in
+            guard let canonical = candidate["properties"] as? [String: [String: Any]],
+                  Set(properties.keys) == Set(canonical.keys) else { return false }
+            for (field, property) in properties {
+                guard let expected = canonical[field], property["type"] as? String == expected["type"] as? String,
+                      Set(property.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)) else { return false }
+                for (key, value) in property where key != "description" {
+                    guard let wanted = expected[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return false }
+                }
+            }
+            return true
+        }
+        guard let matched else { return nil }
+        // Preserve the saved version's constraints, including ones omitted by
+        // the engine. History alone accepts complete older forms; a partial
+        // assertion/ref upgrade never becomes another historical variant.
+        var saved = schema
+        saved["additionalProperties"] = false
+        historical[matched] = saved
+        if matched == 1 {
+            var legacy = saved
+            legacy["properties"] = properties.filter { !assertions.contains($0.key) }
+            legacy["required"] = required.filter { !assertions.contains($0) }
+            historical[0] = legacy
+        }
+        return (historical, current)
     }
 
     /// Also applies to schemas retained by old native threads. History stays
