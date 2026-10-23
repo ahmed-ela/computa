@@ -2041,7 +2041,8 @@ private extension CodexAppServerRuntime {
                 let turnPreparationStarted = ContinuousClock.now
                 dispatchProfile?.mark(.turnPreparationRequested)
                 inferencePreparation = try await prepareInferenceTurn(
-                    taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread)
+                    taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread,
+                    userRequest: prompt)
                 dispatchProfile?.mark(.turnPrepared, since: turnPreparationStarted)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
@@ -2106,6 +2107,10 @@ private extension CodexAppServerRuntime {
                 threadID: threadForTask[taskID],
                 expectedTurnID: turnIdentity.activeTurnID(for: taskID)
             )
+            if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
+                try await steerAPI(steer, taskID: taskID)
+                return
+            }
             let response = try await request(
                 method: AppServerSteerRequest.method,
                 params: steer.parameters
@@ -2113,6 +2118,62 @@ private extension CodexAppServerRuntime {
             try steer.validateAcknowledgment(response)
             // No new turn/started event accompanies a steer. In particular, do
             // not reset task bindings, approvals, model, or screenshot epochs.
+        }
+
+        private func steerAPI(_ steer: AppServerSteerRequest, taskID: AgentTask.ID) async throws {
+            let generation = serverGeneration
+            guard let context = browserExecutionContexts[taskID],
+                  context.threadID == steer.threadID, context.turnID == steer.expectedTurnID,
+                  context.generation == generation,
+                  inferencePreparations[taskID] == context.preparationID else {
+                throw AppServerSteerRequest.ValidationError.noActiveTurn
+            }
+            func ownsContext() -> Bool {
+                !isShuttingDown && serverGeneration == generation
+                    && browserExecutionContexts[taskID]?.preparationID == context.preparationID
+                    && browserExecutionContexts[taskID]?.turnID == context.turnID
+                    && browserExecutionContexts[taskID]?.generation == generation
+                    && inferencePreparations[taskID] == context.preparationID
+                    && threadForTask[taskID] == context.threadID
+                    && turnIdentity.activeTurnID(for: taskID) == context.turnID
+                    && nativeStoppedTurns[taskID] != context.turnID
+                    && contextStoppedTurns[taskID] != context.turnID
+                    && commandStoppedTurns[taskID] != context.turnID
+            }
+            let ticket = try await apiModelServer.beginUserInputUpdate(taskID: taskID,
+                threadID: context.threadID, turnID: context.turnID,
+                preparationID: context.preparationID, prompt: steer.prompt)
+            var dispatched = false
+            do {
+                try Task.checkCancellation()
+                guard ownsContext() else { throw CancellationError() }
+                // The gate precedes dispatch: the engine can request its next
+                // inference before this actor resumes from the steer response.
+                dispatched = true
+                let response = try await request(method: AppServerSteerRequest.method,
+                    params: steer.parameters, timeout: .seconds(5))
+                try steer.validateAcknowledgment(response)
+                try Task.checkCancellation()
+                guard ownsContext() else { throw CancellationError() }
+                try await apiModelServer.resolveUserInputUpdate(taskID: taskID,
+                    threadID: context.threadID, turnID: context.turnID,
+                    preparationID: context.preparationID, ticket: ticket, accepted: true)
+            } catch {
+                if dispatched, ownsContext() {
+                    // A lost/malformed acknowledgment may follow accepted input.
+                    // Retire this turn rather than resume an outdated reminder
+                    // that omits a user's new restriction. Interrupt revokes tools
+                    // and cancels inference before waiting for the engine reply.
+                    try? await interrupt(taskID: taskID, acknowledgmentTimeout: .seconds(2))
+                } else if !dispatched, ownsContext() {
+                    try? await apiModelServer.resolveUserInputUpdate(taskID: taskID,
+                        threadID: context.threadID, turnID: context.turnID,
+                        preparationID: context.preparationID, ticket: ticket, accepted: false)
+                }
+                // A superseded or stopped context stays gated until its owning
+                // cleanup cancels it; reopening it could race that cleanup.
+                throw error
+            }
         }
 
         private func threadConfig(for modelID: String, taskID: AgentTask.ID? = nil) -> [String: Any] {
@@ -2248,7 +2309,8 @@ private extension CodexAppServerRuntime {
 
         private func prepareInferenceTurn(taskID: AgentTask.ID, threadID: String,
                                                  modelID: String, isNewThread: Bool = false,
-                                                 isMaintenance: Bool = false) async throws -> UUID? {
+                                                  isMaintenance: Bool = false,
+                                                  userRequest: String? = nil) async throws -> UUID? {
             browserExecutionContexts.removeValue(forKey: taskID)
             guard isRemoteInference(modelID) else {
                 inferencePreparations.removeValue(forKey: taskID)
@@ -2262,7 +2324,8 @@ private extension CodexAppServerRuntime {
                         ? ComputaAgentInstructions.runtimeInteractionPolicy()
                         : ComputaAgentInstructions.browserTurnLifecycle + "\n" + ComputaAgentInstructions.browserSearchEvidence
                     try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
-                        preparationID: preparationID, isNewThread: isNewThread, executionPolicy: policy)
+                        preparationID: preparationID, isNewThread: isNewThread, executionPolicy: policy,
+                        userRequest: userRequest)
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
@@ -2667,7 +2730,7 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        func interrupt(taskID: AgentTask.ID) async throws {
+        func interrupt(taskID: AgentTask.ID, acknowledgmentTimeout: Duration? = nil) async throws {
             let webCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             if let claim = turnSubmissionClaims[taskID] { cancelledSubmissions.insert(claim) }
             if inferenceSelectionTaskID == taskID { inferenceSelectionTask?.cancel() }
@@ -2707,7 +2770,7 @@ private extension CodexAppServerRuntime {
             var interruptFailure: Error?
             do {
                 _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID],
-                    timeout: tasksWithCommands.contains(taskID) ? .seconds(5) : nil)
+                    timeout: acknowledgmentTimeout ?? (tasksWithCommands.contains(taskID) ? .seconds(5) : nil))
             } catch { interruptFailure = error }
             await cleanup?.value
             if let webCleanup { _ = await webCleanup.value }

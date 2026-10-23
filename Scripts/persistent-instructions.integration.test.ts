@@ -334,11 +334,24 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
   let baselineCliSchemas: Json[] | undefined;
   let regularSchemaAssertions = 0;
   let compactSchemaAssertions = 0;
+  const nativeRequestKinds: string[] = [];
   const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/responses") return new Response("fixture", { status: 404 });
     try {
       const body = await request.json() as Json;
       requests.push(body);
+      // Maintenance classification must come from the pinned engine's native
+      // transport metadata, never the maintenance prompt's wording or tools.
+      const headerMetadata = request.headers.get("x-codex-turn-metadata");
+      expect(typeof headerMetadata).toBe("string");
+      const native = JSON.parse(headerMetadata!);
+      expect(native.request_kind).toBe(compacting ? "compaction" : "turn");
+      expect(typeof native.thread_id).toBe("string");
+      expect(typeof native.turn_id).toBe("string");
+      const bodyMetadata = body.client_metadata?.["x-codex-turn-metadata"];
+      expect(typeof bodyMetadata).toBe("string");
+      expect(JSON.parse(bodyMetadata)).toEqual(native);
+      nativeRequestKinds.push(native.request_kind);
       const plan = plans.shift();
       if (!plan) throw new Error("Unexpected model inference.");
       if (compacting) {
@@ -421,7 +434,13 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       await rpc.request("thread/compact/start", { threadId: threadID });
       await rpc.completed(threadID, compactStart);
     } finally { compacting = false; }
-    plans.push(body => { assertRules(body, rules); expect(offered(body).length).toBeGreaterThan(0); return [message("Post-compaction complete")]; });
+    plans.push(body => {
+      assertRules(body, rules); expect(offered(body).length).toBeGreaterThan(0);
+      expect(contains(body, rules.compact)).toBe(false);
+      const currentUser = body.input.filter((item: Json) => item.type === "message" && item.role === "user").at(-1);
+      expect(currentUser.content).toEqual([{ type: "input_text", text: "Continue after context maintenance." }]);
+      return [message("Post-compaction complete")];
+    });
     await rpc.turn(threadID, "Continue after context maintenance.");
 
     const history = Array.from({ length: 80 }, (_, i) => ({ type: "message", role: i % 2 ? "assistant" : "user",
@@ -459,10 +478,12 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
     expect(developerOverrideObserved).toHaveLength(2);
     expect(regularSchemaAssertions).toBe(9);
     expect(compactSchemaAssertions).toBe(1);
+    expect(nativeRequestKinds).toEqual(["turn", "turn", "turn", "turn", "turn", "compaction", "turn", "turn", "turn", "turn"]);
     console.log(JSON.stringify({ verified: true, sourceCommit: runtime.pin.sourceCommit, binarySHA256: runtime.binarySHA256,
       actualModelRequests: requests.length, builtinTerminalContinuation: true, dynamicToolContinuation: true,
       exactTerminalSchemasRetained: regularSchemaAssertions, noToolsCompactionRequests: compactSchemaAssertions,
       coldResume: true, noToolsCompaction: true, exactAppCompactionPrompt: true, postCompaction: true, syntheticHistoryMessages: 80,
+      nativeRequestKindHeaderAndBodyAgree: true, nativeRequestKinds,
       coldResumeDeveloperOverrideObserved: developerOverrideObserved, coldResumeBaseOverrideObserved: true,
       fixtureThreadSandbox: "danger-full-access inside outbound-denying OS sandbox",
       appLiteralSections: ["nativeScope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"],

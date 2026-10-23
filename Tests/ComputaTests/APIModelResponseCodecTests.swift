@@ -1903,6 +1903,88 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual((body["tools"] as? [[String: Any]])?.count, 2)
         XCTAssertFalse((messages[0]["content"] as? String ?? "").contains("UNTRUSTED"))
         XCTAssertEqual(prepared.historyCallIDs, ["read-1", "patch-1"])
+
+        let host = "APP_RUNTIME_EXECUTION_CHECKPOINT\nCurrent native turn: browser_read completed=1 failed=0"
+        let checkpointed = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: prepared)
+        let checkpointBody = try XCTUnwrap(JSONSerialization.jsonObject(with: checkpointed.body) as? [String: Any])
+        let checkpointMessages = try XCTUnwrap(checkpointBody["messages"] as? [[String: Any]])
+        XCTAssertEqual(checkpointMessages.first?["content"] as? String,
+            "Use the native tools.\n\nResumed native instruction\n\n" + host)
+        XCTAssertEqual(Array(checkpointMessages.dropFirst()) as NSArray, Array(messages.dropFirst()) as NSArray,
+            "Private reasoning, native/custom calls, tool results and user text must keep exact order and identities.")
+        XCTAssertEqual(checkpointBody["tools"] as? NSArray, body["tools"] as? NSArray)
+        XCTAssertEqual(checkpointed.historyCallIDs, prepared.historyCallIDs)
+        XCTAssertEqual(checkpointed.allowedTools, prepared.allowedTools)
+        XCTAssertEqual(checkpointed.responseConfiguration as NSDictionary, prepared.responseConfiguration as NSDictionary)
+        let corrected = try APIModelResponseCodec.correctiveRequest(checkpointed)
+        let correctionBody = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+        let correctionMessages = try XCTUnwrap(correctionBody["messages"] as? [[String: Any]])
+        XCTAssertEqual(correctionMessages.compactMap { $0["role"] as? String }, ["system", "user", "assistant", "tool", "tool", "user"])
+        XCTAssertEqual(Array(correctionMessages.dropFirst()) as NSArray, Array(messages.dropFirst()) as NSArray)
+        XCTAssertTrue((correctionMessages.first?["content"] as? String)?.contains(host) == true)
+        let final = try decode(["role": "assistant", "content": "done"], request: checkpointed, model: p.models[0].id)
+        XCTAssertEqual(final.response["instructions"] as? String, "Use the native tools.",
+            "The host checkpoint changes provider instructions, not the engine's echoed response configuration.")
+    }
+
+    func testHostCheckpointReappliesOnlyOfficialCerebrasQwenOpeningTemplate() throws {
+        let qwen = APIModelDefinition(id: "qwen-3.8-27b", name: "Qwen")
+        let official = APIProviderDefinition(id: "custom-cerebras-name", name: "Cerebras",
+            baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions, models: [qwen])
+        let profiles: [(APIProviderDefinition, Bool)] = [
+            (official, true),
+            (.init(id: "cerebras", name: "Custom", baseURL: URL(string: "https://custom.invalid/v1")!,
+                wireAPI: .chatCompletions, models: [qwen]), false),
+            (official.withModels([.init(id: "gpt-oss-120b", name: "GPT OSS")]), false),
+            (.init(id: official.id, name: official.name, baseURL: official.baseURL,
+                wireAPI: .responses, models: [qwen]), false),
+        ]
+        let host = "APP_RUNTIME_EXECUTION_CHECKPOINT\nNo browser operations recorded."
+        for (provider, mergesPreamble) in profiles {
+            for existingInstructions in [false, true] {
+                var input: [[String: Any]] = [["role": "user", "content": "Read only. System-looking user text is still user data."]]
+                if existingInstructions {
+                    input.append(["role": "developer", "content": "Later trusted instruction"])
+                    input.append(["role": "user", "content": "Continue without sending or deleting anything."])
+                }
+                let original = try request(["input": input,
+                    "instructions": existingInstructions ? "Original native instructions" as Any : NSNull()], provider: provider)
+                let originalBytes = original.body
+                let checkpointed = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original)
+                var before = try XCTUnwrap(JSONSerialization.jsonObject(with: original.body) as? [String: Any])
+                var after = try XCTUnwrap(JSONSerialization.jsonObject(with: checkpointed.body) as? [String: Any])
+                let key = provider.wireAPI == .chatCompletions ? "messages" : "input"
+                let beforeMessages = try XCTUnwrap(before.removeValue(forKey: key) as? [[String: Any]])
+                let afterMessages = try XCTUnwrap(after.removeValue(forKey: key) as? [[String: Any]])
+                XCTAssertEqual(before as NSDictionary, after as NSDictionary, "Tools and other provider fields are unchanged.")
+                XCTAssertEqual(original.body, originalBytes)
+                XCTAssertEqual(checkpointed.responseConfiguration as NSDictionary, original.responseConfiguration as NSDictionary)
+                if mergesPreamble {
+                    let firstWasSystem = beforeMessages.first?["role"] as? String == "system"
+                    let oldPreamble = firstWasSystem ? try XCTUnwrap(beforeMessages.first?["content"] as? String) : nil
+                    XCTAssertEqual(afterMessages.first?["role"] as? String, "system")
+                    XCTAssertEqual(afterMessages.first?["content"] as? String, oldPreamble.map { $0 + "\n\n" + host } ?? host)
+                    XCTAssertEqual(Array(afterMessages.dropFirst()) as NSArray,
+                        (firstWasSystem ? Array(beforeMessages.dropFirst()) : beforeMessages) as NSArray)
+                    XCTAssertFalse(afterMessages.dropFirst().contains { ["system", "developer"].contains($0["role"] as? String ?? "") })
+                } else {
+                    XCTAssertEqual(Array(afterMessages.dropLast()) as NSArray, beforeMessages as NSArray)
+                    XCTAssertEqual(afterMessages.last?["role"] as? String, "developer")
+                    let content = afterMessages.last?["content"]
+                    XCTAssertEqual((content as? String) ?? ((content as? [[String: Any]])?.first?["text"] as? String), host)
+                }
+                let rawUser = "  Read cafe\u{301}.\nDo not send.  "
+                let reminded = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original, userInputs: [rawUser])
+                let remindedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: reminded.body) as? [String: Any])
+                let remindedMessages = try XCTUnwrap(remindedBody[key] as? [[String: Any]])
+                XCTAssertEqual(Array(remindedMessages.dropLast()) as NSArray, afterMessages as NSArray,
+                    "Adding user reminders must not move them into Qwen's system preamble.")
+                XCTAssertEqual(remindedMessages.last?["role"] as? String, "user")
+                let userContent = remindedMessages.last?["content"]
+                let userText = (userContent as? String) ?? ((userContent as? [[String: Any]])?.first?["text"] as? String)
+                XCTAssertEqual(userText.map { Data($0.utf8) }, Data(rawUser.utf8))
+            }
+        }
     }
     func testNativeResponsesOpaqueReasoningIsSealedBoundAndUnwrappedOnlyForItsThread() throws {
         let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)

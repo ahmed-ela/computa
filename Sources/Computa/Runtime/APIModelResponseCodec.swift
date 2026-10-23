@@ -275,22 +275,30 @@ enum APIModelResponseCodec {
     /// Called only by the native server after current-turn admission. Appending
     /// to the translated provider body keeps engine history, tool declarations,
     /// capsules and echoed response configuration unchanged.
-    static func appendingHostDeveloperMessage(_ text: String, to original: Request) throws -> Request {
+    static func appendingHostDeveloperMessage(_ text: String, to original: Request, userInputs: [String] = []) throws -> Request {
         guard !text.isEmpty, text.utf8.count <= 16_384,
+              userInputs.count <= 1_024, userInputs.allSatisfy({ !$0.isEmpty }),
+              userInputs.reduce(0, { $0 + $1.utf8.count }) <= maximumText,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any] else { throw Failure.invalidRequest }
         switch original.provider.wireAPI {
         case .chatCompletions:
             guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
-            // Match the existing Qwen role compatibility rule without changing
-            // any historical message's role or content.
+            // Preserve the provider's template after adding trusted host text.
+            // Qwen requires its system instructions in one opening message;
+            // merely mapping developer to system would create a late system
+            // message and revive the provider's wrong_api_format rejection.
             let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
-            messages.append(["role": role, "content": text]); body["messages"] = messages
+            messages.append(["role": role, "content": text])
+            messages += userInputs.map { ["role": "user", "content": $0] }
+            body["messages"] = try chatTemplateMessages(messages,
+                selection: .init(provider: original.provider, model: original.model))
         case .responses:
             var items: [[String: Any]]
             if let input = body["input"] as? String { items = [["role": "user", "content": input]] }
             else if let input = body["input"] as? [[String: Any]] { items = input }
             else { throw Failure.invalidRequest }
             items.append(["type": "message", "role": "developer", "content": [["type": "input_text", "text": text]]])
+            items += userInputs.map { ["type": "message", "role": "user", "content": [["type": "input_text", "text": $0]]] }
             body["input"] = items
         }
         let bytes = try json(body)

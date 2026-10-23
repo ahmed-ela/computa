@@ -10,6 +10,15 @@ private actor APIRequestRecorder {
     func first() -> APIModelServer.HTTPRequest? { requests.first }
     func snapshot() -> [APIModelServer.HTTPRequest] { requests }
 }
+private actor APIHeldReply {
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func release() { released = true; waiter?.resume(); waiter = nil }
+}
 @MainActor
 private final class APIExecutionCheckpointAudit {
     var terminalStatuses: [TaskStatus] = []
@@ -1161,6 +1170,318 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         await server.shutdown()
     }
 
+    func testActiveUserRequestSurvivesCompactionWithoutRedirectingMaintenanceOnBothWireFormats() async throws {
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let records = APIRequestRecorder()
+            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
+                status: "200 OK", headers: ["Content-Type": "application/json"],
+                body: try JSONSerialization.data(withJSONObject: ["id": "maintenance-reply", "object": "response",
+                    "status": "completed", "model": "fixture-model", "output": [["id": "maintenance-message",
+                        "type": "message", "role": "assistant", "status": "completed",
+                        "content": [["type": "output_text", "text": "done", "annotations": []]]]]]))
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }
+            defer { remote.stop() }
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+            let server = try server(); try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                turn = UUID().uuidString, preparation = UUID()
+            let original = "  Read ODE cafe\u{301} announcements.\nDo not send or delete anything.  "
+            let steer = "Only report the attachment title; keep the original read-only restriction."
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: "Host policy stays unchanged.", userRequest: original)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            func infer(kind: String?, input: String) async throws -> [[String: Any]] {
+                var request = try localRequest(base: base, token: server.bearerToken, task: task,
+                    thread: thread, turn: turn, provider: p)
+                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+                body["input"] = [["type": "message", "role": "user", "content": [["type": "input_text", "text": input]]]]
+                body["tools"] = [Any]()
+                if let kind {
+                    // The compatibility header contains identity only; native
+                    // client metadata supplies explicit per-request purpose.
+                    let metadata = try JSONSerialization.data(withJSONObject: ["thread_id": thread, "turn_id": turn, "request_kind": kind])
+                    body["client_metadata"] = ["x-codex-turn-metadata": String(decoding: metadata, as: UTF8.self)]
+                }
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (_, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                let all = await records.snapshot(), upstream = try XCTUnwrap(all.last)
+                let forwarded = try XCTUnwrap(JSONSerialization.jsonObject(with: upstream.body) as? [String: Any])
+                XCTAssertNil(forwarded["client_metadata"])
+                return try XCTUnwrap(forwarded[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
+            }
+            func text(_ message: [String: Any]) -> String? {
+                (message["content"] as? String) ?? ((message["content"] as? [[String: Any]])?.first?["text"] as? String)
+            }
+            let stale = "Historical summary: the latest request is to compact the conversation, so stop the lookup."
+            let first = try await infer(kind: nil, input: stale)
+            XCTAssertEqual(first.last?["role"] as? String, "user")
+            XCTAssertEqual(text(try XCTUnwrap(first.last)).map { Data($0.utf8) }, Data(original.utf8))
+            XCTAssertFalse(first.filter { $0["role"] as? String == "developer" }.contains { text($0)?.contains("Read ODE") == true })
+            let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, prompt: steer)
+            try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, ticket: ticket, accepted: true)
+            let maintenance = try await infer(kind: "compaction", input: ComputaAgentInstructions.compactionPrompt)
+            XCTAssertEqual(maintenance.last?["role"] as? String, "developer")
+            XCTAssertTrue(maintenance.contains { text($0) == ComputaAgentInstructions.compactionPrompt })
+            XCTAssertFalse(maintenance.contains { text($0) == original || text($0) == steer })
+            XCTAssertFalse(text(try XCTUnwrap(maintenance.last))?.contains("The following user messages") == true)
+            let resumed = try await infer(kind: "turn", input: stale)
+            XCTAssertEqual(resumed.suffix(2).compactMap(text), [original, steer])
+            XCTAssertTrue(resumed.suffix(2).allSatisfy { $0["role"] as? String == "user" })
+            XCTAssertTrue(resumed.contains { $0["role"] as? String == "developer" && text($0)?.contains("not a new turn") == true })
+            // Text equality to the maintenance command never establishes native
+            // purpose. This ordinary request still gets its current task anchor.
+            let ordinarySameText = try await infer(kind: nil, input: ComputaAgentInstructions.compactionPrompt)
+            XCTAssertEqual(ordinarySameText.suffix(2).compactMap(text), [original, steer])
+            await server.shutdown()
+        }
+    }
+
+    func testNativeMaintenancePurposeConflictsAndToolAuthorityRejectBeforeProviderAccess() async throws {
+        let records = APIRequestRecorder(), reply = response()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let p = provider(try await remote.start()), server = try server(); try await server.updateProviders([p])
+        let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+            turn = UUID().uuidString, preparation = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: "Read only")
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        for (headerKind, bodyKind, tools) in [("turn", "compaction", false), ("compaction", "turn", false),
+                                            ("compaction", "compaction", true), ("unknown", "unknown", false)] {
+            var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+            func metadata(_ kind: String) throws -> String {
+                String(decoding: try JSONSerialization.data(withJSONObject: ["thread_id": thread, "turn_id": turn, "request_kind": kind]), as: UTF8.self)
+            }
+            request.setValue(try metadata(headerKind), forHTTPHeaderField: "X-Codex-Turn-Metadata")
+            var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+            body["client_metadata"] = ["x-codex-turn-metadata": try metadata(bodyKind)]
+            if tools { body["tools"] = [["type": "function", "name": "browser_open", "parameters": ["type": "object"]]] }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (_, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        }
+        let count = await records.count(); XCTAssertEqual(count, 0)
+        await server.shutdown()
+    }
+
+    #if DEBUG
+    func testAcceptedUserInputGateCommitsAbortsAndCancelsOnlyItsCurrentContext() async throws {
+        let records = APIRequestRecorder(), reply = response()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let p = provider(try await remote.start()), server = try server(); try await server.updateProviders([p])
+        let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+            turn = UUID().uuidString, preparation = UUID(), original = "Original read-only task"
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: original)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        let request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+        func waitForGate() async throws {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while ContinuousClock.now < deadline {
+                if await server.userInputAdmissionIsWaitingForTesting(taskID: task) { return }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            throw NSError(domain: "APIUserInputGate", code: 1)
+        }
+        let first = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, prompt: "Accepted restriction")
+        do {
+            _ = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, prompt: "Concurrent steer")
+            XCTFail("One pending steer must not overwrite another.")
+        } catch { XCTAssertEqual(error as? APIModelServer.Failure, .busy) }
+        for (targetTask, targetTurn, ticket) in [(task, turn, UUID()), (UUID().uuidString, turn, first), (task, UUID().uuidString, first)] {
+            do {
+                try await server.resolveUserInputUpdate(taskID: targetTask, threadID: thread, turnID: targetTurn,
+                    preparationID: preparation, ticket: ticket, accepted: true)
+                XCTFail("Only the staged transaction in this native context may resolve.")
+            } catch { XCTAssertEqual(error as? APIModelServer.Failure, .inferenceContextRequired) }
+        }
+        let pendingFirst = Task { try await URLSession.shared.data(for: request) }
+        try await waitForGate()
+        let before = await records.count(); XCTAssertEqual(before, 0)
+        try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, ticket: first, accepted: true)
+        let (_, firstResult) = try await pendingFirst.value
+        XCTAssertEqual((firstResult as? HTTPURLResponse)?.statusCode, 200)
+
+        let rejected = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, prompt: "Rejected steer must never appear")
+        let pendingRejected = Task { try await URLSession.shared.data(for: request) }
+        try await waitForGate()
+        try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, ticket: rejected, accepted: false)
+        let (_, rejectedResult) = try await pendingRejected.value
+        XCTAssertEqual((rejectedResult as? HTTPURLResponse)?.statusCode, 200)
+        for forwarded in await records.snapshot() {
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: forwarded.body) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.suffix(2).compactMap { $0["content"] as? String }, [original, "Accepted restriction"])
+            XCTAssertFalse(messages.contains { $0["content"] as? String == "Rejected steer must never appear" })
+        }
+        let cancelled = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, prompt: "Possibly accepted restriction")
+        let pendingCancelled = Task { try await URLSession.shared.data(for: request) }
+        try await waitForGate()
+        await server.cancel(taskID: task)
+        let (_, cancelledResult) = try await pendingCancelled.value
+        XCTAssertNotEqual((cancelledResult as? HTTPURLResponse)?.statusCode, 200)
+        let count = await records.count(); XCTAssertEqual(count, 2)
+        do {
+            try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, ticket: cancelled, accepted: true)
+            XCTFail("Cancellation retires staged input.")
+        } catch { XCTAssertEqual(error as? APIModelServer.Failure, .inferenceContextRequired) }
+        let nextTurn = UUID().uuidString, nextPrep = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: nextPrep, userRequest: "Fresh task")
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: nextTurn, preparationID: nextPrep)
+        let next = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: nextTurn, provider: p)
+        let (_, nextResult) = try await URLSession.shared.data(for: next)
+        XCTAssertEqual((nextResult as? HTTPURLResponse)?.statusCode, 200)
+        let snapshot = await records.snapshot(), last = try XCTUnwrap(snapshot.last)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: last.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.last?["content"] as? String, "Fresh task")
+        XCTAssertFalse(String(decoding: last.body, as: UTF8.self).contains("Accepted restriction"))
+        await server.shutdown()
+    }
+
+    func testUserInputGateTimeoutCannotReopenStaleRequestBeforeRetirement() async throws {
+        let records = APIRequestRecorder(), reply = response()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let p = provider(try await remote.start())
+        let server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"), userInputUpdateTimeout: .milliseconds(50))
+        try await server.updateProviders([p])
+        let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+            turn = UUID().uuidString, preparation = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: "Original task")
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+            preparationID: preparation, prompt: "Uncertain accepted restriction")
+        let request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+        for _ in 0..<2 {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        }
+        for accepted in [false, true] {
+            do {
+                try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                    preparationID: preparation, ticket: ticket, accepted: accepted)
+                XCTFail("A late acknowledgment cannot reopen an expired gate; Core must retire it.")
+            } catch { XCTAssertEqual(error as? APIModelServer.Failure, .inferenceContextRequired) }
+        }
+        let count = await records.count(); XCTAssertEqual(count, 0)
+        await server.shutdown()
+    }
+
+    func testStagedOrAcceptedSteerFencesNewProviderDispatchAndCorrectionWithoutLosingFirstUsage() async throws {
+        for boundary in ["before_first", "first_response", "before_correction"] {
+            for accepted in [false, true] {
+                let records = APIRequestRecorder(), held = APIHeldReply(), entered = APICorrectionGate()
+                let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+                let directory = root.appendingPathComponent("accounting")
+                let remote = try APILoopbackFixture { request in
+                    await records.record(request)
+                    if boundary == "first_response" { await entered.enter(); await held.wait() }
+                    return self.correctionResponse(request, invalid: true)
+                }
+                defer { remote.stop() }
+                let p = provider(try await remote.start())
+                let server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+                    capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+                try await server.updateProviders([p])
+                let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                    turn = UUID().uuidString, preparation = UUID()
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: "Original request")
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+                if boundary == "before_first" {
+                    await server.setBeforeInferenceDispatchForTesting { await entered.enter(); await held.wait() }
+                }
+                if boundary == "before_correction" {
+                    await server.setBeforeCorrectionDispatchForTesting { await entered.enter(); await held.wait() }
+                }
+                let request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+                let pending = Task { try await URLSession.shared.data(for: request) }
+                do {
+                    let deadline = ContinuousClock.now + .seconds(2)
+                    while !(await entered.entered), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+                    let reached = await entered.entered; XCTAssertTrue(reached, boundary)
+                    let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                        preparationID: preparation, prompt: "New restriction must apply to any new provider inference")
+                    if accepted {
+                        try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                            preparationID: preparation, ticket: ticket, accepted: true)
+                    }
+                    await held.release()
+                    let (data, response) = try await pending.value
+                    XCTAssertNotEqual((response as? HTTPURLResponse)?.statusCode, 200, boundary)
+                    XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("output_item.done"))
+                    let count = await records.count(); XCTAssertEqual(count, boundary == "before_first" ? 0 : 1, boundary)
+                    if boundary != "before_first" {
+                        let accounting = try correctionRecords(directory)
+                        XCTAssertEqual(accounting.first { $0.phase == "first_received" }?.firstUsage.totalTokens, 14)
+                        let final = try XCTUnwrap(accounting.first { $0.phase == "finished" })
+                        XCTAssertEqual(final.outcome, .cancelled)
+                        XCTAssertFalse(final.secondRequestClaimed)
+                        XCTAssertNil(final.secondUsage)
+                        XCTAssertFalse(accounting.contains { $0.phase == "second_claimed" })
+                    }
+                    await server.shutdown()
+                } catch {
+                    await held.release(); await server.shutdown(); throw error
+                }
+            }
+        }
+    }
+
+    func testStagingUserInputLeavesAlreadyDispatchedInferenceSnapshotIntact() async throws {
+        let records = APIRequestRecorder(), held = APIHeldReply(), reply = response()
+        let remote = try APILoopbackFixture { request in
+            await records.record(request)
+            if await records.count() == 1 { await held.wait() }
+            return reply
+        }
+        defer { remote.stop() }
+        let p = provider(try await remote.start()), server = try server(); try await server.updateProviders([p])
+        let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+            turn = UUID().uuidString, preparation = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: "Original task")
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        let request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+        let inFlight = Task { try await URLSession.shared.data(for: request) }
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while await records.count() == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            let count = await records.count(); XCTAssertEqual(count, 1)
+            let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, prompt: "New accepted restriction")
+            await held.release()
+            let (_, response) = try await inFlight.value
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            let firstRecords = await records.snapshot(), first = try XCTUnwrap(firstRecords.first)
+            XCTAssertFalse(String(decoding: first.body, as: UTF8.self).contains("New accepted restriction"))
+            let next = Task { try await URLSession.shared.data(for: request) }
+            let gateDeadline = ContinuousClock.now + .seconds(2)
+            while !(await server.userInputAdmissionIsWaitingForTesting(taskID: task)), ContinuousClock.now < gateDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let waiting = await server.userInputAdmissionIsWaitingForTesting(taskID: task); XCTAssertTrue(waiting)
+            try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                preparationID: preparation, ticket: ticket, accepted: true)
+            let (_, nextResponse) = try await next.value
+            XCTAssertEqual((nextResponse as? HTTPURLResponse)?.statusCode, 200)
+            let all = await records.snapshot(), last = try XCTUnwrap(all.last)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: last.body) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.suffix(2).compactMap { $0["content"] as? String }, ["Original task", "New accepted restriction"])
+            await server.shutdown()
+        } catch {
+            await held.release(); await server.shutdown(); throw error
+        }
+    }
+    #endif
+
     #if DEBUG
     /// Drives the real Core/API boundary with deterministic engine and browser
     /// fixtures. This qualifies host ordering/reset, not live model behavior.
@@ -1237,8 +1558,10 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
                 XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["content"] as? String == prompt })
                 XCTAssertTrue(messages.contains { ($0["content"] as? String)?.contains("Summary: 99 browser actions") == true })
-                let host = try XCTUnwrap(messages.last), checkpoint = try XCTUnwrap(host["content"] as? String)
+                let host = try XCTUnwrap(messages.last { $0["role"] as? String == "developer" }), checkpoint = try XCTUnwrap(host["content"] as? String)
                 XCTAssertEqual(host["role"] as? String, "developer")
+                XCTAssertEqual(messages.last?["role"] as? String, "user")
+                XCTAssertEqual(messages.last?["content"] as? String, prompt)
                 XCTAssertTrue(checkpoint.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
                 XCTAssertFalse(checkpoint.contains("99 browser actions"))
                 checkpoints.append(checkpoint)

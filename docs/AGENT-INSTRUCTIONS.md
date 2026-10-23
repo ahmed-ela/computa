@@ -37,7 +37,11 @@ The native engine's supported `compact_prompt` configuration uses
 It separates earlier attempts from the current request and preserves explicit
 ongoing user restrictions with their source and scope. Generated notes must not
 invent current execution, revive ephemeral browser handles/cursors, or turn
-assistant refusals into policy. The current native host checkpoint, when supplied,
+assistant refusals into policy. The maintenance instruction explicitly identifies
+itself as runtime-generated: it must not replace the last substantive human task
+with an invented request for historical notes, or declare that task completed by
+summarization. Continuation resumes the preserved task under its existing scope.
+The current native host checkpoint, when supplied,
 establishes recorded operation chronology; operation counts do not establish site
 search results or task success. Matching tool receipts remain the evidence for
 observed content and action outcomes. This contract improves summary generation;
@@ -50,6 +54,26 @@ on cancellation/finish. There is no model-facing endpoint to update it. Raw user
 history and tool schemas remain intact. The checkpoint establishes execution
 chronology only: counts do not prove that the model read an output or that the
 website returned relevant results. Current tool observations establish those facts.
+
+For ordinary API inferences, the host also repeats the active turn's original
+request and accepted steering messages after that checkpoint, in order and with
+their exact text at **user** authority. These reminders come from native submission
+state, not from parsing summaries or promoting user text into developer policy.
+They preserve the active task through compaction without authorizing replay of
+completed or uncertain actions. Engine history and current tool schemas are unchanged.
+The engine's native `request_kind=compaction` metadata suppresses these reminders
+during maintenance; prompt wording and summary prefixes do not determine request
+purpose. Conflicting native identities/purposes and maintenance with offered tools
+are rejected before contacting the provider.
+
+Steering stages a bounded native update before sending `turn/steer`. New inference
+admissions wait for its acknowledgment; accepted text is committed in order, while
+an ambiguous acknowledgment retires the turn rather than continuing with stale
+constraints. Cancellation and turn replacement remove the stored inputs. A request
+already sent to the provider retains its immutable input snapshot. Before any new
+provider dispatch, including schema correction, the host rejects a snapshot that
+has been superseded by pending or accepted steering. Correction accounting still
+retains the usage from the first response.
 
 Instructions distinguish general questions from requested inspections and
 actions. Completion of an operation requires the relevant local observations
@@ -121,7 +145,8 @@ application's active prompts, user configuration, credentials or private chats.
 - `bun test Scripts/persistent-instructions.integration.test.ts` exercises the
   real pinned App Server with scripted loopback Responses. It checks actual
   developer roles, successful command output, matched tool continuations, cold
-  resume, exact production compaction-prompt delivery and an 80-message replay. Missing default artifacts skip
+  resume, exact production compaction-prompt delivery, matching native request-kind
+  metadata in the header and body, and an 80-message replay. Missing default artifacts skip
   clearly; an explicit `COMPUTA_INSTRUCTION_TEST_RESOURCES` override or a present
   mismatched artifact fails closed. The fixture uses a private home and an outer
   sandbox denying external network. Its thread sandbox differs from production

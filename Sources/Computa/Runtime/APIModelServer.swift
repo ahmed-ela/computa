@@ -71,7 +71,9 @@ actor APIModelServer {
 #if DEBUG
     private var failureDiagnosticsObserverForTesting: (@Sendable (String) -> Void)?
     private var beforeCorrectionDispatchForTesting: (@Sendable () async throws -> Void)?
+    private var beforeInferenceDispatchForTesting: (@Sendable () async throws -> Void)?
     func setBeforeCorrectionDispatchForTesting(_ hook: (@Sendable () async throws -> Void)?) { beforeCorrectionDispatchForTesting = hook }
+    func setBeforeInferenceDispatchForTesting(_ hook: (@Sendable () async throws -> Void)?) { beforeInferenceDispatchForTesting = hook }
     func setFailureDiagnosticsObserverForTesting(_ observer: (@Sendable (String) -> Void)?) {
         failureDiagnosticsObserverForTesting = observer
     }
@@ -80,14 +82,26 @@ actor APIModelServer {
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
     private var lanes: [String: Lane] = [:]
-    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String? }
+    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let userRequest: Data? }
     private struct Identity: Equatable, Sendable { let threadID: String; let turnID: String }
-    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String? }
+    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let userRequest: Data? }
     private struct ExecutionCheckpoint { let context: Context; let revision: Int; let text: String }
+    private struct NativeRequestContext { let identity: Identity; let requestKind: String? }
+    private struct ActiveUserInputs { let context: Context; var revision: Int; var inputs: [Data] }
+    private struct UserInputUpdate {
+        let context: Context; let ticket: UUID; let baseRevision: Int; let input: Data
+        let deadline: ContinuousClock.Instant
+        var timeout: Task<Void, Never>?
+    }
+    private struct UserInputWaiter { let id: UUID; let continuation: CheckedContinuation<Void, Error> }
     private struct Waiter { let id: UUID; let continuation: CheckedContinuation<Context, Error> }
     private var prepared: [String: Prepared] = [:]
     private var contexts: [String: Context] = [:]
     private var executionCheckpoints: [String: ExecutionCheckpoint] = [:]
+    private var activeUserInputs: [String: ActiveUserInputs] = [:]
+    private var userInputUpdates: [String: UserInputUpdate] = [:]
+    private var userInputWaiters: [String: UserInputWaiter] = [:]
+    private let userInputUpdateTimeout: Duration
     private var waiters: [String: Waiter] = [:]
     private var admissions: [String: UUID] = [:]
     private var retiring = Set<String>()
@@ -96,7 +110,9 @@ actor APIModelServer {
     init(credentials: any APIProviderCredentials = APIProviderCredentialStore(),
          client: APIProviderHTTPClient = APIProviderHTTPClient(), capsules: APIReasoningCapsules? = nil,
          rejectionDiagnosticsDirectory: URL? = nil, toolNamingDirectory: URL? = nil,
-         correctionAccountingDirectory: URL? = nil, inferenceTimeout: Duration = .seconds(300)) {
+         correctionAccountingDirectory: URL? = nil, inferenceTimeout: Duration = .seconds(300),
+         userInputUpdateTimeout: Duration = .seconds(30)) {
+        self.userInputUpdateTimeout = userInputUpdateTimeout
         self.credentials = credentials; self.client = client; suppliedCapsules = capsules
         self.rejectionDiagnosticsDirectory = rejectionDiagnosticsDirectory
         self.toolNamingDirectory = toolNamingDirectory
@@ -151,11 +167,13 @@ actor APIModelServer {
         let url = URL(string: "http://127.0.0.1:\(port)/v1")!; baseURL = url; return url
     }
     func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID, isNewThread: Bool = false,
-                              executionPolicy: String? = nil) throws {
+                              executionPolicy: String? = nil, userRequest: String? = nil) throws {
         let task = try Self.canonicalID(taskID), thread = try Self.canonicalID(threadID)
         if let executionPolicy { try Self.validateExecutionText(executionPolicy, limit: 8_192) }
+        let userRequest = try userRequest.map { try Self.validatedUserInput($0) }
         guard !stopped, !retiring.contains(task), lanes[task] == nil, admissions[task] == nil else { throw Failure.busy }
-        let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread, executionPolicy: executionPolicy)
+        let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread,
+            executionPolicy: executionPolicy, userRequest: userRequest)
         if prepared[task] == value { return }
         guard prepared[task] == nil, contexts[task] == nil else { throw Failure.inferenceContextRequired }
         prepared[task] = value
@@ -166,15 +184,16 @@ actor APIModelServer {
         guard let preparation = prepared[task], preparation.threadID == identity.threadID,
               preparation.preparationID == preparationID else { throw Failure.inferenceContextRequired }
         let value = Context(identity: identity, preparationID: preparationID, isNewThread: preparation.isNewThread,
-                            executionPolicy: preparation.executionPolicy)
+                            executionPolicy: preparation.executionPolicy, userRequest: preparation.userRequest)
         if contexts[task] == value { return }
         guard !stopped, !retiring.contains(task), contexts[task] == nil,
               prepared[task] == preparation else { throw Failure.inferenceContextRequired }
         contexts[task] = value
-        if value.executionPolicy != nil {
+        if value.executionPolicy != nil || value.userRequest != nil {
             executionCheckpoints[task] = .init(context: value, revision: 0,
                 text: "No browser operations are recorded for this prepared turn.")
         }
+        if let input = value.userRequest { activeUserInputs[task] = .init(context: value, revision: 0, inputs: [input]) }
         waiters.removeValue(forKey: task)?.continuation.resume(returning: value)
     }
     /// Native Core only. There is no HTTP/tool endpoint for this host evidence.
@@ -188,7 +207,7 @@ actor APIModelServer {
         guard revision > 0 else { throw Failure.invalidRequest }
         guard !stopped, !retiring.contains(task), let context = contexts[task],
               context.identity == identity, context.preparationID == preparationID,
-              context.executionPolicy != nil,
+              context.executionPolicy != nil || context.userRequest != nil,
               prepared[task]?.preparationID == preparationID,
               let current = executionCheckpoints[task], current.context == context else { throw Failure.inferenceContextRequired }
         // Actor reentrancy can deliver a delayed cumulative update after a newer
@@ -200,24 +219,109 @@ actor APIModelServer {
         }
         executionCheckpoints[task] = .init(context: context, revision: revision, text: checkpoint)
     }
+
+    /// Stage before turn/steer is sent. Already-dispatched inference keeps its
+    /// snapshot; new admissions wait for an unambiguous acknowledgment.
+    func beginUserInputUpdate(taskID: String, threadID: String, turnID: String,
+                              preparationID: UUID, prompt: String) throws -> UUID {
+        let task = try Self.canonicalID(taskID)
+        let context = try activeUserContext(task: task, threadID: threadID, turnID: turnID, preparationID: preparationID)
+        guard userInputUpdates[task] == nil else { throw Failure.busy }
+        let input = try Self.validatedUserInput(prompt), current = activeUserInputs[task]!
+        guard current.inputs.count < 1_024,
+              current.inputs.reduce(input.count, { $0 + $1.count }) <= 2_000_000 else { throw Failure.invalidRequest }
+        let ticket = UUID(), deadline = ContinuousClock.now.advanced(by: userInputUpdateTimeout)
+        userInputUpdates[task] = .init(context: context, ticket: ticket, baseRevision: current.revision,
+            input: input, deadline: deadline)
+        userInputUpdates[task]?.timeout = Task { [weak self] in
+            do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+            await self?.expireUserInputUpdate(task: task, ticket: ticket)
+        }
+        return ticket
+    }
+
+    /// accepted=false requires a confirmed engine rejection. An ambiguous RPC
+    /// outcome must cancel/retire the context rather than restore stale inputs.
+    func resolveUserInputUpdate(taskID: String, threadID: String, turnID: String,
+                                preparationID: UUID, ticket: UUID, accepted: Bool) throws {
+        let task = try Self.canonicalID(taskID)
+        let context = try activeUserContext(task: task, threadID: threadID, turnID: turnID, preparationID: preparationID)
+        guard let staged = userInputUpdates[task], staged.context == context, staged.ticket == ticket,
+              staged.deadline > ContinuousClock.now,
+              var current = activeUserInputs[task], current.revision == staged.baseRevision else { throw Failure.inferenceContextRequired }
+        if accepted {
+            current.inputs.append(staged.input); current.revision += 1
+            activeUserInputs[task] = current
+        }
+        userInputUpdates.removeValue(forKey: task)?.timeout?.cancel()
+        userInputWaiters.removeValue(forKey: task)?.continuation.resume()
+    }
+    private func activeUserContext(task: String, threadID: String, turnID: String, preparationID: UUID) throws -> Context {
+        let identity = Identity(threadID: try Self.canonicalID(threadID), turnID: try Self.canonicalID(turnID))
+        guard !stopped, !retiring.contains(task), let context = contexts[task],
+              context.identity == identity, context.preparationID == preparationID,
+              prepared[task]?.preparationID == preparationID,
+              activeUserInputs[task]?.context == context else { throw Failure.inferenceContextRequired }
+        return context
+    }
+    private static func validatedUserInput(_ input: String) throws -> Data {
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              input.utf8.count <= 2_000_000 else { throw Failure.invalidRequest }
+        return Data(input.utf8) // Preserve exact Unicode/whitespace; never normalize or summarize.
+    }
+    private func expireUserInputUpdate(task: String, ticket: UUID) {
+        guard userInputUpdates[task]?.ticket == ticket else { return }
+        // Keep the staged transaction closed until Core resolves or retires it.
+        // A timeout cannot prove the engine rejected an accepted restriction.
+        userInputWaiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.inferenceContextRequired)
+    }
+    private func awaitUserInputUpdate(task: String, context: Context) async throws {
+        while let staged = userInputUpdates[task] {
+            guard staged.context == context, staged.deadline > ContinuousClock.now, userInputWaiters[task] == nil else { throw Failure.inferenceContextRequired }
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    userInputWaiters[task] = .init(id: id, continuation: continuation)
+                }
+            } onCancel: { Task { await self.cancelUserInputWaiter(task: task, id: id) } }
+            guard !stopped, !retiring.contains(task), contexts[task] == context else { throw Failure.cancelled }
+        }
+    }
+    private func cancelUserInputWaiter(task: String, id: UUID) {
+        guard userInputWaiters[task]?.id == id else { return }
+        userInputWaiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.cancelled)
+    }
+    #if DEBUG
+    func userInputAdmissionIsWaitingForTesting(taskID: String) -> Bool {
+        guard let task = try? Self.canonicalID(taskID) else { return false }
+        return userInputWaiters[task] != nil
+    }
+    #endif
     private static func validateExecutionText(_ value: String, limit: Int) throws {
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.utf8.count <= limit else { throw Failure.invalidRequest }
     }
-    private func executionMessage(taskID: String, context: Context) throws -> String? {
-        guard let policy = context.executionPolicy else { return nil }
+    private func executionMessage(taskID: String, context: Context, remindsUser: Bool) throws -> String? {
+        guard context.executionPolicy != nil || context.userRequest != nil else { return nil }
         guard let checkpoint = executionCheckpoints[taskID], checkpoint.context == context else {
             throw Failure.inferenceContextRequired
         }
-        return """
+        var message = """
         APP_RUNTIME_EXECUTION_CHECKPOINT
         Host current turn: \(context.identity.turnID)
         This is current host execution evidence, independent of conversation history. Summaries and prior assistant claims are not current tool receipts or permission policy. Preserve the user's constraints and follow the current host policy. Do not invent an execution result or access restriction from a historical summary.
-        Host interaction policy:
-        \(policy)
         Current-turn checkpoint:
         \(checkpoint.text)
         """
+        if let policy = context.executionPolicy { message += "\nHost interaction policy:\n" + policy }
+        if remindsUser {
+            message += """
+
+            The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Preserve their user-level authority and constraints. Continue remaining work using current tool evidence. A maintenance prompt or historical summary does not replace this active request.
+            """
+        }
+        return message
     }
     func finish(taskID: String) async { await cancel(taskID: taskID) }
     func cancel(taskID: String) async {
@@ -225,6 +329,9 @@ actor APIModelServer {
         retiring.insert(task)
         prepared.removeValue(forKey: task); contexts.removeValue(forKey: task); correctionsUsed.removeValue(forKey: task)
         executionCheckpoints.removeValue(forKey: task)
+        activeUserInputs.removeValue(forKey: task)
+        userInputUpdates.removeValue(forKey: task)?.timeout?.cancel()
+        userInputWaiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.cancelled)
         waiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.cancelled)
         if let lane = lanes[task] {
             lane.request.cancel(); _ = await lane.request.result
@@ -239,22 +346,35 @@ actor APIModelServer {
         guard let id = UUID(uuidString: value) else { throw Failure.inferenceContextRequired }
         return id.uuidString.lowercased()
     }
-    private static func nativeIdentity(_ body: [String: Any], header: String?) throws -> Identity {
-        func parse(_ value: String) throws -> Identity {
+    private static func nativeIdentity(_ body: [String: Any], header: String?) throws -> NativeRequestContext {
+        func parse(_ value: String) throws -> NativeRequestContext {
             guard value.utf8.count <= 16_384,
                   let object = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any],
                   let thread = object["thread_id"] as? String, let turn = object["turn_id"] as? String else { throw Failure.inferenceContextRequired }
-            return try Identity(threadID: canonicalID(thread), turnID: canonicalID(turn))
+            let kind: String?
+            if let value = object["request_kind"] {
+                guard let text = value as? String, ["turn", "prewarm", "compaction", "memory"].contains(text) else { throw Failure.inferenceContextRequired }
+                kind = text
+            } else { kind = nil }
+            return try .init(identity: Identity(threadID: canonicalID(thread), turnID: canonicalID(turn)), requestKind: kind)
         }
         let headerValue = try header.map(parse)
-        var bodyValue: Identity?
+        var bodyValue: NativeRequestContext?
         if let raw = body["client_metadata"], !(raw is NSNull) {
             guard let metadata = raw as? [String: Any], let text = metadata["x-codex-turn-metadata"] as? String else { throw Failure.inferenceContextRequired }
             bodyValue = try parse(text)
         }
-        if let headerValue, let bodyValue, headerValue != bodyValue { throw Failure.inferenceContextRequired }
+        if let headerValue, let bodyValue {
+            guard headerValue.identity == bodyValue.identity else { throw Failure.inferenceContextRequired }
+            if let headerKind = headerValue.requestKind, let bodyKind = bodyValue.requestKind,
+               headerKind != bodyKind { throw Failure.inferenceContextRequired }
+        }
         guard let value = headerValue ?? bodyValue else { throw Failure.inferenceContextRequired }
-        return value
+        let kind = headerValue?.requestKind ?? bodyValue?.requestKind
+        if kind == "compaction", let tools = body["tools"], !(tools is NSNull) {
+            guard let tools = tools as? [Any], tools.isEmpty else { throw Failure.invalidRequest }
+        }
+        return .init(identity: value.identity, requestKind: kind)
     }
     private func context(taskID: String) async throws -> Context {
         if let value = contexts[taskID] { return value }
@@ -279,6 +399,9 @@ actor APIModelServer {
         stopped = true; starting?.cancel(); listener?.cancel(); listener = nil; baseURL = nil
         let active = lanes
         prepared.removeAll(); contexts.removeAll(); correctionsUsed.removeAll(); executionCheckpoints.removeAll()
+        activeUserInputs.removeAll()
+        for update in userInputUpdates.values { update.timeout?.cancel() }; userInputUpdates.removeAll()
+        for waiter in userInputWaiters.values { waiter.continuation.resume(throwing: Failure.stopped) }; userInputWaiters.removeAll()
         for waiter in waiters.values { waiter.continuation.resume(throwing: Failure.stopped) }; waiters.removeAll()
         for lane in active.values { lane.request.cancel() }
         for lane in active.values { _ = await lane.request.result }
@@ -324,7 +447,7 @@ actor APIModelServer {
                   let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
                   let modelID = object["model"] as? String else { throw Failure.invalidRequest }
             guard !retiring.contains(taskID), admissions[taskID] == nil, lanes[taskID] == nil else { throw Failure.busy }
-            let identity = try Self.nativeIdentity(object, header: request.headers["x-codex-turn-metadata"])
+            let nativeRequest = try Self.nativeIdentity(object, header: request.headers["x-codex-turn-metadata"])
             let admissionID = UUID(); admissions[taskID] = admissionID
             defer {
                 if admissions[taskID] == admissionID {
@@ -333,7 +456,8 @@ actor APIModelServer {
                 }
             }
             let context = try await context(taskID: taskID)
-            guard !stopped, contexts[taskID] == context, identity == context.identity else { throw Failure.inferenceContextRequired }
+            guard !stopped, contexts[taskID] == context, nativeRequest.identity == context.identity else { throw Failure.inferenceContextRequired }
+            try await awaitUserInputUpdate(task: taskID, context: context)
             if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.identity.threadID),
                let turn = UUID(uuidString: context.identity.turnID) {
                 failureContext = .init(taskID: task, threadID: thread, turnID: turn)
@@ -360,9 +484,18 @@ actor APIModelServer {
                 translated = try APIModelResponseCodec.prepare(request.body, selection: selection,
                     threadID: context.identity.threadID, capsules: capsules, toolNaming: .legacy)
             }
-            let prepared = try executionMessage(taskID: taskID, context: context).map {
-                try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated)
+            // The pinned engine explicitly labels maintenance in native turn
+            // metadata. Never guess from a summary or from prompt wording.
+            let userInputs: [String]
+            if nativeRequest.requestKind == "compaction" { userInputs = [] }
+            else if context.userRequest != nil {
+                guard let active = activeUserInputs[taskID], active.context == context else { throw Failure.inferenceContextRequired }
+                userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
+            } else { userInputs = [] }
+            let prepared = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty).map {
+                try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated, userInputs: userInputs)
             } ?? translated
+            let userInputRevision = activeUserInputs[taskID]?.revision
             let key: String
             do { guard let value = try credentials.key(for: selection.provider.id) else { throw APIProviderHTTPClient.Failure.missingCredential }; key = value }
             catch let failure as APIProviderHTTPClient.Failure { throw failure }
@@ -378,7 +511,8 @@ actor APIModelServer {
             let requestTask = Task<APIModelResponseCodec.Reply, Error> {
                 try await withThrowingTaskGroup(of: APIModelResponseCodec.Reply.self) { group in
                     group.addTask { try await self.performInference(prepared, key: key, taskID: taskID,
-                        context: context, laneID: laneID, deadline: inferenceDeadline, onRejection: onRejection) }
+                        context: context, userInputRevision: userInputRevision, laneID: laneID,
+                        deadline: inferenceDeadline, onRejection: onRejection) }
                     group.addTask {
                         try await ContinuousClock().sleep(until: inferenceDeadline)
                         throw StagedFailure(stage: .requestTransport, cause: APIProviderHTTPClient.Failure.timeout)
@@ -449,9 +583,13 @@ actor APIModelServer {
     }
 
     private func performInference(_ original: APIModelResponseCodec.Request, key: String, taskID: String,
-                                  context: Context, laneID: UUID, deadline: ContinuousClock.Instant,
+                                  context: Context, userInputRevision: Int?, laneID: UUID, deadline: ContinuousClock.Instant,
                                   onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?) async throws -> APIModelResponseCodec.Reply {
+#if DEBUG
+        try await beforeInferenceDispatchForTesting?()
+#endif
         try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+        try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
         let first: APIProviderHTTPClient.Result
         do { first = try await client.request(provider: original.provider, key: key, path: original.path,
             body: original.body, modelID: original.model.id, onRejection: onRejection) }
@@ -494,18 +632,21 @@ actor APIModelServer {
                     terminal = .budgetExhausted; throw APIModelResponseCodec.Failure.invalidArguments
                 }
                 try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
                 correctionsUsed[taskID] = context // one corrective inference per native user turn
                 let correction = try APIModelResponseCodec.correctiveRequest(original, rejectionDetails: rejectionDetails)
 #if DEBUG
                 try await beforeCorrectionDispatchForTesting?()
 #endif
                 try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
                 try accounting.claimed(ticket)
                 secondClaimed = true
                 // Claim is not network acceptance proof. There is no actor await
                 // between this final identity check and starting the same native
                 // HTTP client; it checks cancellation again before URLSession.
                 try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
                 secondStage = .requestTransport; terminal = .transportFailed
                 let second = try await client.request(provider: correction.provider, key: key, path: correction.path,
                     body: correction.body, modelID: correction.model.id, onRejection: onRejection)
@@ -538,6 +679,13 @@ actor APIModelServer {
                     responseDiagnostic: secondResponseDiagnostic.map { .init(validation: $0, attempt: 2) })
             }
         }
+    }
+    /// Admission and actual provider dispatch are separated by task scheduling.
+    /// A new call (including an internal correction) cannot use an input snapshot
+    /// superseded by a staged or accepted steer. Already-dispatched calls may finish.
+    private func requireUserInputSnapshot(taskID: String, context: Context, revision: Int?) throws {
+        guard userInputUpdates[taskID] == nil, activeUserInputs[taskID]?.revision == revision,
+              context.userRequest == nil || activeUserInputs[taskID]?.context == context else { throw Failure.cancelled }
     }
 
     private func logCorrection(_ ticket: APIModelCorrectionAccounting.Ticket, outcome: APIModelCorrectionAccounting.Outcome) {

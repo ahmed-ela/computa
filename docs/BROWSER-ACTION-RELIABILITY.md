@@ -55,6 +55,18 @@ old stop notice was appended after every subsequent turn, making it appear curre
   cleared on retirement. They describe actual tool execution, never website
   result semantics, output exposure or permission grants. Actual observations
   remain necessary for content claims. The engine's history is not rewritten.
+- A subsequent live lookup reached relevant ODE results, then compaction changed
+  the task into a request to write a historical summary. The host now retains the
+  exact original request and accepted in-turn user messages outside compacted
+  history. Ordinary API inferences repeat these as user messages, with host
+  guidance to continue unfinished work without replaying completed actions.
+  Explicit native `request_kind=compaction` metadata suppresses this reminder
+  during maintenance itself; prompt wording is never used to guess the purpose.
+  Steering gates new inference admission until its acknowledgment is validated.
+  An uncertain acknowledgment retires the turn rather than reopening inference
+  with an outdated restriction. Stop, turn replacement and shutdown discard the
+  pending update. The supported compaction prompt also identifies itself as
+  maintenance, not a new human request.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host

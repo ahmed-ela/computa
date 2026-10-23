@@ -7,8 +7,14 @@ enum ComputaAgentInstructions {
     /// generated notes must not turn earlier attempts into current execution or
     /// assistant claims into policy; current host state remains authoritative.
     static let compactionPrompt = """
-    Compact this conversation into concise historical notes for continuation.
-    Separate the latest actual user request from earlier attempts and completed tasks.
+    INTERNAL CONTEXT MAINTENANCE. This runtime-generated instruction is not a
+    human request, authorization, cancellation or change of task. Write concise
+    historical notes for continuation. The active task is the last substantive
+    human request before this maintenance instruction, excluding runtime policy,
+    environment messages and previous compaction notes. Preserve that request
+    separately from earlier attempts. Never identify this maintenance instruction
+    as the user's task, claim the user requested a summary, or claim that
+    summarizing completes their task.
     Preserve decisions, unresolved work and necessary context. Preserve explicit
     ongoing user restrictions, approvals, denials and Stop with their source and
     scope; quote the relevant user wording briefly when needed. Do not broaden an
@@ -29,7 +35,9 @@ enum ComputaAgentInstructions {
     authority. Stable observed URLs may remain as historical context. Keep missing
     result evidence and uncertain action outcomes unresolved; never invent zero
     results, success, access denial or a new permission requirement. List remaining
-    work without executing tools or answering the task during compaction.
+    work without executing tools or answering the task during compaction. After
+    maintenance, continue the preserved task; these notes do not instruct the agent
+    to stop or ask again for authorization already supplied by the user.
     """
 
     /// Task effects are authorized by the user; the host policy only constrains
