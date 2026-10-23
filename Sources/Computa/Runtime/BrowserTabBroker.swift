@@ -392,6 +392,22 @@ struct BrowserTabElement: Equatable, Sendable {
     var contentScope: BrowserContentScope = .unknown
     var contentKind: SemanticReadContentKind = .unknown
     var constraintValidation: BrowserConstraintValidation? = nil
+
+    /// Exact bounded native semantics, independent of selected-page indexing.
+    /// Corroboration never normalizes Unicode or relaxes a prior exposure.
+    func hasIdenticalActionSemantics(to other: BrowserTabElement) -> Bool {
+        func bytes(_ value: String?) -> Data? { value.map { Data($0.utf8) } }
+        return backendNodeID == other.backendNodeID
+            && bytes(nodeID) == bytes(other.nodeID) && bytes(parentNodeID) == bytes(other.parentNodeID)
+            && childNodeIDs.map { Data($0.utf8) } == other.childNodeIDs.map { Data($0.utf8) }
+            && bytes(role) == bytes(other.role) && bytes(semanticRole) == bytes(other.semanticRole)
+            && bytes(label) == bytes(other.label) && bytes(value) == bytes(other.value)
+            && bytes(linkURL) == bytes(other.linkURL) && isEnabled == other.isEnabled
+            && supportsPress == other.supportsPress && supportsSetText == other.supportsSetText
+            && isDOMClickable == other.isDOMClickable && isFocusablePointer == other.isFocusablePointer
+            && contentScope == other.contentScope && contentKind == other.contentKind
+            && constraintValidation == other.constraintValidation
+    }
 }
 
 /// Minted only by this broker from a bounded, emitted row. It identifies one
@@ -399,6 +415,7 @@ struct BrowserTabElement: Equatable, Sendable {
 /// or a model-supplied node. The controller publishes its opaque reference only
 /// after the complete output fits; holding this value alone grants no input.
 struct BrowserPublishedActionWitness: Equatable, Sendable {
+    let publicationID = UUID()
     let sourceID: UUID
     let selectionID: UUID
     let snapshotID: UUID
@@ -413,6 +430,14 @@ struct BrowserPublishedActionWitness: Equatable, Sendable {
     let exposures: [SemanticReadFieldExposure]
     fileprivate let selectedIndex: Int
     fileprivate let deadline: ContinuousClock.Instant
+    fileprivate struct Corroboration: Equatable, Sendable {
+        let sourceID: UUID
+        let selectionID: UUID
+        let element: BrowserTabElement
+    }
+    fileprivate var corroboration: Corroboration?
+    var authoritySourceID: UUID { corroboration?.sourceID ?? sourceID }
+    var authoritySelectionID: UUID { corroboration?.selectionID ?? selectionID }
 
     func checkCaptureAge() throws {
         guard ContinuousClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
@@ -456,6 +481,9 @@ struct BrowserTabSnapshot: Equatable, Sendable {
     var actionSelectionID: UUID? = nil
     var isActionContinuation = false
     var actionWitnesses: [Int: BrowserPublishedActionWitness] = [:]
+    /// Only prior published witnesses, corroborated by this successful fresh
+    /// capture. No new unexposed capability is minted from retained nodes.
+    var corroboratedActionWitnesses: [BrowserPublishedActionWitness] = []
 
     func element(at index: Int) -> BrowserTabElement? {
         guard elements.indices.contains(index), elements[index].index == index else {
@@ -860,7 +888,8 @@ actor BrowserTabSessionBroker {
         replacingCursor: String? = nil,
         compact: Bool = false,
         compactEncoding: BrowserCompleteObservation.Encoding = .read,
-        readAuthorization: BrowserReadAuthorization? = nil
+        readAuthorization: BrowserReadAuthorization? = nil,
+        priorPublishedActions: [BrowserPublishedActionWitness] = []
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -908,6 +937,14 @@ actor BrowserTabSessionBroker {
             }
             scopeNodeID = nodeID
         }
+        // Validate the old publication while its retained capture is still
+        // current. Invalid candidates never become authority in a new capture.
+        let corroborationCandidates: [BrowserPublishedActionWitness]
+        if read.cursor == nil, read.snapshotID == nil, replacingCursor == nil {
+            corroborationCandidates = priorPublishedActions.prefix(EmbeddedBrowserActionReferences.maximumCurrent).filter {
+                (try? approvedTarget(.published($0), entry: entry, binding: suppliedBinding)) != nil
+            }
+        } else { corroborationCandidates = [] }
         if replacingCursor == nil {
             entry.activeSnapshot = nil
             entry.readState = nil
@@ -1086,6 +1123,21 @@ actor BrowserTabSessionBroker {
                 exposures: receipt.exposures.filter { $0.nodeID == "backend:\(element.backendNodeID)" },
                 selectedIndex: selectedElement.offset, deadline: capturedAt + readLifetime)
         }
+        if !corroborationCandidates.isEmpty {
+            let currentElements = makeElements(from: document, read: SemanticReadRequest(view: .all), scopeNodeID: nil)
+            for prior in corroborationCandidates {
+                guard let committed = prior.committedDocumentID, committed == document.committedDocumentID,
+                      prior.bindingHandle == currentBinding.handle,
+                      prior.targetInstanceToken == currentBinding.targetInstanceToken,
+                      prior.loaderID == document.loaderID, prior.documentURL == document.url,
+                      prior.documentEpoch == currentBinding.documentEpoch,
+                      readClock.now < prior.deadline,
+                      let current = corroboratingElement(prior.element, in: document, elements: currentElements) else { continue }
+                var corroborated = prior
+                corroborated.corroboration = .init(sourceID: sourceID, selectionID: selectionID, element: current)
+                snapshot.corroboratedActionWitnesses.append(corroborated)
+            }
+        }
         entry.activeSnapshot = snapshot
         entry.readState = ReadState(
             document: document, capturedAt: capturedAt, selected: selected, request: effectiveRead, scopeNodeID: scopeNodeID,
@@ -1128,19 +1180,43 @@ actor BrowserTabSessionBroker {
             guard let element = snapshot.element(at: index) else { throw BrowserTabBrokerError.elementNotFound }
             return (element, deadline)
         case let .published(witness):
-            guard witness.sourceID == read.sourceID, witness.selectionID == read.selectionID,
-                  active.actionSelectionID == witness.selectionID,
+            guard witness.authoritySourceID == read.sourceID, witness.authoritySelectionID == read.selectionID,
+                  active.actionSelectionID == witness.authoritySelectionID,
                   witness.bindingHandle == binding.handle,
                   witness.targetInstanceToken == entry.targetInstanceToken,
                   witness.committedDocumentID == read.document.committedDocumentID,
                   witness.loaderID == entry.loaderID, witness.documentURL == entry.documentURL,
-                  witness.documentEpoch == entry.documentEpoch, witness.deadline == deadline,
-                  read.selected.indices.contains(witness.selectedIndex),
-                  reindexed(read.selected[witness.selectedIndex], index: witness.element.index) == witness.element else {
+                  witness.documentEpoch == entry.documentEpoch, readClock.now < witness.deadline else {
                 throw BrowserTabBrokerError.staleSnapshot
             }
-            return (witness.element, deadline)
+            if let proof = witness.corroboration {
+                guard witness.committedDocumentID != nil,
+                      proof.element.hasIdenticalActionSemantics(to: witness.element),
+                      corroboratingElement(witness.element, in: read.document,
+                          elements: [proof.element]) != nil else { throw BrowserTabBrokerError.staleSnapshot }
+            } else {
+                guard witness.deadline == deadline, read.selected.indices.contains(witness.selectedIndex),
+                      reindexed(read.selected[witness.selectedIndex], index: witness.element.index) == witness.element else {
+                    throw BrowserTabBrokerError.staleSnapshot
+                }
+            }
+            return (witness.element, witness.deadline)
         }
+    }
+
+    /// Presence is checked against the whole native capture, including
+    /// ignored/duplicate nodes. A partial capture can corroborate a unique
+    /// present target, but never an absent or ambiguous one.
+    private func corroboratingElement(_ prior: BrowserTabElement, in document: BrowserDocumentObservation,
+                                      elements: [BrowserTabElement]) -> BrowserTabElement? {
+        guard let nodeID = prior.nodeID, !nodeID.isEmpty else { return nil }
+        let matches = document.nodes.filter { $0.backendNodeID == prior.backendNodeID }
+        guard matches.count == 1, let node = matches.first, !node.isIgnored,
+              node.nodeID.map({ Data($0.utf8) }) == Data(nodeID.utf8),
+              document.nodes.filter({ $0.nodeID.map { Data($0.utf8) } == Data(nodeID.utf8) }).count == 1,
+              let current = elements.first(where: { $0.backendNodeID == prior.backendNodeID }),
+              current.isEnabled, current.hasIdenticalActionSemantics(to: prior) else { return nil }
+        return current
     }
 
     @discardableResult func perform(
@@ -1197,7 +1273,8 @@ actor BrowserTabSessionBroker {
             requiresCurrentEpoch: true
         )
         guard currentDocument.loaderID == entry.loaderID,
-              currentDocument.url == entry.documentURL else {
+              currentDocument.url == entry.documentURL,
+              entry.committedDocumentID == nil || currentDocument.committedDocumentID == entry.committedDocumentID else {
             entry.loaderID = currentDocument.loaderID
             entry.documentURL = currentDocument.url
             entry.documentEpoch = UUID()
@@ -1277,7 +1354,8 @@ actor BrowserTabSessionBroker {
             requiresCurrentEpoch: true
         )
         guard currentDocument.loaderID == entry.loaderID,
-              currentDocument.url == entry.documentURL else {
+              currentDocument.url == entry.documentURL,
+              entry.committedDocumentID == nil || currentDocument.committedDocumentID == entry.committedDocumentID else {
             entry.loaderID = currentDocument.loaderID
             entry.documentURL = currentDocument.url
             entry.documentEpoch = UUID()

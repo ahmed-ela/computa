@@ -313,14 +313,14 @@ enum ComputaAgentInstructions {
     \(browserAddressChecks)
     Copy complete click_ref or fill_ref from the intended row; these are not computer_v2 references.
     Continuation pages retain earlier refs in the same capture (120-ref FIFO limit).
-    Fresh reads replace the menu; omitted/changed refs expire.
+    Fresh reads keep native-confirmed unchanged refs; expiry stays fixed.
     An admitted click or fill consumes all refs. At most one input action per tool-call batch.
     Never batch fill and click. Use available current_observation from input or stale rejection;
     otherwise browser_read. Never reuse consumed targets.
     Snapshot IDs/indices are not browser input references.
-    browser_click needs the exact row's published click_ref; never infer a clickable parent.
-    browser_fill needs the exact field's published fill_ref, not an adjacent label's.
-    Never invent or interchange reference types.
+    browser_click needs the row's click_ref; never infer a clickable parent.
+    browser_fill: field's fill_ref, not its label's; settable=true is independent of actions.
+    Never invent/interchange refs.
     Recheck the observed label/action against the intended operation.
     If dispatched input leaves the page unchanged,
     wait/read. Never repeat uncertain input.

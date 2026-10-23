@@ -72,17 +72,8 @@ struct EmbeddedBrowserActionReferences: Sendable {
                   kind == other.kind, bindingHandle == other.bindingHandle, instance == other.instance,
                   loaderID == other.loaderID, epoch == other.epoch, url == other.url,
                   exposures == other.exposures else { return false }
-            let a = element, b = other.element
-            func bytes(_ value: String?) -> Data? { value.map { Data($0.utf8) } }
-            return a.backendNodeID == b.backendNodeID && a.nodeID == b.nodeID
-                && a.parentNodeID == b.parentNodeID && a.childNodeIDs == b.childNodeIDs
-                && bytes(a.role) == bytes(b.role) && bytes(a.semanticRole) == bytes(b.semanticRole)
-                && bytes(a.label) == bytes(b.label) && bytes(a.value) == bytes(b.value)
-                && bytes(a.linkURL) == bytes(b.linkURL) && bytes(label) == bytes(other.label)
-                && a.isEnabled == b.isEnabled && a.supportsPress == b.supportsPress
-                && a.supportsSetText == b.supportsSetText && a.isDOMClickable == b.isDOMClickable
-                && a.isFocusablePointer == b.isFocusablePointer
-                && a.constraintValidation == b.constraintValidation
+            return element.hasIdenticalActionSemantics(to: other.element)
+                && Data(label.utf8) == Data(other.label.utf8)
         }
     }
 
@@ -93,6 +84,8 @@ struct EmbeddedBrowserActionReferences: Sendable {
     private var sourceID: UUID?
     private var selectionID: UUID?
     private var bindingHandle: UUID?
+    private var eligibleForFreshCarry = Set<UUID>()
+    private var pendingCarryEligibility = Set<UUID>()
     private var retired = [String: Tombstone]()
     private var retiredOrder = [String]()
     static let maximumCurrent = 120 // Unchanged bound, shared across continuation pages.
@@ -103,6 +96,7 @@ struct EmbeddedBrowserActionReferences: Sendable {
         current.removeAll()
         currentOrder.removeAll()
         publishedPageID = nil; sourceID = nil; selectionID = nil; bindingHandle = nil
+        eligibleForFreshCarry.removeAll(); pendingCarryEligibility.removeAll()
     }
 
     private mutating func retire(_ token: String, _ target: Target) {
@@ -113,10 +107,27 @@ struct EmbeddedBrowserActionReferences: Sendable {
         }
     }
 
-    /// Call on a value copy, then commit only alongside its complete bounded
-    /// output. Only emitted rows receive capabilities. Cursor continuation can
-    /// retain earlier publications of this exact immutable selection, bounded
-    /// by the same token cap; republishing never renews FIFO age or the witness.
+    /// Candidates are existing publication authority, never document lookups.
+    /// A failed admitted read disables carry even when its transactional
+    /// replacement preserved the old snapshot for immediate preflight.
+    func freshReadCandidates(snapshot: BrowserTabSnapshot?) -> [BrowserPublishedActionWitness] {
+        guard let snapshot, snapshot.id == publishedPageID,
+              snapshot.readReceipt?.sourceID == sourceID, snapshot.actionSelectionID == selectionID else { return [] }
+        return currentOrder.compactMap { token in
+            guard let witness = current[token]?.witness, eligibleForFreshCarry.contains(witness.publicationID) else { return nil }
+            return witness
+        }
+    }
+
+    mutating func beginRead() {
+        pendingCarryEligibility = eligibleForFreshCarry
+        eligibleForFreshCarry.removeAll()
+    }
+    mutating func abortRead() { pendingCarryEligibility.removeAll() }
+
+    /// Commit this value copy only with its complete bounded output. A fresh
+    /// capture can corroborate old exposures; only actual emitted rows issue
+    /// new references. Neither path renews an existing token's age or expiry.
     mutating func publish(snapshot: BrowserTabSnapshot, binding: BrowserTabBinding) -> [Int: String] {
         guard let receipt = snapshot.readReceipt, receipt.id == snapshot.id,
               let selected = snapshot.actionSelectionID,
@@ -126,7 +137,21 @@ struct EmbeddedBrowserActionReferences: Sendable {
         let continuing = snapshot.isActionContinuation && sourceID == receipt.sourceID
             && selectionID == selected && bindingHandle == binding.handle
         var next = continuing ? current : [:], nextOrder = continuing ? currentOrder : []
-        var suffixes = [Int: String](), publishedTokens = Set<String>()
+        var nextEligible = continuing ? pendingCarryEligibility.union(eligibleForFreshCarry) : Set<UUID>()
+        if !continuing {
+            for token in currentOrder {
+                guard let old = current[token], let proof = snapshot.corroboratedActionWitnesses.first(where: {
+                    $0.publicationID == old.witness.publicationID
+                        && $0.authoritySourceID == receipt.sourceID && $0.authoritySelectionID == selected
+                        && $0.bindingHandle == binding.handle && $0.targetInstanceToken == binding.targetInstanceToken
+                }) else { continue }
+                next[token] = Target(kind: old.kind, witness: proof)
+                nextEligible.insert(proof.publicationID)
+                nextOrder.append(token)
+            }
+        }
+        var publications = [(index: Int, kind: Kind, token: String, target: Target)]()
+        var protectedTokens = Set<String>()
         for row in presentation.rows {
             guard let element = snapshot.element(at: row.index), element.isEnabled,
                   let witness = snapshot.actionWitnesses[row.index], witness.snapshotID == snapshot.id,
@@ -136,30 +161,38 @@ struct EmbeddedBrowserActionReferences: Sendable {
             for kind in [Kind.click, .fill] {
                 guard kind == .click ? element.supportsPress : element.supportsSetText else { continue }
                 let target = Target(kind: kind, witness: witness)
-                let token = currentOrder.first { !publishedTokens.contains($0)
-                    && current[$0]?.canRepublish(as: target) == true }
+                // Reuse only already retained/proven targets. An expired or
+                // failed-read token cannot be revived by a later publication.
+                let token = nextOrder.first { !protectedTokens.contains($0)
+                    && next[$0]?.canRepublish(as: target) == true }
                     ?? kind.prefix + UUID().uuidString
-                if next[token] == nil {
-                    while next.count >= Self.maximumCurrent,
-                          let oldestIndex = nextOrder.firstIndex(where: { !publishedTokens.contains($0) }) {
-                        let oldest = nextOrder.remove(at: oldestIndex)
-                        if let old = next.removeValue(forKey: oldest) { retire(oldest, old) }
-                    }
-                    guard next.count < Self.maximumCurrent else { continue }
-                    nextOrder.append(token)
-                }
-                // An already published same-capture witness stays frozen even
-                // if an identical fragment appears on a later continuation.
-                if !continuing || next[token] == nil { next[token] = target }
-                publishedTokens.insert(token)
-                suffixes[row.index, default: ""] += " \(kind.argument)=\"\(token)\""
+                protectedTokens.insert(token)
+                publications.append((row.index, kind, token, target))
             }
+        }
+        var suffixes = [Int: String]()
+        for publication in publications {
+            let token = publication.token
+            if next[token] == nil {
+                while next.count >= Self.maximumCurrent,
+                      let oldestIndex = nextOrder.firstIndex(where: { !protectedTokens.contains($0) }) {
+                    let oldest = nextOrder.remove(at: oldestIndex)
+                    if let old = next.removeValue(forKey: oldest) { retire(oldest, old) }
+                }
+                guard next.count < Self.maximumCurrent else { continue }
+                nextOrder.append(token)
+                next[token] = publication.target
+            }
+            if let target = next[token] { nextEligible.insert(target.witness.publicationID) }
+            suffixes[publication.index, default: ""] += " \(publication.kind.argument)=\"\(token)\""
         }
         for (token, target) in current where next[token] == nil { retire(token, target) }
         current = next
         currentOrder = nextOrder
         publishedPageID = snapshot.id; sourceID = receipt.sourceID
         selectionID = selected; bindingHandle = binding.handle
+        eligibleForFreshCarry = nextEligible.intersection(Set(next.values.map { $0.witness.publicationID }))
+        pendingCarryEligibility.removeAll()
         return suffixes
     }
 
@@ -171,8 +204,8 @@ struct EmbeddedBrowserActionReferences: Sendable {
               let snapshot, snapshot.id == publishedPageID,
               snapshot.actionSelectionID == selectionID,
               snapshot.readReceipt?.sourceID == sourceID,
-              target.witness.selectionID == selectionID,
-              target.witness.sourceID == sourceID else { return false }
+              target.witness.authoritySelectionID == selectionID,
+              target.witness.authoritySourceID == sourceID else { return false }
         return true
     }
 

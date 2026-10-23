@@ -400,17 +400,18 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
         let denied = await backend.counts(); XCTAssertEqual(denied.presses, 0)
         let next = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
-        XCTAssertEqual(next.canonicalArguments?["element_index"] as? Int, 0)
+        XCTAssertEqual(next.canonicalArguments?["element_index"] as? Int, 3, "Corroboration preserves the original published target; current row numbering is not authority")
         XCTAssertEqual(approved.canonicalArguments?["element_index"] as? Int, 3)
         XCTAssertEqual(next.intentIdentity, approved.intentIdentity)
         _ = try await controller.executeResult(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: next)
         _ = await controller.shutdown()
     }
 
-    func testChangedOrOmittedTargetsCannotRetainTheirPublishedReference() async throws {
-        for change in ["label", "node", "value", "omitted", "document"] {
+    func testChangedAbsentAmbiguousOrUnprovenTargetsCannotRetainTheirPublishedReference() async throws {
+        for change in ["label", "node", "value", "missing", "hidden", "duplicate_backend", "duplicate_node", "disabled", "document", "commit", "unknown_commit", "url", "unicode", "role", "parent", "constraints"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
             await backend.exposeCommittedDocumentIdentity()
+            if change == "unicode" { await backend.setButtonLabel("Check flight é") }
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
             let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
             let filling = change == "value", tool = filling ? "browser_fill" : "browser_click"
@@ -420,9 +421,14 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             case "node": await backend.replaceButton()
             case "value": await backend.setInitialField("Changed value")
             case "document": await backend.reloadDocument()
-            default: break
+            case "commit": await backend.replaceCommittedDocumentIdentity()
+            case "unknown_commit": await backend.hideCommittedDocumentIdentity()
+            case "url": await backend.redirectOwnedTarget(to: URL(string: "http://localhost:8123/other")!)
+            case "disabled": await backend.disableButton()
+            case "unicode": await backend.setButtonLabel("Check flight e\u{301}")
+            default: await backend.setButtonCaptureScenario(change)
             }
-            let next = try await call(controller, "browser_read", ["view": change == "omitted" ? "content" : "all"])
+            let next = try await call(controller, "browser_read", ["view": "content"])
             let nextID = try snapshotID(next)
             XCTAssertFalse(publishedTargets[nextID]?.values.contains { $0.clickRef == old || $0.fillRef == old } ?? false)
             var input: [String: Any] = [filling ? "fill_ref" : "click_ref": old]
@@ -431,11 +437,201 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertNil(frozen.canonicalArguments, "A known retired ref is only a bounded recovery hint")
             do {
                 _ = try await controller.executeResult(taskKey: "turn-a", tool: tool, arguments: argumentData(input), prepared: frozen)
-                XCTFail("Changed and omitted rows never retarget an old input")
+                XCTFail("Changed, absent or ambiguous native targets never retarget an old input: \(change)")
             } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
             let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
             _ = await controller.shutdown()
         }
+    }
+
+    func testFreshReadCorroboratesPreviouslyPublishedControlsWithoutExposingNewTargets() async throws {
+        for fill in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.exposeCommittedDocumentIdentity()
+            await backend.setObservedResult("A readable result")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
+            let ref = try XCTUnwrap(fill ? publishedTargets[id]?[0]?.fillRef : publishedTargets[id]?[1]?.clickRef)
+            let tool = fill ? "browser_fill" : "browser_click"
+            var arguments: [String: Any] = [fill ? "fill_ref" : "click_ref": ref]
+            if fill { arguments["text"] = "UA 1842" }
+            let data = try argumentData(arguments)
+            let frozen = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
+            let before = await backend.counts()
+            let content = try await call(controller, "browser_read", ["view": "content"])
+            XCTAssertFalse(content.contains(ref), "The current content view does not falsely publish the control")
+            let observed = await backend.counts()
+            XCTAssertEqual(observed.observes - before.observes, 1, "Corroboration uses the existing capture")
+            let firstProof = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
+            _ = try await call(controller, "browser_read", ["view": "content", "query": "readable"])
+            let secondProof = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
+            XCTAssertEqual(firstProof.witness?.publicationID, secondProof.witness?.publicationID)
+            XCTAssertNotEqual(firstProof.witness, secondProof.witness, "Each corroboration has a new capture revision")
+            do {
+                _ = try await controller.executeResult(taskKey: "turn-a", tool: tool, arguments: data, prepared: frozen)
+                XCTFail("A fresh capture cannot move an earlier approval")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            let prepared = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
+            XCTAssertNotNil(prepared.canonicalArguments)
+            XCTAssertEqual(prepared.intentIdentity, frozen.intentIdentity)
+            XCTAssertEqual(prepared.witness?.publicationID, frozen.witness?.publicationID)
+            XCTAssertNotEqual(prepared.witness, frozen.witness, "The host proof revision is newly frozen")
+            let result = try await controller.executeResult(taskKey: "turn-a", tool: tool, arguments: data, prepared: prepared)
+            try assertCompleteActionObservation(result)
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.presses, fill ? 0 : 1); XCTAssertEqual(counts.fills, fill ? 1 : 0)
+            if fill { let value = await backend.fieldValue(); XCTAssertEqual(value, "UA 1842") }
+            // Even an unchanged button is consumed by input. A later fresh
+            // read cannot silently renew the old token.
+            let oldButton = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+            _ = try await call(controller, "browser_read", ["view": "content"])
+            let consumed = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click",
+                arguments: argumentData(["click_ref": oldButton]))
+            XCTAssertNil(consumed.canonicalArguments)
+            _ = await controller.shutdown()
+        }
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.exposeCommittedDocumentIdentity()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        _ = try await call(controller, "browser_read", ["view": "content"])
+        let counts = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        XCTAssertEqual(counts.current, 0, "Unpublished native controls cannot become new capabilities")
+        _ = await controller.shutdown()
+    }
+
+    func testFreshReadCorroborationPreservesOriginalExpiryIncludingLockedDispatch() async throws {
+        for boundary in ["preapproval", "enqueue"] {
+            let backend = EmbeddedBrowserFixtureBackend()
+            let controller = EmbeddedBrowserToolController(transport: backend, readLifetime: .milliseconds(400))
+            await backend.exposeCommittedDocumentIdentity()
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
+            let data = try argumentData(["click_ref": XCTUnwrap(publishedTargets[id]?[1]?.clickRef)])
+            try await Task.sleep(for: .milliseconds(220))
+            _ = try await call(controller, "browser_read", ["view": "content"])
+            let prepared = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
+            XCTAssertNotNil(prepared.canonicalArguments)
+            if boundary == "enqueue" {
+                await backend.holdNextMutation()
+                let task = Task { try await controller.executeResult(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: prepared) }
+                await backend.waitUntilMutationHeld()
+                try await Task.sleep(for: .milliseconds(220))
+                await backend.resumeMutation()
+                do { _ = try await task.value; XCTFail("Corroboration cannot renew a locked input permit") }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            } else {
+                try await Task.sleep(for: .milliseconds(220))
+                do {
+                    try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: prepared)
+                    XCTFail("The old reference expires before the new capture")
+                } catch {
+                    let failure = try XCTUnwrap(error as? EmbeddedBrowserPreflightRecoveryFailure)
+                    XCTAssertEqual(failure.original, .staleSnapshot)
+                }
+            }
+            let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testKnownCommitDriftAfterCorroborationRejectsClickAndFillBeforeInput() async throws {
+        for fill in [false, true] {
+            for missing in [false, true] {
+                let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+                await backend.exposeCommittedDocumentIdentity()
+                _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+                let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
+                var arguments: [String: Any] = [fill ? "fill_ref" : "click_ref": try XCTUnwrap(fill ? publishedTargets[id]?[0]?.fillRef : publishedTargets[id]?[1]?.clickRef)]
+                if fill { arguments["text"] = "MUST_NOT_INPUT" }
+                let tool = fill ? "browser_fill" : "browser_click", data = try argumentData(arguments)
+                _ = try await call(controller, "browser_read", ["view": "content"])
+                let prepared = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
+                try await controller.preflightMutation(taskKey: "turn-a", tool: tool, arguments: data, prepared: prepared)
+                if missing { await backend.hideCommittedDocumentIdentity() }
+                else { await backend.replaceCommittedDocumentIdentity() }
+                do { _ = try await controller.executeResult(taskKey: "turn-a", tool: tool, arguments: data, prepared: prepared); XCTFail() }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
+                let counts = await backend.counts(); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.presses, 0)
+                _ = await controller.shutdown()
+            }
+        }
+    }
+
+    func testFreshCorroborationDoesNotPromoteFIFOAgeOrIncreaseCapacity() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.exposeCommittedDocumentIdentity(); await backend.showManyControls(count: 118)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try await call(controller, "browser_read", ["view": "all", "query": "Check flight"]), id = try snapshotID(first)
+        let oldest = try XCTUnwrap(publishedTargets[id]?[0]?.clickRef)
+        var page = try await call(controller, "browser_read", ["view": "all", "query": "Extra control"])
+        let extraID = try snapshotID(page), extra = try XCTUnwrap(publishedTargets[extraID]?[0]?.clickRef)
+        while let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] {
+            page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
+        }
+        _ = try await call(controller, "browser_read", ["view": "all", "query": "Flight number"])
+        var counts = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        XCTAssertEqual(counts.current, 120)
+        for _ in 0..<2 { _ = try await call(controller, "browser_read", ["view": "content"]) }
+        let stillOldest = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": oldest]))
+        XCTAssertNotNil(stillOldest.canonicalArguments)
+        await backend.setLink("http://localhost:8123/new", label: "New observed link")
+        _ = try await call(controller, "browser_read", ["view": "links"])
+        let evicted = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": oldest]))
+        let retained = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": extra]))
+        XCTAssertNil(evicted.canonicalArguments, "Repeated corroboration never moves the oldest token to the FIFO tail")
+        XCTAssertNotNil(retained.canonicalArguments)
+        counts = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        XCTAssertEqual(counts.current, 120); XCTAssertLessThanOrEqual(counts.retired, 256)
+        let inputs = await backend.counts(); XCTAssertEqual(inputs.presses, 0); XCTAssertEqual(inputs.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testFailedFreshReadsCannotReviveUnexposedEarlierReferences() async throws {
+        for failure in ["capture", "output", "publication"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.exposeCommittedDocumentIdentity()
+            let scope: ComputerTaskScope? = failure == "publication"
+                ? ComputerTaskScope(userPrompt: "Use only http://localhost:8123/flight.") : nil
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let first = try await call(controller, "browser_read", ["view": "all"], scope: scope), id = try snapshotID(first)
+            let ref = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+            switch failure {
+            case "capture": await backend.failObservations([.browserUnavailable("Synthetic failed read")])
+            case "output": await backend.setObservationSourceName(String(repeating: "x", count: 4_096))
+            default: await backend.redirectOnNextObserve(to: URL(string: "https://unrelated.example/no-publish")!)
+            }
+            do { _ = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read",
+                    arguments: argumentData(["view": "content"]), scope: scope); XCTFail() }
+            catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+            await backend.setObservationSourceName("computa_webkit_dom")
+            await backend.redirectOwnedTarget(to: URL(string: "http://localhost:8123/flight")!)
+            _ = try await call(controller, "browser_read", ["view": "content"], scope: scope)
+            let prior = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": ref]))
+            XCTAssertNil(prior.canonicalArguments, "A later capture cannot revive a failed read's old authority: \(failure)")
+            let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testFailedReplacementThenContinuationCannotRestoreOmittedFreshCarryEligibility() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.exposeCommittedDocumentIdentity(); await backend.showManyControls()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
+        let data = try argumentData(["click_ref": XCTUnwrap(publishedTargets[id]?[1]?.clickRef)])
+        let original = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
+        let cursor = try field("next_cursor", in: first)
+        await backend.failObservations([.browserUnavailable("Synthetic changed-filter read failure")])
+        do { _ = try await call(controller, "browser_read", ["cursor": cursor, "view": "content"]); XCTFail() }
+        catch { XCTAssertTrue(error is EmbeddedBrowserPreflightRecoveryFailure) }
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: original)
+        let continued = try await call(controller, "browser_read", ["cursor": cursor])
+        XCTAssertFalse(continued.contains(original.reference))
+        _ = try await call(controller, "browser_read", ["view": "content"])
+        let stale = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
+        XCTAssertNil(stale.canonicalArguments)
+        let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
     }
 
     func testActionSuffixesFitReservedPageBytesAndContinuationPublishesOnlyItsOwnRows() async throws {
@@ -2551,7 +2747,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertTrue(descriptions["browser_click"]?.contains("If dispatched input leaves the page unchanged, wait/read instead of clicking again") == true)
         XCTAssertTrue(descriptions["browser_click"]?.contains("After stale errors use available current_observation; otherwise browser_read") == true)
         XCTAssertFalse(descriptions["browser_click"]?.contains("After stale errors, browser_read before input") == true)
-        XCTAssertTrue(descriptions["browser_read"]?.contains("actions=[] is read-only") == true)
+        XCTAssertTrue(descriptions["browser_read"]?.contains("actions=[] cannot be clicked") == true)
         XCTAssertTrue(descriptions["browser_fill"]?.contains("enabled=true and settable=true") == true)
     }
 
@@ -3268,6 +3464,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var observationSourceName = "computa_webkit_dom"
     private var semanticReadiness: BrowserDocumentObservation.SemanticReadiness?, emptyObservation = false
     private var buttonID: Int64 = 2, buttonDisabled = false, buttonLabel = "Check flight"
+    private var buttonCaptureScenario: String?
     private var pendingRedirect: URL?
     private var link: String?, linkPressUnsupported = false, linkLabel = "Destination"
     private var holdCreate=false, createHeld=false, createContinuation: CheckedContinuation<Void,Never>?
@@ -3308,6 +3505,8 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func setInitialField(_ value: String) { field = value }
     func setObservedResult(_ text: String) { result = text }
     func setButtonLabel(_ text: String) { buttonLabel = text }
+    func setButtonCaptureScenario(_ scenario: String) { buttonCaptureScenario = scenario }
+    func replaceCommittedDocumentIdentity() { committedDocumentID = UUID() }
     func setObservationSourceName(_ name: String) { observationSourceName = name }
     func setSemanticReadiness(_ value: BrowserDocumentObservation.SemanticReadiness?, empty: Bool = false) {
         semanticReadiness = value; emptyObservation = empty
@@ -3434,9 +3633,15 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         }
         var nodes = [
             BrowserDocumentNode(backendNodeID:1,role:"textbox",name:"Flight number",value:field,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"1",isEditable:true),
-            BrowserDocumentNode(backendNodeID:buttonID,role:"button",name:buttonLabel,value:nil,isDisabled:buttonDisabled,isReadOnly:false,isIgnored:false,nodeID:String(buttonID),isDOMClickable:true),
+            BrowserDocumentNode(backendNodeID:buttonID,role:buttonCaptureScenario == "role" ? "link" : "button",name:buttonLabel,value:nil,isDisabled:buttonDisabled,isReadOnly:false,isIgnored:buttonCaptureScenario == "hidden",nodeID:String(buttonID),parentNodeID:buttonCaptureScenario == "parent" ? "changed-parent" : nil,isDOMClickable:true,constraintValidation:buttonCaptureScenario == "constraints" ? .init(required: false, candidate: false, valid: true, issues: []) : nil),
             BrowserDocumentNode(backendNodeID:3,role:"statictext",name:result,value:nil,isDisabled:true,isReadOnly:true,isIgnored:false,nodeID:"3")
         ]
+        if buttonCaptureScenario == "missing" { nodes.removeAll { $0.backendNodeID == buttonID } }
+        if buttonCaptureScenario == "duplicate_backend", let node = nodes.first(where: { $0.backendNodeID == buttonID }) { nodes.append(node) }
+        if buttonCaptureScenario == "duplicate_node" {
+            nodes.append(BrowserDocumentNode(backendNodeID: 999, role: "button", name: "Different target", value: nil,
+                isDisabled: false, isReadOnly: false, isIgnored: false, nodeID: String(buttonID), isDOMClickable: true))
+        }
         if let link {
             nodes.append(BrowserDocumentNode(backendNodeID:4,role:"link",name:linkLabel,value:nil,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"4",linkURL:link,isDOMClickable:!linkPressUnsupported,isPressUnsupported:linkPressUnsupported))
         }

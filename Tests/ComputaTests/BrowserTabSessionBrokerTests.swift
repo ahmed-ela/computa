@@ -2353,6 +2353,53 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testFreshCaptureCorroboratesOnlyCurrentSameBindingPublishedWitnesses() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "article", name: "Card", children: ["n1"]),
+            semanticNode(1, role: "button", name: "Intended action", parent: "n0"),
+        ])
+        try await fixture.transport.setCommittedDocumentID(targetID: fixture.observation.binding.targetID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let original = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [original])
+        XCTAssertTrue(fresh.snapshot.elements.isEmpty)
+        XCTAssertTrue(fresh.snapshot.actionWitnesses.isEmpty, "Native presence alone cannot mint new row authority")
+        let proof = try XCTUnwrap(fresh.snapshot.corroboratedActionWitnesses.first)
+        XCTAssertEqual(proof.publicationID, original.publicationID)
+        XCTAssertEqual(proof.element, original.element); XCTAssertEqual(proof.exposures, original.exposures)
+        XCTAssertEqual(proof.snapshotID, original.snapshotID)
+        XCTAssertEqual(proof.authoritySourceID, fresh.snapshot.readReceipt?.sourceID)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: original)
+        }
+        try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: proof)
+        let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: fresh.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [proof, original])
+        XCTAssertEqual(second.snapshot.corroboratedActionWitnesses.count, 1, "A stale earlier proof cannot seed authority")
+        let foreign = try await fixture.broker.open(taskKey: "task-b", processIdentifier: 47,
+            url: XCTUnwrap(URL(string: "http://127.0.0.1/foreign")))
+        let other = try await fixture.broker.snapshot(taskKey: "task-b", binding: foreign,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all),
+            priorPublishedActions: second.snapshot.corroboratedActionWitnesses)
+        XCTAssertTrue(other.snapshot.corroboratedActionWitnesses.isEmpty)
+        // Same immutable source is insufficient after selecting a new subtree.
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: second.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let beforeSubtree = try XCTUnwrap(all.snapshot.actionWitnesses[1])
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all, snapshotID: all.snapshot.id, elementIndex: 0))
+        let afterSubtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [beforeSubtree])
+        XCTAssertTrue(afterSubtree.snapshot.corroboratedActionWitnesses.isEmpty)
+        await fixture.assertNoInput()
+    }
+
     func testMutationPermitChecksCaptureDeadlineInsideCommit() throws {
         var inputs = 0
         let expired = BrowserMutationPermit(deadline: .now - .milliseconds(1))

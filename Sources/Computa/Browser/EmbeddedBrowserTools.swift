@@ -79,11 +79,11 @@ enum EmbeddedBrowserTools {
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
-                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only; containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use links/all with observed text to find controls. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads expire omitted/changed refs; input consumes all refs.",
+                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
                 ["view": readView, "query": query, "cursor": readCursor]),
             specification(
                 "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is not pressable: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=overview or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
                 ["click_ref": clickRef], ["click_ref"]),
             specification(
                 "browser_fill",
@@ -921,6 +921,16 @@ actor EmbeddedBrowserToolController {
         compactEncoding: BrowserCompleteObservation.Encoding = .read
     ) async throws -> BrowserTabSnapshot {
         let binding = try bound(taskKey, contextID)
+        let priorPublishedActions = contexts[taskKey]?.actionReferences.freshReadCandidates(snapshot: contexts[taskKey]?.snapshot) ?? []
+        // No failed/unpublished read can carry an earlier reference through a
+        // later fresh capture. Cursor admission errors never reach this method.
+        contexts[taskKey]?.actionReferences.beginRead()
+        var observationReady = false
+        defer {
+            if !observationReady, contexts[taskKey]?.id == contextID {
+                contexts[taskKey]?.actionReferences.abortRead()
+            }
+        }
         let fresh = read.cursor == nil && read.snapshotID == nil && read.elementIndex == nil && replacingCursor == nil
         // A fresh read already waits for native navigation in its transport.
         // Check physical ownership now, then site scope at that existing wait's
@@ -950,7 +960,7 @@ actor EmbeddedBrowserToolController {
         let observation = try await broker.snapshot(
             taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read,
             replacingCursor: replacingCursor, compact: compact, compactEncoding: compactEncoding,
-            readAuthorization: authorization)
+            readAuthorization: authorization, priorPublishedActions: priorPublishedActions)
         // The broker has now committed the replacement. If publication fails,
         // neither its unpublished references nor the superseded ones survive.
         contexts[taskKey]?.snapshot = nil
@@ -969,6 +979,7 @@ actor EmbeddedBrowserToolController {
         try requireScope(scope, url: target.url)
         contexts[taskKey]?.binding = observation.binding
         contexts[taskKey]?.snapshot = observation.snapshot
+        observationReady = true
         return observation.snapshot
     }
 
@@ -1165,7 +1176,7 @@ actor EmbeddedBrowserToolController {
         var metadata: [String: Any] = [
             "supersedes_previous": !snapshot.isActionContinuation, "consumed_by_admitted_input": true,
             "next_after_input": "Use available current_observation; otherwise browser_read. Never replay dispatched input.",
-            "references": "Use the intended observed click_ref or fill_ref. Cursor pages retain earlier refs from the same capture within the 120-ref FIFO bound. Fresh reads expire omitted/changed refs; input consumes all refs.",
+            "references": "Use the intended observed click_ref or fill_ref. Cursor pages retain earlier refs from the same capture within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
             "literal_copy_guidance": Self.literalCopyGuidance,
         ]
         if let cursor = snapshot.nextCursor {

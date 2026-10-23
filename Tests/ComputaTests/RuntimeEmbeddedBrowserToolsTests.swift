@@ -680,6 +680,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
 
     func testStaleBrowserPreflightReturnsFailedReadRecoveryAndRequiresANewApprovedCall() async throws {
         try await withHarness(approval: true) { harness in
+            // A fresh view alone is no longer stale. Model a real page edit
+            // of the previously exposed field while retaining its native node.
+            await harness.backend.changeFieldOnNextContentRead("PAGE_UPDATED_VALUE")
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"], "saveFillRef": "old_fill_ref"],
@@ -695,6 +698,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue(failure.contains("stale_snapshot"))
             XCTAssertTrue(failure.contains("\"dispatched\":false"))
             XCTAssertTrue(failure.contains("\"status\":\"available\""))
+            XCTAssertTrue(failure.contains("PAGE_UPDATED_VALUE"), "Recovery must expose the genuine changed field value")
             XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill"])
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
@@ -705,6 +709,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
 
     func testBrowserReadRecoveryDoesNotResetRepeatedFailureStopOrReplayInput() async throws {
         try await withHarness(approval: true) { harness in
+            // A fresh view alone is no longer stale. Model a real page edit
+            // of the previously exposed field while retaining its native node.
+            await harness.backend.changeFieldOnNextContentRead("PAGE_UPDATED_VALUE")
             let stale: [String: Any] = ["tool": "browser_fill", "arguments": [
                 "fill_ref": "@old_fill_ref", "text": "MUST_NOT_FILL",
             ]]
@@ -722,6 +729,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             let rows = try harness.rows()
             XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, false, false])
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("\"status\":\"available\"") == true)
+            XCTAssertTrue((rows[3]["text"] as? String)?.contains("PAGE_UPDATED_VALUE") == true)
             XCTAssertTrue((rows[4]["text"] as? String)?.contains("\"status\":\"unavailable\"") == true)
             let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
             XCTAssertEqual(sent.count, 6, "The third unchanged failure must interrupt before another input request")
@@ -1526,7 +1534,9 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var holdPostInputObservation = false
     private var postInputObservationHeld = false
     private var postInputObservationWaiter: CheckedContinuation<Void, Never>?
+    private var nextContentReadFieldValue: String?
 
+    func changeFieldOnNextContentRead(_ value: String) { nextContentReadFieldValue = value }
     func holdNextClose() { holdClose = true }
     func failNextClose() { failClose = true }
     func failNextPress() { failPress = true }
@@ -1577,6 +1587,10 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         guard let current = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
         guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
         try authorization(current)
+        if readiness == .content, let value = nextContentReadFieldValue {
+            nextContentReadFieldValue = nil
+            values[current.targetID] = value
+        }
         return try await observe(target: current)
     }
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {

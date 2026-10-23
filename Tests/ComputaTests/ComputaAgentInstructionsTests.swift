@@ -761,9 +761,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testBuiltInActionGuidanceRequiresPublishedCapabilitiesInsteadOfReadableIndices() {
         let text = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true).replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("browser_click needs the exact row's published click_ref"))
+        XCTAssertTrue(text.contains("browser_click needs the row's click_ref"))
         XCTAssertTrue(text.contains("never infer a clickable parent"))
-        XCTAssertTrue(text.contains("browser_fill needs the exact field's published fill_ref"))
+        XCTAssertTrue(text.contains("browser_fill: field's fill_ref, not its label's"))
         XCTAssertTrue(text.contains("Snapshot IDs/indices are not browser input references"))
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
@@ -782,7 +782,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let text = instructions.replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(text.contains("creates AND binds a task-owned page; read directly without another bind"))
             XCTAssertTrue(text.contains("Continuation pages retain earlier refs in the same capture (120-ref FIFO limit)"))
-            XCTAssertTrue(text.contains("Fresh reads replace the menu; omitted/changed refs expire"))
+            XCTAssertTrue(text.contains("Fresh reads keep native-confirmed unchanged refs; expiry stays fixed"))
+            XCTAssertTrue(text.contains("settable=true is independent of actions"))
             XCTAssertTrue(text.contains("An admitted click or fill consumes all refs"))
             XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
             XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
@@ -831,7 +832,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         let browser = ComputaAgentInstructions.builtInBrowser.replacingOccurrences(of: "\n", with: " ")
         XCTAssertTrue(browser.contains("Copy complete click_ref or fill_ref from the intended row"))
-        XCTAssertTrue(browser.contains("Never invent or interchange reference types"))
+        XCTAssertTrue(browser.contains("Never invent/interchange refs"))
         XCTAssertTrue(browser.contains("Snapshot IDs/indices are not browser input references"))
         XCTAssertFalse(browser.contains("expected_role"))
         XCTAssertFalse(browser.contains("expected_label"))
