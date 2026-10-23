@@ -1651,7 +1651,13 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
             let required = try XCTUnwrap(schema["required"] as? [String])
             let cursor = try XCTUnwrap(properties["cursor"] as? [String: Any])
-            XCTAssertEqual(cursor["type"] as? String, "string")
+            if name == "browser_read" {
+                XCTAssertEqual(cursor["type"] as? [String], ["string", "null"])
+                XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": NSNull()]))
+            } else {
+                XCTAssertEqual(cursor["type"] as? String, "string")
+                XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": NSNull()]))
+            }
             XCTAssertEqual(cursor["minLength"] as? Int, 1)
             XCTAssertFalse(required.contains("cursor"))
             let guidance = try XCTUnwrap(cursor["description"] as? String)
@@ -1673,14 +1679,101 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["query": " \t\n"]))
     }
 
+    func testNullReadCursorStartsFreshOverviewInsteadOfContinuingOrRevivingOldReferences() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.exposeCommittedDocumentIdentity()
+        await backend.showManyControls()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/other"], key: "turn-b")
+        let foreign = try await call(controller, "browser_read", ["view": "all"], key: "turn-b")
+        let foreignCursor = try field("next_cursor", in: foreign)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let omitted = try await call(controller, "browser_read"), oldID = try snapshotID(omitted)
+        let oldCursor = try field("next_cursor", in: omitted)
+        let oldRef = try XCTUnwrap(publishedTargets[oldID]?[1]?.clickRef)
+        let unchangedFieldRef = try XCTUnwrap(publishedTargets[oldID]?[0]?.fillRef)
+        await backend.setButtonLabel("Check flight updated")
+        let before = await backend.counts()
+        let null = try await call(controller, "browser_read", ["cursor": NSNull()]), nullID = try snapshotID(null)
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes + 1, "Null captures afresh instead of consuming a retained continuation")
+        for page in [omitted, null] {
+            XCTAssertEqual(try field("view", in: page), "overview")
+            XCTAssertEqual(try field("offset", in: page), "0")
+            XCTAssertLessThanOrEqual(page.utf8.count, 16_384)
+        }
+        XCTAssertNotEqual(nullID, oldID)
+        XCTAssertNotEqual(try field("source_observation", in: null), try field("source_observation", in: omitted),
+                          "Null starts a new captured observation")
+        XCTAssertEqual(publishedTargets[nullID]?[0]?.fillRef, unchangedFieldRef,
+                       "An explicitly republished unchanged field retains its current reference")
+        XCTAssertNotEqual(publishedTargets[nullID]?[1]?.clickRef, oldRef,
+                          "The changed target receives a new reference")
+        XCTAssertNotEqual(try field("next_cursor", in: null), oldCursor)
+        do {
+            _ = try await call(controller, "browser_click", ["click_ref": oldRef])
+            XCTFail("A fresh read cannot revive the reference of a changed target")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        for cursor in [oldCursor, foreignCursor, UUID().uuidString] {
+            do { _ = try await call(controller, "browser_read", ["cursor": cursor]); XCTFail("Unknown or replaced cursors remain rejected") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        }
+        do { _ = try await call(controller, "browser_read", ["cursor": ""]); XCTFail("An empty string is not omission") }
+        catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+        let rejected = await backend.counts()
+        XCTAssertEqual(rejected, after, "Rejected cursors and retired refs do not capture or dispatch")
+        let continued = try await call(controller, "browser_read", ["cursor": field("next_cursor", in: null)])
+        XCTAssertGreaterThan(try XCTUnwrap(Int(field("offset", in: continued))), 0)
+        let retained = await backend.counts()
+        XCTAssertEqual(retained.observes, after.observes + 1, "Continuation performs the existing live document freshness probe")
+        XCTAssertEqual(try field("source_observation", in: continued), try field("source_observation", in: null),
+                       "The next page retains its immutable source despite the separate freshness probe")
+        XCTAssertEqual(retained.presses, 0); XCTAssertEqual(retained.fills, 0)
+        let filtered = try await call(controller, "browser_read", ["cursor": NSNull(), "view": "all", "query": "updated"])
+        XCTAssertEqual(try field("view", in: filtered), "all")
+        XCTAssertTrue(filtered.contains("label=\"Check flight updated\""))
+        XCTAssertFalse(filtered.contains("label=\"Flight number\""), "Null does not discard explicitly requested filters")
+        _ = await controller.shutdown()
+    }
+
+    func testNullReadCursorDoesNotRelaxOtherArgumentsOrRefundRecoveryBudget() async throws {
+        for (tool, args) in [
+            ("browser_tabs", ["cursor": NSNull()]), ("browser_read", ["view": NSNull()]),
+            ("browser_read", ["query": NSNull()]), ("browser_click", ["click_ref": NSNull()]),
+            ("browser_fill", ["fill_ref": NSNull(), "text": "value"]),
+        ] as [(String, [String: Any])] {
+            XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: tool, arguments: args))
+        }
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showManyControls()
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        for attempt in 0..<4 {
+            let fresh = try await call(controller, "browser_read", ["cursor": NSNull(), "view": "all"])
+            let before = await backend.counts()
+            let failure = try await changedFilterFailure(controller,
+                arguments: ["cursor": field("next_cursor", in: fresh), "view": "content"])
+            let current = try XCTUnwrap(jsonObject(failure.observationResponse)["current_observation"] as? [String: Any])
+            XCTAssertEqual(current["status"] as? String, attempt < 3 ? "available" : "unavailable")
+            if attempt == 3 { XCTAssertEqual(current["reason"] as? String, "recovery_limit") }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + (attempt < 3 ? 1 : 0))
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        }
+        _ = await controller.shutdown()
+    }
+
     func testOptionalBrowserReadArgumentsKeepNativeUTF8BoundsWithoutNormalizing() throws {
         for (name, field) in [("browser_tabs", "cursor"), ("browser_read", "cursor"), ("browser_read", "query")] {
             let boundary = String(repeating: "é", count: 1024)
             XCTAssertEqual(boundary.utf8.count, 2048)
             XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: boundary]))
             XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: boundary + "x"]))
-            for value: Any in ["", NSNull(), 17] {
+            for value: Any in ["", 17] {
                 XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: value]))
+            }
+            if name == "browser_read", field == "cursor" {
+                XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: NSNull()]))
+            } else {
+                XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: NSNull()]))
             }
         }
     }

@@ -662,6 +662,28 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testNullFreshReadCannotRefundSameDocumentContinuationFailures() async throws {
+        try await withHarness(approval: true) { harness in
+            await harness.backend.enablePaginatedRead()
+            let read: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": NSNull(), "view": "all"]]
+            let changed: [String: Any] = ["tool": "browser_read", "arguments": ["cursor": "@cursor", "view": "content"]]
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/search"]],
+                read, changed, read, changed, read, changed,
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
+            try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, false, true, false])
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.mutations, 0)
+            XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
     func testVerifiedNewBindingSeparatesReadFailuresWithoutRefundingRecoveryReads() async throws {
         try await withHarness(approval: true) { harness in
             await harness.backend.enablePaginatedRead()

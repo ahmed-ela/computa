@@ -168,6 +168,47 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testSavedReadCursorSchemaRefreshesNullableContractWithoutRewritingWebsiteContinuation() throws {
+        let native = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+        var current = native
+        current["parameters"] = current.removeValue(forKey: "inputSchema")
+        var savedSchema = try XCTUnwrap(current["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(savedSchema["properties"] as? [String: [String: Any]])
+        properties["cursor"]?["type"] = "string"
+        for field in properties.keys {
+            properties[field]?.removeValue(forKey: "description")
+            properties[field]?.removeValue(forKey: "minLength")
+        }
+        savedSchema["properties"] = properties
+        let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
+            ["type": "function", "name": "browser_read", "description": "Saved snapshot/index action guidance", "parameters": savedSchema]]]]
+        let expected: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [current]]]
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": "Read the current page.", "tools": tools])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousRequestValues(original, in: prepared, expectedToolDefinitions: expected)
+        XCTAssertEqual(prepared.continuationRequest, original)
+        let reply = try WebModelResponseCodec.parseReply(
+            #"{"type":"tool_calls","calls":[{"name":"functions.browser_read","arguments":{"cursor":null,"view":"content"}}]}"#,
+            request: prepared, requireEnvelope: true)
+        guard case let .toolCalls(calls) = reply else { return XCTFail("Expected a nullable fresh-read call") }
+        let call = try XCTUnwrap(calls.first)
+        let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: Any])
+        XCTAssertTrue(arguments["cursor"] is NSNull)
+        XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: call.name, arguments: arguments))
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with:
+            WebModelResponseCodec.completedResponse(for: reply, request: prepared)) as? [String: Any])
+        let output = try XCTUnwrap((response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual((output["arguments"] as? String).map { Data($0.utf8) }, Data(call.argumentsJSON.utf8))
+        let history: [[String: Any]] = [output, ["type": "function_call_output", "call_id": try XCTUnwrap(output["call_id"] as? String), "output": "Current page observation."]]
+        let nextBody = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": history, "tools": tools])
+        let next = try WebModelResponseCodec.prepareRequest(nextBody)
+        try assertContiguousRequestValues(nextBody, in: next, expectedToolDefinitions: expected)
+        XCTAssertEqual(next.continuationRequest, nextBody)
+        let displayed = Data(next.prompt[try requestRange(in: next.prompt)].utf8)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+        XCTAssertEqual(object["input"] as? NSArray, history as NSArray)
+    }
+
     func testEmbeddedPlainFinalTextCannotRelaxRequiredToolsOrRepairActionJSON() throws {
         let prepared = try request()
         for text in ["{\"type\":\"tool_calls\",\"calls\":[", "Prefix\n{\"type\":\"message\",\"text\":\"value\"}",

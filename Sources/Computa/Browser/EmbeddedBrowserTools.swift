@@ -54,6 +54,8 @@ enum EmbeddedBrowserTools {
             "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
         let cursor: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
+        let readCursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
+            "description": "Omit this field on the first page or a fresh read; null has the same fresh-read meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_read in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
@@ -83,7 +85,7 @@ enum EmbeddedBrowserTools {
                 "Read compact visible DOM semantics for the bound built-in tab. READ_SELECTION_EVIDENCE reports local capture selection and exposed query-match kinds; its counts and zero matches never establish website search results or absence. Use overview for controls/headings and a bounded document-text sample, content for readable text and non-navigation listbox options, all for structure. Continue with browser_read(cursor=next_cursor) alone, omitting view and query; to change either filter start a fresh browser_read without cursor. Never use computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. For a popup-only link without AXPress, use browser_navigate with its complete exact observed href in the same bound tab; never reconstruct href_fragment or href_omitted destinations. Use view=links or all with observed text to find the actual control. Only published click_ref/fill_ref values authorize browser input; act on the intended observed row without repeating unchanged reads. An unchanged row may explicitly retain its ref in a new read; omitted or changed rows expire.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
-                    "query": query, "cursor": cursor,
+                    "query": query, "cursor": readCursor,
                 ]),
             specification(
                 "browser_click",
@@ -149,6 +151,9 @@ enum EmbeddedBrowserTools {
         }
         for key in ["url", "tab_id", "snapshot_id", "view", "query", "cursor", "text"]
         where arguments[key] != nil {
+            // Only this explicitly nullable optional field means omission.
+            // Other fields and inventory cursors keep their strict contracts.
+            if tool == "browser_read", key == "cursor", arguments[key] is NSNull { continue }
             guard let value = arguments[key] as? String,
                 value.utf8.count <= (key == "text" && tool == "browser_fill" ? 65_536 : 2_048),
                 key == "text" || !value.isEmpty
@@ -637,10 +642,11 @@ actor EmbeddedBrowserToolController {
             }
         case "browser_read":
             let view = (object["view"] as? String).flatMap(SemanticReadView.init(rawValue:))
+            let cursor = object["cursor"] as? String
             let read = SemanticReadRequest(
                 query: object["query"] as? String,
-                view: view ?? (object["cursor"] == nil ? .overview : nil),
-                cursor: object["cursor"] as? String)
+                view: view ?? (cursor == nil ? .overview : nil),
+                cursor: cursor)
             // Keep the invalid continuation rejected. For its exact current
             // cursor only, separately expose the explicitly requested fresh
             // view once instead of leaving the model on the old overview.

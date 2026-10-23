@@ -47,6 +47,14 @@ old stop notice was appended after every subsequent turn, making it appear curre
   Genuine cursor values remain exact, and invented cursors remain rejected
   without a read or input dispatch. Page text containing the same words is not
   rewritten.
+- The optional `browser_read.cursor` explicitly accepts null as a fresh read,
+  with the same default overview, binding checks and budgets as omission. Finite
+  diagnostics from an installed GPT-OSS documentation task identified two
+  consecutive pre-dispatch failures from `cursor: null` under the former
+  string-only schema. Recognized saved native catalogs receive the new contract;
+  completed history retains its original argument bytes. Nonnull cursors remain
+  exact and nonempty; custom and required-cursor schemas are unchanged. This is
+  a field-specific public contract, not generic argument repair or extra retries.
 - Navigation-related stale preflight errors can return a bounded fresh read,
   like other stale snapshot errors. They remain failed, undispatched actions;
   input is never replayed. Approval, ownership and unchanged-attempt limits remain.

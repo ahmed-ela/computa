@@ -10,6 +10,43 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
+    /// Only the app-owned optional read cursor accepts null as a fresh read.
+    /// Match complete native schemas; required, narrowed or foreign contracts
+    /// keep their own semantics. Historical argument bytes are never rewritten.
+    static func browserReadCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
+        -> (historical: [String: Any], current: [String: Any])? {
+        guard name == "browser_read", namespace == nil || namespace == "functions",
+              let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
+              let canonical = current["properties"] as? [String: [String: Any]],
+              schema["type"] as? String == "object",
+              Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
+              let properties = schema["properties"] as? [String: [String: Any]], Set(properties.keys) == Set(canonical.keys),
+              let required = schema["required"] as? [String], required.isEmpty else { return nil }
+        if let additional = schema["additionalProperties"] {
+            guard let flag = additional as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID(), !flag.boolValue else { return nil }
+        }
+        let omittable: Set<String> = ["minLength", "maxLength", "pattern"]
+        for (field, property) in properties {
+            guard let expected = canonical[field],
+                  Set(property.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)),
+                  Set(expected.keys).subtracting(omittable.union(["description"])).isSubset(of: Set(property.keys)) else { return nil }
+            for (key, value) in property where key != "description" {
+                if field == "cursor", key == "type" {
+                    let types = (value as? String).map { [$0] } ?? (value as? [String]) ?? []
+                    guard types == ["string"] || (types.count == 2 && Set(types) == ["string", "null"]) else { return nil }
+                } else {
+                    guard let wanted = expected[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return nil }
+                }
+            }
+        }
+        var historical = schema, historicalProperties = properties
+        historicalProperties["cursor"]?["type"] = ["string", "null"]
+        historical["properties"] = historicalProperties
+        // The nullable form is a superset, not a disjoint oneOf alternative.
+        // All saved constraints other than the cursor type remain untouched.
+        return (historical, current)
+    }
+
     /// Only the three app-owned argument shapes are eligible for evolution. A
     /// similarly named MCP/custom tool or a modified schema keeps its contract.
     /// The pinned engine can omit constraints when projecting dynamic schemas.
@@ -103,6 +140,16 @@ enum ComputaModelToolCatalog {
             // but only the current native contract may be offered for new calls.
             guard !name.hasPrefix("computer_v2_") || currentComputerNames.contains(name) else { return nil }
             if let description = overrides[name] { value["description"] = description }
+            if value["type"] as? String == "function", name == "browser_read" {
+                for key in ["parameters", "inputSchema"] {
+                    guard let schema = value[key] as? [String: Any],
+                          let variants = browserReadCursorSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
+                    value[key] = variants.current
+                    value["description"] = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"]
+                }
+                // Do not widen optionality or repair a modified/foreign schema.
+                return value
+            }
             if value["type"] as? String == "function", ["browser_click", "browser_fill"].contains(name) {
                 for key in ["parameters", "inputSchema"] {
                     guard let schema = value[key] as? [String: Any],

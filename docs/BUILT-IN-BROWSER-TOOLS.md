@@ -22,7 +22,7 @@ The pinned runtime persists dynamic tool schemas at thread creation. An older ch
 | `browser_open` | explicit HTTP(S) `url` | Creates and binds a background task-owned tab using the shared profile. |
 | `browser_bind` | currently issued `tab_id` | Leases an available observed human tab without activation or navigation. |
 | `browser_navigate` | HTTP(S) `url` | Navigates the bound target once and retires the old action snapshot. |
-| `browser_read` | optional `view`, literal `query`, observed `cursor` | Bounded semantic text; eligible published rows carry `click_ref` or `fill_ref`. Read continuations retain their exact selection. |
+| `browser_read` | optional `view`, literal `query`, observed `cursor` | Bounded semantic text; eligible published rows carry `click_ref` or `fill_ref`. Omitted or null cursor starts a fresh read; a nonempty cursor continues its exact selection. |
 | `browser_click` | current `click_ref` | One guarded semantic press; inspect the returned observation or read the changed page to verify the outcome. |
 | `browser_fill` | current `fill_ref` and `text` | Replaces one observed editable value and sends input/change events. Fill is separate from submission; inspect the resulting value before pressing. |
 | `browser_wait` | optional nonempty `text`, `timeout_ms` | Read-only event-driven readiness/text wait, bounded to 10 seconds. Does not refresh or repeat input. |
@@ -31,6 +31,8 @@ The pinned runtime persists dynamic tool schemas at thread creation. An older ch
 Inventory pages are at most 8 KiB, with explicit omitted/truncated metadata. Displayed titles are limited to 256 UTF-8 bytes at a scalar boundary; a single oversized combining-character grapheme cannot stall pagination, and JSON control-character escapes still fit the row budget. URLs longer than 2,048 UTF-8 bytes are omitted, never shortened into a different address. Inventory continuations retain metadata captured for that inventory; they are not fresh page-content observations. Cursors are opaque, one-use and confined to their originating turn. Only returned rows issue bind IDs, and binding rechecks the current exact target. Semantic reads reuse the broker's bounded views and pagination. Each read replaces the action menu; only its currently published references can authorize input. Transcript text and indices cannot restore a retired capability.
 
 ## Ownership, actions and cleanup
+
+Only the optional `browser_read.cursor` field accepts JSON null. Null and omission both start an ordinary fresh read, using overview unless a view is supplied. This does not reuse a previous cursor or refund read/recovery budgets. Empty, malformed, foreign and stale nonnull cursors remain rejected. Recognized saved native read schemas are refreshed for current calls, while completed historical arguments retain their exact bytes. Other tools, custom schemas and required-cursor schemas do not acquire this compatibility.
 
 One task writes a leased tab at a time. Only eligible currently published rows with an exposed label receive typed action references. A token can be retained only when a replacement read explicitly republishes the same node with identical field exposures and native action semantics, in the same binding and committed document/generation/URL. Changed or omitted rows expire. This does not search for a substitute target or authorize unseen content.
 
