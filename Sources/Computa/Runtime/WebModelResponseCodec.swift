@@ -14,6 +14,8 @@ enum WebModelResponseCodec {
         let promptStatistics: WebsitePromptProjection.Statistics
         let runtimeInstructions: String
         let currentUserInstructions: String
+        /// Derived from validated original definitions; native admission supplies state.
+        let requiresBrowserToolAvailability: Bool
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
@@ -144,7 +146,8 @@ enum WebModelResponseCodec {
         }
     }
 
-    static func prepareRequest(_ data: Data) throws -> Request {
+    static func prepareRequest(_ data: Data,
+                               browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
@@ -171,6 +174,7 @@ enum WebModelResponseCodec {
             throw Failure.invalidRequest
         }
         let schemas: [[String: Any]]
+        let requiresBrowserToolAvailability: Bool
         var toolDefinitionsChanged = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
@@ -182,11 +186,14 @@ enum WebModelResponseCodec {
                     for child in children { try insertTool(child, namespace: namespace, into: &historical) }
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
-            schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model)
+            requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
+            schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
+                browserToolAvailability: browserToolAvailability)
             toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
             object["tools"] = schemas
         } else {
             schemas = []
+            requiresBrowserToolAvailability = false
         }
         var offered: [String: OfferedTool] = [:]
         for schema in schemas {
@@ -242,6 +249,7 @@ enum WebModelResponseCodec {
             finalPromptBytes: bytes)
         return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
+                       requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,

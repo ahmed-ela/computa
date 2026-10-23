@@ -3,6 +3,147 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    private func browserAvailabilityRequest(provider: String = "chatgpt", input: [[String: Any]]) throws -> Data {
+        let tools = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition
+            value["parameters"] = value.removeValue(forKey: "inputSchema")
+            return value
+        }
+        return try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider),
+            "input": input, "tools": tools, "stream": false])
+    }
+
+    func testBrowserCatalogReprojectsOnlyAfterAdmittedInferenceAndPreservesContinuation() async throws {
+        let unboundNames = Set(["browser_tabs", "browser_open", "browser_bind"])
+        let boundNames = Set(EmbeddedBrowserTools.definitions().compactMap { $0["name"] as? String })
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let state = WebsiteBrowserAvailabilityFixture()
+            let base = FixtureWebModelTransport(replyTexts: [
+                #"{"type":"tool_calls","calls":[{"name":"browser_open","arguments":{"url":"https://example.invalid/"}}]}"#,
+                #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{"view":"content"}}]}"#,
+                #"{"type":"message","text":"Finished the synthetic workflow"}"#])
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.setBrowserToolAvailabilityProvider { request in await state.read(request) }
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic page"]]
+            var submittedHistories: [NSArray] = []
+            let states: [EmbeddedBrowserToolAvailability] = [.unbound, .bound, .unbound]
+            for (index, availability) in states.enumerated() {
+                await state.set(availability)
+                submittedHistories.append(history as NSArray)
+                let output = try responseOutput(await server.fixtureInfer(
+                    browserAvailabilityRequest(provider: provider, input: history), taskID: provider))
+                if index < 2 {
+                    let call = try XCTUnwrap(output.first)
+                    XCTAssertEqual(call["name"] as? String, index == 0 ? "browser_open" : "browser_read")
+                    history += output + [["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"]),
+                                          "output": "Exact synthetic result-\(index)"]]
+                }
+            }
+            let prompts = await base.sentPrompts()
+            XCTAssertEqual(prompts.count, 3)
+            for (index, prompt) in prompts.enumerated() {
+                let object = try canonicalRequest(in: prompt)
+                let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
+                XCTAssertEqual(Set(tools.compactMap { $0["name"] as? String }), index == 1 ? boundNames : unboundNames)
+                XCTAssertEqual(object["input"] as? NSArray, submittedHistories[index])
+            }
+            let queries = await state.queries()
+            XCTAssertEqual(queries.count, 3)
+            XCTAssertEqual(Set(queries.map(\.taskID)), [websiteInferenceFixtureTaskID(provider)])
+            XCTAssertEqual(Set(queries.map(\.threadID)), [websiteInferenceFixtureTaskID(provider + ":thread")])
+            XCTAssertEqual(Set(queries.map(\.turnID)), [websiteInferenceFixtureTaskID(provider + ":turn")])
+            XCTAssertEqual(Set(queries.map(\.preparationID)), [UUID(uuidString: websiteInferenceFixtureTaskID(provider + ":preparation"))!])
+            let issues = await server.fixtureFinish(taskID: provider)
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
+    func testBrowserCatalogRequiresNativeStateAndRejectsLateAdmissionBeforeWebsiteStart() async throws {
+        for failure in ["missing", "throws", "generation", "replaced"] {
+            let base = FixtureWebModelTransport()
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            let gate = WebListenerStartupGate()
+            if failure == "missing" {
+                await server.setBrowserToolAvailabilityProvider(nil)
+            } else {
+                await server.setBrowserToolAvailabilityProvider { _ in
+                    if failure == "throws" { throw CancellationError() }
+                    await gate.pause()
+                    return .bound
+                }
+            }
+            let data = try browserAvailabilityRequest(input: [["role": "user", "content": "Inspect the fixture"]])
+            let inference = Task { try await server.fixtureInfer(data, taskID: failure) }
+            addTeardownBlock { inference.cancel(); await gate.resume() }
+            if failure == "generation" || failure == "replaced" {
+                try await gate.waitUntilEntered()
+                if failure == "generation" { await server.setCleanupRuntimeGeneration(UUID()) }
+                else { await server.setBrowserToolAvailabilityProvider { _ in .unbound } }
+                await gate.resume()
+            }
+            do {
+                _ = try await inference.value
+                XCTFail("Unproven browser state must not reach the website")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.inferenceContextRequired.localizedDescription)
+            }
+            let operations = await base.operations()
+            XCTAssertTrue(operations.isEmpty, failure)
+        }
+    }
+
+    func testBrowserCatalogStaysFrozenAcrossFormatCorrectionAfterBindingChanges() async throws {
+        let state = WebsiteBrowserAvailabilityFixture()
+        let gate = WebListenerStartupGate()
+        let base = FixtureWebModelTransport(startGate: gate, replyTexts: [
+            #"{"type":"message","text":"#,
+            #"{"type":"tool_calls","calls":[{"name":"browser_click","arguments":{"click_ref":"old-reference"}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+            storageDirectory: try canonicalFormatCorrectionFixtureRoot())
+        await server.setBrowserToolAvailabilityProvider { request in await state.read(request) }
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let data = try browserAvailabilityRequest(input: [["role": "user", "content": "Read the fixture"]])
+        let inference = Task { try await server.fixtureInfer(data, taskID: "frozen-availability") }
+        addTeardownBlock { inference.cancel(); await gate.resume() }
+        try await gate.waitUntilEntered()
+        await state.set(.bound)
+        await gate.resume()
+        do {
+            _ = try await inference.value
+            XCTFail("A later binding cannot add a tool to an already admitted reply")
+        } catch {
+            XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unknownTool("browser_click"))
+        }
+        let prompts = await base.sentPrompts(), queries = await state.queries()
+        XCTAssertEqual(prompts.count, 2)
+        XCTAssertEqual(queries.count, 1)
+        for prompt in prompts {
+            let object = try canonicalRequest(in: prompt)
+            let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
+            XCTAssertEqual(Set(tools.compactMap { $0["name"] as? String }), ["browser_tabs", "browser_open", "browser_bind"])
+        }
+    }
+
+    func testNonbrowserAndEmptyWebsiteCatalogsDoNotQueryBrowserState() async throws {
+        let base = FixtureWebModelTransport()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.setBrowserToolAvailabilityProvider { _ in
+            XCTFail("Nonbrowser and empty catalogs need no browser state")
+            throw CancellationError()
+        }
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let catalogs: [[[String: Any]]] = [[], [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]]]
+        for (index, tools) in catalogs.enumerated() {
+            let data = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": "Return fixture status", "tools": tools])
+            _ = try await server.fixtureInfer(data, taskID: "without-browser-\(index)")
+        }
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 2)
+    }
+
     func testSyntheticCaptureAdmissionCannotChangeInferenceWireOrToolSelection() async throws {
         enum Arm: CaseIterable { case absent, wrongNonce, unsafeMode, matching }
         let nonce = "cccccccc-1111-4222-8333-dddddddddddd"
@@ -2058,6 +2199,17 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(endpoint.path, "/v1")
         _ = await server.shutdown()
     }
+}
+
+private actor WebsiteBrowserAvailabilityFixture {
+    private var availability = EmbeddedBrowserToolAvailability.unbound
+    private var requests: [EmbeddedBrowserToolAvailabilityRequest] = []
+    func set(_ value: EmbeddedBrowserToolAvailability) { availability = value }
+    func read(_ request: EmbeddedBrowserToolAvailabilityRequest) -> EmbeddedBrowserToolAvailability {
+        requests.append(request)
+        return availability
+    }
+    func queries() -> [EmbeddedBrowserToolAvailabilityRequest] { requests }
 }
 
 private actor FixtureReceiptAudit {

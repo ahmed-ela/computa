@@ -22,8 +22,8 @@ enum ComputaModelToolCatalog {
         return name == "browser_read" ? .fresh : .continuation
     }
 
-    private static func matchesNativeReadSchema(_ schema: [String: Any], _ canonical: [String: Any]) -> Bool {
-        let omittable: Set<String> = ["minLength", "maxLength", "pattern"]
+    private static func matchesNativeReadSchema(_ schema: [String: Any], _ canonical: [String: Any],
+                                                omittable: Set<String> = ["minLength", "maxLength", "pattern"]) -> Bool {
         guard schema["type"] as? String == "object",
               Set(schema.keys).subtracting(["description"]).isSubset(of: Set(canonical.keys)),
               let properties = schema["properties"] as? [String: [String: Any]],
@@ -194,9 +194,61 @@ enum ComputaModelToolCatalog {
         return (historical, current)
     }
 
+    /// Only original, recognized native declarations require host binding state.
+    /// Refreshing constraints first could make a modified contract look native.
+    static func requiresBrowserToolAvailability(_ definitions: [[String: Any]]) -> Bool {
+        definitions.contains { definition in
+            if definition["type"] as? String == "namespace", let namespace = definition["name"] as? String,
+               let children = definition["tools"] as? [[String: Any]] {
+                return children.contains { requiresBrowserBinding($0, namespace: namespace) }
+            }
+            return requiresBrowserBinding(definition, namespace: nil)
+        }
+    }
+
+    private static func nativeConstraintTypesAreValid(_ schema: [String: Any]) -> Bool {
+        for key in ["minimum", "maximum", "minLength", "maxLength", "pattern"] where schema[key] != nil {
+            if key == "pattern" {
+                guard schema[key] is String else { return false }
+            } else {
+                guard let number = schema[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+            }
+        }
+        if let fields = schema["properties"] as? [String: [String: Any]],
+           !fields.values.allSatisfy(nativeConstraintTypesAreValid) { return false }
+        if let variants = schema["oneOf"] as? [[String: Any]],
+           !variants.allSatisfy(nativeConstraintTypesAreValid) { return false }
+        return true
+    }
+
+    private static func requiresBrowserBinding(_ definition: [String: Any], namespace: String?) -> Bool {
+        guard definition["type"] as? String == "function", namespace == nil || namespace == "functions",
+              let name = definition["name"] as? String,
+              ["browser_read", "browser_continue", "browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_close"].contains(name)
+        else { return false }
+        let schemaKeys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
+        guard !schemaKeys.isEmpty else { return false }
+        return schemaKeys.allSatisfy { key in
+            guard let schema = definition[key] as? [String: Any], nativeConstraintTypesAreValid(schema) else { return false }
+            switch name {
+            case "browser_read":
+                return browserCursorSchemaVariants(name: name, namespace: namespace, schema: schema) != nil
+            case "browser_continue":
+                return browserReadMode(name: name, namespace: namespace, schema: schema) == .continuation
+            case "browser_click", "browser_fill":
+                return browserMutationSchemaVariants(name: name, namespace: namespace, schema: schema) != nil
+            default:
+                guard let canonical = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any] else { return false }
+                return matchesNativeReadSchema(schema, canonical,
+                    omittable: ["minimum", "maximum", "minLength", "maxLength", "pattern"])
+            }
+        }
+    }
+
     /// Also applies to schemas retained by old native threads. History stays
     /// unchanged; only the current model's callable tool definitions change.
-    static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String) -> [[String: Any]] {
+    static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String,
+                                       browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) -> [[String: Any]] {
         let overrides = nativeToolDescriptions(modelID: modelID)
         // Availability is already scoped by the caller's interaction policy.
         // Reject removed names without hiding valid foreground tools that are
@@ -231,6 +283,7 @@ enum ComputaModelToolCatalog {
                 value["tools"] = tools
                 return value
             }
+            if browserToolAvailability == .unbound, requiresBrowserBinding(definition, namespace: namespace) { return nil }
             guard let name = value["name"] as? String else { return value }
             // Restored threads may retain removed tools. History remains readable,
             // but only the current native contract may be offered for new calls.

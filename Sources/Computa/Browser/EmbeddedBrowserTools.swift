@@ -373,6 +373,21 @@ struct EmbeddedBrowserBindingRequiredFailure: Error, LocalizedError, Sendable {
     }
 }
 
+/// Native inference admission state, never model arguments or page evidence.
+enum EmbeddedBrowserToolAvailability: Equatable, Sendable {
+    case bound, unbound
+}
+
+struct EmbeddedBrowserToolAvailabilityRequest: Equatable, Sendable {
+    let taskID: String
+    let threadID: String
+    let turnID: String
+    let preparationID: UUID
+}
+
+typealias EmbeddedBrowserToolAvailabilityProvider = @Sendable (EmbeddedBrowserToolAvailabilityRequest)
+    async throws -> EmbeddedBrowserToolAvailability
+
 /// Each active turn receives its own taskKey from the runtime. The controller
 /// retains an exact tab lease and capability; it never operates on an active tab.
 actor EmbeddedBrowserToolController {
@@ -421,6 +436,29 @@ actor EmbeddedBrowserToolController {
         self.transport = transport
         broker = BrowserTabSessionBroker(
             transport: transport, browserGeneration: UUID(), ownership: .borrowed, readLifetime: readLifetime)
+    }
+
+    /// Core must first reserve this exact current-turn key. No context, target,
+    /// observation, or input authority is created by this catalog-only query.
+    func toolAvailability(taskKey: String) throws -> EmbeddedBrowserToolAvailability {
+        try Task.checkCancellation()
+        guard !closed, !taskKey.isEmpty, taskKey.utf8.count <= 4_096,
+              taskKey == taskKey.trimmingCharacters(in: .whitespacesAndNewlines),
+              !taskKey.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !retiredKeys.contains(taskKey), releasing[taskKey] == nil else {
+            throw BrowserTabBrokerError.handleMissing
+        }
+        guard !inFlight.contains(taskKey) else { throw BrowserTabBrokerError.operationInProgress }
+        guard let context = contexts[taskKey] else { return .unbound }
+        try context.lifetime.check()
+        guard let binding = context.binding else { return .unbound }
+        try binding.lifetime.check()
+        guard let lifetime = context.bindingLifetime, lifetime === binding.lifetime,
+              binding.taskKey == taskKey, let target = context.leasedTarget,
+              binding.targetID == target.targetID, binding.targetInstanceToken == target.instanceToken,
+              leases[target.targetID] == taskKey else { throw BrowserTabBrokerError.handleMissing }
+        try lifetime.check()
+        return .bound
     }
 
     /// Freeze this native-only invocation before retry accounting and approval.

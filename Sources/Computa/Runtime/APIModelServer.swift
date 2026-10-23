@@ -35,6 +35,8 @@ actor APIModelServer {
     private var correctionsUsed: [String: Context] = [:]
     private var capsules: APIReasoningCapsules?
     private var providers: [APIProviderDefinition] = []
+    private var browserToolAvailabilityProvider: EmbeddedBrowserToolAvailabilityProvider?
+    private var browserToolAvailabilityProviderRevision = UUID()
     private var listener: NWListener?
     private var baseURL: URL?
     private var starting: Task<URL, Error>?
@@ -89,6 +91,7 @@ actor APIModelServer {
         failureDiagnosticsObserverForTesting = observer
     }
     func setUserProjectionObserverForTesting(_ observer: (@Sendable (String) -> Void)?) { userProjectionObserverForTesting = observer }
+    func isRetiringForTesting(taskID: String) -> Bool { retiring.contains(taskID.lowercased()) }
 #endif
     private struct Connection { let socket: NWConnection; let task: Task<Void, Never> }
     private var connections: [UUID: Connection] = [:]
@@ -131,6 +134,12 @@ actor APIModelServer {
         self.correctionAccountingDirectory = correctionAccountingDirectory
         self.inferenceTimeout = min(max(inferenceTimeout, .milliseconds(1)), .seconds(300))
     }
+    /// Installed only by native Core. Request bodies cannot supply binding state.
+    func setBrowserToolAvailabilityProvider(_ provider: EmbeddedBrowserToolAvailabilityProvider?) {
+        browserToolAvailabilityProvider = provider
+        browserToolAvailabilityProviderRevision = UUID()
+    }
+
     func updateProviders(_ values: [APIProviderDefinition]) throws {
         try APIProviderCatalog.validate(values)
         for provider in values { _ = try APIProviderHTTPClient.endpoint(provider.baseURL, path: "models") }
@@ -568,6 +577,26 @@ actor APIModelServer {
             try Task.checkCancellation()
             guard !stopped, !retiring.contains(taskID), contexts[taskID] == context,
                   admissions[taskID] == admissionID else { throw Failure.inferenceContextRequired }
+            let browserToolAvailability: EmbeddedBrowserToolAvailability?
+            if let definitions = object["tools"] as? [[String: Any]],
+               ComputaModelToolCatalog.requiresBrowserToolAvailability(definitions) {
+                guard let provider = browserToolAvailabilityProvider else { throw Failure.inferenceContextRequired }
+                let providerRevision = browserToolAvailabilityProviderRevision
+                do {
+                    browserToolAvailability = try await provider(.init(taskID: taskID,
+                        threadID: context.identity.threadID, turnID: context.identity.turnID,
+                        preparationID: context.preparationID))
+                } catch {
+                    try Task.checkCancellation()
+                    throw Failure.inferenceContextRequired
+                }
+                try await awaitUserInputUpdate(task: taskID, context: context)
+                try Task.checkCancellation()
+                guard !stopped, !retiring.contains(taskID), contexts[taskID] == context,
+                      prepared[taskID]?.preparationID == context.preparationID,
+                      admissions[taskID] == admissionID, browserToolAvailabilityProviderRevision == providerRevision
+                else { throw Failure.inferenceContextRequired }
+            } else { browserToolAvailability = nil }
             let proposedNaming: APIModelResponseCodec.ToolNaming = context.isNewThread && Self.hasOnlyUnmodeledInput(object) ? .semantic : .legacy
             failureStage = .prepare
             let translated: APIModelResponseCodec.Request
@@ -578,11 +607,13 @@ actor APIModelServer {
                 translated = try APIThreadToolNamingStore(directory: toolNamingDirectory).withPinnedStyle(
                     threadID: context.identity.threadID, proposed: proposedNaming) { style in
                         try APIModelResponseCodec.prepare(request.body, selection: selection,
-                            threadID: context.identity.threadID, capsules: capsules, toolNaming: style)
+                            threadID: context.identity.threadID, capsules: capsules, toolNaming: style,
+                            browserToolAvailability: browserToolAvailability)
                     }
             } else {
                 translated = try APIModelResponseCodec.prepare(request.body, selection: selection,
-                    threadID: context.identity.threadID, capsules: capsules, toolNaming: .legacy)
+                    threadID: context.identity.threadID, capsules: capsules, toolNaming: .legacy,
+                    browserToolAvailability: browserToolAvailability)
             }
             // The pinned engine explicitly labels maintenance in native turn
             // metadata. Never guess from a summary or from prompt wording.

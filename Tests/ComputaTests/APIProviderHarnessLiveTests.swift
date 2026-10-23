@@ -198,7 +198,17 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let taskID = UUID().uuidString.lowercased(), audit = APIHarnessEventAudit(taskID: taskID)
             pump = Task { for await event in runtime.events() { audit.receive(event) } }
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
-            try await runtime.submit(prompt: "Read the existing fixture browser tab and continue its partial page. Read only.",
+            try await runtime.submit(prompt: APIHarnessBrowserContinuationInference.priorPrompt,
+                toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .completed); XCTAssertEqual(audit.errors, [])
+            XCTAssertEqual(audit.finalTexts.last, "PRIOR_TASK_COMPLETE")
+            let priorReceipt = await inference.receipt()
+            XCTAssertEqual(priorReceipt.requests, 2); XCTAssertEqual(priorReceipt.maintenanceRequests, 0)
+            // A genuine completed task precedes the new request in the same
+            // runtime/chat. Reset only the terminal observer, never history.
+            audit.began = false; audit.terminal = false; audit.status = nil
+            try await runtime.submit(prompt: APIHarnessBrowserContinuationInference.currentPrompt,
                 toTaskID: taskID, modelID: modelID)
             try await waitForTerminal(audit)
             XCTAssertEqual(audit.status, .completed); XCTAssertEqual(audit.errors, [])
@@ -206,9 +216,24 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let trace = try AppServerWireTrace.load(firstTrace)
             let threadID = try threadStarted(in: trace)
             let proofs = trace.messages.compactMap { ($0.object["result"] as? [String: Any])?["nativeBrowserRead"] as? String }
-            XCTAssertEqual(proofs, ["inventory_v1", "read_v1", "continue_v1"])
+            XCTAssertEqual(proofs, ["inventory_v1", "inventory_v1", "read_v1", "continue_v1"])
             let firstReceipt = await inference.receipt()
-            XCTAssertEqual(firstReceipt.requests, 5)
+            XCTAssertEqual(firstReceipt.requests, 10)
+            XCTAssertEqual(firstReceipt.ordinaryRequests, 7)
+            XCTAssertEqual(firstReceipt.maintenanceRequests, 3)
+            XCTAssertEqual(firstReceipt.currentTaskOrdinaryChecks, 5)
+            XCTAssertEqual(firstReceipt.currentTaskMaintenanceChecks, 3)
+            XCTAssertEqual(firstReceipt.summaryAssistantChecks, 3)
+            XCTAssertTrue(firstReceipt.catalogStatesMatched)
+            let startedTurnIDs = trace.messages.compactMap { message -> String? in
+                guard message.direction == .serverToClient, message.method == "turn/started",
+                      let params = message.object["params"] as? [String: Any],
+                      let turn = params["turn"] as? [String: Any] else { return nil }
+                return (turn["id"] as? String)?.lowercased()
+            }
+            XCTAssertEqual(startedTurnIDs, firstReceipt.hostTurnIDs,
+                "The actual HTTP checkpoint must follow the native task boundary, not the preceding task")
+            XCTAssertEqual(Set(firstReceipt.hostTurnIDs).count, 2)
             XCTAssertTrue(firstReceipt.sameCaptureContinued)
             XCTAssertTrue(firstReceipt.cursorArgumentsExact)
             XCTAssertEqual(firstReceipt.failures, [])
@@ -226,22 +251,45 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let saved = try XCTUnwrap(tasks.first { $0.id == threadID })
             let resumedAudit = APIHarnessEventAudit(taskID: saved.id)
             pump = Task { for await event in resumed.events() { resumedAudit.receive(event) } }
-            try await resumed.submit(prompt: "Return the saved continuation result without using tools.",
+            try await resumed.submit(prompt: APIHarnessBrowserContinuationInference.resumedPrompt,
                 toTaskID: saved.id, modelID: modelID)
             try await waitForTerminal(resumedAudit)
             XCTAssertEqual(resumedAudit.status, .completed); XCTAssertEqual(resumedAudit.errors, [])
             XCTAssertEqual(resumedAudit.finalTexts.last, "CONTINUATION_OBSERVED")
             let finalReceipt = await inference.receipt()
-            XCTAssertEqual(finalReceipt.requests, 6)
+            XCTAssertEqual(finalReceipt.requests, 11)
+            XCTAssertEqual(finalReceipt.ordinaryRequests, 8)
+            XCTAssertEqual(finalReceipt.maintenanceRequests, 3)
+            XCTAssertEqual(finalReceipt.hostTurnIDs.count, 3)
+            XCTAssertEqual(Set(finalReceipt.hostTurnIDs).count, 3)
             XCTAssertTrue(finalReceipt.coldResumePreserved)
             XCTAssertEqual(finalReceipt.failures, [])
             let counts = await backend.counts()
-            XCTAssertEqual(counts.inventories, 1); XCTAssertEqual(counts.created, 0)
+            XCTAssertEqual(counts.inventories, 2); XCTAssertEqual(counts.created, 0)
             XCTAssertEqual(counts.mutations, 0); XCTAssertEqual(counts.activations, 0)
             XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
             let stopped = await resumed.shutdown()
             XCTAssertTrue(stopped.succeeded, stopped.issues.joined(separator: "; "))
             pump?.cancel(); pump = nil; owned = nil
+            let resumedWire = try AppServerWireTrace.load(root.appendingPathComponent("resumed.jsonl"))
+            let resumedTurnIDs = resumedWire.messages.compactMap { message -> String? in
+                guard message.direction == .serverToClient, message.method == "turn/started",
+                      let params = message.object["params"] as? [String: Any],
+                      let turn = params["turn"] as? [String: Any] else { return nil }
+                return (turn["id"] as? String)?.lowercased()
+            }
+            XCTAssertEqual(resumedTurnIDs, Array(finalReceipt.hostTurnIDs.suffix(1)))
+            let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+            let files = FileManager.default.enumerator(at: sessions, includingPropertiesForKeys: [.isRegularFileKey])
+            var compactions = 0
+            while let file = files?.nextObject() as? URL {
+                guard file.pathExtension == "jsonl" else { continue }
+                for line in try Data(contentsOf: file).split(separator: 0x0A) {
+                    let row = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+                    if row?["type"] as? String == "compacted" { compactions += 1 }
+                }
+            }
+            XCTAssertEqual(compactions, 3, "The real engine must persist all three forced maintenance results")
             guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Browser continuation invariants failed.") }
             await upstream.stop()
             try FileManager.default.removeItem(at: root)
@@ -1193,8 +1241,18 @@ private actor APIHarnessBrowserLifecycleInference {
 }
 
 private actor APIHarnessBrowserContinuationInference {
+    static let priorPrompt = "List the available synthetic browser tabs and return PRIOR_TASK_COMPLETE. Do not open, bind, read, navigate or act on a page."
+    static let currentPrompt = "Read the existing fixture browser tab and continue its partial page. Read only."
+    static let resumedPrompt = "Return the saved continuation result without using tools."
     struct Receipt: Sendable {
         var requests = 0
+        var ordinaryRequests = 0
+        var maintenanceRequests = 0
+        var currentTaskOrdinaryChecks = 0
+        var currentTaskMaintenanceChecks = 0
+        var summaryAssistantChecks = 0
+        var catalogStatesMatched = false
+        var hostTurnIDs = [String]()
         var sameCaptureContinued = false
         var cursorArgumentsExact = false
         var coldResumePreserved = false
@@ -1206,6 +1264,9 @@ private actor APIHarnessBrowserContinuationInference {
     private var cursor: String?
     private var continuationArguments: String?
     private var continuationOutput: String?
+    private var continuationName: String?
+    private var unboundCatalog: Data?
+    private var boundCatalog: Data?
     init(expectedKey: String) { self.expectedKey = expectedKey }
     func receipt() -> Receipt { observations }
 
@@ -1216,25 +1277,120 @@ private actor APIHarnessBrowserContinuationInference {
                   request.headers["authorization"] == "Bearer " + expectedKey,
                   let body = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
                   body["stream"] as? Bool == true,
-                  let messages = body["messages"] as? [[String: Any]],
-                  let tools = body["tools"] as? [[String: Any]] else { throw APIHarnessFailure("continuation_request") }
-            func function(_ nativeName: String) throws -> [String: Any] {
-                let found = tools.compactMap { $0["function"] as? [String: Any] }.filter {
-                    $0["name"] as? String == nativeName
-                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
-                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
+                  let messages = body["messages"] as? [[String: Any]] else { throw APIHarnessFailure("continuation_request") }
+            let tools = body["tools"] as? [[String: Any]] ?? []
+            let maintenance = tools.isEmpty
+            if maintenance { observations.maintenanceRequests += 1 }
+            else { observations.ordinaryRequests += 1 }
+            let ordinary = observations.ordinaryRequests
+            let stage = ordinary <= 2 ? 0 : ordinary <= 7 ? 1 : 2
+            func text(_ item: [String: Any]) -> String { item["content"] as? String ?? "" }
+            let checkpoints = messages.filter { text($0).hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n") }
+            guard checkpoints.count == 1, let host = checkpoints.first,
+                  host["role"] as? String == "developer",
+                  let turnLine = text(host).split(separator: "\n").first(where: { $0.hasPrefix("Host current turn: ") }),
+                  let turnID = UUID(uuidString: String(turnLine.dropFirst("Host current turn: ".count))),
+                  !text(host).contains(Self.priorPrompt), !text(host).contains(Self.currentPrompt),
+                  !text(host).contains(Self.resumedPrompt), body["client_metadata"] == nil else {
+                throw APIHarnessFailure("continuation_checkpoint_authority")
+            }
+            let currentTurnID = turnID.uuidString.lowercased()
+            if observations.hostTurnIDs.count == stage { observations.hostTurnIDs.append(currentTurnID) }
+            guard observations.hostTurnIDs.count == stage + 1,
+                  observations.hostTurnIDs[stage] == currentTurnID else { throw APIHarnessFailure("continuation_checkpoint_wrong_turn") }
+            if !maintenance, [1, 3, 8].contains(ordinary) {
+                guard text(host).lowercased().contains("no browser operations") else { throw APIHarnessFailure("continuation_prior_counts_carried") }
+            }
+            if stage == 1 {
+                let prior = messages.indices.filter { text(messages[$0]) == Self.priorPrompt }
+                let completed = messages.indices.filter { text(messages[$0]) == "PRIOR_TASK_COMPLETE" }
+                let current = messages.indices.filter { text(messages[$0]) == Self.currentPrompt }
+                guard prior.count == 1, completed.count == 1, current.count == (maintenance ? 2 : 1),
+                      messages[prior[0]]["role"] as? String == "user",
+                      messages[completed[0]]["role"] as? String == "assistant",
+                      current.allSatisfy({ messages[$0]["role"] as? String == "user" }),
+                      prior[0] < completed[0], completed[0] < current[0] else {
+                    throw APIHarnessFailure("continuation_two_task_order")
                 }
+                if maintenance {
+                    guard (1...3).contains(observations.maintenanceRequests),
+                          ordinary == observations.maintenanceRequests + 3,
+                          current.last == messages.count - 2,
+                          messages.last?["role"] as? String == "user",
+                          text(messages.last!).contains("INTERNAL CONTEXT MAINTENANCE."),
+                          text(host).contains("context maintenance only") else {
+                        throw APIHarnessFailure("continuation_maintenance_current_user_order")
+                    }
+                    observations.currentTaskMaintenanceChecks += 1
+                } else {
+                    guard text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_ordinary_tail") }
+                    for index in messages.indices where (messages[index]["tool_call_id"] as? String ?? "").hasPrefix("continuation-") {
+                        guard current[0] < index else { throw APIHarnessFailure("continuation_user_after_tool_evidence") }
+                    }
+                    observations.currentTaskOrdinaryChecks += 1
+                    if observations.maintenanceRequests > 0 {
+                        let summaries = messages.filter { text($0).contains("CURRENT_TASK_SUMMARY_") }
+                        guard summaries.allSatisfy({ $0["role"] as? String == "assistant" }),
+                              summaries.contains(where: { text($0).contains("CURRENT_TASK_SUMMARY_\(observations.maintenanceRequests):") }) else {
+                            throw APIHarnessFailure("continuation_summary_authority")
+                        }
+                        observations.summaryAssistantChecks += 1
+                    }
+                }
+                if ordinary >= 4 {
+                    guard text(host).contains("browser_tabs: completed=1 failed=0") else { throw APIHarnessFailure("continuation_checkpoint_counts") }
+                }
+            } else if !maintenance {
+                let prompt = stage == 0 ? Self.priorPrompt : Self.resumedPrompt
+                let current = messages.filter { text($0) == prompt }
+                guard current.count == 1, current[0]["role"] as? String == "user",
+                      text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_other_turn_order") }
+            } else { throw APIHarnessFailure("continuation_maintenance_wrong_task") }
+            func matches(_ function: [String: Any], _ nativeName: String) -> Bool {
+                function["name"] as? String == nativeName
+                    || (function["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
+                    || (function["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
+            }
+            func function(_ nativeName: String) throws -> [String: Any] {
+                let found = tools.compactMap { $0["function"] as? [String: Any] }.filter { matches($0, nativeName) }
                 guard found.count == 1 else { throw APIHarnessFailure("continuation_tool_not_registered") }
                 return found[0]
             }
-            let read = try function("browser_read"), continuation = try function("browser_continue")
-            guard let readSchema = read["parameters"] as? [String: Any],
-                  let readProperties = readSchema["properties"] as? [String: Any],
-                  Set(readProperties.keys) == Set(["view", "query"]),
-                  let continueSchema = continuation["parameters"] as? [String: Any],
-                  let continueProperties = continueSchema["properties"] as? [String: Any],
-                  Set(continueProperties.keys) == Set(["cursor"]),
-                  continueSchema["required"] as? [String] == ["cursor"] else { throw APIHarnessFailure("continuation_schema") }
+            if !maintenance {
+                let dependent = ["browser_read", "browser_continue", "browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_close"]
+                let bytes = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
+                if ordinary <= 4 || ordinary == 8 {
+                    guard tools.allSatisfy({ item in
+                        guard let function = item["function"] as? [String: Any] else { return false }
+                        return !dependent.contains(where: { matches(function, $0) })
+                    }) else { throw APIHarnessFailure("continuation_unbound_capability_leak") }
+                    for name in ["browser_tabs", "browser_open", "browser_bind"] { _ = try function(name) }
+                    if let previous = unboundCatalog, bytes != previous { throw APIHarnessFailure("continuation_unbound_catalog_changed") }
+                    unboundCatalog = bytes
+                } else {
+                    for name in dependent { _ = try function(name) }
+                    if let previous = boundCatalog, bytes != previous { throw APIHarnessFailure("continuation_bound_catalog_changed") }
+                    boundCatalog = bytes
+                    let visibleUnbound = tools.filter { item in
+                        guard let function = item["function"] as? [String: Any] else { return true }
+                        return !dependent.contains(where: { matches(function, $0) })
+                    }
+                    guard let unboundCatalog,
+                          try JSONSerialization.data(withJSONObject: visibleUnbound, options: [.sortedKeys]) == unboundCatalog else {
+                        throw APIHarnessFailure("continuation_catalog_delta_not_only_binding")
+                    }
+                    let read = try function("browser_read"), continuation = try function("browser_continue")
+                    guard let readSchema = read["parameters"] as? [String: Any],
+                          let readProperties = readSchema["properties"] as? [String: Any],
+                          Set(readProperties.keys) == Set(["view", "query"]),
+                          let continueSchema = continuation["parameters"] as? [String: Any],
+                          let continueProperties = continueSchema["properties"] as? [String: Any],
+                          Set(continueProperties.keys) == Set(["cursor"]),
+                          continueSchema["required"] as? [String] == ["cursor"] else { throw APIHarnessFailure("continuation_schema") }
+                    continuationName = continuation["name"] as? String
+                    observations.catalogStatesMatched = true
+                }
+            }
             func output(_ id: String) throws -> String {
                 let matches = messages.filter { $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == id }
                 guard matches.count == 1, let text = matches[0]["content"] as? String else { throw APIHarnessFailure("continuation_output") }
@@ -1255,46 +1411,59 @@ private actor APIHarnessBrowserContinuationInference {
             }
             let delta: [String: Any]
             let finish: String
-            switch observations.requests {
+            let highUsage = !maintenance && [4, 5, 6].contains(ordinary)
+            if maintenance {
+                delta = ["role": "assistant", "content": "CURRENT_TASK_SUMMARY_\(observations.maintenanceRequests): The prior inventory task is complete. The current task is to read the existing fixture tab and continue its partial page. Preserve the genuine current tool receipts; no page input was requested."]
+                finish = "stop"
+            } else { switch ordinary {
             case 1:
-                delta = try call("browser_tabs", id: "continuation-tabs", arguments: [:]); finish = "tool_calls"
+                delta = try call("browser_tabs", id: "prior-task-tabs", arguments: [:]); finish = "tool_calls"
             case 2:
+                guard try output("prior-task-tabs").contains(InertRuntimeBrowser.humanID) else { throw APIHarnessFailure("continuation_prior_inventory") }
+                delta = ["role": "assistant", "content": "PRIOR_TASK_COMPLETE"]; finish = "stop"
+            case 3:
+                delta = try call("browser_tabs", id: "continuation-tabs", arguments: [:]); finish = "tool_calls"
+            case 4:
                 guard try output("continuation-tabs").contains(InertRuntimeBrowser.humanID) else { throw APIHarnessFailure("continuation_inventory") }
                 delta = try call("browser_bind", id: "continuation-bind", arguments: ["tab_id": InertRuntimeBrowser.humanID]); finish = "tool_calls"
-            case 3:
+            case 5:
+                guard observations.maintenanceRequests == 1 else { throw APIHarnessFailure("continuation_first_compaction_missing") }
                 _ = try output("continuation-bind")
                 delta = try call("browser_read", id: "continuation-read", arguments: ["view": "all"]); finish = "tool_calls"
-            case 4:
+            case 6:
+                guard observations.maintenanceRequests == 2 else { throw APIHarnessFailure("continuation_second_compaction_missing") }
                 let text = try output("continuation-read")
                 source = try field("source_observation", in: text)
                 cursor = try field("next_cursor", in: text)
                 guard let cursor, UUID(uuidString: cursor) != nil else { throw APIHarnessFailure("continuation_cursor") }
                 continuationArguments = String(decoding: try JSONSerialization.data(withJSONObject: ["cursor": cursor], options: [.sortedKeys]), as: UTF8.self)
                 delta = try call("browser_continue", id: "continuation-page", arguments: ["cursor": cursor]); finish = "tool_calls"
-            case 5, 6:
+            case 7, 8:
+                guard observations.maintenanceRequests == 3 else { throw APIHarnessFailure("continuation_third_compaction_missing") }
                 let text = try output("continuation-page")
                 let calls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }.filter { $0["id"] as? String == "continuation-page" }
                 guard calls.count == 1, let saved = calls[0]["function"] as? [String: Any],
-                      saved["name"] as? String == continuation["name"] as? String,
+                      saved["name"] as? String == continuationName,
                       saved["arguments"] as? String == continuationArguments,
                       try field("source_observation", in: text) == source,
                       try field("observation", in: text) == "retained",
                       let offset = Int(try field("offset", in: text)), offset > 0 else { throw APIHarnessFailure("continuation_identity") }
                 observations.sameCaptureContinued = true
                 observations.cursorArgumentsExact = true
-                if observations.requests == 5 { continuationOutput = text }
+                if ordinary == 7 { continuationOutput = text }
                 else {
                     guard text == continuationOutput else { throw APIHarnessFailure("continuation_cold_resume_bytes") }
                     observations.coldResumePreserved = true
                 }
                 delta = ["role": "assistant", "content": "CONTINUATION_OBSERVED"]; finish = "stop"
             default: throw APIHarnessFailure("continuation_unexpected_replay")
-            }
+            } }
             let id = "chatcmpl-browser-\(observations.requests)"
+            let inputTokens = highUsage ? 70_000 : 120
             let chunks: [[String: Any]] = [
                 ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [["index": 0, "delta": delta, "finish_reason": NSNull()]]],
                 ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [["index": 0, "delta": [:], "finish_reason": finish]]],
-                ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [], "usage": ["prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160]],
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-browser", "choices": [], "usage": ["prompt_tokens": inputTokens, "completion_tokens": 40, "total_tokens": inputTokens + 40]],
             ]
             var data = Data()
             for chunk in chunks {

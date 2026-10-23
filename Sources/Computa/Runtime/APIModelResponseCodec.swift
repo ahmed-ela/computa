@@ -416,7 +416,8 @@ enum APIModelResponseCodec {
     }
 
     static func prepare(_ data: Data, selection: APIProviderCatalog.Selection, threadID: String,
-                        capsules: APIReasoningCapsules, toolNaming: ToolNaming = .legacy) throws -> Request {
+                        capsules: APIReasoningCapsules, toolNaming: ToolNaming = .legacy,
+                        browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> Request {
         guard data.count <= maximumText, var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let localID = raw["model"] as? String,
               APIProviderCatalog.identity(for: localID) == APIProviderCatalog.Identity(providerID: selection.provider.id, modelID: selection.model.id),
@@ -432,7 +433,8 @@ enum APIModelResponseCodec {
         // to validate historical call/output pairs; never advertise it again.
         let historyTools = try parseTools(raw["tools"], naming: toolNaming)
         if let definitions = raw["tools"] as? [[String: Any]] {
-            raw["tools"] = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: localID)
+            raw["tools"] = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: localID,
+                browserToolAvailability: browserToolAvailability)
         }
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
@@ -455,6 +457,7 @@ enum APIModelResponseCodec {
             allowed = [tool.wireName]; required = true
             wireChoice = ["type": "function", "function": ["name": tool.wireName]]
         } else if !absent(raw["tool_choice"]) { throw Failure.invalidRequest }
+        guard !required || !allowed.isEmpty else { throw Failure.invalidTool }
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)

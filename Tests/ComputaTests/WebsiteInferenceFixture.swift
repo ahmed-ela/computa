@@ -42,6 +42,9 @@ func makeWebsiteInferenceFixtureServer(testCase: XCTestCase, rejectedReplyDirect
     await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
     await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
         runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+    // Standalone protocol fixtures have no native controller. State-specific
+    // tests replace this explicit synthetic binding; engine fixtures use Core.
+    await server.setBrowserToolAvailabilityProvider { _ in .bound }
     testCase.addTeardownBlock {
         _ = await server.shutdown()
         try? FileManager.default.removeItem(at: root)

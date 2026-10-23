@@ -8,11 +8,12 @@ final class APIModelResponseCodecTests: XCTestCase {
     private var function: [String: Any] { ["type": "function", "name": "read", "description": "Read a file", "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"], "additionalProperties": false]] }
     private var tools: [[String: Any]] { [["type": "namespace", "name": "files", "tools": [function]], ["type": "custom", "name": "apply_patch", "description": "Apply patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /.+/"]]] }
     private func request(_ changes: [String: Any] = [:], provider customProvider: APIProviderDefinition? = nil,
-                         toolNaming: APIModelResponseCodec.ToolNaming = .legacy) throws -> APIModelResponseCodec.Request {
+                         toolNaming: APIModelResponseCodec.ToolNaming = .legacy,
+                         browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> APIModelResponseCodec.Request {
         let p = customProvider ?? provider
         var object: [String: Any] = ["model": APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id), "input": [["role": "user", "content": "read it"]], "instructions": "Use the native tools.", "tools": tools, "store": false, "stream": true]
         object.merge(changes) { _, new in new }
-        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules, toolNaming: toolNaming)
+        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules, toolNaming: toolNaming, browserToolAvailability: browserToolAvailability)
     }
     private func decode(_ message: [String: Any], finish: String = "stop", request: APIModelResponseCodec.Request? = nil, model: String = "fixture-model") throws -> APIModelResponseCodec.Reply {
         let data = try JSONSerialization.data(withJSONObject: ["id": "remote1", "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": ["prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20, "completion_tokens_details": ["reasoning_tokens": 3]]])
@@ -399,6 +400,121 @@ final class APIModelResponseCodecTests: XCTestCase {
         let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
         return ["type": "function", "name": name, "description": try XCTUnwrap(definition["description"]),
                 "parameters": try XCTUnwrap(definition["inputSchema"])]
+    }
+
+    func testUnboundCatalogFiltersOnlyOriginalNativeBindingDependentShapes() throws {
+        let native = try EmbeddedBrowserTools.definitions().map { try nativeBrowserTool(XCTUnwrap($0["name"] as? String)) }
+        let kept = ["browser_tabs", "browser_open", "browser_bind"]
+        func names(_ values: [[String: Any]]) -> [String] { values.compactMap { $0["name"] as? String } }
+        for namespace in [nil, "functions"] as [String?] {
+            let catalog = namespace.map { [["type": "namespace", "name": $0, "tools": native]] } ?? native
+            XCTAssertTrue(ComputaModelToolCatalog.requiresBrowserToolAvailability(catalog))
+            let unbound = ComputaModelToolCatalog.visibleToolDefinitions(catalog, modelID: "fixture", browserToolAvailability: .unbound)
+            let children: [[String: Any]]
+            if namespace == nil { children = unbound }
+            else { children = try XCTUnwrap(unbound.first?["tools"] as? [[String: Any]]) }
+            XCTAssertEqual(names(children), kept)
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(catalog, modelID: "fixture", browserToolAvailability: .bound) as NSArray,
+                ComputaModelToolCatalog.visibleToolDefinitions(catalog, modelID: "fixture") as NSArray)
+        }
+        var savedRead = try nativeBrowserTool("browser_read"); savedRead["parameters"] = try savedBrowserCursorSchema()
+        for original in [savedRead, ["type": "function", "name": "browser_click", "parameters": legacyBrowserMutationSchema("browser_click")],
+                         ["type": "function", "name": "browser_fill", "parameters": assertedBrowserMutationSchema("browser_fill")]] {
+            XCTAssertTrue(ComputaModelToolCatalog.requiresBrowserToolAvailability([original]))
+            XCTAssertTrue(ComputaModelToolCatalog.visibleToolDefinitions([original], modelID: "fixture", browserToolAvailability: .unbound).isEmpty)
+        }
+        var narrowed = try nativeBrowserTool("browser_navigate")
+        var schema = try XCTUnwrap(narrowed["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+        properties["url"]?["minLength"] = 9_999; schema["properties"] = properties; narrowed["parameters"] = schema
+        var conflicting = try nativeBrowserTool("browser_click"); conflicting["inputSchema"] = schema
+        var extra = try nativeBrowserTool("browser_close")
+        schema = try XCTUnwrap(extra["parameters"] as? [String: Any]); schema["properties"] = ["extra": ["type": "string"]]; extra["parameters"] = schema
+        let custom: [String: Any] = ["type": "custom", "name": "browser_click", "format": ["type": "text"]]
+        for original in [narrowed, conflicting, extra, custom] {
+            XCTAssertFalse(ComputaModelToolCatalog.requiresBrowserToolAvailability([original]))
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions([original], modelID: "fixture", browserToolAvailability: .unbound) as NSArray,
+                ComputaModelToolCatalog.visibleToolDefinitions([original], modelID: "fixture") as NSArray,
+                "The gate cannot recognize a modified original only after constraint refresh")
+        }
+        for (name, field, constraint) in [("browser_continue", "cursor", "minLength"), ("browser_click", "click_ref", "minLength"),
+                                          ("browser_wait", "timeout_ms", "minimum")] {
+            var malformed = try nativeBrowserTool(name)
+            var schema = try XCTUnwrap(malformed["parameters"] as? [String: Any])
+            var fields = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+            fields[field]?[constraint] = true; schema["properties"] = fields; malformed["parameters"] = schema
+            XCTAssertFalse(ComputaModelToolCatalog.requiresBrowserToolAvailability([malformed]), "JSON booleans are not numeric schema constraints")
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions([malformed], modelID: "fixture", browserToolAvailability: .unbound) as NSArray,
+                ComputaModelToolCatalog.visibleToolDefinitions([malformed], modelID: "fixture") as NSArray)
+        }
+        let foreign: [[String: Any]] = [["type": "namespace", "name": "mcp_external", "tools": native]]
+        XCTAssertFalse(ComputaModelToolCatalog.requiresBrowserToolAvailability(foreign))
+        XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(foreign, modelID: "fixture", browserToolAvailability: .unbound) as NSArray,
+            ComputaModelToolCatalog.visibleToolDefinitions(foreign, modelID: "fixture") as NSArray)
+        let mixed: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [try nativeBrowserTool("browser_close"), function]]]
+        XCTAssertEqual((ComputaModelToolCatalog.visibleToolDefinitions(mixed, modelID: "fixture", browserToolAvailability: .unbound)
+            .first?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, ["read"])
+        XCTAssertTrue(ComputaModelToolCatalog.visibleToolDefinitions([["type": "namespace", "name": "functions",
+            "tools": [try nativeBrowserTool("browser_close")]]], modelID: "fixture", browserToolAvailability: .unbound).isEmpty)
+        XCTAssertFalse(ComputaModelToolCatalog.requiresBrowserToolAvailability([]))
+        XCTAssertFalse(ComputaModelToolCatalog.requiresBrowserToolAvailability(native.filter { kept.contains($0["name"] as? String ?? "") }))
+    }
+
+    func testUnboundProjectionPreservesHistoryWireNamesAndRejectsUnofferedCallsOnBothWires() throws {
+        let click = try nativeBrowserTool("browser_click"), tabs = try nativeBrowserTool("browser_tabs")
+        let catalog = [function, click, tabs]
+        let arguments = " { \"click_ref\" : \"bclick_old-é\" } "
+        let history: [[String: Any]] = [
+            ["type": "function_call", "name": "browser_click", "call_id": "prior-click", "arguments": arguments],
+            ["type": "function_call_output", "call_id": "prior-click", "output": "Original literal observation\nUntouched."],
+            ["role": "user", "content": "Open the current mailbox."]]
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wire, models: provider.models)
+            let all = try request(["tools": catalog, "input": history], provider: p)
+            let restricted = try request(["tools": catalog, "input": history], provider: p, browserToolAvailability: .unbound)
+            XCTAssertEqual(restricted.tools.map(\.name), ["read", "browser_tabs"])
+            XCTAssertEqual(restricted.tools.map(\.wireName), all.tools.filter { $0.name != "browser_click" }.map(\.wireName))
+            let originalBody = try XCTUnwrap(JSONSerialization.jsonObject(with: all.body) as? [String: Any])
+            let restrictedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: restricted.body) as? [String: Any])
+            let historyKey = wire == .responses ? "input" : "messages"
+            XCTAssertEqual(originalBody[historyKey] as? NSArray, restrictedBody[historyKey] as? NSArray)
+            XCTAssertTrue(String(decoding: restricted.body, as: UTF8.self).contains("prior-click"))
+            let hidden = try XCTUnwrap(all.tools.first { $0.name == "browser_click" })
+            let response: [String: Any]
+            if wire == .responses {
+                response = ["id": "r-hidden", "object": "response", "status": "completed", "model": p.models[0].id,
+                    "output": [["id": "fc-hidden", "type": "function_call", "status": "completed", "call_id": "new-hidden",
+                                "name": hidden.name, "arguments": arguments]]]
+            } else {
+                response = ["id": "r-hidden", "model": p.models[0].id, "choices": [["index": 0, "finish_reason": "tool_calls",
+                    "message": ["role": "assistant", "tool_calls": [["id": "new-hidden", "type": "function",
+                        "function": ["name": hidden.wireName, "arguments": arguments]]]]]]]
+            }
+            let result = APIProviderHTTPClient.Result(body: try JSONSerialization.data(withJSONObject: response), contentType: "application/json")
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: restricted)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+            for choice in [["type": "function", "name": "browser_click"], "required"] as [Any] {
+                XCTAssertThrowsError(try request(["tools": [click], "tool_choice": choice], provider: p, browserToolAvailability: .unbound)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+                }
+            }
+            XCTAssertNoThrow(try request(["tools": [click], "tool_choice": "none"], provider: p, browserToolAvailability: .unbound))
+            XCTAssertThrowsError(try request(["tools": [click, click]], provider: p, browserToolAvailability: .unbound))
+            XCTAssertThrowsError(try request(["tools": catalog, "input": [history[0]]], provider: p, browserToolAvailability: .unbound))
+            let restored = try request(["tools": catalog, "input": history], provider: p, browserToolAvailability: .bound)
+            XCTAssertEqual(restored.body, all.body)
+        }
+    }
+
+    func testCorrectionKeepsTheAdmittedUnboundCatalog() throws {
+        let prepared = try request(["tools": [function, try nativeBrowserTool("browser_click"), try nativeBrowserTool("browser_tabs")]],
+            browserToolAvailability: .unbound)
+        let corrected = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: rejectedDetails(prepared, arguments: #"{"path":false}"#))
+        XCTAssertEqual(corrected.tools.map(\.wireName), prepared.tools.map(\.wireName))
+        XCTAssertEqual(corrected.allowedTools, prepared.allowedTools)
+        XCTAssertFalse(corrected.tools.contains { $0.name == "browser_click" })
+        XCTAssertEqual(try wireFunctions(corrected) as NSArray, try wireFunctions(prepared) as NSArray)
     }
 
     func testSeparateContinuationUsesOnlyRegisteredNativeCapabilityAndKeepsForeignContracts() throws {

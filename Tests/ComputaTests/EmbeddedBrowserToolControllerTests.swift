@@ -8,6 +8,81 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    func testToolAvailabilityReadsOnlyCurrentBindingStateWithoutBackendWork() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let initial = await backend.counts()
+        let missing = try await controller.toolAvailability(taskKey: "turn-a")
+        XCTAssertEqual(missing, .unbound)
+        let unchanged = await backend.counts()
+        XCTAssertEqual(unchanged, initial)
+        let inventories = await backend.inventoryReadCount()
+        XCTAssertEqual(inventories, 0)
+        _ = try await call(controller, "browser_tabs")
+        let inventoried = try await controller.toolAvailability(taskKey: "turn-a")
+        XCTAssertEqual(inventoried, .unbound)
+        _ = try await call(controller, "browser_bind", ["tab_id": await backend.humanID])
+        let before = await backend.counts()
+        let bound = try await controller.toolAvailability(taskKey: "turn-a")
+        let other = try await controller.toolAvailability(taskKey: "turn-b")
+        XCTAssertEqual(bound, .bound); XCTAssertEqual(other, .unbound)
+        let after = await backend.counts()
+        XCTAssertEqual(after, before)
+        _ = try await call(controller, "browser_close")
+        let closed = try await controller.toolAvailability(taskKey: "turn-a")
+        XCTAssertEqual(closed, .unbound)
+        _ = await controller.shutdown()
+    }
+
+    func testToolAvailabilityKeepsBoundStateWhenLifecycleObservationUnavailable() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.failFreshReads([.outputLimit("Synthetic observation packing failure")])
+        let result = try await lifecycle(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        XCTAssertFalse(result.completeObservation)
+        let before = await backend.counts()
+        let availability = try await controller.toolAvailability(taskKey: "turn-a")
+        XCTAssertEqual(availability, .bound)
+        let after = await backend.counts()
+        XCTAssertEqual(after, before)
+        _ = await controller.shutdown()
+    }
+
+    func testToolAvailabilityReportsFailedBindingAsUnboundWithoutRetry() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_tabs")
+        await backend.failObservations([.browserUnavailable("Synthetic bind failure")])
+        do {
+            _ = try await call(controller, "browser_bind", ["tab_id": await backend.humanID])
+            XCTFail("Fixture binding should fail")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Synthetic bind failure")) }
+        let before = await backend.counts()
+        let availability = try await controller.toolAvailability(taskKey: "turn-a")
+        XCTAssertEqual(availability, .unbound)
+        let after = await backend.counts()
+        XCTAssertEqual(after, before)
+        _ = await controller.shutdown()
+    }
+
+    func testToolAvailabilityRejectsBusyRetiredClosedAndInvalidKeys() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        for key in ["", " ", "turn\ninvalid", String(repeating: "a", count: 4_097)] {
+            do { _ = try await controller.toolAvailability(taskKey: key); XCTFail("Invalid key") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        }
+        await backend.holdNextCreate()
+        let opening = Task { try await self.call(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
+        await backend.waitUntilCreateHeld()
+        do { _ = try await controller.toolAvailability(taskKey: "turn-a"); XCTFail("Busy key") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+        _ = await controller.releaseReport(taskKey: "turn-a")
+        do { _ = try await controller.toolAvailability(taskKey: "turn-a"); XCTFail("Retired key") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        await backend.resumeCreate()
+        do { _ = try await opening.value; XCTFail("Retired open") } catch { }
+        _ = await controller.shutdown()
+        do { _ = try await controller.toolAvailability(taskKey: "new-turn"); XCTFail("Closed controller") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+    }
+
     private func lifecycle(_ controller: EmbeddedBrowserToolController, _ tool: String,
                            _ arguments: [String: Any], key: String = "turn-a", scope: ComputerTaskScope? = nil)
         async throws -> EmbeddedBrowserToolExecution {

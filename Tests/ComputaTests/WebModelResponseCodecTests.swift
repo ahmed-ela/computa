@@ -168,6 +168,49 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testUnboundWebsiteCatalogPreservesHistoryAndContinuationWhileRejectingOldActions() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition
+            value["parameters"] = value.removeValue(forKey: "inputSchema")
+            return value
+        }
+        let oldArguments = " { \"click_ref\" : \"old-ref-é\" } "
+        let history: [[String: Any]] = [
+            ["type": "function_call", "name": "browser_click", "call_id": "old", "arguments": oldArguments],
+            ["type": "function_call_output", "call_id": "old", "output": "Exact-old-ref-é; attachment-file.pdf"],
+            ["role": "user", "content": "Start the next task"]]
+        let allowed = Set(["browser_tabs", "browser_open", "browser_bind"])
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let data = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider),
+                "input": history, "tools": native])
+            let unbound = try WebModelResponseCodec.prepareRequest(data, browserToolAvailability: .unbound)
+            let bound = try WebModelResponseCodec.prepareRequest(data, browserToolAvailability: .bound)
+            XCTAssertTrue(unbound.requiresBrowserToolAvailability)
+            XCTAssertEqual(unbound.offeredToolNames, allowed)
+            XCTAssertEqual(bound.offeredToolNames, Set(native.compactMap { $0["name"] as? String }))
+            XCTAssertEqual(unbound.continuationRequest, data)
+            XCTAssertEqual(bound.continuationRequest, data)
+            for prepared in [unbound, bound] {
+                let displayed = Data(prepared.prompt[try requestRange(in: prepared.prompt)].utf8)
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+                XCTAssertEqual(object["input"] as? NSArray, history as NSArray)
+                let offered = try XCTUnwrap(object["tools"] as? [[String: Any]])
+                XCTAssertEqual(Set(offered.compactMap { $0["name"] as? String }), prepared.offeredToolNames)
+            }
+            let oldReply = #"{"type":"tool_calls","calls":[{"name":"browser_click","arguments":{"click_ref":"old-ref-é"}}]}"#
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(oldReply, request: unbound, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("browser_click"))
+            }
+            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(oldReply, request: bound, requireEnvelope: true))
+            var forced = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            forced["tool_choice"] = ["type": "function", "name": "browser_read"]
+            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(
+                JSONSerialization.data(withJSONObject: forced), browserToolAvailability: .unbound)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidToolChoice)
+            }
+        }
+    }
+
     func testSplitBrowserReadAndContinueContractsPreserveWebsiteHistoryAndRegisteredNames() throws {
         func function(_ name: String) throws -> [String: Any] {
             var tool = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })

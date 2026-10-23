@@ -1436,3 +1436,43 @@ text was cleared; Send was disabled and no request was dispatched. This validate
 the observed startup overlap in addition to the deterministic held-load tests.
 It does not requalify the unchanged browser/model behavior from build245. No
 release, notarization or merge was performed.
+
+
+## Build 247: offer browser actions only after binding
+
+A build245 follow-up listed tabs and then attempted an old click before binding
+the new turn. API and website inference now project the callable tool catalog
+from the authenticated native turn's binding state. Before binding, recognized
+native read, continue, click, fill, navigate, wait and close tools are omitted;
+tabs, open and bind remain available. The next inference after binding restores
+the registered dependent tools. The controller query captures no page and grants
+no new authority; existing dispatch, approval and reference checks still apply.
+
+Recognition uses original native schemas before refreshing constraints. Custom
+or foreign declarations retain their existing treatment. Full original history
+and raw arguments remain unchanged; current response decoding accepts only the
+offered subset. Original wire identities remain stable, including numbered Chat
+Completions aliases and Responses names. Corrective attempts retain the same
+prepared catalog; only a new inference samples binding state again.
+
+Core validates task/thread, turn, preparation, server generation, session epoch,
+submission, Stop and cleanup state before and after the controller actor hop.
+Both servers recheck their admitted context and provider revision. Missing or
+retired state fails before provider work; empty catalogs require no availability
+query. No retry, capture, history, reference, instruction or recovery limit grew.
+
+Validation covered 543 distinct tests, all passing in their final recorded run,
+with zero skips. The first 536-case run had three failures in new test setup or
+assertions. A 106-case rerun fixed the invalid synthetic UUID cleanup fixture and
+most naming assertions; one remaining assertion conflated Chat Completions and
+Responses names. Its corrected rerun and all five bundled-engine tests passed
+(six cases). Production sources stayed unchanged throughout these test-only
+repairs, and source hashes were stable within each run. Original failures remain
+in the evidence. The actual bundled-engine test checked two successive tasks,
+three compactions, cold resume, exact current-user/history ordering, and changing
+catalog subsets across eleven bounded loopback requests. Version validation
+passed for 0.7.0 (247).
+
+These checks establish host behavior under controlled binding states. They do
+not establish that the model will keep the ODE task, select the correct message,
+or copy identifiers exactly. Installed live qualification is recorded separately.

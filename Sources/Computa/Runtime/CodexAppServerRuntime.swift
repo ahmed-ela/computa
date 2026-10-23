@@ -1054,6 +1054,15 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.installNativeBackgroundBindingForFixture(taskID: taskID, application: application, background: background)
     }
 
+    func prepareBrowserAvailabilityForFixture(taskID: AgentTask.ID) async throws -> EmbeddedBrowserToolAvailabilityRequest {
+        try await core.prepareBrowserAvailabilityForFixture(taskID: taskID)
+    }
+
+    func browserToolAvailabilityForFixture(_ request: EmbeddedBrowserToolAvailabilityRequest)
+        async throws -> EmbeddedBrowserToolAvailability {
+        try await core.browserToolAvailabilityForFixture(request)
+    }
+
     #endif
 
     func shutdown() async -> RuntimeShutdownReport {
@@ -1232,11 +1241,14 @@ private extension CodexAppServerRuntime {
         private let configuration: Configuration
         private let events: AsyncStream<AgentRuntimeEvent>.Continuation
         private var embeddedBrowserTools: EmbeddedBrowserToolController?
-        private struct EmbeddedBrowserTurnLease {
+        private var embeddedBrowserAvailabilityInstallation: Task<Void, Never>?
+        private struct EmbeddedBrowserTurnLease: Equatable {
             let key: String
             let threadID: String
             let turnID: String
             let generation: UUID
+            let epoch: UUID
+            let preparationID: UUID?
             let submission: UUID?
         }
         private var embeddedBrowserTurnKeys = [AgentTask.ID: EmbeddedBrowserTurnLease]()
@@ -1574,9 +1586,24 @@ private extension CodexAppServerRuntime {
             serverFailed(error)
         }
 
-        func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) {
-            guard !isShuttingDown, !isPreparingCommandShutdown, embeddedBrowserTools == nil else { return }
+        func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {
+            guard !isShuttingDown, !isPreparingCommandShutdown else { return }
+            if let installation = embeddedBrowserAvailabilityInstallation {
+                await installation.value
+                return
+            }
+            guard embeddedBrowserTools == nil else { return }
             embeddedBrowserTools = controller
+            let provider: EmbeddedBrowserToolAvailabilityProvider = { [weak self] request in
+                guard let self else { throw CancellationError() }
+                return try await self.browserToolAvailability(request)
+            }
+            let installation = Task { [apiModelServer, webModelServer] in
+                await apiModelServer.setBrowserToolAvailabilityProvider(provider)
+                await webModelServer.setBrowserToolAvailabilityProvider(provider)
+            }
+            embeddedBrowserAvailabilityInstallation = installation
+            await installation.value
         }
 
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
@@ -1636,6 +1663,26 @@ private extension CodexAppServerRuntime {
         }
 
         #if DEBUG
+        /// Give the local JSON-RPC fixture a preparation identity only after
+        /// its real turn has started, before any browser lease exists. This is
+        /// not a server admission substitute and is absent from Release.
+        func prepareBrowserAvailabilityForFixture(taskID: AgentTask.ID) throws -> EmbeddedBrowserToolAvailabilityRequest {
+            guard case .fixture = configuration.executable,
+                  !isRemoteInference(modelForTask[taskID] ?? ""),
+                  let threadID = threadForTask[taskID], let turnID = turnIdentity.activeTurnID(for: taskID),
+                  computerV2Sessions[taskID] != nil, embeddedBrowserTurnKeys[taskID] == nil,
+                  inferencePreparations[taskID] == nil else { throw CancellationError() }
+            let preparationID = UUID()
+            inferencePreparations[taskID] = preparationID
+            return .init(taskID: taskID, threadID: threadID, turnID: turnID, preparationID: preparationID)
+        }
+
+        func browserToolAvailabilityForFixture(_ request: EmbeddedBrowserToolAvailabilityRequest)
+            async throws -> EmbeddedBrowserToolAvailability {
+            guard case .fixture = configuration.executable else { throw CancellationError() }
+            return try await browserToolAvailability(request)
+        }
+
         func installNativeBackgroundBindingForFixture(taskID: AgentTask.ID, application: ActivatedApplication,
                                                        background: NativeBackgroundAccessibility) async throws {
             guard case .fixture = configuration.executable,
@@ -4890,6 +4937,46 @@ private extension CodexAppServerRuntime {
             var nativeRead: EmbeddedBrowserToolExecution.NativeRead? = nil
         }
 
+        private func reserveEmbeddedBrowserTurnLease(taskID: AgentTask.ID, threadID: String,
+            turnID: String, epoch: UUID, generation: UUID) throws -> EmbeddedBrowserTurnLease {
+            guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
+                  serverGeneration == generation, threadForTask[taskID] == threadID,
+                  taskForThread[threadID] == taskID, turnIdentity.activeTurnID(for: taskID) == turnID,
+                  computerV2Sessions[taskID]?.epoch == epoch,
+                  commandStoppedTurns[taskID] != turnID, nativeStoppedTurns[taskID] != turnID,
+                  contextStoppedTurns[taskID] != turnID, embeddedBrowserTaskCleanups[taskID] == nil,
+                  latestSubmissionClaims[taskID].map({ !cancelledSubmissions.contains($0) }) ?? true else {
+                throw CancellationError()
+            }
+            let expected = EmbeddedBrowserTurnLease(key: "\(generation):\(taskID):\(turnID)",
+                threadID: threadID, turnID: turnID, generation: generation, epoch: epoch,
+                preparationID: inferencePreparations[taskID], submission: latestSubmissionClaims[taskID])
+            if let existing = embeddedBrowserTurnKeys[taskID] {
+                guard existing == expected else { throw CancellationError() }
+                return existing
+            }
+            embeddedBrowserTurnKeys[taskID] = expected
+            return expected
+        }
+
+        private func browserToolAvailability(_ request: EmbeddedBrowserToolAvailabilityRequest)
+            async throws -> EmbeddedBrowserToolAvailability {
+            guard let controller = embeddedBrowserTools,
+                  inferencePreparations[request.taskID] == request.preparationID,
+                  let epoch = computerV2Sessions[request.taskID]?.epoch else { throw CancellationError() }
+            let generation = serverGeneration
+            let lease = try reserveEmbeddedBrowserTurnLease(taskID: request.taskID,
+                threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
+            let availability = try await controller.toolAvailability(taskKey: lease.key)
+            // The controller actor hop must not publish a prior preparation's
+            // state into a new turn, or recreate a lease retired by Stop.
+            guard inferencePreparations[request.taskID] == request.preparationID,
+                  embeddedBrowserTurnKeys[request.taskID] == lease else { throw CancellationError() }
+            _ = try reserveEmbeddedBrowserTurnLease(taskID: request.taskID,
+                threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
+            return availability
+        }
+
         /// Browser mechanics live behind a separate controller; this boundary
         /// supplies only current-turn authority and the existing native approval.
         private func executeEmbeddedBrowserTool(_ tool: String, arguments: [String: Any],
@@ -4913,11 +5000,9 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.serverError(violation)
             }
             let generation = serverGeneration
-            let lease = embeddedBrowserTurnKeys[taskID] ?? EmbeddedBrowserTurnLease(
-                key: "\(generation):\(taskID):\(turnID)", threadID: threadForTask[taskID] ?? taskID,
-                turnID: turnID, generation: generation, submission: latestSubmissionClaims[taskID])
-            guard lease.turnID == turnID, lease.generation == generation else { throw CancellationError() }
-            embeddedBrowserTurnKeys[taskID] = lease
+            guard let threadID = threadForTask[taskID] else { throw CancellationError() }
+            let lease = try reserveEmbeddedBrowserTurnLease(taskID: taskID, threadID: threadID,
+                turnID: turnID, epoch: epoch, generation: generation)
             let key = lease.key
             let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
             func observeReadScope(_ scope: EmbeddedBrowserReadFailureScope?) throws {

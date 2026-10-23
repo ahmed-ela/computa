@@ -205,6 +205,8 @@ actor WebModelServer {
     private var embeddedTransport: (any WebModelTransport)?
     private var embeddedTransportGeneration = UUID()
     private var embeddedTransportIdentity: AnyObject?
+    private var browserToolAvailabilityProvider: EmbeddedBrowserToolAvailabilityProvider?
+    private var browserToolAvailabilityProviderRevision = UUID()
     private var yieldedTurns: [String: YieldedTurn] = [:]
     private var closedTurns: [String: ClosedTurn] = [:]
     // A claimed Send whose output failed was never handed off. Saving its
@@ -239,6 +241,11 @@ actor WebModelServer {
     private let rejectedReplyDirectory: URL?
     private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
+
+    func setBrowserToolAvailabilityProvider(_ provider: EmbeddedBrowserToolAvailabilityProvider?) {
+        browserToolAvailabilityProvider = provider
+        browserToolAvailabilityProviderRevision = UUID()
+    }
 
     func configureCleanupReceipts(directory: URL, runtimeGeneration: UUID,
                                   observer: @escaping @Sendable (WebsiteSessionCleanupReceipt) async -> Void) {
@@ -765,15 +772,10 @@ actor WebModelServer {
         return try await operation.value
     }
 
-    private func perform(_ request: WebModelResponseCodec.Request, provider: String,
+    private func perform(_ originalRequest: WebModelResponseCodec.Request, provider: String,
                          taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
-        if provider == "chatgpt" {
-            // Finite sizes only: no prompt, account data, URLs or authority tokens.
-            // Presentation measurements do not change admission or tool policy.
-            Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
-        }
         var inferenceID = UUID()
         let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
         var lease = sessions[taskID]
@@ -791,12 +793,10 @@ actor WebModelServer {
         var correctionFinished = false
         var rejectionRecordedID: UUID?
         var responseDeadline: ContinuousClock.Instant?
-        // The original Request remains the only tool/policy/continuation
-        // authority. Only the website presentation gets a trusted format note.
-        let correctionPrompt = request.prompt + Self.formatCorrectionReminder
         func requireCurrentContext(includeResponseDeadline: Bool = true) throws {
             try Task.checkCancellation()
-            guard context.runtimeGeneration == cleanupRuntimeGeneration,
+            guard !shuttingDown, !retiringTaskIDs.contains(taskID), cleanupTasks[taskID] == nil,
+                  context.runtimeGeneration == cleanupRuntimeGeneration,
                   inferenceContexts[taskID] == context,
                   identity == NativeRequestIdentity(threadID: context.threadID, turnID: context.turnID),
                   transportGeneration == embeddedTransportGeneration else {
@@ -805,6 +805,34 @@ actor WebModelServer {
             if includeResponseDeadline, correctionTicket != nil, let responseDeadline,
                ContinuousClock.now >= responseDeadline { throw Failure.deadline }
         }
+        // Validate the full saved request first, then project its callable subset
+        // only after native turn admission. Freeze it for corrective attempts;
+        // continuation checks still use the unchanged original request bytes.
+        try requireCurrentContext()
+        let request: WebModelResponseCodec.Request
+        if originalRequest.requiresBrowserToolAvailability {
+            guard let browserToolAvailabilityProvider else { throw Failure.inferenceContextRequired }
+            let revision = browserToolAvailabilityProviderRevision
+            let availability: EmbeddedBrowserToolAvailability
+            do {
+                availability = try await browserToolAvailabilityProvider(.init(taskID: taskID,
+                    threadID: context.threadID, turnID: context.turnID, preparationID: context.preparationID))
+            } catch {
+                try Task.checkCancellation()
+                throw Failure.inferenceContextRequired
+            }
+            try requireCurrentContext()
+            guard revision == browserToolAvailabilityProviderRevision else { throw Failure.inferenceContextRequired }
+            request = try WebModelResponseCodec.prepareRequest(originalRequest.continuationRequest,
+                browserToolAvailability: availability)
+        } else {
+            request = originalRequest
+        }
+        if provider == "chatgpt" {
+            // Finite sizes only: no prompt, account data, URLs or authority tokens.
+            Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
+        }
+        let correctionPrompt = request.prompt + Self.formatCorrectionReminder
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)
             guard !session.provesNativeContinuation || current != nil else { throw Failure.modelUnverified }

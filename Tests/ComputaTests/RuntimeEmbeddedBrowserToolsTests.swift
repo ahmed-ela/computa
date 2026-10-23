@@ -7,6 +7,97 @@ import XCTest
 /// with an inert browser backend. No provider, Chrome, UI or network is used.
 @MainActor
 final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
+    func testAvailabilityUsesCurrentNativeLeaseAcrossTabsBindingCloseAndNewTurn() async throws {
+        try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_close", "arguments": [:]],
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+            ], hold: true, pauseForNativeBinding: true, pauseAfterEachCall: true)
+            try await self.waitFor { harness.audit.status == .running }
+            let request = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+            let before = await harness.backend.counts()
+            let initial = try await harness.runtime.browserToolAvailabilityForFixture(request)
+            XCTAssertEqual(initial, .unbound)
+            let after = await harness.backend.counts()
+            XCTAssertEqual(after, before)
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            for invalid in [
+                EmbeddedBrowserToolAvailabilityRequest(taskID: "foreign", threadID: request.threadID,
+                    turnID: request.turnID, preparationID: request.preparationID),
+                .init(taskID: request.taskID, threadID: "foreign", turnID: request.turnID, preparationID: request.preparationID),
+                .init(taskID: request.taskID, threadID: request.threadID, turnID: "foreign", preparationID: request.preparationID),
+                .init(taskID: request.taskID, threadID: request.threadID, turnID: request.turnID, preparationID: UUID()),
+            ] {
+                do { _ = try await harness.runtime.browserToolAvailabilityForFixture(invalid); XCTFail("Foreign admission") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            }
+            try Data().write(to: harness.root.appendingPathComponent("native-binding-continue"))
+            for (index, expected) in [EmbeddedBrowserToolAvailability.unbound, .bound, .unbound, .bound].enumerated() {
+                try await self.waitFor { harness.rowCount == index + 1 }
+                let previous = await harness.backend.counts()
+                let availability = try await harness.runtime.browserToolAvailabilityForFixture(request)
+                XCTAssertEqual(availability, expected)
+                let current = await harness.backend.counts()
+                XCTAssertEqual(current, previous, "Catalog queries must not observe or operate a tab")
+                if index == 2 { await harness.backend.failNextRead() }
+                try Data().write(to: harness.root.appendingPathComponent("continue-\(index + 1)"))
+            }
+            let rows = try harness.rows()
+            XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            XCTAssertTrue((rows.last?["text"] as? String)?.contains("unavailable") == true,
+                          "A successful open stays bound even when its separate capture fails")
+            try await harness.runtime.interrupt(taskID: Harness.taskID)
+            do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("Stopped preparation") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            try await self.waitFor { harness.audit.status != .running }
+            let cleanup = try XCTUnwrap(harness.websiteCleanupReceipts().last)
+            XCTAssertTrue(cleanup.isValid)
+            XCTAssertTrue(cleanup.receiptSaved)
+            XCTAssertEqual(cleanup.outcome, .noOwnedSession)
+            XCTAssertEqual(cleanup.taskID, request.taskID)
+            XCTAssertEqual(cleanup.threadID, request.threadID)
+            XCTAssertEqual(cleanup.turnID, request.turnID)
+            try await harness.submit([], hold: true)
+            try await self.waitFor { harness.audit.status == .running }
+            let next = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+            XCTAssertNotEqual(next.turnID, request.turnID)
+            XCTAssertNotEqual(next.preparationID, request.preparationID)
+            let nextAvailability = try await harness.runtime.browserToolAvailabilityForFixture(next)
+            XCTAssertEqual(nextAvailability, .unbound)
+            do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("Previous turn") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            let final = await harness.backend.counts()
+            XCTAssertEqual(final.created, 1); XCTAssertEqual(final.ownedClosed, 1)
+            XCTAssertEqual(final.mutations, 0); XCTAssertTrue(final.humanIntact)
+        }
+    }
+
+    func testAvailabilityRejectsMissingControllerAndCancelledQuery() async throws {
+        for configured in [false, true] {
+            try await withHarness(configured: configured) { harness in
+                try await harness.submit([], hold: true)
+                try await self.waitFor { harness.audit.status == .running }
+                let request = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+                if configured {
+                    let query = Task {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                        return try await harness.runtime.browserToolAvailabilityForFixture(request)
+                    }
+                    do { _ = try await query.value; XCTFail("Cancelled query") }
+                    catch { XCTAssertTrue(error is CancellationError) }
+                } else {
+                    do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("No controller") }
+                    catch { XCTAssertTrue(error is CancellationError) }
+                }
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts, InertRuntimeBrowser.Counts())
+                XCTAssertTrue(harness.audit.approvals.isEmpty)
+            }
+        }
+    }
+
     func testLifecycleCapabilityPublishesOpenObservationForImmediateInputOnlyWhenEnabled() async throws {
         for enabled in [false, true] {
             try await withHarness(approval: true,
@@ -637,8 +728,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertEqual(receipts.count, 1)
             let receipt = try XCTUnwrap(receipts.first)
             XCTAssertEqual(receipt.taskID, Harness.taskID)
-            XCTAssertEqual(receipt.threadID, "embedded-browser-thread")
-            XCTAssertEqual(receipt.turnID, "embedded-turn-1")
+            XCTAssertEqual(receipt.threadID, "02000000-0000-4000-8000-000000000001")
+            XCTAssertEqual(receipt.turnID, "03000000-0000-4000-8000-000000000001")
             XCTAssertTrue(receipt.report.isSettled)
             XCTAssertEqual(receipt.report.targets.count, 1)
             XCTAssertTrue(receipt.report.targets[0].closed)
@@ -1413,7 +1504,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
 
     @MainActor
     private final class Harness {
-        static let taskID = "embedded-browser-task"
+        // Inference preparation also records normal cleanup evidence. Use the
+        // same UUID identity shape as production, including in the JSON-RPC peer.
+        static let taskID = "01000000-0000-4000-8000-000000000001"
         static let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let root: URL
         let runtime: CodexAppServerRuntime
@@ -1457,9 +1550,10 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
 
         func submit(_ calls: [[String: Any]], hold: Bool = false, interruptProbe: Bool = false,
-                    pauseForNativeBinding: Bool = false) async throws {
+                    pauseForNativeBinding: Bool = false, pauseAfterEachCall: Bool = false) async throws {
             let data = try JSONSerialization.data(withJSONObject: ["calls": calls, "hold": hold,
-                "interruptProbe": interruptProbe, "pauseForNativeBinding": pauseForNativeBinding], options: [.sortedKeys])
+                "interruptProbe": interruptProbe, "pauseForNativeBinding": pauseForNativeBinding,
+                "pauseAfterEachCall": pauseAfterEachCall], options: [.sortedKeys])
             try await runtime.submit(prompt: String(decoding: data, as: UTF8.self), toTaskID: Self.taskID, modelID: Self.modelID)
         }
         func rows() throws -> [[String: Any]] {
@@ -1482,6 +1576,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
                 .filter { $0.pathExtension == "json" }
                 .map { try JSONDecoder().decode(EmbeddedBrowserCleanupReceipt.self, from: Data(contentsOf: $0)) }
+        }
+
+        func websiteCleanupReceipts() -> [WebsiteSessionCleanupReceipt] {
+            WebsiteSessionCleanupStore(directory:
+                root.appendingPathComponent("WebsiteSessionCleanup-v1", isDirectory: true)).latest()
         }
     }
 
@@ -1585,7 +1684,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     import { join } from 'node:path';
     import { createInterface } from 'node:readline';
     const root = process.env.CODEX_HOME;
-    const threadId = 'embedded-browser-thread';
+    const threadId = '02000000-0000-4000-8000-000000000001';
+    const turnIdentity = number => `03000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
     const send = value => process.stdout.write(JSON.stringify(value) + '\n');
     const result = (id, value = {}) => send({id, result:value});
     const notify = (method, params) => send({method, params:{threadId, ...params}});
@@ -1633,7 +1733,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       for (const [key,value] of Object.entries(call.arguments ?? {})) args[key] = typeof value === 'string' && value.startsWith('@') ? refs[value.slice(1)] : value;
       const params = {threadId:call.foreignThread ? 'foreign-thread' : threadId, turnId, callId:`call-${turnCount}-${step}`, tool:call.tool, arguments:args};
       if (call.turn === 'wrong') params.turnId = 'wrong-turn';
-      if (call.turn === 'previous') params.turnId = `embedded-turn-${turnCount-1}`;
+      if (call.turn === 'previous') params.turnId = turnIdentity(turnCount-1);
       if (call.turn === 'missing') delete params.turnId;
       requests.push({turnId, step, tool:call.tool, reference:args.click_ref ?? args.fill_ref}); save('requests.json', requests);
       send({id:`request-${turnCount}-${step}`, method:'item/tool/call', params});
@@ -1697,7 +1797,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
           if (nativeRow) refs.nativeRow = Number(nativeRow.match(/^#(\d+)/)[1]);
         }
       }
-      step++; setTimeout(next, 0);
+      step++;
+      if (plan.pauseAfterEachCall) {
+        const pause = setInterval(() => {
+          if (finished || existsSync(join(root, `continue-${step}`))) { clearInterval(pause); next(); }
+        }, 10);
+      } else setTimeout(next, 0);
     }
     createInterface({input:process.stdin}).on('line', line => {
       const message = JSON.parse(line);
@@ -1716,7 +1821,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         case 'thread/resume': result(message.id, {thread:{id:threadId, turns:[], status:{type:'idle'}}, initialTurnsPage:{data:[], nextCursor:null, hasMore:false}, model:'lmstudio-community/Qwen3.5-4B-MLX-4bit'}); break;
         case 'thread/name/set': case 'thread/inject_items': result(message.id); break;
         case 'turn/start':
-          turnCount++; turnId = `embedded-turn-${turnCount}`; step = 0; finished = false;
+          turnCount++; turnId = turnIdentity(turnCount); step = 0; finished = false;
           plan = JSON.parse(message.params.input[0].text);
           save('turn-input.json', message.params.input);
           result(message.id, {turn:{id:turnId, status:'inProgress', items:[]}});
@@ -1779,9 +1884,9 @@ enum CanonicalDynamicToolTestContract {
 /// Shared only with native-engine contract tests; never a production backend.
 actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     static let humanID = "11111111-1111-4111-8111-111111111111"
-    struct Counts: Sendable {
+    struct Counts: Equatable, Sendable {
         var inventories = 0, created = 0, ownedClosed = 0, humanCloseAttempts = 0, activations = 0
-        var fills = 0, presses = 0, navigations = 0
+        var fills = 0, presses = 0, navigations = 0, observations = 0
         var humanIntact = true
         var mutations: Int { fills + presses + navigations }
     }
@@ -1880,6 +1985,7 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         return try await observe(target: current)
     }
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
+        ledger.observations += 1
         guard targets[target.targetID] == target else { throw BrowserTabBrokerError.targetClosed }
         if holdPostInputObservation, ledger.fills + ledger.presses > 0 {
             holdPostInputObservation = false
