@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -81,9 +82,20 @@ async function appInstructions() {
   };
 }
 
-function message(text: string) {
-  return { type: "message", id: "msg_fixture", role: "assistant", status: "completed",
+function message(text: string, phase: "commentary" | "final_answer" = "final_answer") {
+  return { type: "message", id: "msg_fixture_" + crypto.randomUUID(), role: "assistant", status: "completed", phase,
     content: [{ type: "output_text", text, annotations: [] }] };
+}
+
+// Assert the native model HTTP input, before either website or Chat Completions
+// translation can discard phase. Content/IDs must survive, not just a role label.
+function assertAssistantPhase(body: Json, expected: ReturnType<typeof message>) {
+  const matches = body.input.filter((item: Json) => item.id === expected.id);
+  expect(matches).toHaveLength(1);
+  expect(matches[0].role).toBe("assistant");
+  expect(matches[0].phase).toBe(expected.phase);
+  // Empty response annotations are not input message fields in the native model.
+  expect(matches[0].content).toEqual(expected.content.map(({ type, text }) => ({ type, text })));
 }
 
 function sse(output: Json[]) {
@@ -114,7 +126,8 @@ class Rpc {
   readonly frames: Json[] = [];
   readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void }>();
   private nextID = 0;
-  readonly process: ReturnType<typeof Bun.spawn>;
+  readonly process: ChildProcessWithoutNullStreams;
+  private readonly exited: Promise<number | null>;
   private readonly reader: Promise<void>;
   private readonly stderr: Promise<string>;
   failure: Error | undefined;
@@ -123,25 +136,30 @@ class Rpc {
     // The entire owned process tree may contact this fixture's loopback model;
     // attempted external network is denied, including unexpected startup calls.
     const policy = '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))';
-    this.process = Bun.spawn(["/usr/bin/sandbox-exec", "-p", policy, binary, "--listen", "stdio://",
+    this.process = spawn("/usr/bin/sandbox-exec", ["-p", policy, binary, "--listen", "stdio://",
       "-c", "project_root_markers=[]", "-c", "allow_login_shell=false",
       "-c", 'cli_auth_credentials_store="file"', "-c", 'mcp_oauth_credentials_store="file"'], {
       cwd: workspace, env: { HOME: join(home, "ProcessHome"), CODEX_HOME: home,
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin", LANG: "en_US.UTF-8" },
-      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    this.stderr = new Response(this.process.stderr).text();
+    this.exited = new Promise((resolve, reject) => { this.process.once("exit", resolve); this.process.once("error", reject); });
+    this.stderr = (async () => {
+      let output = "";
+      for await (const chunk of this.process.stderr) {
+        output += chunk.toString();
+        if (output.length > 65_536) throw new Error("Private fixture stderr exceeded its budget.");
+      }
+      return output;
+    })();
     this.reader = this.read();
   }
 
   private async read() {
-    const reader = (this.process.stdout as ReadableStream<Uint8Array>).getReader();
     const decoder = new TextDecoder();
     let pending = "";
     try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      for await (const value of this.process.stdout) {
         pending += decoder.decode(value, { stream: true });
         if (pending.length > 2_000_000) throw new Error("Oversized private fixture RPC frame.");
         for (;;) {
@@ -208,8 +226,8 @@ class Rpc {
   }
   async close() {
     (this.process.stdin as any).end();
-    try { await bounded(this.process.exited, "owned App Server exit", 5000); }
-    catch { this.process.kill("SIGTERM"); await bounded(this.process.exited, "owned App Server termination", 5000); }
+    try { await bounded(this.exited, "owned App Server exit", 5000); }
+    catch { this.process.kill("SIGTERM"); await bounded(this.exited, "owned App Server termination", 5000); }
     await this.reader;
     await this.stderr;
   }
@@ -392,20 +410,30 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
         inputSchema: { type: "object", properties: {}, additionalProperties: false } }] });
     const threadID = started.thread.id;
 
+    const commentary = message("Checking the private terminal fixture.", "commentary");
+    const terminalFinal = message("CLI fixture complete");
+    const nativeFinal = message("Native fixture complete");
     let terminalCall: Json | undefined;
     let dynamicCall: Json | undefined;
     plans.push(body => {
       assertRules(body, rules);
       expect(offered(body).map((tool: Json) => tool.name)).toContain("write_stdin");
       terminalCall = functionCall(body, "exec_command", { cmd: `/usr/bin/printf '${toolMarker}\\n'`, workdir: workspace, max_output_tokens: 1000 });
-      return [terminalCall];
-    }, body => { assertRules(body, rules); assertToolContinuation(body, terminalCall!, toolMarker); return [message("CLI fixture complete")]; });
+      return [commentary, terminalCall];
+    }, body => {
+      assertRules(body, rules); assertToolContinuation(body, terminalCall!, toolMarker);
+      assertAssistantPhase(body, commentary);
+      return [terminalFinal];
+    });
     await rpc.turn(threadID, "Read the private protocol fixture's terminal status.");
     const command = rpc.frames.find(frame => frame.method === "item/completed" && frame.params.item.type === "commandExecution");
     expect(command?.params.item.exitCode).toBe(0);
     expect(command?.params.item.aggregatedOutput).toContain(toolMarker);
-    plans.push(body => { assertRules(body, rules); dynamicCall = functionCall(body, "computer_v2_status", {}); return [dynamicCall]; }, body => {
-      assertRules(body, rules); assertToolContinuation(body, dynamicCall!, dynamicMarker); return [message("Native fixture complete")];
+    plans.push(body => {
+      assertRules(body, rules); assertAssistantPhase(body, commentary); assertAssistantPhase(body, terminalFinal);
+      dynamicCall = functionCall(body, "computer_v2_status", {}); return [dynamicCall];
+    }, body => {
+      assertRules(body, rules); assertToolContinuation(body, dynamicCall!, dynamicMarker); return [nativeFinal];
     });
     await rpc.turn(threadID, "Read the private fixture's native status.");
     expect(rpc.frames.filter(frame => frame.method === "item/tool/call")).toHaveLength(1);
@@ -417,6 +445,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       expect(offered(body).map((tool: Json) => tool.name)).toContain("computer_v2_status");
       assertToolContinuation(body, terminalCall!, toolMarker);
       assertToolContinuation(body, dynamicCall!, dynamicMarker);
+      for (const item of [commentary, terminalFinal, nativeFinal]) assertAssistantPhase(body, item);
       return [message("Cold resume complete")];
     });
     await rpc.turn(threadID, "Continue after reopening the private fixture.");
@@ -482,6 +511,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
     console.log(JSON.stringify({ verified: true, sourceCommit: runtime.pin.sourceCommit, binarySHA256: runtime.binarySHA256,
       actualModelRequests: requests.length, builtinTerminalContinuation: true, dynamicToolContinuation: true,
       exactTerminalSchemasRetained: regularSchemaAssertions, noToolsCompactionRequests: compactSchemaAssertions,
+      explicitAssistantPhaseCurrentTurnAndColdResume: true,
       coldResume: true, noToolsCompaction: true, exactAppCompactionPrompt: true, postCompaction: true, syntheticHistoryMessages: 80,
       nativeRequestKindHeaderAndBodyAgree: true, nativeRequestKinds,
       coldResumeDeveloperOverrideObserved: developerOverrideObserved, coldResumeBaseOverrideObserved: true,

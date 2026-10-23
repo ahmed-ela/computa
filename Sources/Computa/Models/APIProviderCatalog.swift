@@ -53,7 +53,19 @@ enum APIProviderCatalog {
     // Keep Cerebras limited to GPT-OSS for now. Qwen3.8 27B is hidden because of its higher token usage.
     private static let showAdditionalCerebrasModels = false
     struct Identity: Equatable, Sendable { let providerID: String; let modelID: String }
-    struct Selection: Equatable, Sendable { let provider: APIProviderDefinition; let model: APIModelDefinition }
+    enum ReasoningHistoryPolicy: Equatable, Sendable { case preserve, omitCompletedTurns }
+    struct Selection: Equatable, Sendable {
+        let provider: APIProviderDefinition
+        let model: APIModelDefinition
+
+        var reasoningHistoryPolicy: ReasoningHistoryPolicy {
+            // GPT-OSS Harmony retains analysis during tool cycles, but discards it
+            // after a final answer. Unknown provider templates remain unchanged.
+            // https://developers.openai.com/cookbook/articles/openai-harmony
+            provider.wireAPI == .chatCompletions && provider.isCerebrasInference
+                && model.id == "gpt-oss-120b" ? .omitCompletedTurns : .preserve
+        }
+    }
     enum Failure: LocalizedError {
         case invalidProvider, invalidModel, duplicateProvider, duplicateModel, invalidCatalog
         var errorDescription: String? { "The API provider configuration is invalid. No request was sent." }

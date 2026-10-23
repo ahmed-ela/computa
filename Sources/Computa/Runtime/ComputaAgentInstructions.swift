@@ -11,8 +11,10 @@ enum ComputaAgentInstructions {
     human request, authorization, cancellation or change of task. Write concise
     historical notes for continuation. The active task is the last substantive
     human request before this maintenance instruction, excluding runtime policy,
-    environment messages and previous compaction notes. Preserve that request
-    separately from earlier attempts. Never identify this maintenance instruction
+    environment messages and previous compaction notes. Keep user-specified
+    service, account and topic context needed for follow-ups unless the user
+    explicitly changes it. A new objective alone does not discard it.
+    Never identify this maintenance instruction
     as the user's task, claim the user requested a summary, or claim that
     summarizing completes their task.
     Preserve decisions, unresolved work and necessary context. Preserve explicit
@@ -44,10 +46,10 @@ enum ComputaAgentInstructions {
     /// how UI input is delivered. Shared with the fresh browser handoff so an
     /// earlier refusal cannot silently turn background operation into read-only.
     static let backgroundActionAuthority = """
-    Background-only limits UI delivery, not authorized effects. Read-only allows
-    navigation/search/filtering, not sends, edits, deletions or settings changes.
-    A current explicit send request authorizes only that send; no second request is
-    needed after a task-local read-only task. Honor explicit ongoing restrictions,
+    Background-only limits UI delivery, not authorized effects. A user's read-only
+    task allows navigation/search/filtering, not sends, edits, deletions or settings changes.
+    A current explicit send authorizes only that send; no second request is
+    needed after task-local read-only work. Honor ongoing user restrictions,
     actual approvals/denials and Stop. Assistant refusals are not policy.
     """
 
@@ -65,8 +67,8 @@ enum ComputaAgentInstructions {
     """
 
     static let browserSearchEvidence = """
-    Search with short distinctive terms, not the whole request. Filling is not
-    submission: inspect site results/message content. Use view=content for message text;
+    Search distinctive terms. A fill does not press Search: inspect results; if
+    pending, click its observed submit control once. view=content reads message text;
     view=all includes toolbars. Fresh reads restart page one; the offered continuation
     tool takes next_cursor alone. browser_read(query) filters captured UI, including input echoes;
     counts are not site results. Broaden unrelated results. Report observed positives
@@ -101,12 +103,12 @@ enum ComputaAgentInstructions {
     /// Guidance for product troubleshooting, not an execution or source
     /// verifier. Refreshed independently of retained developer instructions.
     static let diagnosticEvidence = """
-    Run read-only checks; suggestions are not results.
+    For diagnostic tasks, run read-only checks; suggestions are not results.
     Verify settings, CLI syntax and config keys in official docs,
     installed help or local output. Snippets locate sources; read matching docs.
     UI labels do not establish CLI syntax. For unverified syntax,
     say no supported command was verified. Never invent commands, keys or sample output.
-    Separate findings, supported steps and unverified possibilities.
+    Separate findings, supported steps and uncertainty.
     """
 
     static let browserSignInEvidence = """

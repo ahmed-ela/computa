@@ -960,10 +960,53 @@ overlapped runtime signing. The new bundled fixture initially used a symlinked
 using the canonical temporary directory fixed that fixture without weakening
 the store. Final tests supersede these attempts; the initial logs remain.
 
-Installation and live model acceptance are still pending at this checkpoint.
-Build 239's account-picker, ODE follow-up and same-chat send failures are not
-claimed fixed by source tests. The split removes a known invalid-argument choice;
-live evidence must establish whether it improves task completion.
+Signed build 240 installed from `5ce105d` with runtime `mactopus-14`.
+Remote Cerebras GPT-OSS120b at medium effort produced mixed completed results:
+
+- Local read passed in 3.244 seconds with five calls, the exact attachment
+  filename and zero POSTs. The same-chat explicit send failed in 0.543 seconds
+  with zero tools or POSTs: the model incorrectly treated the earlier read-only
+  task as a host prohibition despite current authorization. No native gate
+  rejected the send.
+- Fresh local send passed in 5.743 seconds with ten calls and one stale-reference
+  rejection. Exactly one POST matched all three requested fields, and the answer
+  cited the current observed receipt. No failed action dispatched input.
+- Real Outlook reached the requested account's mailbox and used three successful
+  cursor-only continuations, but failed after 40.017 seconds and 37 calls, with
+  two native failures and two compactions. It never established the attachment
+  filename before the unchanged 32-pair retention bound stopped the turn. A
+  distinct eligible Search button was exposed after filling the site's search
+  field; the model selected message options instead and never clicked Search.
+- The ODE follow-up failed after 37.612 seconds and fourteen calls. It reported
+  generic public web snippets as announcements for the user's class. Compaction
+  retained the original Outlook/account request, but its generated summary
+  described that task as unrelated. This is a context-interpretation failure,
+  not proof that the original human context was removed.
+- Read-only diagnostics failed semantic acceptance after 42.844 seconds and
+  41 calls. Real official documentation supported general browser-policy controls,
+  but the answer asserted an unobserved workspace setting, exact unobserved toggle
+  wording and universal CLI absence. Fifteen shell commands were read-only and
+  ultimately terminal; broad scans and unsupported command options added work.
+
+`browser_continue` worked in the local send, Outlook and ODE trials. The local
+trials had no compaction, so they do not qualify retention behavior. Successful
+continuation transport does not prove correct search submission, target choice,
+result interpretation or authorization adherence.
+
+Owned-tab cleanup was separately observed: fresh send, ODE and diagnostics
+preserved user tabs and left an empty composer with Send disabled; local read
+preserved user tabs. The attachment trial closed one owned tab, without a separate
+user-tab-preservation observation for that turn. The zero-tool refusal created no
+owned tabs. No real mail send, forward, download or delete, or configuration
+mutation, was observed.
+
+A separate manual CUA diagnostic reached the mailbox in the same browser profile,
+filled search and clicked the distinct Search button once. Results appeared
+without Enter. Its owned tab was closed and the initial zero-tab/hidden-pane state
+restored. This confirms that UI capability; it is not an autonomous lookup pass
+or attachment verification. The finite audits and corrected exact prompt
+comparisons are preserved in `work/action-reliability-20261023/audits240/`.
+The draft goal remains incomplete.
 
 The final packaging check also caught stale generated protocol exports. The real
 source generator refreshed exactly five files: the TypeScript enum, two visible
@@ -972,3 +1015,37 @@ that only `continue_v1` was added, including the stable internal rollout schema.
 Four schema consistency tests and three actual protocol decoder/serialization
 tests passed. The runtime was rebuilt with those exports and its final identity
 is recorded above; the initial pre-schema artifact and receipts are preserved.
+
+
+### Build 241 source qualification — live qualification pending
+
+The candidate qualifies read-only guidance to the user's task and diagnostic
+checks to diagnostic tasks. It preserves current-send authorization, ongoing
+user restrictions, approvals, denials and Stop. Compaction preserves needed
+user-specified service/account/topic context unless explicitly changed, while
+keeping earlier actions and results historical. Search guidance now directs one
+click on the observed submit control only after inspecting results and finding
+search still pending. It does not assume that filling cannot trigger page handlers
+or permit blind input replay. The replacement is two bytes shorter; all instruction
+limits remain unchanged. These edits do not prove model adherence.
+
+For the known Cerebras GPT-OSS120b Chat Completions route, the dispatch copy omits
+reasoning from completed turns only after an explicit final-answer phase with no
+pending calls. All saved capsules and call pairs validate first. Active tool-cycle
+reasoning, ordinary messages, calls/results and canonical history remain intact;
+other routes preserve their existing behavior. Before the final search-guidance
+edit, all 144 focused Swift tests passed, including four actual bundled-engine API
+cases, 47 instruction tests and six new reasoning-history tests. After the final
+edit, all 47 affected instruction tests passed again. The initial two schema-test failures from
+an omitted Bun path are preserved; the correctly configured rerun passed.
+
+A separate installed-runtime loopback using the GPT-OSS catalog passed 122
+assertions across five requests. Explicit commentary/final-answer phases survived
+active tool cycles, the next user turn and cold resume. The retained integration
+suite passed four tests with 352 assertions over ten native requests, including
+compaction and resume. Neither probe made a remote provider request. Initial
+launcher failures and an incorrect empty-annotation expectation remain recorded;
+the corrected harnesses passed without changing the runtime.
+
+Installed live model qualification remains pending. No execution or retention
+budget, native permission, runtime package or approval policy is changed.

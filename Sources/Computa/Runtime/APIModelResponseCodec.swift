@@ -671,6 +671,7 @@ enum APIModelResponseCodec {
         // indices, and must never become callable tools in the new request.
         var uncataloguedKinds = [String: Bool]()
         var reasoning: APIReasoningCapsules.Payload?, assistant: [String: Any]?, calls: [[String: Any]] = []
+        var assistantIsFinal = false, lastCompletedMessage: Int?
         func flush() throws {
             guard var message = assistant else {
                 guard reasoning == nil else { throw Failure.invalidHistory }; return
@@ -682,7 +683,9 @@ enum APIModelResponseCodec {
                 guard (value.toolNaming ?? ToolNaming.legacy.rawValue) == toolNaming.rawValue else { throw Failure.invalidReasoning }
                 message["reasoning"] = text
             }
-            messages.append(message); assistant = nil; calls = []; reasoning = nil
+            messages.append(message)
+            if assistantIsFinal, calls.isEmpty, pending.isEmpty { lastCompletedMessage = messages.count - 1 }
+            assistant = nil; calls = []; reasoning = nil; assistantIsFinal = false
         }
         if let instructions = raw["instructions"] as? String, !instructions.isEmpty { messages.append(["role": "system", "content": instructions]) }
         let items: [[String: Any]]
@@ -707,9 +710,13 @@ enum APIModelResponseCodec {
                 if selection.provider.isCerebrasInference, role != "user", containsImage(item["content"]) { throw Failure.unsupportedModality }
                 if role == "assistant", assistant == nil {
                     assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
+                    assistantIsFinal = item["phase"] as? String == "final_answer"
                 } else {
                     try flush(); guard pending.isEmpty else { throw Failure.invalidHistory }
-                    if role == "assistant" { assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)] }
+                    if role == "assistant" {
+                        assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
+                        assistantIsFinal = item["phase"] as? String == "final_answer"
+                    }
                     else { messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]) }
                 }
             case "function_call", "custom_tool_call":
@@ -769,6 +776,12 @@ enum APIModelResponseCodec {
         }
         try flush()
         guard pending.isEmpty, !messages.isEmpty else { throw Failure.invalidHistory }
+        // Validate every saved capsule and call pair above, including completed
+        // turns, before filtering the dispatch copy. A user append or commentary
+        // is not a completion signal; missing phase conservatively preserves it.
+        if selection.reasoningHistoryPolicy == .omitCompletedTurns, let boundary = lastCompletedMessage {
+            for index in 0...boundary { messages[index].removeValue(forKey: "reasoning") }
+        }
         return History(messages: try chatTemplateMessages(messages, selection: selection), callIDs: seen)
     }
 

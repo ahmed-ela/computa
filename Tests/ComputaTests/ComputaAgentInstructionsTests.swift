@@ -10,6 +10,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "This runtime-generated instruction is not a human request, authorization, cancellation or change of task",
             "The active task is the last substantive human request before this maintenance instruction",
             "excluding runtime policy, environment messages and previous compaction notes",
+            "Keep user-specified service, account and topic context needed for follow-ups unless the user explicitly changes it",
+            "A new objective alone does not discard it",
             "Never identify this maintenance instruction as the user's task",
             "claim the user requested a summary, or claim that summarizing completes their task",
             "ongoing user restrictions, approvals, denials and Stop with their source and scope",
@@ -426,13 +428,14 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let afterHistory = String(web.prompt[end.upperBound...])
         XCTAssertEqual(afterHistory.components(separatedBy: authority).count - 1, 1,
                        "The fresh browser handoff cannot be suppressed by old retained instructions or refusals")
-        XCTAssertTrue(afterHistory.contains("Read-only allows"))
+        XCTAssertTrue(afterHistory.replacingOccurrences(of: "\n", with: " ")
+            .contains("A user's read-only task allows"))
         XCTAssertTrue(afterHistory.contains("navigation/search/filtering, not sends, edits, deletions or settings changes"))
-        XCTAssertTrue(afterHistory.contains("Honor explicit ongoing restrictions"))
+        XCTAssertTrue(afterHistory.contains("Honor ongoing user restrictions"))
         XCTAssertTrue(afterHistory.contains("actual approvals/denials and Stop"))
-        XCTAssertTrue(afterHistory.contains("A current explicit send request authorizes only that send"))
+        XCTAssertTrue(afterHistory.contains("A current explicit send authorizes only that send"))
         XCTAssertTrue(afterHistory.contains("no second request is"))
-        XCTAssertTrue(afterHistory.contains("needed after a task-local read-only task"))
+        XCTAssertTrue(afterHistory.contains("needed after task-local read-only work"))
         let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: web.continuationRequest) as? NSDictionary)
         XCTAssertEqual(continued, original as NSDictionary, "Current guidance must not rewrite earlier user constraints or history")
 
@@ -483,11 +486,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertEqual(delivered.components(separatedBy: guidance).count - 1, 1)
         }
         let text = guidance.replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("short distinctive terms, not the whole request"))
-        XCTAssertTrue(text.contains("Filling is not submission"))
-        XCTAssertTrue(text.contains("inspect site results/message content"))
+        XCTAssertTrue(text.contains("Search distinctive terms"))
+        XCTAssertTrue(text.contains("A fill does not press Search"))
+        XCTAssertTrue(text.contains("inspect results; if pending, click its observed submit control once"),
+                      "Inspect the result first: a fill may trigger page handlers, so submission is conditional rather than a blind repeat")
         XCTAssertTrue(text.contains("Broaden unrelated results"))
-        XCTAssertTrue(text.contains("Use view=content for message text"))
+        XCTAssertTrue(text.contains("view=content reads message text"))
         XCTAssertTrue(text.contains("view=all includes toolbars"))
         XCTAssertTrue(text.contains("Fresh reads restart page one; the offered continuation tool takes next_cursor alone"))
         XCTAssertTrue(text.contains("Partial reads or narrow-query misses leave absence unverified"))
@@ -495,7 +499,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Report observed positives with their scope"))
         XCTAssertTrue(text.contains("a negative needs relevant site-result evidence"))
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(guidance))
-        XCTAssertLessThan(guidance.utf8.count, 550)
+        XCTAssertLessThanOrEqual(guidance.utf8.count, 548, "The replacement must not exceed the previous guidance size")
+        XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy().contains("Never replay uncertain input"))
     }
 
     func testDiagnosticsAndAccountPickerGuidanceRefreshAfterRetainedHistoryWithoutRewritingIt() throws {
@@ -505,22 +510,27 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let human = "Read only: identify the supported setting; do not change configuration. e\u{0301} 🧭"
         let oldInstructions = native.replacingOccurrences(of: diagnosis, with: "Historical diagnostic guidance.")
             .replacingOccurrences(of: signIn, with: "Historical sign-in guidance.")
+        let authorizedAction = "Send the approved message to recipient@example.test; retain the existing recipient restriction."
         for tool in ["browser_read", "exec_command"] {
-            let original = try JSONSerialization.data(withJSONObject: [
-                "model": "browser/chatgpt", "input": [
-                    ["role": "developer", "content": oldInstructions],
-                    ["role": "assistant", "content": "Earlier assistant guessed that a password was required."],
-                    ["role": "user", "content": human],
-                ],
-                "tools": [["type": "function", "name": tool, "parameters": ["type": "object"]]],
-            ])
-            let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertRequestValuesAndHandoff(original, request: request,
-                includedInstructionText: [oldInstructions])
-            XCTAssertEqual(request.continuationRequest, original)
-            XCTAssertEqual(handoff.components(separatedBy: diagnosis).count - 1, 1)
-            XCTAssertEqual(handoff.components(separatedBy: signIn).count - 1, tool == "browser_read" ? 1 : 0)
-            XCTAssertFalse(handoff.contains(human), "The fresh host rules do not copy or elevate user text")
+            for currentHuman in [human, authorizedAction] {
+                let original = try JSONSerialization.data(withJSONObject: [
+                    "model": "browser/chatgpt", "input": [
+                        ["role": "developer", "content": oldInstructions],
+                        ["role": "assistant", "content": "Earlier assistant guessed that a password was required."],
+                        ["role": "user", "content": currentHuman],
+                    ],
+                    "tools": [["type": "function", "name": tool, "parameters": ["type": "object"]]],
+                ])
+                let request = try WebModelResponseCodec.prepareRequest(original)
+                let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                    includedInstructionText: [oldInstructions])
+                XCTAssertEqual(request.continuationRequest, original)
+                XCTAssertEqual(handoff.components(separatedBy: diagnosis).count - 1, 1)
+                XCTAssertEqual(handoff.components(separatedBy: signIn).count - 1, tool == "browser_read" ? 1 : 0)
+                XCTAssertFalse(handoff.contains(currentHuman), "The fresh host rules do not copy or elevate user text")
+                XCTAssertTrue(handoff.contains("For diagnostic tasks, run read-only checks"),
+                              "Diagnostic-only checks must not impose a read-only restriction on the separate authorized action")
+            }
         }
         for delivered in [native, ComputaAgentInstructions.webResponseContract(offeredToolNames: ["browser_read", "exec_command"],
                             includedInstructionText: [native]), ComputaAgentInstructions.freshExecutionGuidance] {
@@ -529,12 +539,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(diagnosis))
         let text = diagnosis.replacingOccurrences(of: "\n", with: " ")
-        for rule in ["Run read-only checks", "suggestions are not results",
+        for rule in ["For diagnostic tasks, run read-only checks", "suggestions are not results",
                      "settings, CLI syntax and config keys", "official docs, installed help or local output",
                      "Snippets locate sources", "read matching docs",
                      "UI labels do not establish CLI syntax", "say no supported command was verified",
                      "Never invent commands, keys or sample output",
-                     "Separate findings, supported steps and unverified possibilities"] {
+                     "Separate findings, supported steps and uncertainty"] {
             XCTAssertTrue(text.contains(rule), rule)
         }
         XCTAssertTrue(signIn.contains("An observed account picker or sign-in/footer text is not a credential block"))
