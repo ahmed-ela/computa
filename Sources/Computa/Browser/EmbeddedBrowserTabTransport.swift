@@ -139,17 +139,40 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         try await observe(target: target, readiness: readiness)
     }
 
-    private func observe(target: BrowserTarget, readiness requestedReadiness: BrowserReadReadiness?) async throws -> BrowserDocumentObservation {
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        try await observe(target: target, readiness: readiness, authorization: authorization)
+    }
+
+    private func observe(target: BrowserTarget, readiness requestedReadiness: BrowserReadReadiness?,
+                         authorization: BrowserReadAuthorization? = nil) async throws -> BrowserDocumentObservation {
         let id = try exactID(target)
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation(for: id))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
+        try Task.checkCancellation()
+        _ = try exactID(target)
+        guard let readyTarget = self.target(for: id) else { throw BrowserTabBrokerError.targetClosed }
         let generation = try generation(for: id)
+        try authorization?(readyTarget)
+        _ = try exactID(target)
+        guard self.target(for: id)?.url == readyTarget.url,
+              try self.generation(for: id) == generation else { throw BrowserTabBrokerError.staleDocument }
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation)
         let data = try await run(
             id: id, generation: generation,
             input: ["operation": "observe", "awaitSemanticReadiness": requestedReadiness != nil,
                     "readinessView": requestedReadiness?.rawValue ?? "immediate", "timeoutMS": 10_000],
-            timeoutMS: 12_000)
+            timeoutMS: 12_000,
+            readAdmission: authorization.map { authorize in {
+                try Task.checkCancellation()
+                _ = try self.exactID(target)
+                guard let current = self.target(for: id), current.url == readyTarget.url,
+                      try self.generation(for: id) == generation else { throw BrowserTabBrokerError.staleDocument }
+                try authorize(current)
+                _ = try self.exactID(target)
+                guard self.target(for: id)?.url == readyTarget.url,
+                      try self.generation(for: id) == generation else { throw BrowserTabBrokerError.staleDocument }
+            } })
         guard data.count <= 1_000_000,
             let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             raw["loaderID"] as? String == generation.uuidString,
@@ -372,7 +395,8 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private func run(
         id: UUID, generation: UUID, input: [String: Any], timeoutMS: Int,
         deadline: ContinuousClock.Instant? = nil,
-        permit: BrowserMutationPermit? = nil, mutation: Bool = false
+        permit: BrowserMutationPermit? = nil, mutation: Bool = false,
+        readAdmission: (() throws -> Void)? = nil
     ) async throws -> Data {
         guard let source = script, let view = session.webView(for: id), session.humanTab(id: id) != nil,
             try self.generation(for: id) == generation
@@ -390,6 +414,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                     // and turn a normal unmatched wait into a browser failure.
                     result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
                     let enqueue = {
+                        try readAdmission?()
                         let operationID: UUID?
                         if mutation {
                             operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)

@@ -137,6 +137,31 @@ final class APIModelCorrectionTests: XCTestCase {
         let forged = APIModelCorrectionAccounting.Ticket(id: ticket.id, taskID: id, threadID: id, turnID: id, firstUsage: usage)
         XCTAssertThrowsError(try store.claimed(forged), "Dropping observed diagnostic cannot match the original immutable first record")
     }
+    func testReadModeConflictRoundTripsAsFiniteRootLocationWithinExistingJournalBound() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        let observed = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [.init(toolIndex: 19, constraint: .readModeConflict,
+                location: .init(tool: .browserRead, schemaPath: [], expectedType: .object, actualType: .object))],
+            callCount: 1, rejectedCount: 1, envelopeShapeValid: true, unambiguousJSON: true,
+            streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let finite = try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(observed))
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage, firstValidation: finite)
+        try store.claimed(ticket)
+        try store.finish(ticket, claimed: true, usage: usage, outcome: .argumentsRejected, secondValidation: finite)
+        let all = try records(directory)
+        XCTAssertEqual(all.count, 3)
+        XCTAssertTrue(all.allSatisfy { $0.schemaVersion == 3 && $0.firstValidation == finite })
+        XCTAssertEqual(all.first { $0.phase == "finished" }?.secondValidation, finite)
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let data = try Data(contentsOf: file), text = String(decoding: data, as: UTF8.self)
+            XCTAssertLessThanOrEqual(data.count, 2_048)
+            XCTAssertTrue(text.contains("read_mode_conflict")); XCTAssertTrue(text.contains("browser_read"))
+            for forbidden in ["\"cursor\"", "\"query\"", "\"view\"", "PRIVATE", "\"arguments\"", "allowed_forms"] {
+                XCTAssertFalse(text.contains(forbidden), "The journal carries finite diagnostic facts, not corrective text or arguments")
+            }
+        }
+    }
     func testFirstValidationRejectsPrivateFieldsUnknownValuesAndUnboundedCounts() throws {
         let observed = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
             schemaFailures: [.init(toolIndex: 0, constraint: .typeMismatch)], callCount: 2, rejectedCount: 1,

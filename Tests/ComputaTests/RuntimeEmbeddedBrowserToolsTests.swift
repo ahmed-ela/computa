@@ -1571,6 +1571,14 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
         for id in owned { targets.removeValue(forKey: id); ledger.ownedClosed += 1 }
         owned.removeAll(); return []
     }
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        try Task.checkCancellation()
+        guard let current = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
+        guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
+        try authorization(current)
+        return try await observe(target: current)
+    }
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         guard targets[target.targetID] == target else { throw BrowserTabBrokerError.targetClosed }
         if holdPostInputObservation, ledger.fills + ledger.presses > 0 {

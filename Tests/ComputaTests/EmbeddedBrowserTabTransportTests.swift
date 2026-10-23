@@ -1,6 +1,7 @@
 import AppKit
 import AutomationCore
 import Foundation
+import Network
 import WebKit
 import XCTest
 @testable import Computa
@@ -9,6 +10,82 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testFreshReadAuthorizesSettledNativeTargetBeforeAnyDriverCapture() async throws {
+        for denied in [false, true] {
+            let fixture = try HeldBrowserNavigationFixture(), base = try await fixture.start()
+            defer { fixture.stop() }
+            let finalURL = base.appendingPathComponent("authorized")
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let driver = try String(contentsOf: root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js"), encoding: .utf8)
+            let instrumented = "document.documentElement.setAttribute('data-driver-captures', String(Number(document.documentElement.getAttribute('data-driver-captures') || 0) + 1));\n" + driver
+            let transport = EmbeddedBrowserTabTransport(session: session, script: instrumented)
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+            view.loadHTMLString("<main><h1>Prior page</h1></main>", baseURL: URL(string: "http://localhost:8123/prior"))
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+            let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+            try session.navigate(tabID: id, to: finalURL)
+            await fulfillment(of: [fixture.received], timeout: 5)
+            XCTAssertTrue(view.isLoading)
+            let audit = BrowserReadAuthorizationAudit(), started = expectation(description: "Fresh read entered the existing navigation wait")
+            let read = Task { @MainActor in
+                started.fulfill()
+                return try await transport.observeForRead(target: target, readiness: .semanticContent, authorization: { candidate in
+                    try audit.authorize(candidate, expectedURL: finalURL, denied: denied)
+                })
+            }
+            await fulfillment(of: [started], timeout: 5)
+            XCTAssertEqual(audit.count, 0, "An in-flight navigation must settle before evaluating its URL scope")
+            fixture.release()
+            if denied {
+                do { _ = try await read.value; XCTFail("A denied settled page must not be captured") }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .scopeDenied("Synthetic native scope denial")) }
+                XCTAssertEqual(audit.count, 1)
+            } else {
+                let observed = try await read.value
+                XCTAssertEqual(observed.url, finalURL)
+                XCTAssertTrue(observed.nodes.contains { $0.name == "Settled authorized page" })
+                XCTAssertGreaterThanOrEqual(audit.count, 1)
+            }
+            let captureCount = try await script(view, "return Number(document.documentElement.getAttribute('data-driver-captures') || 0);")
+            XCTAssertEqual(captureCount, Data((denied ? "0" : "1").utf8), "Authorization adds no capture and denial happens before driver JS")
+        }
+    }
+
+    func testFreshReadCancellationOrTabClosureDuringNavigationNeverAuthorizesCapture() async throws {
+        for closesTab in [false, true] {
+            let fixture = try HeldBrowserNavigationFixture(), base = try await fixture.start()
+            defer { fixture.stop() }
+            let session = EmbeddedBrowserSession(persistent: false), transport = EmbeddedBrowserTabTransport(session: session)
+            defer { session.shutdown() }
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            view.loadHTMLString("<main><h1>Prior page</h1></main>", baseURL: URL(string: "http://localhost:8123/prior"))
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+            let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+            let finalURL = base.appendingPathComponent("authorized")
+            try session.navigate(tabID: id, to: finalURL)
+            await fulfillment(of: [fixture.received], timeout: 5)
+            let audit = BrowserReadAuthorizationAudit(), started = expectation(description: "Read waiting before retirement")
+            let read = Task { @MainActor in
+                started.fulfill()
+                return try await transport.observeForRead(target: target, readiness: .semanticContent, authorization: { candidate in
+                    try audit.authorize(candidate, expectedURL: finalURL, denied: false)
+                })
+            }
+            await fulfillment(of: [started], timeout: 5)
+            if closesTab { session.closeTab(id) } else { read.cancel() }
+            do { _ = try await read.value; XCTFail("A retired read must not capture") }
+            catch {
+                if !closesTab { XCTAssertTrue(error is CancellationError) }
+            }
+            XCTAssertEqual(audit.count, 0)
+            XCTAssertNil(transport.captureDiagnosticsForTesting)
+            fixture.release()
+        }
+    }
+
     /// These synthetic labels contain no escaped quotes. Read expectations from
     /// the emitted row, independently of the backend document used by the test.
     private func exposedField(_ name: String, in row: Substring) throws -> String {
@@ -1393,5 +1470,87 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 catch { continuation.resume(throwing:error) }
             }
         }
+    }
+}
+
+private final class BrowserReadAuthorizationAudit: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+    func authorize(_ target: BrowserTarget, expectedURL: URL, denied: Bool) throws {
+        lock.lock(); calls += 1; lock.unlock()
+        guard target.url == expectedURL else { throw BrowserTabBrokerError.scopeDenied("Authorization observed an unsettled target") }
+        if denied { throw BrowserTabBrokerError.scopeDenied("Synthetic native scope denial") }
+    }
+}
+
+/// Holds an actual loopback HTTP navigation until the test explicitly releases
+/// it. No timer controls ordering between readiness, authorization and capture.
+private final class HeldBrowserNavigationFixture: @unchecked Sendable {
+    let received = XCTestExpectation(description: "WebKit requested the held navigation")
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "ComputaTests.BrowserReadNavigation")
+    private let lock = NSLock()
+    private var connections: [NWConnection] = []
+    private var held: [NWConnection] = []
+    private var released = false
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.lock.lock(); self.connections.append(connection); self.lock.unlock()
+            connection.start(queue: self.queue)
+            self.receive(connection, bytes: Data())
+        }
+    }
+    private func receive(_ connection: NWConnection, bytes: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] chunk, _, complete, error in
+            guard let self, error == nil, let chunk, !chunk.isEmpty else { connection.cancel(); return }
+            let combined = bytes + chunk
+            guard combined.count <= 65_536 else { connection.cancel(); return }
+            guard combined.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                if complete { connection.cancel() } else { self.receive(connection, bytes: combined) }
+                return
+            }
+            self.lock.lock()
+            let released = self.released
+            if !released { self.held.append(connection) }
+            self.lock.unlock()
+            self.received.fulfill()
+            if released { self.send(connection) }
+        }
+    }
+    func start() async throws -> URL {
+        let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [listener] state in
+                switch state {
+                case .ready:
+                    guard let port = listener.port else { return }
+                    listener.stateUpdateHandler = nil; continuation.resume(returning: port.rawValue)
+                case .failed(let error):
+                    listener.stateUpdateHandler = nil; continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+        return URL(string: "http://127.0.0.1:\(port)/")!
+    }
+    func release() {
+        lock.lock(); released = true; let pending = held; held.removeAll(); lock.unlock()
+        pending.forEach(send)
+    }
+    private func send(_ connection: NWConnection) {
+        let body = Data("<!doctype html><main><h1>Settled authorized page</h1></main>".utf8)
+        var output = Data("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        output.append(body)
+        connection.send(content: output, completion: .contentProcessed { _ in connection.cancel() })
+    }
+    func stop() {
+        listener.cancel()
+        lock.lock(); let sockets = connections; held.removeAll(); lock.unlock()
+        sockets.forEach { $0.cancel() }
     }
 }

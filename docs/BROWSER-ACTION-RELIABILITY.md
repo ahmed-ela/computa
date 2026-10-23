@@ -546,3 +546,60 @@ path was omitted, two text checks needed alignment, and the new correction test
 used noncanonical UUIDs and incorrectly assumed identical retry policy on both
 wires. These were corrected without adding production retries. Runtime
 `mactopus-10` remains unchanged.
+
+Controlled 0.7.0 (231), source `a1f7a5d`, was Developer ID signed, installed and
+verified. The unchanged fresh Outlook task failed after 30.781 seconds and eight
+native calls, without compaction or a native tool failure. It opened the service
+root, clicked the matching existing account once, and remained at the account
+picker. The post-input observation reported `scope_denied`; a later fresh read
+succeeded but still showed the picker. No mailbox search, attachment filename,
+password prompt or MFA challenge was verified. Both the provider reply and its
+single correction failed schema validation. The finite journal identifies tool
+index 19 but no callable or field, so this evidence does not establish which
+argument was invalid. Rejected calls were not dispatched. Cleanup confirmed one
+owned tab closed and existing user tabs preserved.
+
+## Correction feedback follow-up
+
+Inspection found that corrective feedback for the recognized disjoint
+`browser_read` schema listed its fields but omitted the mutually exclusive forms.
+The follow-up adds fixed native descriptions of fresh and cursor-only reads. It
+classifies a `read_mode_conflict` only after authoritative schema rejection, when
+the exact recognized native contract's frozen flat schema accepts every field
+and a nonempty cursor is combined with view/query. Other errors and foreign or
+narrowed schemas retain their existing behavior. The finite journal can preserve
+the known tool and root type without argument values. This is an independently
+verified diagnostic gap, not a recovered explanation of build 231's rejection.
+The existing single Chat Completions correction, no Responses automatic retry,
+1,536-byte feedback cap and all action/history limits remain unchanged.
+
+A separate read-order defect was found in source: fresh reads checked a tab's
+current site before the transport's existing navigation-readiness wait. Native
+tab metadata includes provisional addresses, so a transient address could stop
+a read before that wait. Build 231's 45 ms post-click denial, followed by an
+allowed snapshot on a new document generation, is consistent with this race;
+the rejected address was not retained and its exact cause remains unproven.
+
+The follow-up moves fresh-read scope authorization to after the same native
+navigation wait and before driver capture. The required transport gate checks
+the exact target, immutable task scope and revocable lifetimes. Enqueue checks
+the gated URL and generation again. Post-capture scope and publication checks
+remain; retained reads and mutation preflight keep their existing behavior. It
+adds no wait, retry, route allowance, capture or input replay. The real Outlook
+authentication outcome still requires a fresh live qualification.
+
+Generic schema mismatches on a proven object root can now retain the exact
+recognized built-in tool identity even when no field can be localized. This
+keeps the constraint generic, preserves the closed diagnostic vocabulary, and
+records no argument values. Foreign or narrowed contracts remain unidentified.
+
+Build 232's selected final-source suite passed 573 unique Swift tests with no
+failures or skips, including 34 real-WebKit transport cases and all three enabled
+bundled API-engine cases. The new held-navigation fixture verifies one authorized
+capture versus zero denied captures, with cancellation and tab closure stopping
+before authorization. Controller cases cover exact-target replacement, lease
+release with the user's tab preserved, persistent scope denial, and one dispatched
+click/fill with no replay. Version/product-identity checks passed 20 tests. An
+initial compiler failure on a conditional closure expression is retained in the
+evidence; explicit conditional assignment resolved it without behavior changes.
+The pinned mactopus-10 runtime remains unchanged. Live qualification is separate.

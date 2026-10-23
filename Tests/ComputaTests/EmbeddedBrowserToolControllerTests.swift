@@ -1424,6 +1424,121 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         }
     }
 
+    func testFreshReadAuthorizesSettledMetadataBeforeAnyPageCapture() async throws {
+        for settlesAllowed in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            await backend.redirectOwnedTarget(to: URL(string: "https://unrelated.example/transient")!)
+            await backend.prepareFreshRead(settlingAt: settlesAllowed ? URL(string: "http://localhost:8123/result")! : nil)
+            let before = await backend.counts()
+            do {
+                let page = try await call(controller, "browser_read", scope: scope)
+                XCTAssertTrue(settlesAllowed)
+                XCTAssertTrue(page.contains("http://localhost:8123/result"))
+            } catch {
+                XCTAssertFalse(settlesAllowed)
+                guard let failure = error as? BrowserTabBrokerError, case .scopeDenied = failure else {
+                    XCTFail("Expected a scope rejection before capture, got \(error)"); continue
+                }
+            }
+            let after = await backend.counts(), admissions = await backend.readAdmissionCounts()
+            XCTAssertEqual(admissions.preparations, 1, "Reuse the single fresh-read preparation")
+            XCTAssertEqual(admissions.admissions, settlesAllowed ? 1 : 0)
+            XCTAssertEqual(after.observes - before.observes, settlesAllowed ? 1 : 0)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testPostInputReadSettlesScopeWithoutReplayingClickOrFill() async throws {
+        for tool in ["browser_click", "browser_fill"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Use only http://localhost:8123/flight for the requested action.")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let page = try await call(controller, "browser_read", scope: scope)
+            var arguments: [String: Any] = ["snapshot_id": try snapshotID(page), "element_index": tool == "browser_click" ? 1 : 0]
+            if tool == "browser_fill" { arguments["text"] = "UA 4629" }
+            await backend.configureAfterInput("transient_scope")
+            let before = await backend.counts(), beforeAdmissions = await backend.readAdmissionCounts()
+            let output = try await controller.executeResult(taskKey: "turn-a", tool: tool,
+                arguments: argumentData(arguments), scope: scope)
+            let observation = try availableObservation(output.response), response = try jsonObject(output.response)
+            XCTAssertTrue(observation.contains("http://localhost:8123/result"))
+            XCTAssertEqual(response["dispatched"] as? Bool, true)
+            XCTAssertEqual(response["no_replay"] as? Bool, true)
+            XCTAssertEqual(response["result_verified"] as? Bool, false)
+            let after = await backend.counts(), admissions = await backend.readAdmissionCounts()
+            XCTAssertEqual(admissions.preparations - beforeAdmissions.preparations, 1)
+            XCTAssertEqual(admissions.admissions - beforeAdmissions.admissions, 1)
+            XCTAssertEqual(after.observes - before.observes, 2, "One input preflight and one settled post-input capture")
+            XCTAssertEqual(after.presses, tool == "browser_click" ? 1 : 0)
+            XCTAssertEqual(after.fills, tool == "browser_fill" ? 1 : 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testFreshReadGateRejectsCancellationReleaseReplacementAndScopeChangeBeforeCapture() async throws {
+        for change in ["cancel", "release", "replacement", "offscope"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+            if change == "release" {
+                _ = try await call(controller, "browser_tabs", scope: scope)
+                _ = try await call(controller, "browser_bind", ["tab_id": await backend.humanID], scope: scope)
+            } else {
+                _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            }
+            await backend.prepareFreshRead(hold: true)
+            let before = await backend.counts()
+            let operation = Task { try await controller.execute(taskKey: "turn-a", tool: "browser_read",
+                arguments: Data("{}".utf8), scope: scope) }
+            await backend.waitUntilFreshReadHeld()
+            if change == "cancel" { operation.cancel() }
+            if change == "release" { _ = await controller.release(taskKey: "turn-a") }
+            if change == "replacement" { await backend.replaceOwnedTarget() }
+            if change == "offscope" { await backend.redirectOwnedTarget(to: URL(string: "https://unrelated.example/private")!) }
+            await backend.resumeFreshRead()
+            do { _ = try await operation.value; XCTFail("Retired or unauthorized read must not publish: \(change)") }
+            catch { /* The gate propagates the exact cancellation, lease, target, or scope rejection. */ }
+            let after = await backend.counts(), admissions = await backend.readAdmissionCounts()
+            XCTAssertEqual(admissions.preparations, 1); XCTAssertEqual(admissions.admissions, 0)
+            XCTAssertEqual(after.observes, before.observes, change)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            if change == "release" {
+                let preserved = try await backend.target(id: backend.humanID)
+                XCTAssertNotNil(preserved, "The revoked lease must deny capture even when the user's physical tab survives")
+            }
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testRetainedReadAndMutationKeepImmediateScopePreflight() async throws {
+        for tool in ["browser_read", "browser_click"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            await backend.showManyControls()
+            let page = try await call(controller, "browser_read", ["view": "all"], scope: scope)
+            let arguments: [String: Any] = tool == "browser_read"
+                ? ["cursor": try field("next_cursor", in: page)]
+                : ["snapshot_id": try snapshotID(page), "element_index": 1]
+            let before = await backend.counts(), beforeAdmissions = await backend.readAdmissionCounts()
+            await backend.redirectOwnedTarget(to: URL(string: "https://unrelated.example/transient")!)
+            await backend.prepareFreshRead(settlingAt: URL(string: "http://localhost:8123/result")!)
+            do { _ = try await call(controller, tool, arguments, scope: scope); XCTFail("Retained authority must not follow a provisional route") }
+            catch {
+                guard let failure = error as? BrowserTabBrokerError, case .scopeDenied = failure else {
+                    XCTFail("Expected immediate scope rejection, got \(error)"); continue
+                }
+            }
+            let after = await backend.counts(), admissions = await backend.readAdmissionCounts()
+            XCTAssertEqual(admissions.preparations, beforeAdmissions.preparations)
+            XCTAssertEqual(after.observes, before.observes)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
     func testFreshReadRetryRechecksScopeAndPhysicalTargetBeforeObservingAgain() async throws {
         for replaced in [false, true] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -3121,9 +3236,22 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var holdPublicationAfterRead = false, targetChecksBeforeHold: Int?
     private var finalTargetHeld = false, finalTargetContinuation: CheckedContinuation<Void, Never>?
     private var finalTargetWaiters = [CheckedContinuation<Void, Never>]()
+    private var freshReadPreparations = 0, freshReadAdmissions = 0
+    private var settleFreshReadURL: URL?
+    private var holdFreshRead = false, freshReadHeld = false
+    private var freshReadContinuation: CheckedContinuation<Void, Never>?
+    private var freshReadWaiters = [CheckedContinuation<Void, Never>]()
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
+    func readAdmissionCounts() -> (preparations: Int, admissions: Int) { (freshReadPreparations, freshReadAdmissions) }
+    func prepareFreshRead(settlingAt url: URL? = nil, hold: Bool = false) {
+        settleFreshReadURL = url; holdFreshRead = hold; freshReadHeld = false
+    }
+    func waitUntilFreshReadHeld() async {
+        if !freshReadHeld { await withCheckedContinuation { freshReadWaiters.append($0) } }
+    }
+    func resumeFreshRead() { freshReadContinuation?.resume(); freshReadContinuation = nil }
     func inventoryReadCount() -> Int { inventoryReads }
     func reportInvalidFieldOnPress() { invalidFieldOnPress = true; committedIdentityExposed = true }
     func hideCommittedDocumentIdentity() { committedIdentityExposed = false }
@@ -3184,6 +3312,24 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func closeOwnedTargets() async -> [String] {
         for id in Array(owned) { if let target=targets[id] { try? await closeTarget(target:target) } }; return []
+    }
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        freshReadPreparations += 1
+        if holdFreshRead {
+            holdFreshRead = false; freshReadHeld = true
+            freshReadWaiters.forEach { $0.resume() }; freshReadWaiters.removeAll()
+            await withCheckedContinuation { freshReadContinuation = $0 }
+        }
+        if let settled = settleFreshReadURL { redirectOwnedTarget(to: settled); settleFreshReadURL = nil }
+        try Task.checkCancellation()
+        guard !protectedTargets.contains(target.targetID), let current = targets[target.targetID] else {
+            throw BrowserTabBrokerError.targetClosed
+        }
+        guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
+        try authorization(current)
+        freshReadAdmissions += 1
+        return try await observe(target: current)
     }
     func observe(target:BrowserTarget) async throws -> BrowserDocumentObservation {
         stats.observes += 1
@@ -3315,6 +3461,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         guard let scenario = afterInputScenario else { return }
         switch scenario {
         case "redirect": redirectOwnedTarget(to: URL(string: "https://unrelated.example/PRIVATE_READ_ERROR")!)
+        case "transient_scope":
+            redirectOwnedTarget(to: URL(string: "https://unrelated.example/transient")!)
+            settleFreshReadURL = URL(string: "http://localhost:8123/result")!
         case "replaced": replaceOwnedTarget()
         case "protected": protectedTargets.insert(target.targetID)
         case "new_document":

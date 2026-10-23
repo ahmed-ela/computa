@@ -289,6 +289,10 @@ enum BrowserReadReadiness: String, Equatable, Sendable {
     case content
 }
 
+/// A fresh read may settle native navigation before checking site scope. The
+/// backend must invoke this gate after that wait and before reading page data.
+typealias BrowserReadAuthorization = @Sendable (BrowserTarget) throws -> Void
+
 protocol BrowserTabTransport: Sendable {
     func createTarget(url: URL) async throws -> BrowserTarget
     func target(id: String) async throws -> BrowserTarget?
@@ -299,6 +303,8 @@ protocol BrowserTabTransport: Sendable {
     /// mutation preflight retain the immediate observation contract.
     func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation
     func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation
     func press(
         target: BrowserTarget,
         backendNodeID: Int64,
@@ -853,7 +859,8 @@ actor BrowserTabSessionBroker {
         read: SemanticReadRequest,
         replacingCursor: String? = nil,
         compact: Bool = false,
-        compactEncoding: BrowserCompleteObservation.Encoding = .read
+        compactEncoding: BrowserCompleteObservation.Encoding = .read,
+        readAuthorization: BrowserReadAuthorization? = nil
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -912,8 +919,13 @@ actor BrowserTabSessionBroker {
         }
         let freshDocument: BrowserDocumentObservation
         if read.cursor == nil, read.snapshotID == nil {
-            freshDocument = try await transport.observeForRead(
-                target: target, readiness: read.view == .content ? .content : .semanticContent)
+            let readiness: BrowserReadReadiness = read.view == .content ? .content : .semanticContent
+            if let readAuthorization {
+                freshDocument = try await transport.observeForRead(
+                    target: target, readiness: readiness, authorization: readAuthorization)
+            } else {
+                freshDocument = try await transport.observeForRead(target: target, readiness: readiness)
+            }
         } else {
             freshDocument = try await transport.observe(target: target)
         }

@@ -928,16 +928,36 @@ actor EmbeddedBrowserToolController {
         compactEncoding: BrowserCompleteObservation.Encoding = .read
     ) async throws -> BrowserTabSnapshot {
         let binding = try bound(taskKey, contextID)
-        _ = try await currentTarget(binding: binding, scope: scope)
+        let fresh = read.cursor == nil && read.snapshotID == nil && read.elementIndex == nil && replacingCursor == nil
+        // A fresh read already waits for native navigation in its transport.
+        // Check physical ownership now, then site scope at that existing wait's
+        // completion, before any page capture. Retained reads remain immediate.
+        _ = try await currentTarget(binding: binding, scope: fresh ? nil : scope)
         try check(taskKey, contextID)
         try binding.lifetime.check()
+        let contextLifetime = contexts[taskKey]!.lifetime
+        let authorization: BrowserReadAuthorization?
+        if fresh {
+            authorization = { target in
+                try Task.checkCancellation()
+                try contextLifetime.check()
+                try binding.lifetime.check()
+                guard target.targetID == binding.targetID, target.instanceToken == binding.targetInstanceToken else {
+                    throw BrowserTabBrokerError.targetReplaced
+                }
+                if let violation = scope?.siteViolation(url: target.url) {
+                    throw BrowserTabBrokerError.scopeDenied(violation)
+                }
+            }
+        } else { authorization = nil }
         // Ordinary reads revoke first. A bounded changed-filter recovery is
         // transactional in the broker: a failed capture preserves the prior
         // capability, which still requires all normal physical preflights.
         if replacingCursor == nil { contexts[taskKey]?.snapshot = nil }
         let observation = try await broker.snapshot(
             taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read,
-            replacingCursor: replacingCursor, compact: compact, compactEncoding: compactEncoding)
+            replacingCursor: replacingCursor, compact: compact, compactEncoding: compactEncoding,
+            readAuthorization: authorization)
         // The broker has now committed the replacement. If publication fails,
         // neither its unpublished references nor the superseded ones survive.
         contexts[taskKey]?.snapshot = nil

@@ -393,6 +393,15 @@ private actor OwnershipTransport: BrowserTabTransport {
         targets.removeValue(forKey: target.targetID)
     }
 
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        guard let current = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
+        guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
+        try Task.checkCancellation()
+        try authorization(current)
+        return try await observe(target: current)
+    }
+
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         observationCount += 1
         let hook = observationHook

@@ -2630,6 +2630,15 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
 
     func readinessRequests() -> [BrowserReadReadiness] { requestedReadiness }
 
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        guard let current = states[target.targetID]?.target else { throw BrowserTabBrokerError.targetClosed }
+        guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
+        try Task.checkCancellation()
+        try authorization(current)
+        return try await observeForRead(target: current, readiness: readiness)
+    }
+
     func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
         requestedReadiness.append(readiness)
         return try await observe(target: target)
