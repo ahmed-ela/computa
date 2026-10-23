@@ -2324,7 +2324,8 @@ private extension CodexAppServerRuntime {
                         ? ComputaAgentInstructions.runtimeInteractionPolicy()
                         : ComputaAgentInstructions.browserTurnLifecycle + "\n" + ComputaAgentInstructions.browserSearchEvidence
                     try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
-                        preparationID: preparationID, isNewThread: isNewThread, executionPolicy: policy,
+                        preparationID: preparationID, isNewThread: isNewThread,
+                        executionPolicy: policy + "\n" + ComputaAgentInstructions.freshExecutionGuidance,
                         historicalOutcomeCorrections: historicalOutcomeCorrections(threadID: threadID),
                         userRequest: userRequest)
                 } else {

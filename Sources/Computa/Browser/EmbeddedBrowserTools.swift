@@ -656,7 +656,11 @@ actor EmbeddedBrowserToolController {
                 _ = try bound(taskKey, contextID)
                 guard let previous = contexts[taskKey]?.snapshot,
                       previous.nextCursor == cursor, let receipt = previous.readReceipt else {
-                    throw BrowserTabBrokerError.staleSnapshot
+                    // Diagnose the exact retained-capability mismatch before
+                    // any capture. Do not infer an identifier's kind or turn
+                    // an unissued/replaced cursor into a fresh read.
+                    throw BrowserTabBrokerError.invalidRead(
+                        "cursor must be the exact next_cursor from the current browser_read page, not a snapshot ID or tab handle. No read or input was dispatched. Omit cursor or use null for a fresh view/query; to continue, send only the page's next_cursor.")
                 }
                 let original = SemanticReadRequest(query: receipt.query, view: receipt.view)
                 guard read.continues(original) else {

@@ -668,6 +668,38 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testInvalidReadCursorDiagnosisPreservesRepeatedFailureThresholdWithoutApprovals() async throws {
+        try await withHarness { harness in
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_read", "arguments": ["cursor": "@snapshot", "view": "content"]],
+                ["tool": "browser_read", "arguments": ["cursor": UUID().uuidString, "view": "content"]],
+                ["tool": "browser_read", "arguments": ["cursor": "PRIVATE_UNISSUED_CURSOR", "view": "content"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
+            try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, false, false])
+            for row in rows.suffix(3) {
+                let text = try XCTUnwrap(row["text"] as? String)
+                XCTAssertTrue(text.contains("exact next_cursor"))
+                XCTAssertTrue(text.contains("Omit cursor or use null"))
+                XCTAssertFalse(text.contains("PRIVATE_UNISSUED_CURSOR"))
+                XCTAssertFalse(text.contains("current_observation"), "Invalid identifiers must not create a recovery read")
+            }
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+                harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+            XCTAssertEqual(requests.count, 6, "Changing cursor text must not evade the unchanged three-failure threshold")
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0)
+            XCTAssertEqual(counts.ownedClosed, 0); XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
     func testNullFreshReadCannotRefundSameDocumentContinuationFailures() async throws {
         try await withHarness(approval: true) { harness in
             await harness.backend.enablePaginatedRead()

@@ -99,6 +99,20 @@ old stop notice was appended after every subsequent turn, making it appear curre
   chooses the page before issuing references and its cursor; it never truncates
   a finished page while retaining a cursor that skips omitted content. This
   changes evidence delivery, not action authorization or target validation.
+- An unissued continuation now reports that only the current `next_cursor` may
+  continue a page and that a fresh read omits `cursor` (or uses null). Build-225
+  evidence showed a model passing a snapshot ID, then a tab handle, as a cursor;
+  the generic stale-snapshot message did not identify that mistake. This error
+  performs no capture or input, consumes no action references, and does not
+  refund failure budgets. Real expiry and document changes retain their checks.
+- Current API checkpoints also refresh concise troubleshooting and sign-in
+  evidence rules. A build-225 fresh chat invented a diagnostic command and
+  attributed a search snippet to a different article; a separate Outlook run
+  assumed a password was required without trying the displayed matching account.
+  Suggested checks are not executed diagnostics, and an account picker is not an
+  observed credential challenge. The rules also reach website handoffs without
+  raising prompt limits. They guide the model; they are not proof of adherence,
+  a semantic answer validator, or permission to change settings.
 - A subsequent live lookup reached relevant ODE results, then compaction changed
   the task into a request to write a historical summary. The host now retains the
   exact original request and accepted in-turn user messages outside compacted

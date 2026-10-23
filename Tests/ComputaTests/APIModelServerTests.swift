@@ -1,3 +1,4 @@
+import AutomationCore
 import XCTest
 import Network
 import Darwin
@@ -1993,6 +1994,24 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             try appendPriorFailure(5, to: threadID)
             try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .fullAccess)
             try await waitForTerminalTurn(3)
+            // Valid legacy activation records can use the store's full text
+            // bounds. Exercise their real Core projection, not a copied
+            // correction preamble, so future guidance cannot exceed admission.
+            let legacyError = ComputerInputError.applicationActivationFailed(processIdentifier: 1234)
+            var maximumLegacyLines: [String] = []
+            for number in 6...8 {
+                let turnPrefix = "legacy-native-\(number)-", messagePrefix = "Legacy native failure \(number): "
+                let legacyTurn = turnPrefix + String(repeating: "t", count: 256 - turnPrefix.utf8.count)
+                let legacyMessage = messagePrefix + String(repeating: "m", count: 2_048 - messagePrefix.utf8.count)
+                try failureStore.append(.init(threadID: threadID, turnID: legacyTurn,
+                    callID: UUID().uuidString, toolName: "computer_v2_open", message: legacyMessage,
+                    diagnosticText: ComputerToolFailureEvidence.text(for: legacyError),
+                    timestamp: Date(timeIntervalSince1970: Double(number))))
+                maximumLegacyLines.append("turn=\(legacyTurn): \(legacyMessage)")
+            }
+            XCTAssertEqual(try failureStore.load(threadID: threadID).suffix(3).map(\.message.utf8.count), [2_048, 2_048, 2_048])
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)
+            try await waitForTerminalTurn(4)
             // The bounded load-error correction belongs in the fresh developer
             // checkpoint too; it must not become a durable user text part.
             let evidenceFile = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: failureDirectory,
@@ -2002,10 +2021,10 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     return value["threadID"] as? String == threadID
                 })
             try Data("invalid fixture evidence".utf8).write(to: evidenceFile)
-            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)
-            try await waitForTerminalTurn(4)
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .fullAccess)
+            try await waitForTerminalTurn(5)
             let requests = await records.snapshot()
-            XCTAssertEqual(requests.count, 5)
+            XCTAssertEqual(requests.count, 6)
             var checkpoints: [String] = [], toolSchemas: [NSArray] = []
             for request in requests {
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
@@ -2018,6 +2037,9 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(Data((messages.last?["content"] as? String ?? "").utf8), Data(prompt.utf8))
                 XCTAssertTrue(checkpoint.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
                 XCTAssertEqual(checkpoint.components(separatedBy: ComputaAgentInstructions.runtimeInteractionPolicy()).count, 2)
+                XCTAssertEqual(checkpoint.components(separatedBy: ComputaAgentInstructions.freshExecutionGuidance).count, 2,
+                    "Current diagnostic/account-picker guidance must reach every inference, including later turns of an existing native thread")
+                XCTAssertLessThanOrEqual(checkpoint.utf8.count, 16_384)
                 XCTAssertFalse(checkpoint.contains("Literal human note:"), "Human wording must not acquire developer authority")
                 for user in messages.filter({ $0["role"] as? String == "user" }) {
                     let text = user["content"] as? String ?? ""
@@ -2028,8 +2050,8 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 checkpoints.append(checkpoint)
                 toolSchemas.append(try XCTUnwrap(body["tools"] as? NSArray))
             }
-            XCTAssertEqual(checkpoints.count, 5)
-            if checkpoints.count == 5 {
+            XCTAssertEqual(checkpoints.count, 6)
+            if checkpoints.count == 6 {
                 XCTAssertTrue(checkpoints[0].contains("No browser operations are recorded for this prepared turn."))
                 XCTAssertTrue(checkpoints[1].contains("browser_open: completed=1 failed=1"))
                 XCTAssertTrue(checkpoints[1].contains("not proof that output was read or a website search succeeded"))
@@ -2045,13 +2067,15 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 for number in 3...5 { XCTAssertTrue(checkpoints[3].contains("turn=prior-native-\(number):")) }
                 XCTAssertFalse(checkpoints[3].contains("turn=prior-native-2:"))
                 XCTAssertEqual(checkpoints[3].components(separatedBy: "APP_RUNTIME_OUTCOME_CORRECTION").count, 2)
-                XCTAssertTrue(checkpoints[4].contains("Previous execution evidence could not be loaded."))
+                for line in maximumLegacyLines { XCTAssertTrue(checkpoints[4].contains(line)) }
                 XCTAssertFalse(checkpoints[4].contains("turn=prior-native-"))
+                XCTAssertTrue(checkpoints[5].contains("Previous execution evidence could not be loaded."))
+                XCTAssertFalse(checkpoints[5].contains("turn=legacy-native-"))
                 for tools in toolSchemas.dropFirst() { XCTAssertEqual(tools, toolSchemas[0]) }
             }
             let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
             let starts = trace.messages.filter { $0.direction == .clientToServer && $0.object["method"] as? String == "turn/start" }
-            XCTAssertEqual(starts.count, 4)
+            XCTAssertEqual(starts.count, 5)
             for (index, start) in starts.enumerated() {
                 let params = try XCTUnwrap(start.object["params"] as? [String: Any])
                 let input = try XCTUnwrap(params["input"] as? [[String: String]])
@@ -2070,7 +2094,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(counts.created, 1, "Explicit site restrictions still block the second open before dispatch.")
             XCTAssertEqual(counts.activations, 0)
             XCTAssertEqual(audit.approvals, ["browser_open"], "The unrelated site is rejected before approval.")
-            XCTAssertEqual(audit.terminalStatuses, [.completed, .completed, .completed, .completed])
+            XCTAssertEqual(audit.terminalStatuses, [.completed, .completed, .completed, .completed, .completed])
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
         } catch {
