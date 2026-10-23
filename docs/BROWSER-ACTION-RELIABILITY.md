@@ -1401,3 +1401,28 @@ download was observed.
 The goal remains unresolved: task continuity and literal copying still failed,
 and diagnostics were not requalified. No limit, permission or approval boundary
 was increased.
+
+## Build 246: preserve interaction during startup
+
+During the first build245 launch, creating a new draft while saved history loaded
+was followed by a switch to an older saved chat and an empty composer. The UI
+test's fresh-state check prevented sending the intended fixture prompt to that
+wrong chat. Source inspection identified an unconditional history replacement
+after the asynchronous startup load. This race is separate from the ODE model's
+wrong answer; there is no evidence that it caused that completed task's drift.
+
+Startup now reconciles saved history with task changes made while loading. New
+drafts, changed models, streaming-message ownership and the current selection
+survive. Explicit deselection is retained even when startup began with no tasks.
+A newer authoritative task snapshot supersedes the pending load, and cancellation
+or shutdown prevents late publication. Normal subsequent authoritative snapshots
+keep their replacement behavior. This stays within the existing AppState and
+SwiftUI/web workspace architecture.
+
+The initial run passed 160 AppState tests. Independent review then found the
+empty-baseline create-and-deselect edge case, which was fixed and covered before
+the final run: 170 AppState/WebSnapshot tests passed, zero failures or skips, with
+stable source hashes. Eight held-load regressions cover the startup race and its
+selection, model, prompt, snapshot, streaming, cancellation and shutdown edges.
+Version validation passed for 0.7.0 (246). The deterministic held-load tests prove
+the race handling; live installation and UI checks are recorded separately.

@@ -387,6 +387,209 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testStartupHistoryKeepsNewDraftPromptModelAndWebSelection() async throws {
+        let restored = startupTask("saved")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [], runtime: HeldStartupRuntime(tasks: [restored], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+
+        state.createTask()
+        let firstDraftID = try XCTUnwrap(state.selectedTaskID)
+        state.createTask()
+        let draftID = try XCTUnwrap(state.selectedTaskID)
+        let modelID = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+        XCTAssertTrue(state.setTaskModel(modelID, taskID: draftID))
+        let prompt = "Keep this unsent draft exactly.\nSecond line."
+        state.composerText = prompt
+        // The web composer stores text by task ID; restoration must keep the
+        // same selected ID as well as the native composer's pending text.
+        let webDrafts = [draftID: prompt]
+
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks.map(\.id), [draftID, firstDraftID, restored.id])
+        XCTAssertEqual(state.selectedTaskID, draftID)
+        XCTAssertEqual(state.selectedTask?.model, modelID)
+        XCTAssertEqual(state.selectedTask?.status, .draft)
+        XCTAssertEqual(state.composerText, prompt)
+        XCTAssertEqual(webDrafts[try XCTUnwrap(WebUISnapshot(state: state).selectedTaskID)], prompt)
+        XCTAssertTrue(state.selectedTask?.entries.isEmpty == true)
+        XCTAssertTrue(state.queuedPrompts.isEmpty)
+        let submissions = await gate.submissions
+        XCTAssertEqual(submissions, 0)
+        XCTAssertEqual(state.connectionState, .connected(provider: "Held startup"))
+
+        // Reconciliation applies only to the initial load. An authoritative
+        // subsequent snapshot still removes tasks and their selection.
+        state.apply(.tasksSnapshot([restored]))
+        XCTAssertEqual(state.tasks, [restored])
+        XCTAssertEqual(state.selectedTaskID, restored.id)
+    }
+
+    @MainActor
+    func testStartupHistoryPreservesExistingSelectionAndHydratesUnchangedTasks() async {
+        let first = startupTask("first")
+        let second = startupTask("second")
+        var hydratedSecond = second
+        hydratedSecond.entries = [.init(kind: .assistant, title: "Saved reply", body: "Saved history")]
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [first, second],
+                             runtime: HeldStartupRuntime(tasks: [first, hydratedSecond], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        state.selectTask(second.id)
+        state.composerText = "A follow-up for the selected task"
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks, [first, hydratedSecond])
+        XCTAssertEqual(state.selectedTaskID, second.id)
+        XCTAssertEqual(state.selectedEntryID, hydratedSecond.entries.last?.id)
+        XCTAssertEqual(state.composerText, "A follow-up for the selected task")
+    }
+
+    @MainActor
+    func testStartupHistoryDoesNotOverwriteModelEditOrExplicitDeselection() async {
+        let edited = startupTask("edited")
+        let restored = startupTask("restored")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [edited],
+                             runtime: HeldStartupRuntime(tasks: [edited, restored], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        let modelID = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+        XCTAssertTrue(state.setTaskModel(modelID, taskID: edited.id))
+        state.selectTask(nil)
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks.map(\.id), [edited.id, restored.id])
+        XCTAssertEqual(state.tasks.first?.model, modelID)
+        XCTAssertNil(state.selectedTaskID)
+        XCTAssertNil(state.selectedEntryID)
+    }
+
+    @MainActor
+    func testStartupHistoryPreservesCreateThenDeselectFromEmptyBaseline() async throws {
+        let restored = startupTask("saved")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [], runtime: HeldStartupRuntime(tasks: [restored], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        state.createTask()
+        let draftID = try XCTUnwrap(state.selectedTaskID)
+        state.selectTask(nil)
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks.map(\.id), [draftID, restored.id])
+        XCTAssertNil(state.selectedTaskID)
+        XCTAssertNil(state.selectedEntryID)
+        XCTAssertNil(WebUISnapshot(state: state).selectedTaskID)
+        XCTAssertEqual(state.connectionState, .connected(provider: "Held startup"))
+    }
+
+    @MainActor
+    func testNewerAuthoritativeSnapshotSupersedesStartupEvenWithEmptyBaseline() async {
+        let removed = startupTask("removed")
+        let newer = startupTask("newer")
+        for baseline in [[], [removed]] {
+            let gate = StartupTaskLoadGate()
+            let state = AppState(tasks: baseline,
+                                 runtime: HeldStartupRuntime(tasks: [removed], gate: gate),
+                                 preferences: isolatedTestPreferences())
+            let startup = Task { await state.startRuntime() }
+            await gate.waitUntilLoading()
+            // The existing authoritative snapshot path can remove a task that
+            // was never in the startup baseline; it must still stay removed.
+            state.apply(.tasksSnapshot([newer]))
+            state.createTask()
+            let expected = state.tasks
+            let selected = state.selectedTaskID
+            state.composerText = "Typed after the newer snapshot"
+            await gate.release()
+            await startup.value
+
+            XCTAssertEqual(state.tasks, expected)
+            XCTAssertEqual(state.selectedTaskID, selected)
+            XCTAssertEqual(state.composerText, "Typed after the newer snapshot")
+            XCTAssertFalse(state.tasks.contains { $0.id == removed.id })
+            XCTAssertEqual(state.connectionState, .connected(provider: "Held startup"))
+        }
+    }
+
+    @MainActor
+    func testStartupHistoryPreservesNewTaskStreamingDraftOwnership() async throws {
+        let restored = startupTask("saved")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [], runtime: HeldStartupRuntime(tasks: [restored], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        state.createTask()
+        let taskID = try XCTUnwrap(state.selectedTaskID)
+        state.apply(.taskStatusChanged(taskID: taskID, status: .running))
+        state.apply(.assistantMessageDelta(taskID: taskID, itemID: "reply", delta: "First"))
+        state.apply(.reasoningMessageUpdated(taskID: taskID, itemID: "reasoning", text: "Working"))
+        await gate.release()
+        await startup.value
+        state.apply(.assistantMessageDelta(taskID: taskID, itemID: "reply", delta: " second"))
+        state.apply(.reasoningMessageUpdated(taskID: taskID, itemID: "reasoning", text: "Still working"))
+
+        XCTAssertEqual(state.selectedTaskID, taskID)
+        XCTAssertEqual(state.selectedTask?.entries.first(where: { $0.id == "reply" })?.body, "First second")
+        XCTAssertEqual(state.selectedTask?.entries.first(where: { $0.id == "reasoning" })?.body, "Still working")
+        XCTAssertEqual(state.tasks.last, restored)
+    }
+
+    @MainActor
+    func testCancelledStartupCannotApplyLateHistory() async {
+        let initial = startupTask("initial")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [initial],
+                             runtime: HeldStartupRuntime(tasks: [startupTask("late")], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        startup.cancel()
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks, [initial])
+        XCTAssertEqual(state.selectedTaskID, initial.id)
+        XCTAssertNotEqual(state.connectionState, .connected(provider: "Held startup"))
+    }
+
+    @MainActor
+    func testShutdownStartupCannotApplyLateHistory() async {
+        let initial = startupTask("initial")
+        let gate = StartupTaskLoadGate()
+        let state = AppState(tasks: [initial],
+                             runtime: HeldStartupRuntime(tasks: [startupTask("late")], gate: gate),
+                             preferences: isolatedTestPreferences())
+        let startup = Task { await state.startRuntime() }
+        await gate.waitUntilLoading()
+        _ = await state.shutdownRuntime()
+        await gate.release()
+        await startup.value
+
+        XCTAssertEqual(state.tasks, [initial])
+        XCTAssertEqual(state.selectedTaskID, initial.id)
+        XCTAssertEqual(state.connectionState, .disconnected)
+    }
+
+    private func startupTask(_ id: String) -> AgentTask {
+        AgentTask(id: id, title: id, summary: "Saved task", status: .completed,
+                  workspace: "No workspace selected", model: LocalModelCatalog.defaultModelID)
+    }
+
+    @MainActor
     func testRejectedTurnKeepsConnectedTransportAndReturnsTaskToWaiting() async {
         let task = AgentTask(
             id: "thread-live-2",
@@ -754,6 +957,57 @@ private struct StubRuntime: AgentRuntimeClient {
 
     func interrupt(taskID: AgentTask.ID) async throws {}
 
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+}
+
+private actor StartupTaskLoadGate {
+    private var loading = false
+    private var released = false
+    private var loadingWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    private(set) var submissions = 0
+
+    func holdLoad() async {
+        loading = true
+        loadingWaiters.forEach { $0.resume() }
+        loadingWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilLoading() async {
+        guard !loading else { return }
+        await withCheckedContinuation { loadingWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+
+    func recordSubmission() { submissions += 1 }
+}
+
+private struct HeldStartupRuntime: AgentRuntimeClient {
+    let tasks: [AgentTask]
+    let gate: StartupTaskLoadGate
+    let providerName = "Held startup"
+
+    func loadTasks() async throws -> [AgentTask] {
+        await gate.holdLoad()
+        return tasks
+    }
+
+    func events() -> AsyncStream<AgentRuntimeEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
+        await gate.recordSubmission()
+    }
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
     func resolveApproval(requestID: String, approved: Bool) async throws {}
 }
 

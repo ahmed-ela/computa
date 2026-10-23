@@ -14,6 +14,8 @@ final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
     @ObservationIgnored private var isShuttingDown = false
+    @ObservationIgnored private var taskSnapshotRevision: UInt64 = 0
+    @ObservationIgnored private var taskSelectionRevision: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let cookieMaintenanceOnlyLaunch: Bool
@@ -499,6 +501,7 @@ final class AppState {
     }
 
     func selectTask(_ id: AgentTask.ID?) {
+        taskSelectionRevision &+= 1
         selectedTaskID = id
         updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
@@ -555,6 +558,7 @@ final class AppState {
             model: defaultModel
         )
         tasks.insert(task, at: 0)
+        taskSelectionRevision &+= 1
         selectedTaskID = task.id
         // A new draft briefly inherits the user's default model. Pause rather
         // than discard an unused root while the user chooses this task's model.
@@ -1168,6 +1172,9 @@ final class AppState {
     /// sample store remains fully local and this method is a no-op.
     func startRuntime() async {
         guard !isShuttingDown, let runtime else { return }
+        let tasksBeforeLoading = tasks
+        let selectionRevisionBeforeLoading = taskSelectionRevision
+        let snapshotRevisionBeforeLoading = taskSnapshotRevision
         connectionState = .connecting
         if cookieMaintenanceOnlyLaunch {
             await cookieMaintenanceRunner(browserSession)
@@ -1182,8 +1189,11 @@ final class AppState {
             await runtime.configureEmbeddedBrowserTools(embeddedBrowserTools)
             guard !Task.isCancelled, !isShuttingDown else { return }
             let snapshot = try await runtime.loadTasks()
-            guard !isShuttingDown else { return }
-            replaceTasks(with: snapshot)
+            guard !Task.isCancelled, !isShuttingDown else { return }
+            if taskSnapshotRevision == snapshotRevisionBeforeLoading {
+                restoreStartupTasks(snapshot, replacing: tasksBeforeLoading,
+                                    selectionRevisionBeforeLoading: selectionRevisionBeforeLoading)
+            }
             guard !Task.isCancelled, !isShuttingDown else { return }
             connectionState = .connected(provider: runtime.providerName)
 
@@ -1250,18 +1260,50 @@ final class AppState {
         return report
     }
 
+    private func restoreStartupTasks(_ loadedTasks: [AgentTask], replacing baseline: [AgentTask],
+                                     selectionRevisionBeforeLoading: UInt64) {
+        let baselineByID = Dictionary(uniqueKeysWithValues: baseline.map { ($0.id, $0) })
+        let currentIDs = Set(tasks.map(\.id))
+        let removedIDs = Set(baselineByID.keys).subtracting(currentIDs)
+        // The MainActor can accept New Task, model edits, or runtime updates
+        // while startup awaits disk history. Those newer task values win.
+        let changedTasks = tasks.filter { baselineByID[$0.id] != $0 }
+        let changedIDs = Set(changedTasks.map(\.id))
+        let restoredTasks = changedTasks + loadedTasks.filter {
+            !changedIDs.contains($0.id) && !removedIDs.contains($0.id)
+        }
+        replaceTasks(with: restoredTasks, preservingMessageDraftsFor: changedIDs,
+                     preserveEmptySelection: selectedTaskID == nil
+                        && taskSelectionRevision != selectionRevisionBeforeLoading)
+    }
+
     func replaceTasks(with newTasks: [AgentTask]) {
+        replaceTasks(with: newTasks, preservingMessageDraftsFor: [], preserveEmptySelection: false)
+    }
+
+    private func replaceTasks(with newTasks: [AgentTask],
+                              preservingMessageDraftsFor retainedTaskIDs: Set<AgentTask.ID>,
+                              preserveEmptySelection: Bool) {
+        // A newer authoritative snapshot supersedes any pending startup load,
+        // including deletions of IDs absent from that load's original baseline.
+        taskSnapshotRevision &+= 1
         let priorSelection = selectedTaskID
+        let priorEntry = selectedEntryID
         let cleanupReceipts = websiteSessionCleanupReceipts.values.sorted {
             $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
         }
-        discardAllMessageDrafts()
+        discardAllMessageDrafts(except: retainedTaskIDs)
         tasks = newTasks
-        selectedTaskID = newTasks.contains(where: { $0.id == priorSelection })
+        selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
             : newTasks.first?.id
         updateWebsitePrewarming()
-        selectedEntryID = selectedTask?.entries.last?.id
+        if let task = selectedTask, retainedTaskIDs.contains(task.id),
+           task.entries.contains(where: { $0.id == priorEntry }) {
+            selectedEntryID = priorEntry
+        } else {
+            selectedEntryID = selectedTask?.entries.last?.id
+        }
         interruptingTaskIDs.formIntersection(
             Set(newTasks.filter { $0.status == .running }.map(\.id))
         )
@@ -1755,11 +1797,12 @@ final class AppState {
         }
     }
 
-    private func discardAllMessageDrafts() {
-        for taskID in Set(provisionalAssistantItemIDs.keys).union(assistantItemPhases.keys) {
+    private func discardAllMessageDrafts(except retainedTaskIDs: Set<AgentTask.ID> = []) {
+        for taskID in Set(provisionalAssistantItemIDs.keys).union(assistantItemPhases.keys)
+            where !retainedTaskIDs.contains(taskID) {
             discardAssistantDrafts(taskID: taskID)
         }
-        for taskID in Array(provisionalReasoningItemIDs.keys) {
+        for taskID in Array(provisionalReasoningItemIDs.keys) where !retainedTaskIDs.contains(taskID) {
             discardReasoningDrafts(taskID: taskID)
         }
     }
