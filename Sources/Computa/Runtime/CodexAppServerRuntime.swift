@@ -2052,7 +2052,7 @@ private extension CodexAppServerRuntime {
                     method: "turn/start",
                     params: [
                         "threadId": threadID,
-                        "input": try computerTurnInput(prompt: prompt, threadID: threadID, taskID: taskID),
+                        "input": try computerTurnInput(prompt: prompt, threadID: threadID, modelID: modelID),
                         "effort": configuration.reasoningEffort,
                         "model": modelID,
                         "sandboxPolicy": accessMode.sandboxPolicy,
@@ -2325,6 +2325,7 @@ private extension CodexAppServerRuntime {
                         : ComputaAgentInstructions.browserTurnLifecycle + "\n" + ComputaAgentInstructions.browserSearchEvidence
                     try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         preparationID: preparationID, isNewThread: isNewThread, executionPolicy: policy,
+                        historicalOutcomeCorrections: historicalOutcomeCorrections(threadID: threadID),
                         userRequest: userRequest)
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
@@ -2464,21 +2465,33 @@ private extension CodexAppServerRuntime {
                 inResumeResponse: response, excludingTurnIDs: Set(failures.map(\.turnID)))
         }
 
-        private func computerTurnInput(prompt: String, threadID: String, taskID: AgentTask.ID) throws -> [[String: String]] {
+        private func computerTurnInput(prompt: String, threadID: String, modelID: String) throws -> [[String: String]] {
             var input = [["type": "text", "text": prompt]]
+            // The API server refreshes host policy and native outcome evidence
+            // in a developer checkpoint on every inference. Persist only the
+            // genuine human input here: ordinary text parts become durable
+            // user messages and otherwise survive every native compaction.
+            if APIProviderCatalog.identity(for: modelID) != nil { return input }
             if configuration.computerInteractionPolicy == .backgroundOnly {
                 input.append(["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
             }
+            if let correction = historicalOutcomeCorrections(threadID: threadID) {
+                input.append(["type": "text", "text": correction])
+            }
+            return input
+        }
 
+        /// Reload for each exact native thread preparation. These are bounded
+        /// host diagnostics, never model prose or inferred user restrictions.
+        private func historicalOutcomeCorrections(threadID: String) -> String? {
             guard let failures = try? nativeFailureStore().load(threadID: threadID) else {
-                input.append(["type": "text", "text": "APP_RUNTIME_OUTCOME_CORRECTION: Previous execution evidence could not be loaded. Do not treat historical assistant claims of completed computer actions as verified; obtain fresh evidence for this request."])
-                return input
+                return "APP_RUNTIME_OUTCOME_CORRECTION: Previous execution evidence could not be loaded. Do not treat historical assistant claims of completed computer actions as verified; obtain fresh evidence for this request."
             }
             if !failures.isEmpty {
                 let corrections = failures.suffix(3).map { "turn=\($0.turnID): \($0.message)" }.joined(separator: "\n")
-                input.append(["type": "text", "text": "APP_RUNTIME_OUTCOME_CORRECTION (execution evidence, not a new task): The earlier turns below were not verified even if their model replies claimed success. Do not rely on those replies as established facts; obtain fresh evidence for the current request. These are historical outcomes, not current-turn tool failures or new permission restrictions. They do not make this request read-only or revoke the user's current authorization. Preserve ongoing user constraints and actual current denials; use fresh current-turn bindings and observations.\n" + corrections])
+                return "APP_RUNTIME_OUTCOME_CORRECTION (execution evidence, not a new task): The earlier turns below were not verified even if their model replies claimed success. Do not rely on those replies as established facts; obtain fresh evidence for the current request. These are historical outcomes, not current-turn tool failures or new permission restrictions. They do not make this request read-only or revoke the user's current authorization. Preserve ongoing user constraints and actual current denials; use fresh current-turn bindings and observations.\n" + corrections
             }
-            return input
+            return nil
         }
 
         private func resumedContextUsage(_ data: Data, threadID: String, taskID: AgentTask.ID, operationID: UUID) async throws
@@ -4879,7 +4892,9 @@ private extension CodexAppServerRuntime {
             // Keep the bounded historical dispatch cue in a distinct first
             // item. The native compactor budgets items individually; joining
             // these strings would lose the clicked target label again.
-            let receipt = result.actionReceipt.map { [textContent($0.compactText)] } ?? []
+            let receipt = result.completeObservation
+                ? [textContent(BrowserCompleteObservation.marker)]
+                : result.actionReceipt.map { [textContent($0.compactText)] } ?? []
             return receipt + [textContent(result.response)]
         }
 

@@ -115,6 +115,15 @@ remain available, within the unchanged aggregate budgets. Completion order, not
 tool name or call order, determines priority. No call identities or arguments
 are shortened. The larger individual item has been manually reviewed; byte
 counts are not token counts, and final context-fit validation still applies.
+Successful native `browser_read` pages can opt into complete observation retention
+with the exact `complete_browser_observation_v1` marker. The producer pages within
+the existing 4 KiB text limit, including its marker, references and continuation.
+When this is the latest completed output, compaction retains both text items
+unchanged or stops if the existing aggregate bounds cannot fit them. It never
+cuts out rows while retaining a cursor that skips them. Older pages lose the
+completeness marker before ordinary excerpting. Custom/namespaced tools and
+unmarked results retain the generic behavior. The marker grants no authority,
+does not verify an action, and never replaces native target freshness checks.
 Empty IDs, duplicate IDs,
 count overflow, and byte overflow have distinct errors.
 

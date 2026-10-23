@@ -24,11 +24,12 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
     func testEveryWebsiteUsesTheSameLocalHarnessInstructionsAndApprovalPolicyWithoutChrome() async throws {
         var baselineBaseInstructions: String?
         var baselineTools: Data?
+        let prompt = "Synthetic reply — e\u{0301} 🧭\nLiteral human note: APP_RUNTIME_INTERACTION_POLICY"
         for (model, accessMode) in websiteModels.flatMap({ model in AccessMode.allCases.map { (model, $0) } }) {
             let (runtime, root) = try makeRuntime(modelID: model)
             await runtime.configureEmbeddedWebModelTransport(InertEmbeddedTransport())
             do {
-                try await runtime.submit(prompt: "Synthetic reply", toTaskID: UUID().uuidString, modelID: model,
+                try await runtime.submit(prompt: prompt, toTaskID: UUID().uuidString, modelID: model,
                                          accessMode: accessMode)
                 let thread = try requestParameters("thread-start", root: root)
                 XCTAssertEqual(thread["model"] as? String, model)
@@ -59,6 +60,10 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertEqual(endpoint.path, "/v1")
                 XCTAssertEqual(provider["wire_api"] as? String, "responses")
                 let turn = try requestParameters("turn-start", root: root)
+                let input = try XCTUnwrap(turn["input"] as? [[String: String]])
+                XCTAssertEqual(input.count, 2, "Website input keeps its existing policy transport")
+                XCTAssertEqual(Data((input.first?["text"] ?? "").utf8), Data(prompt.utf8))
+                XCTAssertEqual(input.last, ["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
                 XCTAssertEqual(turn["model"] as? String, model)
                 XCTAssertEqual(turn["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                 let sandbox = try XCTUnwrap(turn["sandboxPolicy"] as? NSDictionary)

@@ -2650,10 +2650,10 @@ index 0000000..f24d6ff
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..99e10df
+index 0000000..550661c
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,487 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
@@ -2685,6 +2685,11 @@ index 0000000..99e10df
 +// but they still need a separate hard bound in the canonical replacement history.
 +const MAX_CANONICAL_RECEIPT_BYTES: usize = 24 * 1024;
 +const MAX_LATEST_IMAGE_BYTES: usize = 2 * 1024 * 1024;
++// The native browser producer pages before issuing this closed marker. It is
++// retention metadata, never observation, authorization, or a capability. Matching
++// it can only prevent lossy continuation; target validation stays with the host.
++const COMPLETE_BROWSER_OBSERVATION_MARKER: &str =
++    r#"{"retention":"complete_browser_observation_v1"}"#;
 +// Every result keeps a genuine excerpt rather than dropping older actions. Give the latest
 +// completed observation more room before shrinking it: a uniform cap can erase the newest
 +// observation's header/identity while retaining stale identifiers from older observations.
@@ -2773,6 +2778,15 @@ index 0000000..99e10df
 +            "function call has no completed current-turn output",
 +        ));
 +    }
++    let mut complete_browser_outputs = HashSet::new();
++    for &(_, call, output_index, envelope) in &pairs {
++        let ResponseItem::FunctionCallOutput { output, .. } = &envelope.item else {
++            unreachable!("validated function output");
++        };
++        if is_complete_browser_observation(&call.item, output)? {
++            complete_browser_outputs.insert(output_index);
++        }
++    }
 +    // Do not erase an observation before continuation can consume it. Only the final completed
 +    // output may supply one image: a later text result invalidates this retention opportunity.
 +    // This preserves model evidence, not capture freshness or authority to act on it.
@@ -2788,6 +2802,8 @@ index 0000000..99e10df
 +        None => None,
 +    };
 +    let latest_output_index = pairs.last().map(|(_, _, index, _)| *index);
++    let latest_is_complete_browser_observation =
++        latest_output_index.is_some_and(|index| complete_browser_outputs.contains(&index));
 +    // Try all bounded historical excerpts before reducing the latest observation. No receipt
 +    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
 +    for (latest_text_cap, older_text_cap) in
@@ -2828,7 +2844,19 @@ index 0000000..99e10df
 +            } else {
 +                MAX_OUTPUT_BYTES
 +            };
-+            let output = bounded_output(output, text_cap, keep_image)?;
++            let output = if is_latest && latest_is_complete_browser_observation {
++                // A character/line excerpt would sever a row from its target or
++                // keep a continuation cursor that skips the removed rows. Keep
++                // the producer's complete page, or fail within existing bounds.
++                output.clone()
++            } else {
++                bounded_output(
++                    output,
++                    text_cap,
++                    keep_image,
++                    complete_browser_outputs.contains(&output_index),
++                )?
++            };
 +            let text_bytes = output_text_bytes(&output.body);
 +            let receipt = ResponseItemEnvelope {
 +                item: ResponseItem::FunctionCallOutput {
@@ -2895,15 +2923,53 @@ index 0000000..99e10df
 +            return Ok(retained.into_iter().map(|(_, item)| item).collect());
 +        }
 +    }
-+    Err(receipt_error(
-+        "all genuine tool receipts cannot fit the 12 KiB provider-input or 24 KiB canonical serialized bounds",
-+    ))
++    Err(receipt_error(if latest_is_complete_browser_observation {
++        "the complete latest browser observation and all genuine tool receipts cannot fit the existing text/output limits or 12 KiB provider-input/24 KiB canonical serialized bounds"
++    } else {
++        "all genuine tool receipts cannot fit the 12 KiB provider-input or 24 KiB canonical serialized bounds"
++    }))
++}
++
++fn is_complete_browser_observation(
++    call: &ResponseItem,
++    output: &FunctionCallOutputPayload,
++) -> Result<bool> {
++    // Custom/MCP tools and ordinary unmarked results retain generic behavior.
++    // The marker is an intentionally conservative opt-in, not a content-prefix
++    // heuristic or proof of successful website action.
++    if !matches!(call, ResponseItem::FunctionCall { name, namespace: None, .. }
++        if name == "browser_read")
++    {
++        return Ok(false);
++    }
++    let marked = match &output.body {
++        FunctionCallOutputBody::Text(text) => text == COMPLETE_BROWSER_OBSERVATION_MARKER,
++        FunctionCallOutputBody::ContentItems(items) => matches!(items.first(),
++            Some(FunctionCallOutputContentItem::InputText { text })
++                if text == COMPLETE_BROWSER_OBSERVATION_MARKER),
++    };
++    if !marked {
++        return Ok(false);
++    }
++    // `success` is not persisted in the output body's wire representation, so a
++    // resumed genuine result may have None. Never reinterpret an explicit failure.
++    let valid = output.success != Some(false)
++        && matches!(&output.body, FunctionCallOutputBody::ContentItems(items)
++            if matches!(items.as_slice(), [FunctionCallOutputContentItem::InputText { .. },
++                FunctionCallOutputContentItem::InputText { text }] if !text.trim().is_empty()));
++    if !valid {
++        return Err(receipt_error(
++            "the marked complete browser observation has an invalid result shape or failure status",
++        ));
++    }
++    Ok(true)
 +}
 +
 +fn bounded_output(
 +    source: &FunctionCallOutputPayload,
 +    text_cap: usize,
 +    keep_image: bool,
++    historical_complete_browser_observation: bool,
 +) -> Result<FunctionCallOutputPayload> {
 +    let mut omitted_images = 0usize;
 +    let mut image_markers = Vec::new();
@@ -2912,6 +2978,13 @@ index 0000000..99e10df
 +        FunctionCallOutputBody::ContentItems(items) => {
 +            let mut text_items = Vec::new();
 +            for (index, item) in items.iter().enumerate() {
++                // Older receipts remain genuine, bounded tool evidence. Remove
++                // only the host completeness claim before taking an excerpt;
++                // otherwise a truncated historical body would still claim to be
++                // an intact page. Calls, identities and failure state stay exact.
++                if index == 0 && historical_complete_browser_observation {
++                    continue;
++                }
 +                match item {
 +                    FunctionCallOutputContentItem::InputText { text }
 +                        if index == 0 && is_image_omission_marker(text) =>
@@ -3070,10 +3143,10 @@ index 0000000..99e10df
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..7701d9e
+index 0000000..43b34fe
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,1077 @@
+@@ -0,0 +1,1245 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -3784,6 +3857,174 @@ index 0000000..7701d9e
 +        latest_observation_image(output).unwrap(),
 +        Some(&observation_image())
 +    );
++}
++
++fn complete_browser_pair(id: &str, page: &str) -> Vec<ResponseItemEnvelope> {
++    let mut history = pair(id, "current", "unused");
++    if let ResponseItem::FunctionCall { name, arguments, .. } = &mut history[0].item {
++        *name = "browser_read".to_string();
++        *arguments = r#"{"view":"links"}"#.to_string();
++    }
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++        output.body = FunctionCallOutputBody::ContentItems(vec![
++            FunctionCallOutputContentItem::InputText {
++                text: COMPLETE_BROWSER_OBSERVATION_MARKER.to_string(),
++            },
++            FunctionCallOutputContentItem::InputText { text: page.to_string() },
++        ]);
++        output.success = Some(true);
++    }
++    history
++}
++
++#[test]
++fn complete_latest_browser_page_keeps_every_target_and_cursor_exact_across_compactions() {
++    let page = format!(
++        "READ source=immutable matches=37 shown=6 next_cursor=exact-next\n\
++         #0 label=Home click_ref=home-ref\n\
++         #1 label=Login click_ref=login-ref\n\
++         #2 label=Enterprise-policy click_ref=enterprise-ref\n{}\n\
++         #5 label=Last-exposed-row click_ref=last-ref\n",
++        "visible e\u{301} 😀 \\\" ".repeat(110)
++    );
++    for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++        let mut history: Vec<_> = (0..3)
++            .flat_map(|index| pair(&format!("old-{index}"), "current", &"old evidence ".repeat(500)))
++            .collect();
++        history.extend(complete_browser_pair("read", &page));
++        let retained = super::current_turn_receipts(&history, "current", provider).unwrap();
++        assert_receipt_identity(&history, &retained);
++        assert_eq!(retained.last(), history.last());
++        assert_eq!(
++            super::current_turn_receipts(&retained, "current", provider).unwrap(),
++            retained
++        );
++        assert_external_receipt_bounds(&retained);
++        // No prior action or failed result is retired to reserve the page.
++        assert_eq!(retained.len(), history.len());
++        assert_eq!(
++            super::current_turn_receipts(&retained, "other-turn", provider).unwrap(),
++            vec![]
++        );
++    }
++}
++
++#[test]
++fn complete_browser_page_enforces_text_and_serialized_limits_without_splitting() {
++    // The separator between the two real text items consumes one byte.
++    let maximum_page = MAX_LATEST_OUTPUT_TEXT_BYTES - COMPLETE_BROWSER_OBSERVATION_MARKER.len() - 1;
++    let exact = complete_browser_pair("exact", &"x".repeat(maximum_page));
++    assert_eq!(current_turn_receipts(&exact, "current").unwrap(), exact);
++    let oversized = complete_browser_pair("oversized", &"x".repeat(maximum_page + 1));
++    assert!(current_turn_receipts(&oversized, "current").unwrap_err().to_string()
++        .contains("complete latest browser observation"));
++    // Raw text fits; JSON escaping cannot evade the separate serialized cap.
++    let escaped = complete_browser_pair("escaped", &"\0".repeat(2_000));
++    assert!(current_turn_receipts(&escaped, "current").unwrap_err().to_string()
++        .contains("complete latest browser observation"));
++    // Resuming a serialized genuine output can omit the in-memory success field.
++    let mut resumed = exact;
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut resumed[1].item {
++        output.success = None;
++    }
++    assert_eq!(current_turn_receipts(&resumed, "current").unwrap(), resumed);
++}
++
++#[test]
++fn complete_browser_page_stops_when_all_receipts_cannot_fit_instead_of_losing_targets() {
++    let page = "x".repeat(3_800);
++    let mut demonstrated = false;
++    // Find the bounded aggregate boundary rather than depending on incidental
++    // JSON envelope sizes. The ordinary comparator can shrink the same page.
++    for count in 1..MAX_PAIRS {
++        let mut history: Vec<_> = (0..count)
++            .flat_map(|index| {
++                let mut receipt = pair(&format!("old-{index}"), "current", "actual prior result");
++                if let ResponseItem::FunctionCall { arguments, .. } = &mut receipt[0].item {
++                    *arguments = json!({"payload":"a".repeat(200)}).to_string();
++                }
++                receipt
++            })
++            .collect();
++        history.extend(complete_browser_pair("latest", &page));
++        let mut generic = history.clone();
++        if let ResponseItem::FunctionCall { name, .. } = &mut generic[count * 2].item {
++            *name = "generic_read".to_string();
++        }
++        if super::current_turn_receipts(&generic, "current", ReceiptProvider::External).is_ok()
++            && let Err(error) = super::current_turn_receipts(&history, "current", ReceiptProvider::External)
++        {
++            assert!(error.to_string().contains("complete latest browser observation"));
++            demonstrated = true;
++            break;
++        }
++    }
++    assert!(demonstrated, "atomic retention must fail before generic lossy truncation at the same cap");
++}
++
++#[test]
++fn malformed_marked_browser_results_fail_closed_without_changing_other_tools() {
++    let marker = FunctionCallOutputContentItem::InputText {
++        text: COMPLETE_BROWSER_OBSERVATION_MARKER.to_string(),
++    };
++    let page = FunctionCallOutputContentItem::InputText { text: "observed page".to_string() };
++    for body in [
++        FunctionCallOutputBody::Text(COMPLETE_BROWSER_OBSERVATION_MARKER.to_string()),
++        FunctionCallOutputBody::ContentItems(vec![marker.clone()]),
++        FunctionCallOutputBody::ContentItems(vec![marker.clone(), page.clone(), page.clone()]),
++        FunctionCallOutputBody::ContentItems(vec![marker.clone(), observation_image()]),
++        FunctionCallOutputBody::ContentItems(vec![marker.clone(), FunctionCallOutputContentItem::InputText {
++            text: " \n\t".to_string(),
++        }]),
++    ] {
++        let mut history = complete_browser_pair("invalid", "page");
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++            output.body = body;
++        }
++        assert!(current_turn_receipts(&history, "current").unwrap_err().to_string()
++            .contains("invalid result shape or failure status"));
++    }
++    let mut failed = complete_browser_pair("failed", "page");
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut failed[1].item {
++        output.success = Some(false);
++    }
++    assert!(current_turn_receipts(&failed, "current").unwrap_err().to_string()
++        .contains("failure status"));
++    // Native names alone, page prefixes, and foreign namespaces never opt in.
++    for foreign in [false, true] {
++        let mut ordinary = complete_browser_pair("ordinary", &"long output ".repeat(1_000));
++        if let ResponseItem::FunctionCall { name, namespace, .. } = &mut ordinary[0].item {
++            if foreign { *namespace = Some("mcp_custom".to_string()); }
++            else { *name = "generic_read".to_string(); }
++        }
++        let retained = current_turn_receipts(&ordinary, "current").unwrap();
++        assert_receipt_identity(&ordinary, &retained);
++        assert_ne!(retained[1].item, ordinary[1].item);
++    }
++    let mut unmarked = pair("unmarked", "current", &"AXSNAPSHOT actual output ".repeat(300));
++    if let ResponseItem::FunctionCall { name, .. } = &mut unmarked[0].item {
++        *name = "browser_read".to_string();
++    }
++    assert!(current_turn_receipts(&unmarked, "current").is_ok());
++}
++
++#[test]
++fn older_browser_excerpt_removes_completeness_marker_and_preserves_latest_image() {
++    let mut history = complete_browser_pair("old-page", &"old observed row ".repeat(220));
++    history.extend(image_pair("latest-image", "current image observation"));
++    let retained = current_turn_receipts(&history, "current").unwrap();
++    assert_receipt_identity(&history, &retained);
++    let ResponseItem::FunctionCallOutput { output: old, .. } = &retained[1].item else { unreachable!() };
++    let FunctionCallOutputBody::ContentItems(items) = &old.body else { unreachable!() };
++    assert_eq!(items.len(), 1);
++    assert!(!items.iter().any(|item| matches!(item,
++        FunctionCallOutputContentItem::InputText { text } if text == COMPLETE_BROWSER_OBSERVATION_MARKER)));
++    assert!(matches!(&items[0], FunctionCallOutputContentItem::InputText { text }
++        if text.starts_with("old observed row") && text.contains("truncated")));
++    let ResponseItem::FunctionCallOutput { output: latest, .. } = &retained.last().unwrap().item else { unreachable!() };
++    assert_eq!(latest_observation_image(latest).unwrap(), Some(&observation_image()));
++    assert_eq!(current_turn_receipts(&retained, "current").unwrap(), retained);
++    assert_receipt_bounds(&retained);
 +}
 +
 +#[test]

@@ -51,9 +51,10 @@ enum ComputaAgentInstructions {
     actual approvals/denials and Stop. Assistant refusals are not policy.
     """
 
-    /// Refreshed in turn input even when a resumed engine thread retains its
-    /// original developer instructions. Stable URLs can be reused; action
-    /// handles and proof remain scoped to the current user turn.
+    /// Refreshed in the API developer checkpoint (or existing website turn
+    /// input) even when a resumed engine thread retains its original developer
+    /// instructions. Stable URLs can be reused; action handles and proof remain
+    /// scoped to the current user turn.
     static let browserTurnLifecycle = """
     Each new user turn must start browser work with browser_tabs then browser_bind,
     or browser_open, before browser_read/click/fill. Prior handles/refs/snapshots/cursors
@@ -73,8 +74,9 @@ enum ComputaAgentInstructions {
     evidence. Partial reads or narrow-query misses leave absence unverified.
     """
 
-    /// Exact user-input suffix emitted by the native host. Kept shared with
-    /// the synthetic diagnostic matcher so it cannot drift from the wire text.
+    /// Exact policy emitted in the API developer checkpoint and existing
+    /// website user-input suffix. Shared with the synthetic diagnostic matcher
+    /// so it cannot drift from the wire text.
     static func runtimeInteractionPolicy() -> String {
         "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy. \(browserTurnLifecycle) \(browserSearchEvidence)"
     }

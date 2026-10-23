@@ -305,12 +305,14 @@ struct EmbeddedBrowserReadFailureScope: Equatable, Sendable {
 struct EmbeddedBrowserToolExecution: Sendable {
     let response: String
     let actionReceipt: EmbeddedBrowserActionReceipt?
+    let completeObservation: Bool
     /// Native-only evidence of an observed binding/document generation.
     /// A fresh snapshot UUID or URL alone cannot reset a read failure budget.
     let readFailureScope: EmbeddedBrowserReadFailureScope?
 
     init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil,
-         readFailureScope: EmbeddedBrowserReadFailureScope? = nil) {
+         readFailureScope: EmbeddedBrowserReadFailureScope? = nil, completeObservation: Bool = false) {
+        self.completeObservation = completeObservation
         self.response = response
         self.actionReceipt = actionReceipt
         self.readFailureScope = readFailureScope
@@ -663,8 +665,9 @@ actor EmbeddedBrowserToolController {
                 }
             }
             let snapshot = try await currentReadObservation(
-                taskKey: taskKey, contextID: contextID, scope: scope, read: read)
-            return try .init(response: readResponse(snapshot, taskKey: taskKey), readFailureScope: .init(snapshot: snapshot))
+                taskKey: taskKey, contextID: contextID, scope: scope, read: read, compact: true)
+            return try .init(response: readResponse(snapshot, taskKey: taskKey, compact: true),
+                readFailureScope: .init(snapshot: snapshot), completeObservation: true)
         case "browser_click", "browser_fill":
             let invocation = try prepared ?? prepareMutation(taskKey: taskKey, tool: tool, arguments: arguments)
             guard invocation.matches(taskKey: taskKey, contextID: contextID, tool: tool, arguments: object) else {
@@ -901,7 +904,7 @@ actor EmbeddedBrowserToolController {
     /// pagination and physical-target checks. This grants no input or new tab.
     private func currentObservation(
         taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest,
-        replacingCursor: String? = nil
+        replacingCursor: String? = nil, compact: Bool = false
     ) async throws -> BrowserTabSnapshot {
         let binding = try bound(taskKey, contextID)
         _ = try await currentTarget(binding: binding, scope: scope)
@@ -913,7 +916,7 @@ actor EmbeddedBrowserToolController {
         if replacingCursor == nil { contexts[taskKey]?.snapshot = nil }
         let observation = try await broker.snapshot(
             taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read,
-            replacingCursor: replacingCursor)
+            replacingCursor: replacingCursor, compact: compact)
         // The broker has now committed the replacement. If publication fails,
         // neither its unpublished references nor the superseded ones survive.
         contexts[taskKey]?.snapshot = nil
@@ -936,10 +939,10 @@ actor EmbeddedBrowserToolController {
     /// additional read on the same lease, never another input or a new binding.
     /// Retained cursor/subtree reads cannot move to a different document.
     private func currentReadObservation(
-        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest
+        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest, compact: Bool = false
     ) async throws -> BrowserTabSnapshot {
         do {
-            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read, compact: compact)
         } catch BrowserTabBrokerError.staleDocument
             where read.cursor == nil && read.snapshotID == nil && read.elementIndex == nil {
             try Task.checkCancellation()
@@ -948,7 +951,7 @@ actor EmbeddedBrowserToolController {
             contexts[taskKey]?.snapshot = nil
             // This direct call deliberately cannot recurse/retry a second time.
             // It repeats physical target, document, scope and publication checks.
-            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read, compact: compact)
         }
     }
 
@@ -1085,11 +1088,11 @@ actor EmbeddedBrowserToolController {
 
     /// Host guidance refers only to values already observed. It neither repeats
     /// page data nor grants observations, references or outcome proof.
-    private static let literalCopyGuidance = "Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority."
+    private static let literalCopyGuidance = BrowserCompleteObservation.literalCopyGuidance
 
     /// References adapt only controls actually exposed by this read. Their
     /// reserved row bytes do not change current-snapshot/physical preflight.
-    private func readResponse(_ snapshot: BrowserTabSnapshot, taskKey: String) throws -> String {
+    private func readResponse(_ snapshot: BrowserTabSnapshot, taskKey: String, compact: Bool = false) throws -> String {
         guard var context = contexts[taskKey], context.snapshot == snapshot, let binding = context.binding else {
             throw BrowserTabBrokerError.staleSnapshot
         }
@@ -1102,6 +1105,15 @@ actor EmbeddedBrowserToolController {
         guard text.utf8.count <= 16_384,
               suffixes.values.allSatisfy({ $0.utf8.count <= SemanticReadPresentation.rowMetadataByteReserve }) else {
             throw PostInputObservationFailure.outputLimit
+        }
+        if compact {
+            let result = text + (try BrowserCompleteObservation.footer(cursor: snapshot.nextCursor))
+            guard try BrowserCompleteObservation.excessBytes(result) == 0 else {
+                throw PostInputObservationFailure.outputLimit
+            }
+            // Reference publication is transactional with the complete page.
+            contexts[taskKey]?.actionReferences = context.actionReferences
+            return result
         }
         var metadata: [String: Any] = [
             "supersedes_previous": true, "consumed_by_admitted_input": true,

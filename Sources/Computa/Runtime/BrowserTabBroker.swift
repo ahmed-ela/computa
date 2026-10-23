@@ -3,6 +3,34 @@ import ApplicationServices
 import AutomationCore
 import Foundation
 
+/// A complete ordinary browser-read page, including its reference menu, must
+/// fit atomically in the pinned runtime's existing latest-receipt budget.
+enum BrowserCompleteObservation {
+    static let marker = #"{"retention":"complete_browser_observation_v1"}"#
+    static let maximumTextBytes = 4_096
+    static let maximumSerializedItemsBytes = 4_608
+    static let literalCopyGuidance = "Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority."
+
+    static func footer(cursor: String?) throws -> String {
+        var metadata: [String: Any] = [
+            "consumed_by_admitted_input": true,
+            "next_after_input": "Use current_observation or browser_read; never replay.",
+            "references": "Only this page's refs are current; fresh filtered read for earlier targets.",
+            "literal_copy_guidance": "Copy observed values verbatim, preserving Unicode and whitespace.",
+        ]
+        if let cursor { metadata["continuation"] = ["tool": "browser_read", "arguments": ["cursor": cursor]] }
+        let bytes = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes])
+        return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
+    }
+
+    static func excessBytes(_ text: String, referenceReserve: Int = 0) throws -> Int {
+        let items = [["type": "inputText", "text": marker], ["type": "inputText", "text": text]]
+        let serialized = try JSONSerialization.data(withJSONObject: items, options: [.sortedKeys])
+        return max(0, max(marker.utf8.count + 1 + text.utf8.count + referenceReserve - maximumTextBytes,
+                          serialized.count + referenceReserve - maximumSerializedItemsBytes))
+    }
+}
+
 struct BrowserTarget: Equatable, Sendable {
     let targetID: String
     let instanceToken: String
@@ -642,7 +670,8 @@ actor BrowserTabSessionBroker {
         binding suppliedBinding: BrowserTabBinding,
         bundleIdentifier: String,
         read: SemanticReadRequest,
-        replacingCursor: String? = nil
+        replacingCursor: String? = nil,
+        compact: Bool = false
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -775,38 +804,48 @@ actor BrowserTabSessionBroker {
         let navigationCandidates = Set(candidateSnapshot.elements.filter {
             BrowserActionVerification.observedLinkDestination($0, at: document.url) != nil
         }.map(\.backendNodeID))
-        let page = try makePage(selected: selected, position: position, regionCandidates: candidates,
-                                navigationCandidates: navigationCandidates,
-                                overview: effectiveRead.view == .overview)
-        let elements = page.elements
-        let nextCursor = page.nextPosition.element < selected.count ? UUID().uuidString : nil
         let sourceID = retainingObservation ? priorRead!.sourceID : UUID()
-        let receipt = SemanticReadReceipt(
-            id: snapshotID, sourceID: sourceID,
-            targetGeneration: "\(browserGeneration):\(currentBinding.handle):\(currentBinding.documentEpoch)",
-            consistency: .immutableCapture, view: effectiveRead.view, query: effectiveRead.query,
-            subtreeNodeID: scopeNodeID, selectedElementCount: selected.count,
-            selectedFieldCount: selected.reduce(0) { $0 + readFields($1).count },
-            sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
-            outputTruncated: nextCursor != nil, exposures: page.exposures
-        )
-        let formatted = try formatSnapshot(
-            snapshotID: snapshotID,
-            binding: currentBinding,
-            bundleIdentifier: bundleIdentifier,
-            document: document,
-            elements: elements,
-            rows: page.rows,
-            sourceID: sourceID,
-            read: effectiveRead,
-            receipt: receipt,
-            scopeNodeID: scopeNodeID,
-            totalMatches: selected.count,
-            offset: position.element,
-            nextCursor: nextCursor,
-            fieldsTruncated: page.fieldsTruncated,
-            retainedObservation: retainingObservation
-        )
+        let continuationID = UUID().uuidString
+        var bodyLimit = compact ? 3_000 : (effectiveRead.view == .overview ? 6_000 : 10_000)
+        var page: ReadPage
+        var receipt: SemanticReadReceipt
+        var nextCursor: String?
+        var formatted: String
+        // Rebuild from the same immutable position; never trim a finished page
+        // while keeping a cursor which has already advanced past omitted rows.
+        while true {
+            page = try makePage(selected: selected, position: position, regionCandidates: candidates,
+                navigationCandidates: navigationCandidates, overview: effectiveRead.view == .overview,
+                bodyByteLimit: bodyLimit, compact: compact)
+            nextCursor = page.nextPosition.element < selected.count ? continuationID : nil
+            receipt = SemanticReadReceipt(
+                id: snapshotID, sourceID: sourceID,
+                targetGeneration: "\(browserGeneration):\(currentBinding.handle):\(currentBinding.documentEpoch)",
+                consistency: .immutableCapture, view: effectiveRead.view, query: effectiveRead.query,
+                subtreeNodeID: scopeNodeID, selectedElementCount: selected.count,
+                selectedFieldCount: selected.reduce(0) { $0 + readFields($1).count },
+                sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
+                outputTruncated: nextCursor != nil, exposures: page.exposures)
+            formatted = try formatSnapshot(snapshotID: snapshotID, binding: currentBinding,
+                bundleIdentifier: bundleIdentifier, document: document, elements: page.elements,
+                rows: page.rows, sourceID: sourceID, read: effectiveRead, receipt: receipt,
+                scopeNodeID: scopeNodeID, totalMatches: selected.count, offset: position.element,
+                nextCursor: nextCursor, fieldsTruncated: page.fieldsTruncated,
+                retainedObservation: retainingObservation, compact: compact)
+            if !compact { break }
+            let withFooter = formatted + (try BrowserCompleteObservation.footer(cursor: nextCursor))
+            let excess = try BrowserCompleteObservation.excessBytes(withFooter,
+                referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) })
+            if excess == 0 { break }
+            // This can fail even with zero rows when the host metadata itself
+            // cannot fit. Do not publish any partial page or reference menu.
+            let nextLimit = bodyLimit - max(64, excess)
+            guard !page.elements.isEmpty, nextLimit > 0 else {
+                throw BrowserTabBrokerError.invalidRead("The complete browser observation exceeds its bounded output. Use a narrower view or query; no partial page was published.")
+            }
+            bodyLimit = nextLimit
+        }
+        let elements = page.elements
         guard formatted.utf8.count <= 16_384 else {
             throw BrowserTabBrokerError.invalidRead("the observed snapshot metadata exceeds the bounded read output")
         }
@@ -1361,9 +1400,9 @@ actor BrowserTabSessionBroker {
     }
 
     private func makePage(selected: [BrowserTabElement], position: ReadPosition,
-                          regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false) throws -> ReadPage {
+                          regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false,
+                          bodyByteLimit: Int, compact: Bool = false) throws -> ReadPage {
         let maximumElements = overview ? 18 : 60
-        let bodyByteLimit = overview ? 6_000 : 10_000
         var page = ReadPage(nextPosition: position)
         var pageFragments = [[FieldFragment]]()
         var bytes = 0
@@ -1388,7 +1427,8 @@ actor BrowserTabSessionBroker {
             let fields = readFields(element)
             var next = page.nextPosition
             var fragments = [FieldFragment]()
-            let available = bodyByteLimit - bytes - 1 - SemanticReadPresentation.rowMetadataByteReserve
+            let referenceReserve = compact ? compactReferenceReserve(element) : SemanticReadPresentation.rowMetadataByteReserve
+            let available = bodyByteLimit - bytes - 1 - referenceReserve
             while next.field < fields.count {
                 let field = fields[next.field]
                 // Links are never presented as a syntactically valid clipped
@@ -1401,7 +1441,7 @@ actor BrowserTabSessionBroker {
                         start: next.utf8Offset, end: part.end, total: field.text.utf8.count)
                     guard fragment.end > fragment.start || fragment.total == 0 else { break }
                     let rowBytes = formatElement(element, fragments: fragments + [fragment],
-                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID)).utf8.count
+                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact).utf8.count
                     if rowBytes <= available { accepted = fragment; break }
                     budget -= max(1, rowBytes - available)
                 }
@@ -1416,15 +1456,17 @@ actor BrowserTabSessionBroker {
             }
             guard !fragments.isEmpty else {
                 if page.elements.isEmpty {
-                    throw BrowserTabBrokerError.invalidRead("the observed element metadata exceeds the bounded read output")
+                    throw BrowserTabBrokerError.invalidRead(compact
+                        ? "The observed element metadata exceeds the bounded read output. Use a narrower view or query; no partial page was published."
+                        : "the observed element metadata exceeds the bounded read output")
                 }
                 break
             }
             let row = formatElement(element, fragments: fragments,
-                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact)
             page.elements.append(element)
             pageFragments.append(fragments)
-            bytes += row.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve
+            bytes += row.utf8.count + 1 + referenceReserve
             page.exposures += fragments.map {
                 SemanticReadFieldExposure(nodeID: "backend:\(element.backendNodeID)", field: $0.field,
                     startUTF8: $0.start, endUTF8: $0.end, totalUTF8: $0.total,
@@ -1448,7 +1490,7 @@ actor BrowserTabSessionBroker {
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
             return formatElement(element, fragments: fragments,
                 parentIndex: parentIndex == element.index ? nil : parentIndex,
-                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact)
         }
         page.presentedRows = zip(page.elements, page.rows).map { element, row in
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
@@ -1486,8 +1528,15 @@ actor BrowserTabSessionBroker {
         return (text, rawBytes)
     }
 
+    // Tokens are native UUIDs: each suffix, including JSON escaping, is <64
+    // bytes. Passive rows need no speculative capability budget.
+    private func compactReferenceReserve(_ element: BrowserTabElement) -> Int {
+        guard element.isEnabled else { return 0 }
+        return (element.supportsPress ? 64 : 0) + (element.supportsSetText ? 64 : 0)
+    }
+
     private func formatElement(_ element: BrowserTabElement, fragments: [FieldFragment],
-                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool) -> String {
+                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool, compact: Bool = false) -> String {
         let actions = element.supportsPress ? "[\"AXPress\"]" : "[]"
         let pressSource: String
         if element.supportsPress && !supportsSemanticPress(role: element.semanticRole ?? element.role) {
@@ -1515,8 +1564,9 @@ actor BrowserTabSessionBroker {
         let children = element.childNodeIDs.isEmpty ? "" : " child_count=\(element.childNodeIDs.count) expandable=true"
         return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children) "
             + "content_scope=\(element.contentScope.rawValue) content_kind=\(element.contentKind.rawValue) "
-            + "enabled=\(element.isEnabled ? "true" : "false") "
-            + "settable=\(element.supportsSetText ? "true" : "false") actions=\(actions)\(pressSource)"
+            + (compact ? (element.isEnabled ? "" : "enabled=false ") : "enabled=\(element.isEnabled ? "true" : "false") ")
+            + (compact ? (element.supportsSetText ? "settable=true " : "") : "settable=\(element.supportsSetText ? "true" : "false") ")
+            + (compact && !element.supportsPress ? "" : "actions=\(actions)") + pressSource
             + (element.constraintValidation?.formattedMetadata ?? "")
     }
 
@@ -1678,8 +1728,16 @@ actor BrowserTabSessionBroker {
         offset: Int,
         nextCursor: String?,
         fieldsTruncated: Bool,
-        retainedObservation: Bool
+        retainedObservation: Bool,
+        compact: Bool = false
     ) throws -> String {
+        if compact {
+            return try formatCompactSnapshot(snapshotID: snapshotID, binding: binding,
+                document: document, elements: elements, rows: rows, sourceID: sourceID,
+                read: read, receipt: receipt, scopeNodeID: scopeNodeID, totalMatches: totalMatches,
+                offset: offset, nextCursor: nextCursor, fieldsTruncated: fieldsTruncated,
+                retainedObservation: retainedObservation)
+        }
         let documentURL = document.url.absoluteString
         let formattedURL = documentURL.utf8.count <= 2048
             ? "url=\(quote(documentURL))" : "url_omitted=1"
@@ -1745,6 +1803,36 @@ actor BrowserTabSessionBroker {
         if totalMatches == 0 {
             lines.append("No matching captured elements in this view/filter. This is not a website search result or proof of absent content. Read without a local query to inspect the site's actual result state; no unrelated fallback nodes were substituted.")
         }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The same captured rows and exact field spans, with one concise scope
+    /// declaration instead of repeated prose. No text is removed after paging.
+    private func formatCompactSnapshot(snapshotID: UUID, binding: BrowserTabBinding,
+        document: BrowserDocumentObservation, elements: [BrowserTabElement], rows: [String], sourceID: UUID,
+        read: SemanticReadRequest, receipt: SemanticReadReceipt, scopeNodeID: String?,
+        totalMatches: Int, offset: Int, nextCursor: String?, fieldsTruncated: Bool,
+        retainedObservation: Bool) throws -> String {
+        let url = document.url.absoluteString
+        let title = fieldPrefix(document.title, startUTF8: 0, escapedByteLimit: 128)
+        let metadataTruncated = title.end < document.title.utf8.count || url.utf8.count > 1_024
+        var lines = [
+            "AXSNAPSHOT id=\(snapshotID.uuidString) tab_handle=\(binding.handle.uuidString) document_epoch=\(binding.documentEpoch.uuidString) source=\(document.sourceName) "
+                + (url.utf8.count <= 1_024 ? "url=\(quote(url))" : "url_omitted=1") + " title=\(quote(title.text))",
+            "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") source_observation=\(sourceID) consistency=immutable_capture "
+                + "source_nodes=\(document.nodes.count) source_truncated=\(document.sourceTruncated ? 1 : 0) matches=\(totalMatches) shown=\(elements.count) offset=\(offset) "
+                + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) metadata_truncated=\(metadataTruncated ? 1 : 0) no_matches=\(totalMatches == 0 ? 1 : 0) "
+                + (nextCursor.map { "next_cursor=\($0) " } ?? "") + "observation=\(retainedObservation ? "retained" : "live")"
+                + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
+            try selectionEvidence(receipt: receipt, elements: elements),
+            "SCOPE captured selection only, not website search or proof of relevance/absence. *_utf8 marks exact fragments; href_fragment is not a destination. Omitted row flags: enabled=true settable=false actions=[]. Only shown click_ref/fill_ref authorize input."
+        ]
+        if read.view != .all { lines.append("VIEW \(readViewName(read.view)) omits other kinds of captured nodes; use all for structural context.") }
+        if document.semanticReadiness == .emptyAtDeadline {
+            lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
+        }
+        lines.append(contentsOf: rows)
+        if nextCursor != nil { lines.append("Continue with cursor only for remaining captured fields/rows.") }
         return lines.joined(separator: "\n")
     }
 

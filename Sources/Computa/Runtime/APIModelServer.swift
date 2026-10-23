@@ -82,9 +82,9 @@ actor APIModelServer {
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
     private var lanes: [String: Lane] = [:]
-    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let userRequest: Data? }
+    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let historicalOutcomeCorrections: String?; let userRequest: Data? }
     private struct Identity: Equatable, Sendable { let threadID: String; let turnID: String }
-    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let userRequest: Data? }
+    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String?; let historicalOutcomeCorrections: String?; let userRequest: Data? }
     private struct ExecutionCheckpoint { let context: Context; let revision: Int; let text: String }
     private struct NativeRequestContext { let identity: Identity; let requestKind: String? }
     private struct ActiveUserInputs { let context: Context; var revision: Int; var inputs: [Data] }
@@ -167,13 +167,20 @@ actor APIModelServer {
         let url = URL(string: "http://127.0.0.1:\(port)/v1")!; baseURL = url; return url
     }
     func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID, isNewThread: Bool = false,
-                              executionPolicy: String? = nil, userRequest: String? = nil) throws {
+                              executionPolicy: String? = nil, historicalOutcomeCorrections: String? = nil,
+                              userRequest: String? = nil) throws {
         let task = try Self.canonicalID(taskID), thread = try Self.canonicalID(threadID)
         if let executionPolicy { try Self.validateExecutionText(executionPolicy, limit: 8_192) }
+        if let historicalOutcomeCorrections { try Self.validateExecutionText(historicalOutcomeCorrections, limit: 8_192) }
+        // Leave room in the existing 16 KiB host message bound for the live
+        // 4 KiB checkpoint and fixed guidance. Native history is not expanded.
+        guard (executionPolicy?.utf8.count ?? 0) + (historicalOutcomeCorrections?.utf8.count ?? 0) <= 10_000 else {
+            throw Failure.invalidRequest
+        }
         let userRequest = try userRequest.map { try Self.validatedUserInput($0) }
         guard !stopped, !retiring.contains(task), lanes[task] == nil, admissions[task] == nil else { throw Failure.busy }
         let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread,
-            executionPolicy: executionPolicy, userRequest: userRequest)
+            executionPolicy: executionPolicy, historicalOutcomeCorrections: historicalOutcomeCorrections, userRequest: userRequest)
         if prepared[task] == value { return }
         guard prepared[task] == nil, contexts[task] == nil else { throw Failure.inferenceContextRequired }
         prepared[task] = value
@@ -184,12 +191,13 @@ actor APIModelServer {
         guard let preparation = prepared[task], preparation.threadID == identity.threadID,
               preparation.preparationID == preparationID else { throw Failure.inferenceContextRequired }
         let value = Context(identity: identity, preparationID: preparationID, isNewThread: preparation.isNewThread,
-                            executionPolicy: preparation.executionPolicy, userRequest: preparation.userRequest)
+                            executionPolicy: preparation.executionPolicy,
+                            historicalOutcomeCorrections: preparation.historicalOutcomeCorrections, userRequest: preparation.userRequest)
         if contexts[task] == value { return }
         guard !stopped, !retiring.contains(task), contexts[task] == nil,
               prepared[task] == preparation else { throw Failure.inferenceContextRequired }
         contexts[task] = value
-        if value.executionPolicy != nil || value.userRequest != nil {
+        if value.executionPolicy != nil || value.historicalOutcomeCorrections != nil || value.userRequest != nil {
             executionCheckpoints[task] = .init(context: value, revision: 0,
                 text: "No browser operations are recorded for this prepared turn.")
         }
@@ -207,7 +215,7 @@ actor APIModelServer {
         guard revision > 0 else { throw Failure.invalidRequest }
         guard !stopped, !retiring.contains(task), let context = contexts[task],
               context.identity == identity, context.preparationID == preparationID,
-              context.executionPolicy != nil || context.userRequest != nil,
+              context.executionPolicy != nil || context.historicalOutcomeCorrections != nil || context.userRequest != nil,
               prepared[task]?.preparationID == preparationID,
               let current = executionCheckpoints[task], current.context == context else { throw Failure.inferenceContextRequired }
         // Actor reentrancy can deliver a delayed cumulative update after a newer
@@ -304,7 +312,7 @@ actor APIModelServer {
     }
     private func executionMessage(taskID: String, context: Context, remindsUser: Bool,
                                   purpose: APIModelResponseCodec.HostProjectionPurpose) throws -> String? {
-        guard context.executionPolicy != nil || context.userRequest != nil else { return nil }
+        guard context.executionPolicy != nil || context.historicalOutcomeCorrections != nil || context.userRequest != nil else { return nil }
         guard let checkpoint = executionCheckpoints[taskID], checkpoint.context == context else {
             throw Failure.inferenceContextRequired
         }
@@ -316,6 +324,9 @@ actor APIModelServer {
         \(checkpoint.text)
         """
         if let policy = context.executionPolicy { message += "\nHost interaction policy:\n" + policy }
+        if let corrections = context.historicalOutcomeCorrections {
+            message += "\nHistorical native outcome evidence (not new permission policy or current-turn failures):\n" + corrections
+        }
         if purpose == .nativeCompaction {
             message += """
 

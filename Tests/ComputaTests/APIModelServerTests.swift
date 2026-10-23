@@ -1347,7 +1347,9 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
                 turn = UUID().uuidString, preparation = UUID()
             let policy = "Background-only limits UI delivery. Read-only tasks allow search input but forbid sends. Honor current approvals and Stop."
-            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, executionPolicy: policy)
+            let corrections = "APP_RUNTIME_OUTCOME_CORRECTION: turn=prior-fixture: The prior native outcome was unverified."
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: policy, historicalOutcomeCorrections: corrections)
             try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
             let input: [[String: Any]] = [
                 ["role": "user", "content": "Read the inbox only; do not send, forward, delete or change settings."],
@@ -1390,6 +1392,8 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 XCTAssertTrue(text.hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n"))
                 XCTAssertTrue(text.contains(turn.lowercased()))
                 XCTAssertTrue(text.contains(policy))
+                XCTAssertEqual(text.components(separatedBy: corrections).count, 2)
+                XCTAssertTrue(text.contains("Historical native outcome evidence (not new permission policy or current-turn failures):"))
                 XCTAssertTrue(text.contains(checkpoint ?? "No browser operations are recorded for this prepared turn."))
                 XCTAssertFalse(text.contains("99 browser actions"))
                 XCTAssertEqual(messages.filter { $0["role"] as? String == "developer" }.count, 1,
@@ -1476,6 +1480,19 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 XCTFail("Oversized or empty host policy must not be retained")
             } catch { XCTAssertEqual(error as? APIModelServer.Failure, .invalidRequest) }
         }
+        for corrections in ["", "\n ", String(repeating: "界", count: 2_731)] {
+            do {
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                    historicalOutcomeCorrections: corrections)
+                XCTFail("Oversized or empty historical evidence must not reserve admission")
+            } catch { XCTAssertEqual(error as? APIModelServer.Failure, .invalidRequest) }
+        }
+        do {
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: String(repeating: "p", count: 5_000),
+                historicalOutcomeCorrections: String(repeating: "c", count: 5_001))
+            XCTFail("Combined host evidence must leave space for the current checkpoint and maintenance guidance")
+        } catch { XCTAssertEqual(error as? APIModelServer.Failure, .invalidRequest) }
         try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, executionPolicy: "Valid host policy")
         try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: UUID().uuidString, preparationID: preparation)
         await server.shutdown()
@@ -1892,7 +1909,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     /// Drives the real Core/API boundary with deterministic engine and browser
     /// fixtures. This qualifies host ordering/reset, not live model behavior.
     @MainActor
-    func testCorePublishesBrowserCountsBeforeNextInferenceAndResetsNextTurn() async throws {
+    func testCorePublishesFreshHostEvidenceWithoutPersistingItAsUserInput() async throws {
         try XCTSkipUnless((try? FixtureBunExecutable.resolve()) != nil,
             "The deterministic App Server fixture requires the installed Bun executable.")
         let records = APIRequestRecorder(), reply = response()
@@ -1911,6 +1928,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         configuration.model = modelID
         configuration.workspacePath = root.path
         configuration.codexHomePath = root.path
+        configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         configuration.apiModelServerForTesting = server
         let runtime = CodexAppServerRuntime(configuration: configuration), browser = InertRuntimeBrowser()
         await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: browser))
@@ -1933,7 +1951,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             }
         }
         defer { events.cancel() }
-        let prompt = "Use only https://example.invalid for this read-only lookup. Do not send messages or change account settings."
+        let prompt = "Use only https://example.invalid for this read-only lookup. Do not send messages or change account settings.\nLiteral human note: APP_RUNTIME_INTERACTION_POLICY: e\u{0301} 🧭"
         func waitForTerminalTurn(_ count: Int) async throws {
             let deadline = ContinuousClock.now + .seconds(10)
             while ContinuousClock.now < deadline {
@@ -1954,10 +1972,40 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             _ = try await runtime.loadTasks()
             try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .fullAccess)
             try await waitForTerminalTurn(1)
-            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .fullAccess)
+            let initialTrace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
+            let firstStart = try XCTUnwrap(initialTrace.messages.first {
+                $0.direction == .clientToServer && $0.object["method"] as? String == "turn/start"
+            }?.object["params"] as? [String: Any])
+            let threadID = try XCTUnwrap(firstStart["threadId"] as? String)
+            let failureDirectory = root.appendingPathComponent("heydash-native-failures")
+            let failureStore = try NativeFailureEvidenceStore(directory: failureDirectory)
+            let diagnostic = try ComputerOutcomeDiagnostic.make(kind: .unverified,
+                unresolvedOperations: 1, failedOperations: 0)
+            func appendPriorFailure(_ number: Int, to thread: String) throws {
+                try failureStore.append(.init(threadID: thread, turnID: "prior-native-\(number)",
+                    callID: UUID().uuidString, toolName: "computer_outcome", message: diagnostic.message,
+                    diagnosticText: diagnostic.diagnosticText, timestamp: Date(timeIntervalSince1970: Double(number))))
+            }
+            for number in 1...4 { try appendPriorFailure(number, to: threadID) }
+            try appendPriorFailure(99, to: UUID().uuidString)
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)
             try await waitForTerminalTurn(2)
+            try appendPriorFailure(5, to: threadID)
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .fullAccess)
+            try await waitForTerminalTurn(3)
+            // The bounded load-error correction belongs in the fresh developer
+            // checkpoint too; it must not become a durable user text part.
+            let evidenceFile = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: failureDirectory,
+                includingPropertiesForKeys: nil).first { url in
+                    guard let bytes = try? Data(contentsOf: url),
+                          let value = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
+                    return value["threadID"] as? String == threadID
+                })
+            try Data("invalid fixture evidence".utf8).write(to: evidenceFile)
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)
+            try await waitForTerminalTurn(4)
             let requests = await records.snapshot()
-            XCTAssertEqual(requests.count, 3)
+            XCTAssertEqual(requests.count, 5)
             var checkpoints: [String] = [], toolSchemas: [NSArray] = []
             for request in requests {
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
@@ -1967,20 +2015,52 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let host = try XCTUnwrap(messages.last { $0["role"] as? String == "developer" }), checkpoint = try XCTUnwrap(host["content"] as? String)
                 XCTAssertEqual(host["role"] as? String, "developer")
                 XCTAssertEqual(messages.last?["role"] as? String, "user")
-                XCTAssertEqual(messages.last?["content"] as? String, prompt)
+                XCTAssertEqual(Data((messages.last?["content"] as? String ?? "").utf8), Data(prompt.utf8))
                 XCTAssertTrue(checkpoint.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
+                XCTAssertEqual(checkpoint.components(separatedBy: ComputaAgentInstructions.runtimeInteractionPolicy()).count, 2)
+                XCTAssertFalse(checkpoint.contains("Literal human note:"), "Human wording must not acquire developer authority")
+                for user in messages.filter({ $0["role"] as? String == "user" }) {
+                    let text = user["content"] as? String ?? ""
+                    XCTAssertFalse(text.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
+                    XCTAssertFalse(text.contains("APP_RUNTIME_OUTCOME_CORRECTION"))
+                }
                 XCTAssertFalse(checkpoint.contains("99 browser actions"))
                 checkpoints.append(checkpoint)
                 toolSchemas.append(try XCTUnwrap(body["tools"] as? NSArray))
             }
-            XCTAssertEqual(checkpoints.count, 3)
-            if checkpoints.count == 3 {
+            XCTAssertEqual(checkpoints.count, 5)
+            if checkpoints.count == 5 {
                 XCTAssertTrue(checkpoints[0].contains("No browser operations are recorded for this prepared turn."))
                 XCTAssertTrue(checkpoints[1].contains("browser_open: completed=1 failed=1"))
                 XCTAssertTrue(checkpoints[1].contains("not proof that output was read or a website search succeeded"))
-                XCTAssertTrue(checkpoints[2].contains("No browser operations are recorded for this prepared turn."))
-                XCTAssertFalse(checkpoints[2].contains("browser_open: completed="))
-                XCTAssertEqual(toolSchemas[0], toolSchemas[1]); XCTAssertEqual(toolSchemas[1], toolSchemas[2])
+                for checkpoint in checkpoints.dropFirst(2) {
+                    XCTAssertTrue(checkpoint.contains("No browser operations are recorded for this prepared turn."))
+                    XCTAssertFalse(checkpoint.contains("browser_open: completed="))
+                }
+                XCTAssertFalse(checkpoints[0].contains("APP_RUNTIME_OUTCOME_CORRECTION"))
+                XCTAssertFalse(checkpoints[1].contains("APP_RUNTIME_OUTCOME_CORRECTION"))
+                for number in 2...4 { XCTAssertTrue(checkpoints[2].contains("turn=prior-native-\(number):")) }
+                XCTAssertFalse(checkpoints[2].contains("turn=prior-native-1:"))
+                XCTAssertFalse(checkpoints[2].contains("turn=prior-native-99:"))
+                for number in 3...5 { XCTAssertTrue(checkpoints[3].contains("turn=prior-native-\(number):")) }
+                XCTAssertFalse(checkpoints[3].contains("turn=prior-native-2:"))
+                XCTAssertEqual(checkpoints[3].components(separatedBy: "APP_RUNTIME_OUTCOME_CORRECTION").count, 2)
+                XCTAssertTrue(checkpoints[4].contains("Previous execution evidence could not be loaded."))
+                XCTAssertFalse(checkpoints[4].contains("turn=prior-native-"))
+                for tools in toolSchemas.dropFirst() { XCTAssertEqual(tools, toolSchemas[0]) }
+            }
+            let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
+            let starts = trace.messages.filter { $0.direction == .clientToServer && $0.object["method"] as? String == "turn/start" }
+            XCTAssertEqual(starts.count, 4)
+            for (index, start) in starts.enumerated() {
+                let params = try XCTUnwrap(start.object["params"] as? [String: Any])
+                let input = try XCTUnwrap(params["input"] as? [[String: String]])
+                XCTAssertEqual(input.count, 1, "No durable host-generated policy or correction part")
+                XCTAssertEqual(input.first?["type"], "text")
+                XCTAssertEqual(Data((input.first?["text"] ?? "").utf8), Data(prompt.utf8))
+                XCTAssertEqual(params["approvalPolicy"] as? String, index.isMultiple(of: 2) ? "never" : "on-request")
+                XCTAssertEqual((params["sandboxPolicy"] as? [String: Any])?["type"] as? String,
+                    index.isMultiple(of: 2) ? "dangerFullAccess" : "workspaceWrite")
             }
             let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
                 root.appendingPathComponent("tool-results.json"))) as? [[String: Any]])
@@ -1990,7 +2070,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(counts.created, 1, "Explicit site restrictions still block the second open before dispatch.")
             XCTAssertEqual(counts.activations, 0)
             XCTAssertEqual(audit.approvals, ["browser_open"], "The unrelated site is rejected before approval.")
-            XCTAssertEqual(audit.terminalStatuses, [.completed, .completed])
+            XCTAssertEqual(audit.terminalStatuses, [.completed, .completed, .completed, .completed])
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
         } catch {

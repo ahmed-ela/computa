@@ -83,6 +83,22 @@ old stop notice was appended after every subsequent turn, making it appear curre
   messages as assistant history, preserving genuine user messages and leaving
   mixed or unclassified content untouched. No text-prefix heuristic, permission
   change or larger history budget is used.
+- API turns keep only the exact human text in durable user input. Current host
+  policy and the last three native outcome corrections are supplied through the
+  existing per-inference developer checkpoint. A build-224 historical chat
+  retained 43.6 KB of repeated host instructions alongside 5.1 KB of human text;
+  one new read could therefore trigger another compaction. Website and local
+  provider delivery retain their existing behavior. Existing history is not
+  stripped by matching text prefixes: older messages lack reliable origin
+  metadata, and genuine user text must remain intact.
+- Ordinary browser reads page within the runtime's existing latest-observation
+  limit. The exact page, references and truthful continuation are kept together
+  through compaction, or retention stops at the existing aggregate limit.
+  Build-224 evidence showed middle truncation removing a relevant article's URL
+  and click reference while preserving an unrelated link. The new producer
+  chooses the page before issuing references and its cursor; it never truncates
+  a finished page while retaining a cursor that skips omitted content. This
+  changes evidence delivery, not action authorization or target validation.
 - A subsequent live lookup reached relevant ODE results, then compaction changed
   the task into a request to write a historical summary. The host now retains the
   exact original request and accepted in-turn user messages outside compacted

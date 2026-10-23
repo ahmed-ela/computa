@@ -334,9 +334,15 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 XCTAssertEqual(current["status"] as? String, "available")
                 XCTAssertTrue((current["text"] as? String)?.contains("AXSNAPSHOT") == true)
             }
-            for index in [0, 1, 3, 5] {
-                XCTAssertEqual((rows[index]["contentItems"] as? [[String: Any]])?.count, 1,
-                               "Reads and navigation do not receive a click/fill dispatch cue")
+            XCTAssertEqual((rows[0]["contentItems"] as? [[String: Any]])?.count, 1)
+            for index in [1, 3, 5] {
+                let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
+                XCTAssertEqual(items.count, 2, "Successful ordinary reads publish one complete marked page")
+                XCTAssertEqual(items[0]["text"] as? String, BrowserCompleteObservation.marker)
+                let page = try XCTUnwrap(items[1]["text"] as? String)
+                XCTAssertTrue(page.hasPrefix("AXSNAPSHOT "))
+                XCTAssertLessThanOrEqual(BrowserCompleteObservation.marker.utf8.count + 1 + page.utf8.count, 4_096)
+                XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: items).count, 4_608)
             }
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("UA 123") == true)
             XCTAssertTrue((rows[5]["text"] as? String)?.contains("UA 123 departs at 14:35") == true)

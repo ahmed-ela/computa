@@ -4,6 +4,77 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testCompactPagesPreserveEveryEscapedFieldByteAndFollowingRowsWithoutCursorSkips() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let label = "e\u{301}" + String(repeating: "🙂\\\"\n\t\u{0001}", count: 220) + " EXACT_LABEL_TAIL"
+        let value = String(repeating: "\\\"\n", count: 250) + " EXACT_VALUE_TAIL"
+        let link = "https://example.test/" + String(repeating: "quoted%22/path/", count: 180) + "destination"
+        let nodes = [semanticNode(0, role: "textbox", name: label, link: link, value: value)]
+            + (1...8).map { semanticNode($0, role: "button", name: "Following control \($0)") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: nodes, sourceTruncated: true)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        var reconstructed: [String: String] = [:]
+        var pages = 0
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 32)
+            let receipt = try XCTUnwrap(page.snapshot.readReceipt)
+            XCTAssertEqual(receipt.sourceID, source)
+            XCTAssertEqual(receipt.selectedElementCount, nodes.count)
+            XCTAssertTrue(receipt.sourceTruncated)
+            XCTAssertEqual(receipt.outputTruncated, page.snapshot.nextCursor != nil)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertTrue(complete.contains("source_truncated=1"))
+            let rows = try XCTUnwrap(page.snapshot.presentation).rows
+            for exposure in receipt.exposures {
+                let element = try XCTUnwrap(page.snapshot.elements.first { "backend:\($0.backendNodeID)" == exposure.nodeID })
+                let row = try XCTUnwrap(rows.first { $0.index == element.index }).text
+                let key = "\(exposure.nodeID):\(exposure.field.rawValue)"
+                XCTAssertEqual(exposure.startUTF8, reconstructed[key, default: ""].utf8.count)
+                let partial = exposure.startUTF8 != 0 || exposure.endUTF8 != exposure.totalUTF8
+                let field = exposure.field == .linkURL ? (partial ? "href_fragment" : "href") : exposure.field.rawValue
+                let emitted = try renderedJSONField(field, in: row)
+                XCTAssertEqual(emitted.utf8.count, exposure.endUTF8 - exposure.startUTF8)
+                reconstructed[key, default: ""] += emitted
+                if exposure.field == .linkURL, partial { XCTAssertFalse(row.contains(" href=")) }
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 2)
+        XCTAssertEqual(Array(reconstructed["backend:1:label", default: ""].utf8), Array(label.utf8))
+        XCTAssertEqual(reconstructed["backend:1:value"], value)
+        XCTAssertEqual(reconstructed["backend:1:linkURL"], link)
+        for id in 1...8 { XCTAssertEqual(reconstructed["backend:\(id + 1):label"], "Following control \(id)") }
+        await fixture.assertNoInput()
+    }
+
+    func testCompactDocumentPagesKeepUsefulCapacityAndExactReadOnlyProvenance() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let passage = "The documented setting is managed by the workspace administrator. Review supported settings before changing configuration. "
+        let nodes = [semanticNode(0, role: "main", name: "", children: (1...18).map { "n\($0)" })]
+            + (1...18).map { semanticNode($0, role: "StaticText", name: "Section \($0). " + passage, parent: "n0") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        let receipt = try XCTUnwrap(read.snapshot.readReceipt)
+        let full = read.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor))
+        let usefulBytes = receipt.exposures.reduce(0) { $0 + $1.endUTF8 - $1.startUTF8 }
+        XCTAssertGreaterThanOrEqual(read.snapshot.elements.count, 5)
+        XCTAssertGreaterThan(Double(usefulBytes) / Double(full.utf8.count), 0.20)
+        XCTAssertEqual(receipt.selectedElementCount, 18)
+        XCTAssertTrue(receipt.exposures.allSatisfy { $0.kind == .readable && $0.provenance == .main })
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(full), 0)
+        XCTAssertFalse(full.contains("click_ref=")); XCTAssertFalse(full.contains("fill_ref="))
+        print("COMPACT_READ_CAPACITY rows=\(read.snapshot.elements.count) bytes=\(full.utf8.count) field_bytes=\(usefulBytes) field_ratio=\(Double(usefulBytes) / Double(full.utf8.count)) footer_bytes=\(try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor).utf8.count)")
+        await fixture.assertNoInput()
+    }
+
     func testCompletedReadOmitsCursorFieldWithoutRewritingLiteralPageText() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let literal = "Observed documentation: next_cursor=none"
