@@ -419,9 +419,15 @@ final class RuntimeContextContractTests: XCTestCase {
         }
     }
 
-    func testNativeCompactorUsesDefaultPromptWithoutUnprovenOverrides() {
-        let config = CodexAppServerRuntime.localThreadConfig(for: "lmstudio-community/Qwen3.5-4B-MLX-4bit")
-        XCTAssertNil(config["compact_prompt"])
+    func testAllModelRoutesUseTheAppOwnedCompactionProvenanceContract() {
+        let apiModel = APIProviderCatalog.appModelID(providerID: "cerebras", modelID: "gpt-oss-120b")
+        for model in ["lmstudio-community/Qwen3.5-4B-MLX-4bit", "unlisted/model", "browser/chatgpt", apiModel] {
+            let config = CodexAppServerRuntime.localThreadConfig(for: model)
+            XCTAssertEqual(config["compact_prompt"] as? String, ComputaAgentInstructions.compactionPrompt, model)
+            let forced = CodexAppServerRuntime.localThreadConfig(for: model, autoCompactLimitOverride: 2_048)
+            XCTAssertEqual(forced["compact_prompt"] as? String, config["compact_prompt"] as? String)
+            XCTAssertEqual(forced["model_auto_compact_token_limit"] as? Int, 2_048)
+        }
     }
 
     func testDefaultModeThreadsDoNotOfferTheUnavailableStructuredQuestionTool() {
@@ -444,7 +450,7 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertEqual(nineB["features.shell_tool"] as? Bool, true)
         XCTAssertEqual(nineB["features.unified_exec"] as? Bool, true)
         XCTAssertEqual(nineB["web_search"] as? String, "disabled")
-        XCTAssertNil(nineB["compact_prompt"])
+        XCTAssertEqual(nineB["compact_prompt"] as? String, ComputaAgentInstructions.compactionPrompt)
     }
 
     func testIsolatedFixtureOverrideCannotDisableOrExceedContextWindow() {

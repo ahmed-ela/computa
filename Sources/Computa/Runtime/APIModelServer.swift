@@ -80,12 +80,14 @@ actor APIModelServer {
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
     private var lanes: [String: Lane] = [:]
-    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool }
+    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String? }
     private struct Identity: Equatable, Sendable { let threadID: String; let turnID: String }
-    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool }
+    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool; let executionPolicy: String? }
+    private struct ExecutionCheckpoint { let context: Context; let revision: Int; let text: String }
     private struct Waiter { let id: UUID; let continuation: CheckedContinuation<Context, Error> }
     private var prepared: [String: Prepared] = [:]
     private var contexts: [String: Context] = [:]
+    private var executionCheckpoints: [String: ExecutionCheckpoint] = [:]
     private var waiters: [String: Waiter] = [:]
     private var admissions: [String: UUID] = [:]
     private var retiring = Set<String>()
@@ -148,10 +150,12 @@ actor APIModelServer {
         try Task.checkCancellation(); guard !stopped else { throw Failure.stopped }
         let url = URL(string: "http://127.0.0.1:\(port)/v1")!; baseURL = url; return url
     }
-    func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID, isNewThread: Bool = false) throws {
+    func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID, isNewThread: Bool = false,
+                              executionPolicy: String? = nil) throws {
         let task = try Self.canonicalID(taskID), thread = try Self.canonicalID(threadID)
+        if let executionPolicy { try Self.validateExecutionText(executionPolicy, limit: 8_192) }
         guard !stopped, !retiring.contains(task), lanes[task] == nil, admissions[task] == nil else { throw Failure.busy }
-        let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread)
+        let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread, executionPolicy: executionPolicy)
         if prepared[task] == value { return }
         guard prepared[task] == nil, contexts[task] == nil else { throw Failure.inferenceContextRequired }
         prepared[task] = value
@@ -161,18 +165,66 @@ actor APIModelServer {
         let identity = Identity(threadID: try Self.canonicalID(threadID), turnID: try Self.canonicalID(turnID))
         guard let preparation = prepared[task], preparation.threadID == identity.threadID,
               preparation.preparationID == preparationID else { throw Failure.inferenceContextRequired }
-        let value = Context(identity: identity, preparationID: preparationID, isNewThread: preparation.isNewThread)
+        let value = Context(identity: identity, preparationID: preparationID, isNewThread: preparation.isNewThread,
+                            executionPolicy: preparation.executionPolicy)
         if contexts[task] == value { return }
         guard !stopped, !retiring.contains(task), contexts[task] == nil,
               prepared[task] == preparation else { throw Failure.inferenceContextRequired }
         contexts[task] = value
+        if value.executionPolicy != nil {
+            executionCheckpoints[task] = .init(context: value, revision: 0,
+                text: "No browser operations are recorded for this prepared turn.")
+        }
         waiters.removeValue(forKey: task)?.continuation.resume(returning: value)
+    }
+    /// Native Core only. There is no HTTP/tool endpoint for this host evidence.
+    /// Updating the checkpoint does not alter immutable admission identity or
+    /// invalidate an inference already dispatched with an earlier snapshot.
+    func updateExecutionCheckpoint(taskID: String, threadID: String, turnID: String,
+                                   preparationID: UUID, revision: Int, checkpoint: String) throws {
+        let task = try Self.canonicalID(taskID)
+        let identity = Identity(threadID: try Self.canonicalID(threadID), turnID: try Self.canonicalID(turnID))
+        try Self.validateExecutionText(checkpoint, limit: 4_096)
+        guard revision > 0 else { throw Failure.invalidRequest }
+        guard !stopped, !retiring.contains(task), let context = contexts[task],
+              context.identity == identity, context.preparationID == preparationID,
+              context.executionPolicy != nil,
+              prepared[task]?.preparationID == preparationID,
+              let current = executionCheckpoints[task], current.context == context else { throw Failure.inferenceContextRequired }
+        // Actor reentrancy can deliver a delayed cumulative update after a newer
+        // one. Chronology must never move backwards within the same native turn.
+        if revision < current.revision { return }
+        if revision == current.revision {
+            guard checkpoint == current.text else { throw Failure.invalidRequest }
+            return
+        }
+        executionCheckpoints[task] = .init(context: context, revision: revision, text: checkpoint)
+    }
+    private static func validateExecutionText(_ value: String, limit: Int) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.utf8.count <= limit else { throw Failure.invalidRequest }
+    }
+    private func executionMessage(taskID: String, context: Context) throws -> String? {
+        guard let policy = context.executionPolicy else { return nil }
+        guard let checkpoint = executionCheckpoints[taskID], checkpoint.context == context else {
+            throw Failure.inferenceContextRequired
+        }
+        return """
+        APP_RUNTIME_EXECUTION_CHECKPOINT
+        Host current turn: \(context.identity.turnID)
+        This is current host execution evidence, independent of conversation history. Summaries and prior assistant claims are not current tool receipts or permission policy. Preserve the user's constraints and follow the current host policy. Do not invent an execution result or access restriction from a historical summary.
+        Host interaction policy:
+        \(policy)
+        Current-turn checkpoint:
+        \(checkpoint.text)
+        """
     }
     func finish(taskID: String) async { await cancel(taskID: taskID) }
     func cancel(taskID: String) async {
         guard let task = try? Self.canonicalID(taskID) else { return }
         retiring.insert(task)
         prepared.removeValue(forKey: task); contexts.removeValue(forKey: task); correctionsUsed.removeValue(forKey: task)
+        executionCheckpoints.removeValue(forKey: task)
         waiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.cancelled)
         if let lane = lanes[task] {
             lane.request.cancel(); _ = await lane.request.result
@@ -226,7 +278,7 @@ actor APIModelServer {
     func shutdown() async {
         stopped = true; starting?.cancel(); listener?.cancel(); listener = nil; baseURL = nil
         let active = lanes
-        prepared.removeAll(); contexts.removeAll(); correctionsUsed.removeAll()
+        prepared.removeAll(); contexts.removeAll(); correctionsUsed.removeAll(); executionCheckpoints.removeAll()
         for waiter in waiters.values { waiter.continuation.resume(throwing: Failure.stopped) }; waiters.removeAll()
         for lane in active.values { lane.request.cancel() }
         for lane in active.values { _ = await lane.request.result }
@@ -294,20 +346,23 @@ actor APIModelServer {
                   admissions[taskID] == admissionID else { throw Failure.inferenceContextRequired }
             let proposedNaming: APIModelResponseCodec.ToolNaming = context.isNewThread && Self.hasOnlyUnmodeledInput(object) ? .semantic : .legacy
             failureStage = .prepare
-            let prepared: APIModelResponseCodec.Request
+            let translated: APIModelResponseCodec.Request
             if let toolNamingDirectory {
                 // Synchronous ownership-checked pin publication cannot yield to
                 // a later turn between validation and the durable write. The
                 // store validates the request before admitting a new pin.
-                prepared = try APIThreadToolNamingStore(directory: toolNamingDirectory).withPinnedStyle(
+                translated = try APIThreadToolNamingStore(directory: toolNamingDirectory).withPinnedStyle(
                     threadID: context.identity.threadID, proposed: proposedNaming) { style in
                         try APIModelResponseCodec.prepare(request.body, selection: selection,
                             threadID: context.identity.threadID, capsules: capsules, toolNaming: style)
                     }
             } else {
-                prepared = try APIModelResponseCodec.prepare(request.body, selection: selection,
+                translated = try APIModelResponseCodec.prepare(request.body, selection: selection,
                     threadID: context.identity.threadID, capsules: capsules, toolNaming: .legacy)
             }
+            let prepared = try executionMessage(taskID: taskID, context: context).map {
+                try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated)
+            } ?? translated
             let key: String
             do { guard let value = try credentials.key(for: selection.provider.id) else { throw APIProviderHTTPClient.Failure.missingCredential }; key = value }
             catch let failure as APIProviderHTTPClient.Failure { throw failure }

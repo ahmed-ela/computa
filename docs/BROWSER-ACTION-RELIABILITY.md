@@ -30,9 +30,12 @@ old stop notice was appended after every subsequent turn, making it appear curre
 - Known-service restrictions require destination language. A documentation topic
   does not create an exclusive service-host restriction. Explicit destination,
   URL, title and browser constraints remain enforced.
-- A changed-filter continuation is rejected before discarding the prior valid
-  observation. The error gives separate instructions for continuing the captured
-  read and starting a new filtered read.
+- A changed-filter continuation remains rejected, but its exact current,
+  unexpired cursor can return one separate fresh read of the explicitly requested
+  view/query. This prevents recovery from repeatedly returning an overview when
+  content was requested. Unknown, foreign, replaced or navigation-stale cursors
+  grant no recovery read. Failed capture preserves the previous valid capability;
+  success replaces it. Recovery shares the existing three-read turn limit.
 - Navigation-related stale preflight errors can return a bounded fresh read,
   like other stale snapshot errors. They remain failed, undispatched actions;
   input is never replayed. Approval, ownership and unchanged-attempt limits remain.
@@ -43,6 +46,15 @@ old stop notice was appended after every subsequent turn, making it appear curre
   value echoes from exposed readable text. Partial overviews cannot establish
   mailbox absence. Fresh search guidance requires actual result content and
   refinement when an overly literal query returns irrelevant results.
+- The supported engine compaction prompt separates historical attempts from the
+  current request and preserves the source/scope of genuine user restrictions.
+  An observed automatic summary had imported an earlier attempt's targets and
+  claimed that a current search had already finished. API inferences now receive
+  fresh native policy and execution counts outside history. Counts are bound to
+  task/thread/turn/preparation, versioned against out-of-order actor updates, and
+  cleared on retirement. They describe actual tool execution, never website
+  result semantics, output exposure or permission grants. Actual observations
+  remain necessary for content claims. The engine's history is not rewritten.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host

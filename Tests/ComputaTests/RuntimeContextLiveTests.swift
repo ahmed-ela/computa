@@ -262,7 +262,7 @@ final class RuntimeContextLiveTests: XCTestCase {
             let starts = trace.messages.filter { $0.method == "thread/start" }
             let config = (starts.first?.object["params"] as? [String: Any])?["config"] as? [String: Any]
             XCTAssertNil((starts.first?.object["params"] as? [String: Any])?["developerInstructions"])
-            XCTAssertNil(config?["compact_prompt"])
+            XCTAssertEqual(config?["compact_prompt"] as? String, ComputaAgentInstructions.compactionPrompt)
             let context = LocalThreadContext.forModel(modelID)
             XCTAssertEqual(config?["model_context_window"] as? Int, context.contextWindow)
             XCTAssertEqual(config?["model_auto_compact_token_limit"] as? Int, context.autoCompactTokenLimit)

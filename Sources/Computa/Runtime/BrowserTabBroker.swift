@@ -579,7 +579,8 @@ actor BrowserTabSessionBroker {
         taskKey: String,
         binding suppliedBinding: BrowserTabBinding,
         bundleIdentifier: String,
-        read: SemanticReadRequest
+        read: SemanticReadRequest,
+        replacingCursor: String? = nil
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -593,6 +594,18 @@ actor BrowserTabSessionBroker {
         }
         let priorRead = entry.readState
         let priorSnapshot = entry.activeSnapshot
+        // A changed-filter recovery is a separate fresh read, admitted only
+        // by the exact current, unexpired cursor. It never follows an unknown
+        // cursor or turns a navigation-stale capture into a new capability.
+        if let replacingCursor {
+            guard read.cursor == nil, read.snapshotID == nil, read.elementIndex == nil,
+                  !replacingCursor.isEmpty, let priorRead,
+                  priorRead.nextCursor == replacingCursor,
+                  priorRead.snapshotID == priorSnapshot?.id,
+                  priorRead.capturedAt.duration(to: readClock.now) < readLifetime else {
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+        }
         if let cursor = read.cursor {
             guard !cursor.isEmpty, priorRead?.nextCursor == cursor,
                   priorRead?.snapshotID == priorSnapshot?.id else {
@@ -615,10 +628,15 @@ actor BrowserTabSessionBroker {
             }
             scopeNodeID = nodeID
         }
-        entry.activeSnapshot = nil
-        entry.readState = nil
-        entries[suppliedBinding.handle] = entry
+        if replacingCursor == nil {
+            entry.activeSnapshot = nil
+            entry.readState = nil
+            entries[suppliedBinding.handle] = entry
+        }
         let target = try await currentTarget(for: suppliedBinding.handle, entry: entry)
+        if replacingCursor != nil, target.url != priorRead?.document.url {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
         let freshDocument: BrowserDocumentObservation
         if read.cursor == nil, read.snapshotID == nil {
             freshDocument = try await transport.observeForRead(target: target)
@@ -632,6 +650,7 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: false
         )
+
         _ = try await currentTarget(for: suppliedBinding.handle, entry: entry)
         try Task.checkCancellation()
         _ = try self.entry(
@@ -639,6 +658,16 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: false
         )
+        if replacingCursor != nil {
+            guard let priorRead, freshDocument.loaderID == priorRead.document.loaderID,
+                  freshDocument.url == priorRead.document.url,
+                  priorRead.capturedAt.duration(to: readClock.now) < readLifetime else {
+                entry.activeSnapshot = nil
+                entry.readState = nil
+                entries[suppliedBinding.handle] = entry
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+        }
 
         if freshDocument.loaderID != entry.loaderID
             || freshDocument.url != entry.documentURL {

@@ -224,6 +224,7 @@ actor EmbeddedBrowserToolController {
         var inventoryOffset = 0
         var inventoryCursor: String?
         var stalePreflightRecoveryIDs = Set<UUID>()
+        var changedFilterRecoveryCursors = Set<String>()
         var scope: ComputerTaskScope?
         var cleanupTargets = [EmbeddedBrowserCleanupReport.Target]()
         var cleanupFailures = [EmbeddedBrowserCleanupReport.Issue]()
@@ -244,10 +245,10 @@ actor EmbeddedBrowserToolController {
     private var releasing = [String: Task<EmbeddedBrowserCleanupReport, Never>]()
     private var closed = false
 
-    init(transport: any EmbeddedBrowserControlBackend) {
+    init(transport: any EmbeddedBrowserControlBackend, readLifetime: Duration = .seconds(120)) {
         self.transport = transport
         broker = BrowserTabSessionBroker(
-            transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+            transport: transport, browserGeneration: UUID(), ownership: .borrowed, readLifetime: readLifetime)
     }
 
     /// Read-only admission before host approval. This does not reserve an input
@@ -478,15 +479,19 @@ actor EmbeddedBrowserToolController {
                 query: object["query"] as? String,
                 view: view ?? (object["cursor"] == nil ? .overview : nil),
                 cursor: object["cursor"] as? String)
-            // A mismatched filter is a rejected request, not a new read. The
-            // broker rejects it before capture; do the same before retiring
-            // the controller's matching capability. Otherwise one malformed
-            // pagination call causes an unrelated stale-action cascade.
-            if let cursor = read.cursor, let previous = contexts[taskKey]?.snapshot,
-               previous.nextCursor == cursor, let receipt = previous.readReceipt {
+            // Keep the invalid continuation rejected. For its exact current
+            // cursor only, separately expose the explicitly requested fresh
+            // view once instead of leaving the model on the old overview.
+            if let cursor = read.cursor {
+                _ = try bound(taskKey, contextID)
+                guard let previous = contexts[taskKey]?.snapshot,
+                      previous.nextCursor == cursor, let receipt = previous.readReceipt else {
+                    throw BrowserTabBrokerError.staleSnapshot
+                }
                 let original = SemanticReadRequest(query: receipt.query, view: receipt.view)
                 guard read.continues(original) else {
-                    throw BrowserTabBrokerError.invalidRead(Self.continuationFilterGuidance)
+                    throw try await changedFilterRecovery(taskKey: taskKey, contextID: contextID,
+                        cursor: cursor, read: SemanticReadRequest(query: read.query, view: view ?? .overview), scope: scope)
                 }
             }
             let snapshot: BrowserTabSnapshot
@@ -722,16 +727,23 @@ actor EmbeddedBrowserToolController {
     /// Ordinary and post-input reads share the broker's exact document,
     /// pagination and physical-target checks. This grants no input or new tab.
     private func currentObservation(
-        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest
+        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest,
+        replacingCursor: String? = nil
     ) async throws -> BrowserTabSnapshot {
         let binding = try bound(taskKey, contextID)
         _ = try await currentTarget(binding: binding, scope: scope)
         try check(taskKey, contextID)
         try binding.lifetime.check()
-        // A failed read cannot leave an older controller capability current.
-        contexts[taskKey]?.snapshot = nil
+        // Ordinary reads revoke first. A bounded changed-filter recovery is
+        // transactional in the broker: a failed capture preserves the prior
+        // capability, which still requires all normal physical preflights.
+        if replacingCursor == nil { contexts[taskKey]?.snapshot = nil }
         let observation = try await broker.snapshot(
-            taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read)
+            taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read,
+            replacingCursor: replacingCursor)
+        // The broker has now committed the replacement. If publication fails,
+        // neither its unpublished references nor the superseded ones survive.
+        contexts[taskKey]?.snapshot = nil
         try check(taskKey, contextID)
         try observation.binding.lifetime.check()
         try requireScope(scope, url: observation.snapshot.documentURL)
@@ -781,7 +793,8 @@ actor EmbeddedBrowserToolController {
             "dispatched": false, "no_replay": true,
         ]
         let repeated = contexts[taskKey]!.stalePreflightRecoveryIDs.contains(rejectedID)
-        let exhausted = contexts[taskKey]!.stalePreflightRecoveryIDs.count >= 3
+        let exhausted = contexts[taskKey]!.stalePreflightRecoveryIDs.count
+            + contexts[taskKey]!.changedFilterRecoveryCursors.count >= 3
         if repeated || exhausted {
             result["current_observation"] = ["status": "unavailable", "reason": repeated ? "recovery_already_attempted" : "recovery_limit"]
             result["next"] = "No input was dispatched. The stale reference was rejected and not retried. Use browser_read for current evidence before choosing another input."
@@ -809,7 +822,48 @@ actor EmbeddedBrowserToolController {
         }
     }
 
-    private static let continuationFilterGuidance = "a continuation retains its captured view/query. No read or input occurred. To continue the same capture call browser_read with only its next_cursor as cursor, omitting view and query. To change view/query call browser_read with the new filters and omit cursor entirely. The previous observation has not been replaced."
+    /// A rejected continuation may carry one separate, fresh read of the
+    /// filters the model explicitly supplied. This never replays an action or
+    /// reads from a foreign, expired, replaced or navigation-stale capture.
+    private func changedFilterRecovery(taskKey: String, contextID: UUID, cursor: String,
+                                       read: SemanticReadRequest, scope: ComputerTaskScope?) async throws -> EmbeddedBrowserPreflightRecoveryFailure {
+        try Task.checkCancellation()
+        try check(taskKey, contextID)
+        let original = BrowserTabBrokerError.invalidRead("A continuation retains its captured view/query. The changed-filter continuation was rejected; any attached observation is a separate fresh read of the requested filters. No input was dispatched.")
+        var result: [String: Any] = [
+            "success": false, "error": ["code": "continuation_filters_changed", "message": original.localizedDescription],
+            "dispatched": false, "no_replay": true,
+        ]
+        let repeated = contexts[taskKey]!.changedFilterRecoveryCursors.contains(cursor)
+        let exhausted = contexts[taskKey]!.changedFilterRecoveryCursors.count
+            + contexts[taskKey]!.stalePreflightRecoveryIDs.count >= 3
+        if repeated || exhausted {
+            result["current_observation"] = ["status": "unavailable", "reason": repeated ? "recovery_already_attempted" : "recovery_limit"]
+            result["next"] = "The continuation was rejected. To change view/query, call browser_read with the requested filters and omit cursor. No input or recovery read occurred."
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: try json(result))
+        }
+        contexts[taskKey]?.changedFilterRecoveryCursors.insert(cursor)
+        var captured = false
+        do {
+            let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
+                scope: scope, read: read, replacingCursor: cursor)
+            captured = true
+            try Task.checkCancellation()
+            try check(taskKey, contextID)
+            result["current_observation"] = ["status": "available", "view": read.view.rawValue,
+                "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]
+            result["next"] = "Inspect this separate fresh observation of the requested filters; it supersedes prior references. To continue it, use only its next_cursor. To change filters again, omit cursor. No input was dispatched."
+            let response = try json(result)
+            guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response)
+        } catch {
+            if captured, contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
+            try Task.checkCancellation()
+            result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
+            result["next"] = "The continuation was rejected and no input was dispatched. No replacement observation is available. Request browser_read with the desired filters and omit cursor; do not infer absent content."
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: try json(result))
+        }
+    }
 
     private enum PostInputObservationFailure: Error { case outputLimit }
 

@@ -789,6 +789,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             "web_search": "disabled",
             "model_context_window": context.contextWindow,
             "model_auto_compact_token_limit": compactLimit,
+            "compact_prompt": ComputaAgentInstructions.compactionPrompt,
         ]
     }
 
@@ -1302,6 +1303,15 @@ private extension CodexAppServerRuntime {
         private var inferenceServer: HeadlessMLXServer?
         private let webModelServer: WebModelServer
         private let apiModelServer: APIModelServer
+        private struct BrowserExecutionContext {
+            let threadID: String
+            let turnID: String
+            let preparationID: UUID
+            let generation: UUID
+            var revision = 0
+            var checkpoint = BrowserTurnExecutionCheckpoint()
+        }
+        private var browserExecutionContexts: [AgentTask.ID: BrowserExecutionContext] = [:]
         private var apiProviders: [APIProviderDefinition] = []
         private var apiProviderBaseURL: URL?
         private var isConfiguringAPIProviders = false
@@ -2239,6 +2249,7 @@ private extension CodexAppServerRuntime {
         private func prepareInferenceTurn(taskID: AgentTask.ID, threadID: String,
                                                  modelID: String, isNewThread: Bool = false,
                                                  isMaintenance: Bool = false) async throws -> UUID? {
+            browserExecutionContexts.removeValue(forKey: taskID)
             guard isRemoteInference(modelID) else {
                 inferencePreparations.removeValue(forKey: taskID)
                 return nil
@@ -2247,8 +2258,11 @@ private extension CodexAppServerRuntime {
             inferencePreparations[taskID] = preparationID
             do {
                 if APIProviderCatalog.identity(for: modelID) != nil {
+                    let policy = configuration.computerInteractionPolicy == .backgroundOnly
+                        ? ComputaAgentInstructions.runtimeInteractionPolicy()
+                        : ComputaAgentInstructions.browserTurnLifecycle + "\n" + ComputaAgentInstructions.browserSearchEvidence
                     try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
-                        preparationID: preparationID, isNewThread: isNewThread)
+                        preparationID: preparationID, isNewThread: isNewThread, executionPolicy: policy)
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
@@ -2272,8 +2286,22 @@ private extension CodexAppServerRuntime {
                   nativeStoppedTurns[taskID] != turnID,
                   contextStoppedTurns[taskID] != turnID else { return }
             if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
-                try await apiModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
-                    turnID: turnID, preparationID: preparationID)
+                // Registration opens the server's inference gate. Install the
+                // matching native context first so even an immediate first tool
+                // response cannot overtake this actor's registration continuation.
+                if browserExecutionContexts[taskID]?.preparationID != preparationID {
+                    browserExecutionContexts[taskID] = BrowserExecutionContext(threadID: threadID,
+                        turnID: turnID, preparationID: preparationID, generation: generation)
+                }
+                do {
+                    try await apiModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
+                        turnID: turnID, preparationID: preparationID)
+                } catch {
+                    if browserExecutionContexts[taskID]?.preparationID == preparationID {
+                        browserExecutionContexts.removeValue(forKey: taskID)
+                    }
+                    throw error
+                }
             } else {
                 try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
                     turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
@@ -2287,6 +2315,9 @@ private extension CodexAppServerRuntime {
             if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
                 if let existing = apiCleanupTasks[taskID] { return existing }
                 let preparation = inferencePreparations[taskID]
+                if browserExecutionContexts[taskID]?.preparationID == preparation {
+                    browserExecutionContexts.removeValue(forKey: taskID)
+                }
                 let cleanup = Task<[String], Never> {
                     if cancelled { await apiModelServer.cancel(taskID: taskID) }
                     else { await apiModelServer.finish(taskID: taskID) }
@@ -4381,6 +4412,8 @@ private extension CodexAppServerRuntime {
                     publishedRead = try ComputerReadPublication.prepare(contentItems,
                         evidence: computerReadEvidence[taskID] ?? ComputerReadEvidence())
                 } else { publishedRead = nil }
+                guard await updateBrowserExecutionCheckpoint(taskID: taskID, params: params,
+                    callID: callID, tool: tool, succeeded: true, generation: generation) else { return }
                 try sendResponse(
                     id: id,
                     result: ["contentItems": publishedRead?.contentItems ?? contentItems, "success": true]
@@ -4497,6 +4530,8 @@ private extension CodexAppServerRuntime {
                     publishedFailure = try? ComputerReadPublication.prepare(failureItems,
                         evidence: computerReadEvidence[taskID] ?? ComputerReadEvidence())
                 } else { publishedFailure = nil }
+                guard await updateBrowserExecutionCheckpoint(taskID: taskID, params: params,
+                    callID: callID, tool: tool, succeeded: false, generation: generation) else { return }
                 do { try sendResponse(
                     id: id,
                     result: [
@@ -4508,6 +4543,37 @@ private extension CodexAppServerRuntime {
                     if let taskID, let referencePublication { computerV2Sessions[taskID]?.modelReferences = referencePublication.references }
                 } catch { /* Failed publication grants neither references nor read coverage. */ }
             }
+        }
+
+        /// Publish trusted execution chronology before the engine can request its
+        /// next inference. No model or page text enters this checkpoint. It is
+        /// retained across compaction, but never across native turns/preparations.
+        private func updateBrowserExecutionCheckpoint(taskID: AgentTask.ID?, params: [String: Any],
+            callID: String, tool: String, succeeded: Bool, generation: UUID) async -> Bool {
+            guard EmbeddedBrowserTools.names.contains(tool), let taskID,
+                  APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil else { return true }
+            guard !Task.isCancelled, !isShuttingDown, serverGeneration == generation,
+                  var context = browserExecutionContexts[taskID], context.generation == generation,
+                  params["threadId"] as? String == context.threadID,
+                  params["turnId"] as? String == context.turnID,
+                  threadForTask[taskID] == context.threadID,
+                  turnIdentity.activeTurnID(for: taskID) == context.turnID,
+                  inferencePreparations[taskID] == context.preparationID else { return false }
+            context.checkpoint.record(callID: callID, tool: tool, succeeded: succeeded)
+            context.revision += 1
+            // Store before suspension so concurrent completed calls cannot lose
+            // each other's counts. The API rejects older revisions if actor
+            // scheduling delivers updates in a different order.
+            browserExecutionContexts[taskID] = context
+            do {
+                try await apiModelServer.updateExecutionCheckpoint(taskID: taskID,
+                    threadID: context.threadID, turnID: context.turnID,
+                    preparationID: context.preparationID, revision: context.revision,
+                    checkpoint: context.checkpoint.text)
+            } catch { return false } // A retired context grants no new publication.
+            return !Task.isCancelled && !isShuttingDown && serverGeneration == generation
+                && browserExecutionContexts[taskID]?.preparationID == context.preparationID
+                && turnIdentity.activeTurnID(for: taskID) == context.turnID
         }
 
         private func recoverReferencePresentation(after error: Error, taskID: AgentTask.ID) async -> (items: [[String: Any]], didRead: Bool)? {
@@ -7594,6 +7660,7 @@ private extension CodexAppServerRuntime {
             initializedDiffTurns.removeAll()
             turnIdentity.removeAll()
             inferencePreparations.removeAll()
+            browserExecutionContexts.removeAll()
             assistantStreamTurns.removeAll()
             completedAssistantItems.removeAll()
             pendingAssistantItems.removeAll()

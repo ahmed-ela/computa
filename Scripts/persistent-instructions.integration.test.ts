@@ -56,10 +56,14 @@ async function trustedRuntime() {
   return { binary, pin, binarySHA256: manifest.binarySHA256 };
 }
 
-function literal(source: string, name: string) {
+function literal(source: string, name: string, ancestors = new Set<string>()): string {
+  if (!/^[A-Za-z][A-Za-z0-9]*$/.test(name) || ancestors.has(name)) throw new Error(`Invalid app constant reference: ${name}`);
   const match = source.match(new RegExp(`static let ${name} = """\\n([\\s\\S]*?)\\n    """`));
-  if (!match || match[1].includes("\\(")) throw new Error(`Not an un-interpolated app literal: ${name}`);
-  return match[1].split("\n").map(line => line.startsWith("    ") ? line.slice(4) : line).join("\n");
+  if (!match) throw new Error(`App literal unavailable: ${name}`);
+  const text = match[1].split("\n").map(line => line.startsWith("    ") ? line.slice(4) : line).join("\n")
+    .replace(/\\\(([A-Za-z][A-Za-z0-9]*)\)/g, (_, reference) => literal(source, reference, new Set([...ancestors, name])));
+  if (text.includes("\\(")) throw new Error(`Unsupported app literal expression: ${name}`);
+  return text;
 }
 
 async function appInstructions() {
@@ -71,8 +75,9 @@ async function appInstructions() {
     base: base.split("\n").map(line => line.startsWith("                ") ? line.slice(16) : line).join("\n"),
     // Match the app's reference-tool developer bundle. Legacy scope and the
     // model-specific Swift base additions are intentionally separate coverage.
-    developer: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"]
+    developer: ["nativeScope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"]
       .map(name => literal(app, name)).join("\n\n"),
+    compact: literal(app, "compactionPrompt"),
   };
 }
 
@@ -241,6 +246,15 @@ function assertRules(body: Json, rules: { base: string; developer: string }) {
   expect(developerContains(body, rules.developer)).toBe(true);
 }
 
+test("instruction literal reader expands shared constants and rejects executable or cyclic interpolation", () => {
+  const shared = 'static let shared = """\n    exact shared rule\n    """';
+  const outer = 'static let outer = """\n    before\n    \\(shared)\n    after\n    """';
+  expect(literal(shared + "\n" + outer, "outer")).toBe("before\nexact shared rule\nafter");
+  expect(() => literal(outer.replace("shared", "outer"), "outer")).toThrow();
+  expect(() => literal(outer.replace("shared", "run()"), "outer")).toThrow();
+  expect(() => literal(outer, "outer")).toThrow();
+});
+
 test("instruction oracle rejects identical quoted text outside the developer role", () => {
   const rules = { base: "PRIVATE_BASE", developer: "PRIVATE_DEVELOPER_SCOPE\n\nPRIVATE_DEVELOPER_COMMANDS" };
   const developer = { type: "message", role: "developer", content: [{ type: "input_text", text: rules.developer }] };
@@ -347,6 +361,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
     "features.shell_tool": true, "features.unified_exec": true, "features.view_image": false,
     "features.sleep_tool": false, "features.workspace_dependencies": false,
     "web_search": "disabled", "model_context_window": 32768, "model_auto_compact_token_limit": 28000,
+    "compact_prompt": rules.compact,
     "model_providers.computa_fixture": { name: "Private instruction fixture", base_url: `http://127.0.0.1:${endpoint.port}/v1`,
       wire_api: "responses", requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } };
   // macOS refuses nested sandbox-exec profiles. The outer owned-process
@@ -395,6 +410,9 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
 
     plans.push(body => {
       assertRules(body, rules); expect(offered(body)).toHaveLength(0);
+      const prompt = body.input.at(-1);
+      expect(prompt.role).toBe("user");
+      expect(prompt.content).toEqual([{ type: "input_text", text: rules.compact }]);
       return [message("Private fixture summary: terminal and native status completed. No action remains pending.")];
     });
     const compactStart = rpc.frames.length;
@@ -444,10 +462,10 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
     console.log(JSON.stringify({ verified: true, sourceCommit: runtime.pin.sourceCommit, binarySHA256: runtime.binarySHA256,
       actualModelRequests: requests.length, builtinTerminalContinuation: true, dynamicToolContinuation: true,
       exactTerminalSchemasRetained: regularSchemaAssertions, noToolsCompactionRequests: compactSchemaAssertions,
-      coldResume: true, noToolsCompaction: true, postCompaction: true, syntheticHistoryMessages: 80,
+      coldResume: true, noToolsCompaction: true, exactAppCompactionPrompt: true, postCompaction: true, syntheticHistoryMessages: 80,
       coldResumeDeveloperOverrideObserved: developerOverrideObserved, coldResumeBaseOverrideObserved: true,
       fixtureThreadSandbox: "danger-full-access inside outbound-denying OS sandbox",
-      appLiteralSections: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"],
+      appLiteralSections: ["nativeScope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"],
       modelSpecificSwiftBaseAdditionsNotInstantiated: true, realChatGPTBehavior: false, externalNetworkDenied: true }));
   } catch (error) {
     throw modelFailure ?? error;

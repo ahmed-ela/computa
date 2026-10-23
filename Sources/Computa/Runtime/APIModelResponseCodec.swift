@@ -272,6 +272,36 @@ enum APIModelResponseCodec {
     }
     private static let maximumText = 2_000_000
 
+    /// Called only by the native server after current-turn admission. Appending
+    /// to the translated provider body keeps engine history, tool declarations,
+    /// capsules and echoed response configuration unchanged.
+    static func appendingHostDeveloperMessage(_ text: String, to original: Request) throws -> Request {
+        guard !text.isEmpty, text.utf8.count <= 16_384,
+              var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any] else { throw Failure.invalidRequest }
+        switch original.provider.wireAPI {
+        case .chatCompletions:
+            guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
+            // Match the existing Qwen role compatibility rule without changing
+            // any historical message's role or content.
+            let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
+            messages.append(["role": role, "content": text]); body["messages"] = messages
+        case .responses:
+            var items: [[String: Any]]
+            if let input = body["input"] as? String { items = [["role": "user", "content": input]] }
+            else if let input = body["input"] as? [[String: Any]] { items = input }
+            else { throw Failure.invalidRequest }
+            items.append(["type": "message", "role": "developer", "content": [["type": "input_text", "text": text]]])
+            body["input"] = items
+        }
+        let bytes = try json(body)
+        guard bytes.count <= maximumText else { throw Failure.invalidRequest }
+        return Request(localModelID: original.localModelID, provider: original.provider, model: original.model,
+            threadID: original.threadID, stream: original.stream, body: bytes, tools: original.tools,
+            toolNaming: original.toolNaming, allowedTools: original.allowedTools, requiredTool: original.requiredTool,
+            maximumCalls: original.maximumCalls, historyCallIDs: original.historyCallIDs,
+            capsules: original.capsules, responseConfiguration: original.responseConfiguration)
+    }
+
     static func prepare(_ data: Data, selection: APIProviderCatalog.Selection, threadID: String,
                         capsules: APIReasoningCapsules, toolNaming: ToolNaming = .legacy) throws -> Request {
         guard data.count <= maximumText, var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],

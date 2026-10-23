@@ -32,6 +32,25 @@ Putting current website capability guidance outside retained history avoids
 depending on those overrides or a reminder every N messages. Empty-tool context
 maintenance remains valid and cannot revive historical tool names.
 
+The native engine's supported `compact_prompt` configuration uses
+`ComputaAgentInstructions.compactionPrompt` for automatic and manual maintenance.
+It separates earlier attempts from the current request and preserves explicit
+ongoing user restrictions with their source and scope. Generated notes must not
+invent current execution, revive ephemeral browser handles/cursors, or turn
+assistant refusals into policy. The current native host checkpoint, when supplied,
+establishes recorded operation chronology; operation counts do not establish site
+search results or task success. Matching tool receipts remain the evidence for
+observed content and action outcomes. This contract improves summary generation;
+it does not make a generated summary authoritative or verify its factual claims.
+
+API inference requests append a fresh native developer message after translation,
+containing current host policy and bounded browser-operation counts. It is bound
+to the exact native turn and preparation, uses monotonic revisions, and is cleared
+on cancellation/finish. There is no model-facing endpoint to update it. Raw user
+history and tool schemas remain intact. The checkpoint establishes execution
+chronology only: counts do not prove that the model read an output or that the
+website returned relevant results. Current tool observations establish those facts.
+
 Instructions distinguish general questions from requested inspections and
 actions. Completion of an operation requires the relevant local observations
 and outcome. A familiar or plausible answer does not establish that the
@@ -102,7 +121,7 @@ application's active prompts, user configuration, credentials or private chats.
 - `bun test Scripts/persistent-instructions.integration.test.ts` exercises the
   real pinned App Server with scripted loopback Responses. It checks actual
   developer roles, successful command output, matched tool continuations, cold
-  resume, compaction and an 80-message replay. Missing default artifacts skip
+  resume, exact production compaction-prompt delivery and an 80-message replay. Missing default artifacts skip
   clearly; an explicit `COMPUTA_INSTRUCTION_TEST_RESOURCES` override or a present
   mismatched artifact fails closed. The fixture uses a private home and an outer
   sandbox denying external network. Its thread sandbox differs from production

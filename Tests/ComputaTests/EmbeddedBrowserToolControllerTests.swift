@@ -562,71 +562,196 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             _ = try await call(controller, "browser_read", wrongArguments)
             XCTFail("Metadata does not normalize or admit changed cursor filters")
         } catch {
-            guard let failure = error as? BrowserTabBrokerError, case .invalidRead = failure else {
-                return XCTFail("Expected filter rejection, got \(error)")
+            guard let failure = error as? EmbeddedBrowserPreflightRecoveryFailure,
+                  case .invalidRead = failure.original else {
+                return XCTFail("Expected filter rejection with separate read, got \(error)")
             }
+            let observation = try XCTUnwrap(jsonObject(failure.observationResponse)["current_observation"] as? [String: Any])
+            XCTAssertEqual(observation["view"] as? String, "content")
         }
         let counts = await backend.counts()
         XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
         _ = await controller.shutdown()
     }
 
-    func testInvalidContinuationFilterDoesNotDiscardUnchangedObservationOrDispatchInput() async throws {
-        for changedFilter in [["view": "content"], ["query": "Different control"]] {
+    func testChangedContinuationFiltersReturnOneSeparateRequestedReadWithoutInput() async throws {
+        for changedFilter in [["view": "content"], ["query": "Check flight"], ["view": "content", "query": "Result marker"]] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
             await backend.showManyControls()
+            await backend.setObservedResult("Result marker: an actual body paragraph")
             let first = try await call(controller, "browser_read", ["view": "overview", "query": "Extra control"])
             let cursor = try field("next_cursor", in: first)
             let before = await backend.counts()
             var invalid: [String: Any] = changedFilter
             invalid["cursor"] = cursor
+            let rejected = try await changedFilterFailure(controller, arguments: invalid)
+            let response = try jsonObject(rejected.observationResponse)
+            XCTAssertEqual(response["success"] as? Bool, false)
+            XCTAssertEqual(response["dispatched"] as? Bool, false)
+            XCTAssertEqual(response["no_replay"] as? Bool, true)
+            XCTAssertEqual((response["error"] as? [String: Any])?["code"] as? String, "continuation_filters_changed")
+            let observed = try XCTUnwrap(response["current_observation"] as? [String: Any])
+            XCTAssertEqual(observed["status"] as? String, "available")
+            XCTAssertEqual(observed["view"] as? String, changedFilter["view"] ?? "overview")
+            let fresh = try XCTUnwrap(observed["text"] as? String)
+            XCTAssertNotEqual(try field("source_observation", in: first), try field("source_observation", in: fresh))
+            XCTAssertNotEqual(try snapshotID(first), try snapshotID(fresh))
+            XCTAssertEqual(try field("view", in: fresh), changedFilter["view"] ?? "overview")
+            XCTAssertTrue(fresh.contains(changedFilter["query"] ?? "Result marker"))
+            XCTAssertFalse(fresh.contains("label=\"Extra control"), "Omitted old query must not leak into the requested fresh view")
+            XCTAssertLessThanOrEqual(rejected.observationResponse.utf8.count, 20_480)
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + 1)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            do {
+                _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 0])
+                XCTFail("The separate fresh read supersedes old action references")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
             do {
                 _ = try await call(controller, "browser_read", invalid)
-                XCTFail("A retained cursor cannot silently apply a changed view or query")
-            } catch {
-                guard let failure = error as? BrowserTabBrokerError, case .invalidRead(let guidance) = failure else {
-                    return XCTFail("Expected a rejected filter, got \(error)")
-                }
-                XCTAssertTrue(guidance.contains("No read or input occurred"))
-                XCTAssertTrue(guidance.contains("omit cursor entirely"))
-            }
-            let rejected = await backend.counts()
-            XCTAssertEqual(rejected.observes, before.observes)
-            XCTAssertEqual(rejected.presses, 0); XCTAssertEqual(rejected.fills, 0)
-            // No read happened. The old observed control is still subject to
-            // the exact same current-target/physical mutation checks.
-            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
-                arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": try snapshotID(first), "element_index": 0]))
-            let next = try await call(controller, "browser_read", ["cursor": cursor])
-            XCTAssertEqual(try field("source_observation", in: first), try field("source_observation", in: next))
-            XCTAssertEqual(try field("view", in: next), "overview")
-            XCTAssertTrue(next.contains("Extra control")); XCTAssertFalse(next.contains("Different control"))
-            let fresh = try await call(controller, "browser_read", ["view": "content"])
-            XCTAssertNotEqual(try field("source_observation", in: first), try field("source_observation", in: fresh))
-            let finalCounts = await backend.counts()
-            XCTAssertEqual(finalCounts.presses, 0); XCTAssertEqual(finalCounts.fills, 0)
+                XCTFail("The prior cursor is no longer current")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            let repeated = await backend.counts()
+            XCTAssertEqual(repeated.observes, after.observes, "A retired cursor does not grant another recovery read")
             _ = await controller.shutdown()
         }
     }
 
-    func testInvalidContinuationFilterPreservesNoAuthorityToChangedOrForeignTargets() async throws {
+    func testFailedChangedFilterReadPreservesValidSnapshotAndCannotRetryRecovery() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
         await backend.showManyControls()
         let first = try await call(controller, "browser_read", ["view": "overview"])
-        do {
-            _ = try await call(controller, "browser_read", ["cursor": field("next_cursor", in: first), "view": "content"])
-            XCTFail("Changed filter must fail")
-        } catch { }
-        await backend.replaceOwnedTarget()
-        do {
-            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 1])
-            XCTFail("Preserving the old observation cannot authorize a replacement target")
-        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
-        let counts = await backend.counts()
-        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        let cursor = try field("next_cursor", in: first)
+        let before = await backend.counts()
+        await backend.failObservations([.browserUnavailable("PRIVATE_RECOVERY_ERROR")])
+        let invalid: [String: Any] = ["cursor": cursor, "view": "content"]
+        let rejected = try await changedFilterFailure(controller, arguments: invalid)
+        let unavailable = try XCTUnwrap(jsonObject(rejected.observationResponse)["current_observation"] as? [String: Any])
+        XCTAssertEqual(unavailable["status"] as? String, "unavailable")
+        XCTAssertEqual(unavailable["reason"] as? String, "read_failed")
+        XCTAssertNil(unavailable["text"]); XCTAssertNil(unavailable["snapshot_id"])
+        XCTAssertFalse(rejected.observationResponse.contains("PRIVATE_RECOVERY_ERROR"))
+        let repeated = try await changedFilterFailure(controller, arguments: invalid)
+        XCTAssertEqual((try jsonObject(repeated.observationResponse)["current_observation"] as? [String: Any])?["reason"] as? String, "recovery_already_attempted")
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes + 1)
+        // Both the controller and broker keep the exact old capture on failure.
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": try snapshotID(first), "element_index": 1]))
+        let continued = try await call(controller, "browser_read", ["cursor": cursor])
+        XCTAssertEqual(try field("source_observation", in: continued), try field("source_observation", in: first))
+        let final = await backend.counts()
+        XCTAssertEqual(final.presses, 0); XCTAssertEqual(final.fills, 0)
         _ = await controller.shutdown()
+    }
+
+    func testChangedFilterRecoveryRejectsForeignExpiredAndNavigatedCursors() async throws {
+        for scenario in ["foreign", "expired", "navigated", "replaced", "reloaded"] {
+            let backend = EmbeddedBrowserFixtureBackend()
+            let controller = EmbeddedBrowserToolController(transport: backend,
+                readLifetime: scenario == "expired" ? .zero : .seconds(120))
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let first = try await call(controller, "browser_read", ["view": "overview"])
+            let cursor = scenario == "foreign" ? UUID().uuidString : (try field("next_cursor", in: first))
+            if scenario == "navigated" { await backend.redirectOwnedTarget(to: URL(string: "http://localhost:8123/new-page")!) }
+            if scenario == "replaced" { await backend.replaceOwnedTarget() }
+            if scenario == "reloaded" { await backend.reloadDocument() }
+            let before = await backend.counts()
+            do {
+                _ = try await call(controller, "browser_read", ["cursor": cursor, "view": "content"])
+                XCTFail("An inadmissible cursor must not publish a fresh view")
+            } catch let failure as EmbeddedBrowserPreflightRecoveryFailure {
+                let observed = try XCTUnwrap(jsonObject(failure.observationResponse)["current_observation"] as? [String: Any])
+                XCTAssertEqual(observed["status"] as? String, "unavailable", scenario)
+                XCTAssertNil(observed["snapshot_id"]); XCTAssertNil(observed["text"])
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot, scenario) }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + (scenario == "reloaded" ? 1 : 0), scenario)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testChangedFilterRecoveryIsLimitedToThreeSeparateReadsPerTurn() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls()
+        for attempt in 0..<4 {
+            let overview = try await call(controller, "browser_read", ["view": "overview"])
+            let before = await backend.counts()
+            let rejected = try await changedFilterFailure(controller,
+                arguments: ["cursor": field("next_cursor", in: overview), "view": "content"])
+            let observed = try XCTUnwrap(jsonObject(rejected.observationResponse)["current_observation"] as? [String: Any])
+            XCTAssertEqual(observed["status"] as? String, attempt < 3 ? "available" : "unavailable")
+            if attempt == 3 { XCTAssertEqual(observed["reason"] as? String, "recovery_limit") }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + (attempt < 3 ? 1 : 0))
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        }
+        _ = await controller.shutdown()
+    }
+
+    func testChangedFilterRecoveryCannotPublishAfterCancellationOrRelease() async throws {
+        for cancelled in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let overview = try await call(controller, "browser_read", ["view": "overview"])
+            let cursor = try field("next_cursor", in: overview)
+            await backend.holdNextRead()
+            let operation = Task { try await self.changedFilterFailure(controller, arguments: ["cursor": cursor, "view": "content"]) }
+            await backend.waitUntilObservationHeld()
+            if cancelled { operation.cancel() } else { _ = await controller.release(taskKey: "turn-a") }
+            await backend.resumeObservation()
+            if cancelled {
+                do { _ = try await operation.value; XCTFail("Cancellation must not publish references") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            } else {
+                let rejected = try await operation.value
+                let observed = try XCTUnwrap(jsonObject(rejected.observationResponse)["current_observation"] as? [String: Any])
+                XCTAssertEqual(observed["status"] as? String, "unavailable")
+                XCTAssertNil(observed["snapshot_id"]); XCTAssertNil(observed["text"])
+            }
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testChangedFilterAndStaleActionRecoveryShareTheExistingTurnReadBudget() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls()
+        for _ in 0..<2 {
+            let overview = try await call(controller, "browser_read", ["view": "overview"])
+            _ = try await changedFilterFailure(controller,
+                arguments: ["cursor": field("next_cursor", in: overview), "view": "content"])
+        }
+        let old = try await call(controller, "browser_read", ["view": "overview"])
+        let new = try await call(controller, "browser_read", ["view": "overview"])
+        let third = try await stalePreflight(controller,
+            arguments: ["snapshot_id": snapshotID(old), "element_index": 1])
+        XCTAssertEqual((try jsonObject(third.observationResponse)["current_observation"] as? [String: Any])?["status"] as? String, "available")
+        let before = await backend.counts()
+        let fourth = try await stalePreflight(controller,
+            arguments: ["snapshot_id": snapshotID(new), "element_index": 1])
+        XCTAssertEqual((try jsonObject(fourth.observationResponse)["current_observation"] as? [String: Any])?["reason"] as? String, "recovery_limit")
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes)
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    private func changedFilterFailure(_ controller: EmbeddedBrowserToolController,
+                                       arguments: [String: Any]) async throws -> EmbeddedBrowserPreflightRecoveryFailure {
+        do {
+            _ = try await call(controller, "browser_read", arguments)
+            XCTFail("A changed-filter continuation must remain a failed request")
+            throw BrowserTabBrokerError.invalidRead("Expected changed-filter rejection")
+        } catch let failure as EmbeddedBrowserPreflightRecoveryFailure { return failure }
     }
 
     func testFreshReadDoesNotRetryAfterCancellationOrLeaseRelease() async throws {
@@ -1920,6 +2045,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         observationFailures = failures; failureRedirect = redirect; replaceOnFailure = replaceTarget
     }
     func showManyControls() { manyControls = true }
+    func reloadDocument() { generation = UUID().uuidString }
     func holdNextRead() { holdRead = true }
     func configureAfterInput(_ scenario: String) { afterInputScenario = scenario }
     func waitUntilObservationHeld() async {

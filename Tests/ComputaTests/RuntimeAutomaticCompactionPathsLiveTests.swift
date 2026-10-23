@@ -967,9 +967,9 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                 && config["model_auto_compact_token_limit"] as? Int == expectedLimit,
                 "The live path must use the shipping window and its declared production or forced-fixture threshold.")
             let developerInstructions = ComputaAgentInstructions.developerInstructions()
-            try require(config["compact_prompt"] == nil
+            try require(config["compact_prompt"] as? String == ComputaAgentInstructions.compactionPrompt
                 && params["developerInstructions"] as? String == developerInstructions,
-                "Experimental instructions cannot substitute for the shipping native compactor.")
+                "The live path must use the shipping instructions and compaction provenance contract.")
         }
         print("contextWindow=\(shippingContext.contextWindow) compactLimit=\(expectedLimit) forcedFixtureThreshold=\(forced) usesShippingCompactionThreshold=\(!forced)")
         return trace
