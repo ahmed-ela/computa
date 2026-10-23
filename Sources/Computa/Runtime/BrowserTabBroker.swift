@@ -10,6 +10,44 @@ struct BrowserTarget: Equatable, Sendable {
     let url: URL
 }
 
+/// Passive HTML field constraints. These never establish whether a click
+/// submitted a form, ran page handlers, or completed a requested action.
+struct BrowserConstraintValidation: Codable, Equatable, Sendable {
+    enum Issue: String, Codable, CaseIterable, Sendable {
+        case valueMissing = "value_missing", typeMismatch = "type_mismatch"
+        case patternMismatch = "pattern_mismatch", tooLong = "too_long", tooShort = "too_short"
+        case rangeUnderflow = "range_underflow", rangeOverflow = "range_overflow"
+        case stepMismatch = "step_mismatch", badInput = "bad_input", customError = "custom_error"
+    }
+    let required: Bool
+    let candidate: Bool
+    let valid: Bool
+    let issues: [Issue]
+
+    static func decode(_ raw: Any?) throws -> Self? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        guard let object = raw as? [String: Any],
+              Set(object.keys) == ["required", "candidate", "valid", "issues"],
+              let names = object["issues"] as? [String], names.count <= Issue.allCases.count,
+              Set(names).count == names.count,
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              value.valid == value.issues.isEmpty
+        else {
+            throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid field constraint metadata.")
+        }
+        return value
+    }
+
+    var formattedMetadata: String {
+        // No page strings occur here. The whole fixed-size suffix participates
+        // in the row's existing byte budget, including on continued fragments.
+        let names = Issue.allCases.filter { issues.contains($0) }.map(\.rawValue).joined(separator: ",")
+        let state = !candidate ? "not_candidate" : valid ? "valid" : "invalid[\(names)]"
+        return (required ? " required=true" : "") + " constraint=\(state)"
+    }
+}
+
 struct BrowserDocumentNode: Equatable, Sendable {
     let backendNodeID: Int64?
     let role: String
@@ -35,6 +73,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
     /// Browser editable metadata, independent of role names. Used to keep
     /// contenteditable groups out of read-only result verification regions.
     let isEditable: Bool
+    let constraintValidation: BrowserConstraintValidation?
 
     init(
         backendNodeID: Int64?, role: String, name: String, value: String?,
@@ -42,7 +81,8 @@ struct BrowserDocumentNode: Equatable, Sendable {
         nodeID: String? = nil, parentNodeID: String? = nil,
         childNodeIDs: [String] = [], linkURL: String? = nil,
         isDOMClickable: Bool = false, isFocusablePointer: Bool = false,
-        isEditable: Bool = false, isPressUnsupported: Bool = false
+        isEditable: Bool = false, isPressUnsupported: Bool = false,
+        constraintValidation: BrowserConstraintValidation? = nil
     ) {
         self.backendNodeID = backendNodeID
         self.role = role
@@ -59,6 +99,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
         self.isPressUnsupported = isPressUnsupported
         self.isFocusablePointer = isFocusablePointer
         self.isEditable = isEditable
+        self.constraintValidation = constraintValidation
     }
 }
 
@@ -180,6 +221,7 @@ struct BrowserTabElement: Equatable, Sendable {
     var semanticRole: String? = nil
     var contentScope: BrowserContentScope = .unknown
     var contentKind: SemanticReadContentKind = .unknown
+    var constraintValidation: BrowserConstraintValidation? = nil
 }
 
 struct BrowserTabSnapshot: Equatable, Sendable {
@@ -1322,7 +1364,8 @@ actor BrowserTabSessionBroker {
                 isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
                 nodeID: original.nodeID, parentNodeID: original.parentNodeID,
                 childNodeIDs: original.childNodeIDs, linkURL: original.linkURL,
-                semanticRole: original.semanticRole, contentScope: original.contentScope, contentKind: original.contentKind
+                semanticRole: original.semanticRole, contentScope: original.contentScope, contentKind: original.contentKind,
+                constraintValidation: original.constraintValidation
             )
             // A parent can occur later on this page. Reserve the largest
             // possible page index now, then resolve actual page membership.
@@ -1460,6 +1503,7 @@ actor BrowserTabSessionBroker {
             + "content_scope=\(element.contentScope.rawValue) content_kind=\(element.contentKind.rawValue) "
             + "enabled=\(element.isEnabled ? "true" : "false") "
             + "settable=\(element.supportsSetText ? "true" : "false") actions=\(actions)\(pressSource)"
+            + (element.constraintValidation?.formattedMetadata ?? "")
     }
 
     private func readViewName(_ view: SemanticReadView) -> String {
@@ -1502,7 +1546,8 @@ actor BrowserTabSessionBroker {
             parentNodeID: node.parentNodeID,
             childNodeIDs: node.childNodeIDs,
             linkURL: node.linkURL,
-            semanticRole: node.role
+            semanticRole: node.role,
+            constraintValidation: node.constraintValidation
         )
     }
 

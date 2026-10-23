@@ -87,6 +87,23 @@ const nameFor = (element, role, boxlessContents = false) => {
   const rendered = typeof element.innerText === 'string' ? element.innerText : element.textContent;
   return trim(rendered || element.getAttribute('value') || element.getAttribute('title'));
 };
+// Passive native field state, not submission/outcome evidence. Never invoke
+// checkValidity/reportValidity: those can dispatch events or present UI.
+// Only the already captured visible field is inspected; no form traversal,
+// validationMessage, hidden fields, or secure-field validity is exposed.
+const constraintsFor = (element, boxlessContents) => {
+  if (boxlessContents || !['INPUT','TEXTAREA','SELECT'].includes(element.tagName)
+      || (element.tagName === 'INPUT' && ['password','hidden','submit','button','reset','image'].includes(element.type))) return null;
+  const validity = element.validity;
+  if (typeof element.required !== 'boolean' || typeof element.willValidate !== 'boolean'
+      || !validity || typeof validity.valid !== 'boolean') return null;
+  const flags = [['valueMissing','value_missing'],['typeMismatch','type_mismatch'],
+    ['patternMismatch','pattern_mismatch'],['tooLong','too_long'],['tooShort','too_short'],
+    ['rangeUnderflow','range_underflow'],['rangeOverflow','range_overflow'],
+    ['stepMismatch','step_mismatch'],['badInput','bad_input'],['customError','custom_error']];
+  return {required:element.required, candidate:element.willValidate, valid:validity.valid,
+    issues:flags.filter(([property]) => validity[property] === true).map(([,name]) => name)};
+};
 const metaFor = (element, role, boxlessContents = false) => {
   const name = nameFor(element, role, boxlessContents);
   const editableRole = ['textbox','searchbox','combobox'].includes(role);
@@ -112,7 +129,7 @@ const metaFor = (element, role, boxlessContents = false) => {
     linkURL:link?.slice(0,2048) ?? null, isDisabled:disabled, isReadOnly:readOnly, isEditable:editable && !readOnly,
     isIgnored:false, isDOMClickable:!popupOnlyLink && (interactiveItem || ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role)),
     isPressUnsupported:popupOnlyLink,
-    isFocusablePointer:false, fieldTruncated:tooLarge};
+    isFocusablePointer:false, constraintValidation:constraintsFor(element, boxlessContents), fieldTruncated:tooLarge};
 };
 const capture = () => {
   const nodes = [], next = [{node:document.body || document.documentElement, parent:null, suppressText:false}];

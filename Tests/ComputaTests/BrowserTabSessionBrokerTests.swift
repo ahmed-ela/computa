@@ -4,6 +4,48 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testConstraintMetadataRemainsAttachedToItsPublishedRowWithinReadBudgets() async throws {
+        for view in [SemanticReadView.all, .overview] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            let state = BrowserConstraintValidation(required: true, candidate: true, valid: false, issues: [.valueMissing])
+            let longLabel = String(repeating: "🙂 quoted \"field\" ", count: 400) + "UNPUBLISHED_TAIL"
+            let nodes: [BrowserDocumentNode] = (1...25).map { (index: Int) -> BrowserDocumentNode in
+                let label: String = index == 1 ? longLabel : "Field \(index)"
+                let constraints: BrowserConstraintValidation? = index == 1 ? state : nil
+                return BrowserDocumentNode(backendNodeID: Int64(index), role: "textbox",
+                    name: label, value: "",
+                    isDisabled: false, isReadOnly: false, isIgnored: false,
+                    nodeID: "n\(index)", isEditable: true, constraintValidation: constraints)
+            }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: view))
+            XCTAssertFalse(page.snapshot.formattedText.contains("UNPUBLISHED_TAIL"))
+            var pages = 0, seen = Set<Int64>()
+            repeat {
+                pages += 1
+                let rows = try XCTUnwrap(page.snapshot.presentation).rows
+                let bodyBytes = rows.reduce(0) { $0 + $1.text.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }
+                XCTAssertLessThanOrEqual(bodyBytes, view == .overview ? 6_000 : 10_000)
+                XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+                for row in rows {
+                    let element = try XCTUnwrap(page.snapshot.element(at: row.index))
+                    seen.insert(element.backendNodeID)
+                    XCTAssertEqual(row.text.contains("required=true constraint=invalid[value_missing]"), element.backendNodeID == 1)
+                    XCTAssertEqual(row.text.contains("constraint="), element.constraintValidation != nil)
+                    XCTAssertTrue(page.snapshot.formattedText.contains(row.text))
+                }
+                guard let cursor = page.snapshot.nextCursor else { break }
+                XCTAssertLessThan(pages, 20, "Continued metadata cannot prevent byte progress")
+                page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+            } while true
+            XCTAssertGreaterThan(pages, 1)
+            XCTAssertEqual(seen, Set((1...25).map(Int64.init)))
+            await fixture.assertNoInput()
+        }
+    }
+
     func testContentReadinessIsRequestedOnlyForFreshContentNotQueryContinuationOrSubtree() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes:

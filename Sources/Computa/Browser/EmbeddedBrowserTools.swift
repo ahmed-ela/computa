@@ -612,20 +612,8 @@ actor EmbeddedBrowserToolController {
                         cursor: cursor, read: SemanticReadRequest(query: read.query, view: view ?? .overview), scope: scope)
                 }
             }
-            let snapshot: BrowserTabSnapshot
-            do {
-                snapshot = try await currentObservation(
-                    taskKey: taskKey, contextID: contextID, scope: scope, read: read)
-            } catch BrowserTabBrokerError.staleDocument where read.cursor == nil {
-                // Navigation can invalidate a read while it is in flight.
-                // Retry only a fresh read, with the same exact lease and all
-                // scope checks; never restart pagination or replay input.
-                contexts[taskKey]?.snapshot = nil
-                try Task.checkCancellation()
-                try check(taskKey, contextID)
-                snapshot = try await currentObservation(
-                    taskKey: taskKey, contextID: contextID, scope: scope, read: read)
-            }
+            let snapshot = try await currentReadObservation(
+                taskKey: taskKey, contextID: contextID, scope: scope, read: read)
             return try .init(response: readResponse(snapshot))
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(
@@ -873,6 +861,7 @@ actor EmbeddedBrowserToolController {
         try observation.binding.lifetime.check()
         try requireScope(scope, url: observation.snapshot.documentURL)
         let target = try await currentTarget(binding: observation.binding, scope: scope)
+        try Task.checkCancellation()
         try check(taskKey, contextID)
         try observation.binding.lifetime.check()
         guard contexts[taskKey]?.binding?.handle == binding.handle,
@@ -882,6 +871,27 @@ actor EmbeddedBrowserToolController {
         return observation.snapshot
     }
 
+    /// A dispatched input can start navigation after the old page looked ready.
+    /// Share the ordinary fresh-read recovery with post-input observation: one
+    /// additional read on the same lease, never another input or a new binding.
+    /// Retained cursor/subtree reads cannot move to a different document.
+    private func currentReadObservation(
+        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest
+    ) async throws -> BrowserTabSnapshot {
+        do {
+            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+        } catch BrowserTabBrokerError.staleDocument
+            where read.cursor == nil && read.snapshotID == nil && read.elementIndex == nil {
+            try Task.checkCancellation()
+            try check(taskKey, contextID)
+            try bound(taskKey, contextID).lifetime.check()
+            contexts[taskKey]?.snapshot = nil
+            // This direct call deliberately cannot recurse/retry a second time.
+            // It repeats physical target, document, scope and publication checks.
+            return try await currentObservation(taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+        }
+    }
+
     private func postInputResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?, wasFill: Bool) async throws -> String {
         var result: [String: Any] = ["dispatched": true, "no_replay": true, "result_verified": false,
                                      "input_kind": wasFill ? "fill" : "click"]
@@ -889,7 +899,7 @@ actor EmbeddedBrowserToolController {
             ? "Field replacement and input/change events were dispatched; no Enter key or submit-control click was sent. Page handlers may react."
             : "Click already dispatched."
         do {
-            let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
+            let snapshot = try await currentReadObservation(taskKey: taskKey, contextID: contextID,
                 scope: scope, read: SemanticReadRequest(view: .overview))
             result["current_observation"] = ["status": "available", "view": "overview",
                 "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]

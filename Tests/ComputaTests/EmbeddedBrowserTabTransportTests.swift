@@ -15,6 +15,157 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         return String(row[range.upperBound...].prefix { $0 != "\"" })
     }
 
+    private func inputReference(_ read: String, label: String) throws -> [String: Any] {
+        let header = try XCTUnwrap(read.split(separator: "\n").first)
+        let id = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
+        let row = try XCTUnwrap(read.split(separator: "\n").first {
+            $0.hasPrefix("#") && $0.contains("label=\"\(label)\"")
+        })
+        return ["snapshot_id": String(id.dropFirst(3)),
+                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber })),
+                "expected_role": try exposedField("role", in: row),
+                "expected_label": try exposedField("label", in: row)]
+    }
+
+    func testRealWebKitReadsPassiveFieldConstraintsWithoutHiddenOrSecureState() async throws {
+        let html = """
+        <!doctype html><body><main><h1>Constraints fixture</h1>
+        <textarea aria-label="Message" required></textarea>
+        <input aria-label="Optional">
+        <input aria-label="Email" type="email" required value="invalid-address">
+        <input aria-label="Custom" id="custom" value="visible">
+        <input aria-label="Consent" type="checkbox" required>
+        <select aria-label="Choice" required><option value="">Choose</option><option>One</option></select>
+        <input aria-label="Disabled" disabled required>
+        <input aria-label="Read only" readonly required>
+        <input aria-label="Password" type="password" required value="SECURE_SENTINEL">
+        <input type="hidden" required aria-label="HIDDEN_SENTINEL">
+        <div hidden><input required aria-label="HIDDEN_ANCESTOR_SENTINEL"></div>
+        <div aria-hidden="true"><input required aria-label="ARIA_HIDDEN_SENTINEL"></div>
+        <div inert><input required aria-label="INERT_SENTINEL"></div>
+        <div role="textbox" aria-label="Fake field" required></div>
+        <script>
+        document.getElementById('custom').setCustomValidity('PRIVATE_VALIDATION_MESSAGE');
+        window.invalids=0;window.submits=0;
+        document.addEventListener('invalid',()=>window.invalids++,true);
+        document.addEventListener('submit',()=>window.submits++,true);
+        </script></main></body>
+        """
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let controller = EmbeddedBrowserToolController(transport: transport)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/constraints"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let observed = try await transport.observe(target: target)
+        func state(_ label: String) throws -> BrowserConstraintValidation {
+            try XCTUnwrap(observed.nodes.first { $0.name == label }?.constraintValidation)
+        }
+        XCTAssertEqual(try state("Message"), .init(required: true, candidate: true, valid: false, issues: [.valueMissing]))
+        XCTAssertEqual(try state("Optional"), .init(required: false, candidate: true, valid: true, issues: []))
+        XCTAssertEqual(try state("Email").issues, [.typeMismatch])
+        XCTAssertEqual(try state("Custom").issues, [.customError])
+        XCTAssertEqual(try state("Consent").issues, [.valueMissing])
+        XCTAssertEqual(try state("Choice").issues, [.valueMissing])
+        XCTAssertFalse(try state("Disabled").candidate)
+        XCTAssertFalse(try state("Read only").candidate)
+        for name in ["Password", "Fake field"] {
+            XCTAssertNil(try XCTUnwrap(observed.nodes.first { $0.name == name }).constraintValidation)
+        }
+        _ = try await controller.execute(taskKey: "constraints", tool: "browser_tabs", arguments: Data("{}".utf8))
+        _ = try await controller.execute(taskKey: "constraints", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let read = try await controller.execute(taskKey: "constraints", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
+        let row = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("label=\"Message\"") })
+        XCTAssertTrue(row.contains("required=true constraint=invalid[value_missing]"))
+        for excluded in ["SECURE_SENTINEL", "HIDDEN_SENTINEL", "HIDDEN_ANCESTOR_SENTINEL", "ARIA_HIDDEN_SENTINEL", "INERT_SENTINEL", "PRIVATE_VALIDATION_MESSAGE"] {
+            XCTAssertFalse(read.contains(excluded), excluded)
+        }
+        let events = try await script(view, "return {invalids:window.invalids,submits:window.submits};")
+        let counts = try XCTUnwrap(JSONSerialization.jsonObject(with: events) as? [String: Int])
+        XCTAssertEqual(counts, ["invalids": 0, "submits": 0], "Passive reads must not run native constraint validation")
+        _ = await controller.shutdown()
+    }
+
+    func testRealWebKitInvalidFormStillRunsClickHandlerAndCanBeCompletedWithoutReplay() async throws {
+        let html = """
+        <!doctype html><body><form id="form"><textarea id="body" aria-label="Message" required></textarea>
+        <button id="send" type="submit">Send message</button></form><script>
+        window.clicks=0;window.invalids=0;window.submits=0;
+        document.getElementById('send').addEventListener('click',()=>window.clicks++);
+        document.addEventListener('invalid',()=>window.invalids++,true);
+        document.getElementById('form').addEventListener('submit',event=>{event.preventDefault();window.submits++;});
+        </script></body>
+        """
+        let session = EmbeddedBrowserSession(persistent: false)
+        let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/invalid-form"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        _ = try await controller.execute(taskKey: "form", tool: "browser_tabs", arguments: Data("{}".utf8))
+        _ = try await controller.execute(taskKey: "form", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let before = try await controller.execute(taskKey: "form", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
+        let firstClick = try JSONSerialization.data(withJSONObject: inputReference(before, label: "Send message"))
+        let clicked = try await controller.execute(taskKey: "form", tool: "browser_click", arguments: firstClick)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(clicked.utf8)) as? [String: Any])
+        XCTAssertEqual(result["dispatched"] as? Bool, true)
+        XCTAssertEqual(result["no_replay"] as? Bool, true)
+        XCTAssertEqual(result["result_verified"] as? Bool, false)
+        XCTAssertTrue(clicked.contains("value_missing"))
+        let firstCounts = try await script(view, "return {clicks:window.clicks,invalids:window.invalids,submits:window.submits};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: firstCounts) as? [String: Int], ["clicks": 1, "invalids": 1, "submits": 0])
+        do {
+            _ = try await controller.execute(taskKey: "form", tool: "browser_click", arguments: firstClick)
+            XCTFail("Invalid form state cannot revive the consumed input reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let fresh = try await controller.execute(taskKey: "form", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
+        var fill = try inputReference(fresh, label: "Message"); fill["text"] = "Requested body"
+        _ = try await controller.execute(taskKey: "form", tool: "browser_fill", arguments: JSONSerialization.data(withJSONObject: fill))
+        let completed = try await controller.execute(taskKey: "form", tool: "browser_read", arguments: Data(#"{"view":"all"}"#.utf8))
+        let field = try XCTUnwrap(completed.split(separator: "\n").first { $0.contains("label=\"Message\"") })
+        XCTAssertTrue(field.contains("value=\"Requested body\""))
+        XCTAssertTrue(field.contains("constraint=valid"))
+        let newClick = try JSONSerialization.data(withJSONObject: inputReference(completed, label: "Send message"))
+        let submitted = try await controller.execute(taskKey: "form", tool: "browser_click", arguments: newClick)
+        let newResult = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(submitted.utf8)) as? [String: Any])
+        XCTAssertEqual(newResult["result_verified"] as? Bool, false, "A native submit event is not a delivery receipt")
+        let finalCounts = try await script(view, "return {clicks:window.clicks,invalids:window.invalids,submits:window.submits};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: finalCounts) as? [String: Int], ["clicks": 2, "invalids": 1, "submits": 1])
+        _ = await controller.shutdown()
+    }
+
+    func testRealWebKitConstraintStateDoesNotClaimSubmissionBlockedWhenValidationIsBypassed() async throws {
+        for mode in ["novalidate", "formnovalidate"] {
+            let html = """
+            <!doctype html><body><form id="form" \(mode == "novalidate" ? "novalidate" : "")>
+            <textarea aria-label="Message" required></textarea>
+            <button type="submit" \(mode == "formnovalidate" ? "formnovalidate" : "")>Send message</button></form>
+            <script>window.submits=0;window.invalids=0;
+            document.addEventListener('invalid',()=>window.invalids++,true);
+            document.getElementById('form').addEventListener('submit',event=>{event.preventDefault();window.submits++;});</script></body>
+            """
+            let session = EmbeddedBrowserSession(persistent: false), transport = EmbeddedBrowserTabTransport(session: session)
+            defer { session.shutdown() }
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+            view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/\(mode)"))
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+            let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+            let observed = try await transport.observe(target: target)
+            XCTAssertEqual(observed.nodes.first { $0.name == "Message" }?.constraintValidation?.issues, [.valueMissing])
+            let button = try XCTUnwrap(observed.nodes.first { $0.role == "button" })
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            let counts = try await script(view, "return {invalids:window.invalids,submits:window.submits};")
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: counts) as? [String: Int], ["invalids": 0, "submits": 1], mode)
+        }
+    }
+
     func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {
         let html = """
         <!doctype html><html><body><main>

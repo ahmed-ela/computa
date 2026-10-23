@@ -195,7 +195,8 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 isIgnored: ignored,
                 nodeID: nodeID, parentNodeID: row["parentNodeID"] as? String, childNodeIDs: children,
                 linkURL: row["linkURL"] as? String, isDOMClickable: clickable, isFocusablePointer: pointer,
-                isEditable: editable, isPressUnsupported: pressUnsupported)
+                isEditable: editable, isPressUnsupported: pressUnsupported,
+                constraintValidation: try BrowserConstraintValidation.decode(row["constraintValidation"]))
         }
         var result = BrowserDocumentObservation(
             loaderID: generation.uuidString, title: title, url: url, nodes: nodes,

@@ -83,6 +83,22 @@ old stop notice was appended after every subsequent turn, making it appear curre
   control remains available within the user's scope. No-replay guidance refers
   to the same input, so it does not discourage a needed Search after field entry.
   Page event handlers may still react to a fill; observed outcomes remain required.
+- Captured native form fields expose compact, passive HTML constraint state on
+  their own published row: `required=true`, `constraint=valid`,
+  `constraint=invalid[value_missing]` (or other fixed native flags), and
+  `constraint=not_candidate`. This makes an empty required Message field visible
+  before and after a premature Send. Reads never invoke `checkValidity` or
+  `reportValidity`, traverse the form, or expose `validationMessage`; hidden and
+  password fields remain excluded. The metadata shares existing row byte limits.
+  It cannot establish that submission was blocked or that no page handler ran:
+  invalid controls can coexist with click side effects or validation bypass.
+  Dispatch, no-replay, approval and receipt verification semantics are unchanged.
+- Post-input overview reads share the ordinary fresh-read navigation recovery.
+  When navigation invalidates the first read, one additional fresh read may run
+  on the same lease, with the same identity, scope and cancellation checks.
+  Cursor and subtree reads cannot switch documents, and unrelated failures do
+  not retry. A second failure remains an unavailable observation. The input is
+  never replayed, and a recovered observation does not verify its outcome.
 - Successful click/fill tool outputs begin with a separate compact dispatch
   receipt. It preserves the operation and the control label through item-wise
   history truncation; snapshot IDs and indices alone cannot explain an older
