@@ -97,6 +97,18 @@ old stop notice was appended after every subsequent turn, making it appear curre
   authorized task and approvals. The model must not infer that a password or MFA
   is required before observing that requirement. Actual credential requirements,
   account ambiguity and approval boundaries still require appropriate help.
+- DOM capture traverses `display: contents` wrappers even though those wrappers
+  have no layout box. Visible descendants and direct text retain their semantic
+  ancestry; the wrapper itself receives no input capability. Hidden, inert and
+  `aria-hidden` descendants remain excluded. WebKit can include hidden text in
+  a boxless wrapper's aggregate `innerText`, so those wrappers retain explicit
+  labels while their visible child text is captured individually. Ordinary
+  boxed-element labels and capture limits are unchanged.
+- Final captures log bounded native diagnostics for traversal limits, frame and
+  shadow boundaries, clipping, page visibility, viewport and native attachment.
+  `clippedFields` counts captured nodes with at least one clipped field. These
+  records contain no page text or URLs and do not expand model tool results.
+  An incomplete capture alone does not identify why relevant results are absent.
 
 The follow-up Outlook check proved that field entry and Search activation worked.
 Its incorrect negative answer came after reading an incomplete overview; the host

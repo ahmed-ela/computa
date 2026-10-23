@@ -500,6 +500,162 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         try await broker.revoke(taskKey: "content-timeout", binding: read.binding)
     }
 
+    func testDisplayContentsWrappersRetainRenderedTextControlsAndContentReadiness() async throws {
+        let body = """
+        <div role='toolbar'><button>Ready toolbar</button></div>
+        <main id='landmark' style='display:contents'>
+          <div id='wrapper' style='display:contents'>
+            VISIBLE_DIRECT_TEXT
+            <p id='body-text'>VISIBLE_CONTENTS_BODY</p>
+            <button id='action'>VISIBLE_CONTENTS_ACTION</button>
+          </div>
+        </main>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let layoutBytes = try await script(view, """
+        return {landmarkRects:document.getElementById('landmark').getClientRects().length,
+          wrapperRects:document.getElementById('wrapper').getClientRects().length,
+          bodyRects:document.getElementById('body-text').getClientRects().length,
+          actionRects:document.getElementById('action').getClientRects().length};
+        """)
+        let layout = try XCTUnwrap(JSONSerialization.jsonObject(with: layoutBytes) as? [String: Int])
+        XCTAssertEqual(layout["landmarkRects"], 0)
+        XCTAssertEqual(layout["wrapperRects"], 0)
+        XCTAssertGreaterThan(try XCTUnwrap(layout["bodyRects"]), 0)
+        XCTAssertGreaterThan(try XCTUnwrap(layout["actionRects"]), 0)
+        let raw = try await transport.observe(target: target)
+        XCTAssertTrue(raw.nodes.contains { $0.name == "VISIBLE_CONTENTS_BODY" },
+                      "A boxless display:contents wrapper does not hide its rendered descendants")
+        XCTAssertTrue(raw.nodes.contains { $0.name == "VISIBLE_DIRECT_TEXT" },
+                      "Bare text uses its own rendered range, not the boxless parent's missing rect")
+        XCTAssertTrue(raw.nodes.contains { $0.name == "VISIBLE_CONTENTS_ACTION" && $0.isDOMClickable },
+                      "The actual rendered child control remains observable; no wrapper gains its action")
+        let content = try await transport.observeForRead(target: target, readiness: .content)
+        XCTAssertEqual(content.semanticReadiness, .ready,
+                       "Rendered body text below a boxless wrapper must release content readiness")
+        XCTAssertTrue(content.nodes.contains { $0.name == "VISIBLE_CONTENTS_BODY" })
+        XCTAssertFalse(raw.sourceTruncated, "This small light-DOM fixture has no capture boundary")
+        let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertEqual(diagnostics.stopReason, .none)
+        XCTAssertEqual(diagnostics.boxlessContents, 2)
+        XCTAssertEqual(diagnostics.emitted, content.nodes.count)
+    }
+
+    func testDisplayContentsTraversalDoesNotExposeHiddenAriaHiddenOrInertDescendants() async throws {
+        let body = """
+        <main><p>VISIBLE_CONTROL_BODY</p>
+          <div hidden><div style='display:contents'><p>EXCLUDED_HIDDEN_BODY</p><button>EXCLUDED_HIDDEN_ACTION</button></div></div>
+          <div style='display:none'><div style='display:contents'><p>EXCLUDED_DISPLAY_NONE_BODY</p></div></div>
+          <div style='visibility:hidden'><div style='display:contents'><p>EXCLUDED_VISIBILITY_BODY</p></div></div>
+          <div aria-hidden='true'><div style='display:contents'><p id='aria-body'>EXCLUDED_ARIA_BODY</p><button>EXCLUDED_ARIA_ACTION</button></div></div>
+          <div inert><div style='display:contents'><p id='inert-body'>EXCLUDED_INERT_BODY</p><input value='EXCLUDED_INERT_VALUE'></div></div>
+        </main>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let laidOut = try await script(view, """
+        return document.getElementById('aria-body').getClientRects().length > 0
+          && document.getElementById('inert-body').getClientRects().length > 0;
+        """)
+        XCTAssertEqual(laidOut, Data("true".utf8), "ARIA-hidden and inert exclusions must hold even when descendants have layout boxes")
+        for observation in [try await transport.observe(target: target),
+                            try await transport.observeForRead(target: target, readiness: .content)] {
+            XCTAssertTrue(observation.nodes.contains { $0.name == "VISIBLE_CONTROL_BODY" })
+            XCTAssertFalse(observation.nodes.contains {
+                $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_")
+            }, "Traversing boxless wrappers must preserve every hidden/inert ancestor exclusion")
+        }
+    }
+
+    func testBoxlessSemanticWrappersPreserveContentScopesWithoutInputAuthority() async throws {
+        let body = """
+        <main style='display:contents'><p>BODY_RESULT</p>
+          <nav style='display:contents'><span>NAVIGATION_TEXT</span></nav>
+          <div role='button' aria-label='Boxless control' style='display:contents'>CONTROL_TEXT
+            <button onclick='window.childClicks=(window.childClicks||0)+1'>Rendered child action</button>
+          </div>
+          <div role='textbox' contenteditable='true' aria-label='Boxless field' style='display:contents'>FIELD_TEXT<span hidden>EXCLUDED_AGGREGATED_VALUE</span></div>
+          <div role='heading' style='display:contents'>VISIBLE_WRAPPED_HEADING<span hidden>EXCLUDED_AGGREGATED_NAME</span></div>
+        </main>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "contents", processIdentifier: 42, target: target)
+        let all = try await broker.snapshot(taskKey: "contents", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        XCTAssertFalse(all.snapshot.elements.contains {
+            $0.label.contains("EXCLUDED_AGGREGATED_") || ($0.value ?? "").contains("EXCLUDED_AGGREGATED_")
+        }, "A boxless wrapper's aggregate name/value must not bypass descendant hidden exclusions")
+        let wrapper = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Boxless control" })
+        let field = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Boxless field" })
+        XCTAssertFalse(wrapper.isEnabled); XCTAssertFalse(wrapper.supportsPress)
+        XCTAssertFalse(field.isEnabled); XCTAssertFalse(field.supportsSetText)
+        do {
+            try await broker.perform(taskKey: "contents", binding: all.binding, snapshot: all.snapshot,
+                elementIndex: wrapper.index, action: "AXPress")
+            XCTFail("A boxless semantic wrapper has no input authority")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .unsupportedAction("AXPress")) }
+        let child = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Rendered child action" })
+        XCTAssertTrue(child.isEnabled); XCTAssertTrue(child.supportsPress)
+        try await broker.perform(taskKey: "contents", binding: all.binding, snapshot: all.snapshot,
+            elementIndex: child.index, action: "AXPress")
+        let clicks = try await script(view, "return window.childClicks||0;")
+        XCTAssertEqual(clicks, Data("1".utf8))
+        let content = try await broker.snapshot(taskKey: "contents", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content))
+        XCTAssertTrue(content.snapshot.elements.contains { $0.label == "BODY_RESULT" })
+        XCTAssertTrue(content.snapshot.elements.contains { $0.label == "VISIBLE_WRAPPED_HEADING" },
+                      "Avoiding unsafe wrapper aggregation must preserve the separately rendered visible heading text")
+        for excluded in ["NAVIGATION_TEXT", "CONTROL_TEXT", "FIELD_TEXT", "Rendered child action"] {
+            XCTAssertFalse(content.snapshot.elements.contains { $0.label.contains(excluded) },
+                           "Retained boxless ancestry must not promote navigation/control text into body content")
+        }
+        try await broker.revoke(taskKey: "contents", binding: content.binding)
+    }
+
+    func testCaptureDiagnosticsDistinguishBudgetAndCoverageBoundariesWithoutPageContent() async throws {
+        let cases: [(String, String, BrowserCaptureDiagnostics.StopReason)] = [
+            ("byte-budget", "<main>" + String(repeating: "<div role='group' aria-label='" + String(repeating: "x", count: 1_024) + "'><p>Fixture text</p></div>", count: 120) + "</main>", .byteBudget),
+            ("boundaries", "<p>Visible fixture</p><iframe srcdoc='<p>Uncaptured frame</p>'></iframe><div id='shadow' style='height:20px'></div><script>document.getElementById('shadow').attachShadow({mode:'open'}).innerHTML='<p>Uncaptured shadow</p>';</script><button role='" + String(repeating: "r", count: 101) + "'>Oversized role</button><p>" + String(repeating: "x", count: 4_200) + "</p>", .none),
+        ]
+        for (name, body, stop) in cases {
+            let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+            defer { session.shutdown() }
+            let capture = try await transport.observe(target: target)
+            let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+            XCTAssertEqual(diagnostics.stopReason, stop, name)
+            XCTAssertEqual(diagnostics.emitted, capture.nodes.count)
+            XCTAssertTrue(capture.sourceTruncated)
+            XCTAssertLessThanOrEqual(diagnostics.visited, 20_001)
+            XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 1_000_000)
+            XCTAssertGreaterThan(diagnostics.viewportWidth, 0); XCTAssertGreaterThan(diagnostics.viewportHeight, 0)
+            if name == "byte-budget" {
+                XCTAssertGreaterThan(diagnostics.estimatedBytes, 220_000)
+                XCTAssertEqual(diagnostics.frames + diagnostics.shadowRoots + diagnostics.oversizedRoles + diagnostics.clippedFields, 0)
+            } else {
+                XCTAssertEqual(diagnostics.frames, 1); XCTAssertEqual(diagnostics.shadowRoots, 1)
+                XCTAssertEqual(diagnostics.oversizedRoles, 1); XCTAssertEqual(diagnostics.clippedFields, 1)
+            }
+            let encoded = try JSONEncoder().encode(diagnostics)
+            XCTAssertLessThan(encoded.count, 512)
+            let text = String(decoding: encoded, as: UTF8.self)
+            XCTAssertFalse(text.contains("Fixture")); XCTAssertFalse(text.contains("http"))
+            var invalid = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            invalid["pageText"] = "MUST_NOT_LOG"
+            XCTAssertThrowsError(try BrowserCaptureDiagnostics.decode(invalid, emitted: capture.nodes.count, sourceTruncated: true))
+            invalid.removeValue(forKey: "pageText"); invalid["stopReason"] = "page_supplied_reason"
+            XCTAssertThrowsError(try BrowserCaptureDiagnostics.decode(invalid, emitted: capture.nodes.count, sourceTruncated: true))
+            invalid["stopReason"] = stop.rawValue; invalid["visited"] = 20_002
+            XCTAssertThrowsError(try BrowserCaptureDiagnostics.decode(invalid, emitted: capture.nodes.count, sourceTruncated: true))
+            invalid["visited"] = diagnostics.visited; invalid["visibilityState"] = "PAGE_PRIVATE_SENTINEL"
+            XCTAssertThrowsError(try BrowserCaptureDiagnostics.decode(invalid, emitted: capture.nodes.count, sourceTruncated: true))
+            invalid["visibilityState"] = diagnostics.visibilityState.rawValue; invalid["viewportWidth"] = -1
+            XCTAssertThrowsError(try BrowserCaptureDiagnostics.decode(invalid, emitted: capture.nodes.count, sourceTruncated: true))
+        }
+    }
+
     func testBlankBindingAndMutationPreflightUseImmediateObservationWithoutWaitingForContent() async throws {
         let (session, transport, view, target) = try await semanticReadinessFixture()
         defer { session.shutdown() }

@@ -24,13 +24,25 @@ const idFor = node => {
   if (!id) { id = state.nextID++; state.ids.set(node, id); }
   return id;
 };
-const visible = element => {
+const allowedByAncestors = element => {
   for (let node = element; node; node = node.parentElement) {
     if (node.hidden || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert')) return false;
     const style = getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
   }
-  return element.getClientRects().length > 0;
+  return true;
+};
+// Input targets still need their own rendered box. A display:contents wrapper
+// may be traversed below, but that does not make it an input target.
+const visible = element => allowedByAncestors(element) && element.getClientRects().length > 0;
+const visibleText = node => {
+  const parent = node.parentElement;
+  if (!parent || !allowedByAncestors(parent)) return false;
+  if (parent.getClientRects().length > 0) return true;
+  if (getComputedStyle(parent).display !== 'contents') return false;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  return range.getClientRects().length > 0;
 };
 const roleFor = element => {
   // Page-provided ARIA cannot turn a native secure field into a control whose
@@ -54,7 +66,7 @@ const roleFor = element => {
     ul:'list', ol:'list', li:'listitem', p:'statictext', pre:'statictext', blockquote:'statictext', img:'image',
     section: element.getAttribute('aria-label') ? 'region' : null, output:'status'})[tag] || null;
 };
-const nameFor = (element, role) => {
+const nameFor = (element, role, boxlessContents = false) => {
   const labelled = trim(element.getAttribute('aria-labelledby'));
   if (labelled) {
     const text = trim(labelled.split(' ').map(id => document.getElementById(id)?.textContent || '').join(' '));
@@ -68,17 +80,21 @@ const nameFor = (element, role) => {
   }
   if (['application','main','article','navigation','complementary','banner','contentinfo','list','listitem','region'].includes(role)) return '';
   if (role === 'image') return trim(element.getAttribute('alt'));
+  // WebKit's innerText on a boxless wrapper can include hidden descendants.
+  // Keep explicit accessible labels above; visible child text is captured with
+  // its own layout/ancestor checks instead of aggregating the wrapper subtree.
+  if (boxlessContents) return '';
   const rendered = typeof element.innerText === 'string' ? element.innerText : element.textContent;
   return trim(rendered || element.getAttribute('value') || element.getAttribute('title'));
 };
-const metaFor = (element, role) => {
-  const name = nameFor(element, role);
+const metaFor = (element, role, boxlessContents = false) => {
+  const name = nameFor(element, role, boxlessContents);
   const editableRole = ['textbox','searchbox','combobox'].includes(role);
   const nativeEditable = element.isContentEditable || ['TEXTAREA','SELECT'].includes(element.tagName)
     || (element.tagName === 'INPUT' && ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type));
   const editable = editableRole && nativeEditable;
   const password = element.tagName === 'INPUT' && element.type === 'password';
-  const value = editable && !password ? String(element.isContentEditable ? element.innerText : element.value ?? '') : null;
+  const value = editable && !password && !boxlessContents ? String(element.isContentEditable ? element.innerText : element.value ?? '') : null;
   const link = role === 'link' ? String(element.href || '') : null;
   // Keep the destination observable without offering an action this backend
   // must reject. Task input never creates or adopts an unowned popup.
@@ -101,42 +117,66 @@ const metaFor = (element, role) => {
 const capture = () => {
   const nodes = [], next = [{node:document.body || document.documentElement, parent:null, suppressText:false}];
   let visited = 0, budget = 0, truncated = false;
+  const diagnostics = {stopReason:'none',visited:0,emitted:0,estimatedBytes:0,
+    visibilityState:['visible','hidden','prerender'].includes(document.visibilityState) ? document.visibilityState : 'unknown',
+    viewportWidth:Number.isInteger(innerWidth) && innerWidth >= 0 && innerWidth <= 1000000 ? innerWidth : 0,
+    viewportHeight:Number.isInteger(innerHeight) && innerHeight >= 0 && innerHeight <= 1000000 ? innerHeight : 0,
+    frames:0,shadowRoots:0,oversizedRoles:0,clippedFields:0,boxlessContents:0};
   state.nodes.clear();
   while (next.length) {
     const item = next.pop(), node = item.node;
-    if (++visited > 20000 || nodes.length >= 3000 || budget > 220000) { truncated = true; break; }
+    if (++visited > 20000 || nodes.length >= 3000 || budget > 220000) {
+      diagnostics.stopReason = visited > 20000 ? 'visited_limit' : nodes.length >= 3000 ? 'node_limit' : 'byte_budget';
+      truncated = true; break;
+    }
     if (node.nodeType === Node.TEXT_NODE) {
       const text = trim(node.textContent);
-      if (item.suppressText || !text || !node.parentElement || !visible(node.parentElement)) continue;
+      if (item.suppressText || !text || !visibleText(node)) continue;
       const id = idFor(node), name = text.slice(0,4096);
       truncated ||= text.length > 4096;
+      if (text.length > 4096) diagnostics.clippedFields++;
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
         value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null});
       budget += name.length * 3 + 200;
       continue;
     }
-    if (node.nodeType !== Node.ELEMENT_NODE || !visible(node) || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)) continue;
+    if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)
+        || !allowedByAncestors(node)) continue;
+    const boxlessContents = node.getClientRects().length === 0 && getComputedStyle(node).display === 'contents';
+    if (!boxlessContents && node.getClientRects().length === 0) continue;
+    if (boxlessContents) diagnostics.boxlessContents++;
     // This backend covers the main light DOM only. Never imply exhaustive
     // document coverage when a frame or shadow tree is not traversed.
-    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME' || node.shadowRoot || oversizedRole(node.getAttribute('role') || '')) truncated = true;
+    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') { diagnostics.frames++; truncated = true; }
+    if (node.shadowRoot) { diagnostics.shadowRoots++; truncated = true; }
+    if (oversizedRole(node.getAttribute('role') || '')) { diagnostics.oversizedRoles++; truncated = true; }
     const role = roleFor(node);
     let parent = item.parent, suppressText = item.suppressText;
     if (role) {
-      const id = idFor(node), meta = metaFor(node, role);
+      const id = idFor(node), meta = metaFor(node, role, boxlessContents);
       truncated ||= meta.fieldTruncated;
+      if (meta.fieldTruncated) diagnostics.clippedFields++;
       delete meta.fieldTruncated;
+      if (boxlessContents) {
+        // Retain landmarks/control ancestry so descendants are not reclassified
+        // as body text, while withholding every no-box wrapper input capability.
+        meta.isDisabled = true; meta.isReadOnly = true; meta.isEditable = false;
+        meta.isDOMClickable = false; meta.isFocusablePointer = false; meta.isPressUnsupported = true;
+      }
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:parent,childNodeIDs:[],...meta});
       state.nodes.set(id,node);
       budget += JSON.stringify(meta).length * 3 + 200;
       parent = String(id);
-      suppressText = ['button','link','heading','statictext','textbox','searchbox','combobox','image'].includes(role);
+      suppressText = !boxlessContents && ['button','link','heading','statictext','textbox','searchbox','combobox','image'].includes(role);
     }
     const children = Array.from(node.childNodes);
     for (let index = children.length - 1; index >= 0; index--) next.push({node:children[index],parent,suppressText});
   }
   const byID = new Map(nodes.map(node => [node.nodeID,node]));
   for (const node of nodes) if (node.parentNodeID && byID.has(node.parentNodeID)) byID.get(node.parentNodeID).childNodeIDs.push(node.nodeID);
-  return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes, sourceTruncated:truncated};
+  diagnostics.visited = visited; diagnostics.emitted = nodes.length; diagnostics.estimatedBytes = budget;
+  return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes,
+    sourceTruncated:truncated,captureDiagnostics:diagnostics};
 };
 const isSemanticNode = node =>
   ['button','link','checkbox','combobox','searchbox','textbox','menu','menubar','menuitem',

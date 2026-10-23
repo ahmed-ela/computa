@@ -1,5 +1,43 @@
 import Foundation
+import OSLog
 import WebKit
+
+/// Finite native diagnostics only. No page-provided strings, document identity,
+/// or source content are retained or forwarded to the model.
+struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
+    enum StopReason: String, Codable, Sendable { case none, visitedLimit = "visited_limit", nodeLimit = "node_limit", byteBudget = "byte_budget" }
+    enum VisibilityState: String, Codable, Sendable { case visible, hidden, prerender, unknown }
+    let stopReason: StopReason
+    let visited: Int
+    let emitted: Int
+    let estimatedBytes: Int
+    let visibilityState: VisibilityState
+    let viewportWidth: Int
+    let viewportHeight: Int
+    let frames: Int
+    let shadowRoots: Int
+    let oversizedRoles: Int
+    let clippedFields: Int
+    let boxlessContents: Int
+
+    static func decode(_ raw: Any?, emitted: Int, sourceTruncated: Bool) throws -> Self {
+        guard let fields = raw as? [String: Any],
+              Set(fields.keys) == ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
+                                  "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"],
+              let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 512,
+              let value = try? JSONDecoder().decode(Self.self, from: bytes),
+              (0...20_001).contains(value.visited), (0...3_000).contains(value.emitted),
+              value.emitted == emitted, value.emitted <= value.visited,
+              (0...1_000_000).contains(value.estimatedBytes),
+              (0...1_000_000).contains(value.viewportWidth), (0...1_000_000).contains(value.viewportHeight),
+              [value.frames, value.shadowRoots, value.oversizedRoles, value.clippedFields, value.boxlessContents]
+                .allSatisfy({ (0...20_000).contains($0) && $0 <= value.visited }),
+              sourceTruncated == (value.stopReason != .none || value.frames > 0 || value.shadowRoots > 0
+                                  || value.oversizedRoles > 0 || value.clippedFields > 0)
+        else { throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid capture diagnostics.") }
+        return value
+    }
+}
 
 /// Runtime integration depends on this narrow backend, rather than WebKit or
 /// native window focus. Fixtures can implement it without launching a browser.
@@ -18,6 +56,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private let world = WKContentWorld.world(name: "Computa.BrowserControl.\(UUID().uuidString)")
     private var owned = [UUID: String]()
     private let script: String?
+    private static let captureLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserCapture")
+    #if DEBUG
+    private(set) var captureDiagnosticsForTesting: BrowserCaptureDiagnostics?
+    #endif
 
     init(session: EmbeddedBrowserSession, script: String? = nil) {
         self.session = session
@@ -160,6 +202,41 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
             sourceTruncated: truncated)
         result.sourceName = "computa_webkit_dom"
         result.semanticReadiness = readiness
+        let diagnostics = try BrowserCaptureDiagnostics.decode(raw["captureDiagnostics"], emitted: nodes.count,
+                                                              sourceTruncated: truncated)
+        #if DEBUG
+        captureDiagnosticsForTesting = diagnostics
+        #endif
+        // Emit only the final returned capture, not each MutationObserver probe.
+        // These opaque IDs are host-generated and permit exact-tab correlation.
+        struct Record: Encodable {
+            let kind = "browser_capture_v1"
+            let tabID: UUID
+            let generation: UUID
+            let requestedReadiness: String
+            let readiness: String
+            let capture: BrowserCaptureDiagnostics
+            let viewAttached: Bool
+            let viewHasWindow: Bool
+            let viewHidden: Bool
+            let viewWidth: Int
+            let viewHeight: Int
+        }
+        let view = session.webView(for: id)
+        func dimension(_ value: CGFloat?) -> Int {
+            guard let value, value.isFinite, (0...1_000_000).contains(value) else { return 0 }
+            return Int(value.rounded(.down))
+        }
+        let record = Record(tabID: id, generation: generation,
+            requestedReadiness: requestedReadiness?.rawValue ?? "immediate",
+            readiness: readiness?.rawValue ?? "immediate", capture: diagnostics,
+            viewAttached: view?.superview != nil, viewHasWindow: view?.window != nil,
+            viewHidden: view?.isHiddenOrHasHiddenAncestor ?? true,
+            viewWidth: dimension(view?.bounds.width), viewHeight: dimension(view?.bounds.height))
+        if let bytes = try? JSONEncoder().encode(record), bytes.count <= 1_024 {
+            let text = String(decoding: bytes, as: UTF8.self)
+            Self.captureLog.notice("capture \(text, privacy: .public)")
+        }
         return result
     }
 
