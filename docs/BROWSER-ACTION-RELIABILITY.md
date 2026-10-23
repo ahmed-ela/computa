@@ -1368,5 +1368,36 @@ variant's final answer scoped absence correctly but changed a quoted address's
 hyphen. These are baseline controls, not evidence of a 245 repair. The fixture
 uses article roles and does not reproduce Outlook's ungrouped DOM output.
 
-Installation and live build 245 qualification are pending. Runtime `mactopus-15`
-is unchanged. No limit, permission or approval boundary was increased.
+Installed signed-test build 245 matches validated source `e88febe` and unchanged
+runtime `mactopus-15`; it is not a notarized or published release. Live trials used
+remote Cerebras GPT-OSS-120B at medium effort. The two mixed-author controls passed
+again in 2.235 and 2.351 seconds, three calls each, with no errors or POSTs. Their
+244 baseline already passed, so these controls do not demonstrate a repair.
+
+Two real Outlook attachment lookups returned exact observed filenames in 9.635
+and 25.650 seconds (11 and 15 calls, zero native failures, zero and one
+compactions). Each current capture placed the requested name heading, separate
+recipient/date headings and attachment under one inner message path. This
+supports message-level association, unlike the 244 wrong-owner result; partial
+captures and shared filenames still do not prove a unique mailbox match or
+independently authenticate a sender. The ODE follow-up failed after 27.744 seconds,
+32 calls, four rejected actions and three compactions: it answered the previous
+attachment task. The exact current user request and correct summary goals
+survived all three compactions. This was a wrong final answer, not a call-limit
+termination.
+
+The local read took 2.338 seconds and three calls, correctly giving the change
+and primary filename, but altered hyphens in an additional source quote. Same-chat
+and fresh sends took 6.139 and 4.612 seconds (eight and six calls). Each produced
+exactly one new POST with exact fields and an observed current receipt. The
+same-chat run recovered from one old-binding rejection. Its receipt copy was
+exact, while recipient/body echoes changed typography; the fresh run changed the
+receipt and recipient hyphens. None of these local trials compacted.
+
+UI checks confirmed one owned tab closed per trial, existing tabs preserved and
+empty composers. Both owned fixture servers were stopped; their ports closed and
+event evidence remained unchanged. No real-mail send, forward, deletion or
+download was observed.
+The goal remains unresolved: task continuity and literal copying still failed,
+and diagnostics were not requalified. No limit, permission or approval boundary
+was increased.
