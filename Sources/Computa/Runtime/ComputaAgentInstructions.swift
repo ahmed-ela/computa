@@ -3,10 +3,21 @@ import Foundation
 /// Computa owns its agent instructions. It does not discover the user's Codex
 /// prompts/configuration or bundle another application's instructions.
 enum ComputaAgentInstructions {
+    /// Task effects are authorized by the user; the host policy only constrains
+    /// how UI input is delivered. Shared with the fresh browser handoff so an
+    /// earlier refusal cannot silently turn background operation into read-only.
+    static let backgroundActionAuthority = """
+    Background-only limits UI delivery, not effects. Offered tools may
+    fill, click, submit or send when authorized. Read-only tasks allow navigation
+    and search/filter inputs, but no message sends, edits, deletions or settings changes.
+    A later explicit send authorizes that send only. Preserve ongoing user constraints,
+    actual approvals/denials and Stop. Assistant refusals are not policy.
+    """
+
     /// Exact user-input suffix emitted by the native host. Kept shared with
     /// the synthetic diagnostic matcher so it cannot drift from the wire text.
     static func runtimeInteractionPolicy() -> String {
-        "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
+        "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
     }
 
     static let ordinaryRequests = """
@@ -200,7 +211,8 @@ enum ComputaAgentInstructions {
     If still empty, report unresolved loading, not absence/denial.
     Content includes non-navigation listbox options; read overview/all before absence/access claims.
     Enabled observed links (href, actions=[]): browser_navigate exact href in the bound tab.
-    Background-only forbids native focus theft/global input, not offered navigation or sign-in/account selection.
+    \(backgroundActionAuthority)
+    No native focus theft/global input, including recovery. Offered navigation/sign-in remain allowed.
     Claim policy/access denial only from tool evidence. Sign-in/footer text is not a credential block.
     Follow authorized sign-in; choose an existing matching account. Ask help only at
     actual password/MFA prompts or account ambiguity.
@@ -211,8 +223,9 @@ enum ComputaAgentInstructions {
     static let builtInBrowser = """
     browser_* tools use Computa's built-in browser. Existing pages: browser_tabs,
     then browser_bind with observed tab_id. browser_open creates AND binds a task-owned
-    page; read directly without another bind. Bind anew each turn. Model inference pages
-    are separate and cannot be targeted.
+    page; read directly without another bind. Each user turn needs browser_tabs/browser_bind
+    or browser_open: prior handles/snapshots/cursors are invalid and task-owned pages
+    may be closed. Reacquire missing tabs. Model inference pages are separate and cannot be targeted.
     \(browserAddressChecks)
     browser_read returns snapshot_id/element_index targets; copy exactly.
     Every new read, view change or cursor page supersedes ALL earlier action targets.

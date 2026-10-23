@@ -55,6 +55,67 @@ final class ComputerTaskScopeTests: XCTestCase {
         }
     }
 
+    func testTroubleshootingProductMentionsDoNotCreateExclusiveSiteRestrictions() throws {
+        let reported = "Help me enable Chrome access through ChatGPT’s supported settings. Focus on read-only Terminal diagnostics to identify why “Local browser use is disabled in Work settings” appears. Find the documented setting or supported command, and explain any action I must perform myself. Don’t alter internal permission databases or override safety restrictions. This is a read-only troubleshooting request: do not change settings or configuration files; report your findings and the supported user steps."
+        for prompt in [reported, "Why does ChatGPT refuse to act? Find its documentation.",
+                       "Read ChatGPT documentation", "Read ChatGPT’s support article",
+                       "Research how to use Gmail", "Find news on ChatGPT",
+                       "Research changes in Outlook", "Explain GitHub permissions"] {
+            let scope = ComputerTaskScope(userPrompt: prompt)
+            XCTAssertEqual(scope.targetConfidence, .unknown, prompt)
+            XCTAssertFalse(scope.hasCandidateRestriction, prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://help.openai.com/")), prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://support.openai.com/")), prompt)
+            XCTAssertFalse(scope.externalBrowserOnly, prompt)
+        }
+    }
+
+    func testConcreteServiceDestinationsStillRejectOtherSites() throws {
+        for prompt in ["Open ChatGPT", "Use only ChatGPT. Find its settings.",
+                       "Can you open ChatGPT in the built-in browser?",
+                       "In ChatGPT, read my last conversation.", "Read the page on ChatGPT"] {
+            let scope = ComputerTaskScope(userPrompt: prompt)
+            XCTAssertEqual(scope.targetConfidence, .recognizedService, prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://chatgpt.com/")), prompt)
+            XCTAssertNotNil(scope.siteViolation(url: try url("https://help.openai.com/")), prompt)
+        }
+        let outlook = ComputerTaskScope(userPrompt: "Find the evidence packet sent by Uny to my Outlook account neh6vw. Use the built-in browser and tell me the attachment filename. Do not send, forward, download, or delete anything.")
+        XCTAssertEqual(outlook.targetConfidence, .recognizedService)
+        XCTAssertNil(outlook.siteViolation(url: try url("https://outlook.live.com/mail/")))
+        XCTAssertNotNil(outlook.siteViolation(url: try url("https://example.com/")))
+        let wikipedia = ComputerTaskScope(userPrompt: "Read the requested page on Wikipedia using the built-in browser.")
+        XCTAssertEqual(wikipedia.targetConfidence, .recognizedService)
+        XCTAssertNil(wikipedia.siteViolation(url: try url("https://en.wikipedia.org/wiki/Browser")))
+        XCTAssertNotNil(wikipedia.siteViolation(url: try url("https://example.com/")))
+    }
+
+    func testDocumentationTopicPreservesAnExplicitDestination() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read ChatGPT documentation at https://help.openai.com/")
+        XCTAssertEqual(scope.targetConfidence, .explicitURL)
+        XCTAssertNil(scope.siteViolation(url: try url("https://help.openai.com/en/articles/123")))
+        XCTAssertNotNil(scope.siteViolation(url: try url("https://chatgpt.com/")))
+        XCTAssertNotNil(scope.siteViolation(url: try url("https://help.openai.com.attacker.test/")))
+    }
+
+    func testRejectedDestinationGuidesAuthorizedOpeningWithoutClaimingContentAbsence() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        let diagnostic = try XCTUnwrap(scope.siteViolation(url: try url("https://example.com/")))
+        XCTAssertTrue(diagnostic.contains("browser_open"))
+        XCTAssertTrue(diagnostic.contains("when authorized by the request"))
+        XCTAssertTrue(diagnostic.contains("A missing inventory tab does not prove"))
+        XCTAssertFalse(diagnostic.contains("report that it was not found"))
+    }
+
+    func testTopicMentionDoesNotEraseExplicitTitleOrBrowserConstraints() throws {
+        let title = ComputerTaskScope(userPrompt: "Read ChatGPT documentation in the tab titled \"Support article\".")
+        XCTAssertEqual(title.targetConfidence, .exactTabTitle)
+        XCTAssertNil(title.candidateViolation(url: try url("https://help.openai.com/"), title: "Support article"))
+        XCTAssertNotNil(title.candidateViolation(url: try url("https://help.openai.com/"), title: "Unrelated"))
+        let browser = ComputerTaskScope(userPrompt: "Use Chrome only. Research ChatGPT documentation.")
+        XCTAssertEqual(browser.targetConfidence, .unknown)
+        XCTAssertNotNil(browser.embeddedBrowserToolViolation())
+    }
+
     func testOutlookScopeIncludesDedicatedMailHostsAndOnlyItsProductLandingPath() throws {
         let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
         for raw in [

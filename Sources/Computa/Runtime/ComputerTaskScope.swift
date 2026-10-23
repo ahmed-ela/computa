@@ -139,14 +139,19 @@ struct ComputerTaskScope: Equatable, Sendable {
         }
         exactTitle = titles.first
         if let url = urls.first, let host = url.host?.lowercased() {
-            // Conflicting named service + URL cannot be resolved with syntax.
-            if let service = mentioned.first, !service.hosts.contains(host) {
+            // Conflicting destinations cannot be resolved with syntax. A
+            // product discussed at an explicit documentation URL is not a
+            // second destination and must not erase that URL's restriction.
+            if let service = mentioned.first,
+               service.aliases.contains(where: { Self.requestsDestination($0, in: nonURLText) }),
+               !service.hosts.contains(host) {
                 site = nil; targetConfidence = .ambiguous
                 return
             }
             site = Site(name: host, hosts: [host], port: url.port ?? (url.scheme == "https" ? 443 : 80))
             targetConfidence = .explicitURL
-        } else if let service = mentioned.first {
+        } else if let service = mentioned.first,
+                  service.aliases.contains(where: { Self.requestsDestination($0, in: nonURLText) }) {
             site = Site(name: service.name, hosts: service.hosts, port: nil, serviceRoutes: service.routes)
             targetConfidence = .recognizedService
         } else {
@@ -195,7 +200,7 @@ struct ComputerTaskScope: Equatable, Sendable {
     /// site without substituting an empty title or weakening bind-time checks.
     func siteViolation(url: URL) -> String? {
         guard targetConfidence != .ambiguous, let site, !site.matches(url) else { return nil }
-        return "The selected tab does not match the requested \(site.name) site. Do not substitute an unrelated tab. Refresh the inventory if needed; if the requested site is absent, report that it was not found instead of binding another site."
+        return "The selected tab does not match the requested \(site.name) site. Do not substitute an unrelated tab. Use a matching observed tab or, when authorized by the request, browser_open at the requested address or official service entrypoint. A missing inventory tab does not prove that the requested content is absent or that opening a new tab is forbidden."
     }
 
     private static func explicitBackgroundOnly(_ prompt: String) -> Bool {
@@ -208,6 +213,36 @@ struct ComputerTaskScope: Equatable, Sendable {
             #"\b(?:browser|chrome|safari|firefox|edge)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
         ]
         return patterns.contains { hasMatch($0, in: prompt) }
+    }
+
+    /// A product name can be the subject of research, not the place to act.
+    /// In particular, troubleshooting ChatGPT must not force all browsing onto
+    /// chatgpt.com and prevent opening its documentation. Only a small set of
+    /// destination instructions is recognized here; omissions remain unknown
+    /// rather than turning a topical mention into an exclusive host boundary.
+    private static func requestsDestination(_ alias: String, in prompt: String) -> Bool {
+        let name = NSRegularExpression.escapedPattern(for: alias)
+        let determiner = #"(?:(?:the|my|our)\s+)?"#
+        let topicSuffix = #"(?!\s*(?:['’]s\s+)?(?:support|documentation|docs|help|news|tutorials?|integration|alternatives?|permissions?|polic(?:y|ies)|problems?|errors?)\b)"#
+        let destination = name + #"\b"# + topicSuffix
+        let command = #"(?:^|[.!?;\n])\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:only\s+)?(?:open|visit|read|check|inspect|search|use|browse|look\s+at|go\s+to|navigate\s+to)\s+(?:only\s+)?"#
+        if hasMatch(command + determiner + destination, in: prompt) { return true }
+
+        // "In Gmail ...", "using Outlook", and an account-qualified mail
+        // destination identify where work happens. "through ChatGPT's supported
+        // settings" and "about ChatGPT" deliberately do not.
+        if hasMatch(#"(?:^|[.!?;\n])\s*(?:in|on)\s+"# + determiner + destination, in: prompt)
+            || hasMatch(#"\b(?:using|via)\s+"# + determiner + destination, in: prompt)
+            || hasMatch(#"\b(?:in|on|from|to)\s+(?:my|our|the)\s+"# + destination
+                        + #"\s+(?:account|inbox|mailbox|calendar|drive|feed|files|issues|messages)\b"#, in: prompt) {
+            return true
+        }
+
+        // A concrete browser object can precede its service ("read the page on
+        // Wikipedia"). Requiring that object avoids treating "find news on
+        // ChatGPT" or "research changes in ChatGPT" as a destination request.
+        return hasMatch(#"\b(?:tab|page|website|site|inbox|mailbox|email|emails|message|messages|attachment|attachments|file|files|document|documents|issue|issues|calendar|feed)\s+(?:in|on|from)\s+"#
+                        + determiner + destination, in: prompt)
     }
 
     private static func explicitExternalBrowserOnly(_ prompt: String) -> Bool {

@@ -19,6 +19,33 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         root = nil
     }
 
+    func testRestoredFailureStaysWithItsTurnBeforeLaterSuccessfulReplies() {
+        let record = fixture(timestamp: Date(timeIntervalSince1970: 20))
+        let history = [
+            TimelineEntry(id: "user-1", kind: .user, title: "", body: "Search", timestamp: Date(timeIntervalSince1970: 10),
+                activityGroupID: "group-1", turnID: "turn-1"),
+            TimelineEntry(id: "tool-1", kind: .tool, title: "", body: "Rejected", timestamp: Date(timeIntervalSince1970: 19), turnID: "turn-1"),
+            TimelineEntry(id: "user-2", kind: .user, title: "", body: "New action", timestamp: Date(timeIntervalSince1970: 30), turnID: "turn-2"),
+            TimelineEntry(id: "reply-2", kind: .assistant, title: "", body: "Done", timestamp: Date(timeIntervalSince1970: 40), turnID: "turn-2"),
+        ]
+        let restored = NativeFailureEvidenceStore.restoringFailures([record], in: history)
+        XCTAssertEqual(restored.map(\.id), ["user-1", "tool-1", record.entry.id, "user-2", "reply-2"])
+        XCTAssertEqual(restored[2].turnID, "turn-1")
+        XCTAssertEqual(restored[2].activityGroupID, "group-1")
+        XCTAssertEqual(NativeFailureEvidenceStore.restoringFailures([record], in: restored), restored)
+    }
+
+    func testFailureWithMissingHistoricalTurnRemainsVisibleWithoutAttachingToCurrentTurn() {
+        let record = fixture(timestamp: Date(timeIntervalSince1970: 20))
+        let current = TimelineEntry(id: "current", kind: .user, title: "", body: "Continue",
+            timestamp: Date(timeIntervalSince1970: 30), activityGroupID: "current", turnID: "turn-2")
+        let restored = NativeFailureEvidenceStore.restoringFailures([record], in: [current])
+        XCTAssertEqual(restored.map(\.id), [record.entry.id, "current"])
+        XCTAssertNil(restored[0].activityGroupID)
+        XCTAssertEqual(restored[0].turnID, "turn-1")
+        XCTAssertEqual(restored[0].body, record.message)
+    }
+
     func testRoundTripReloadAndPrivateHashedFilename() throws {
         let store = try NativeFailureEvidenceStore(directory: directory)
         let record = fixture(threadID: "../../outside/thread")

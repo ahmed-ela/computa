@@ -171,6 +171,12 @@ final class RuntimeIsolationTransportTests: XCTestCase {
             ]
             XCTAssertEqual(sandbox, expected, "Each turn must explicitly replace the previous sandbox policy")
             XCTAssertNil(turn["permissions"])
+            let turnInput = try XCTUnwrap(turn["input"] as? [[String: String]])
+            XCTAssertEqual(turnInput.first?["text"], prompt)
+            XCTAssertEqual(turnInput.last?["text"], ComputaAgentInstructions.runtimeInteractionPolicy(),
+                           "Every new/resumed turn and access mode must receive current host policy")
+            XCTAssertTrue(turnInput.last?["text"]?.contains(ComputaAgentInstructions.backgroundActionAuthority) == true,
+                          "Background delivery must not silently become read-only on resumed chats")
         }
         let turn = try XCTUnwrap(turnRequests.first?["params"] as? [String: Any])
         // Each turn inherits the selected thread workspace without replacing

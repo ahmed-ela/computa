@@ -2382,7 +2382,7 @@ private extension CodexAppServerRuntime {
             }
             if !failures.isEmpty {
                 let corrections = failures.suffix(3).map { "turn=\($0.turnID): \($0.message)" }.joined(separator: "\n")
-                input.append(["type": "text", "text": "APP_RUNTIME_OUTCOME_CORRECTION (execution evidence, not a new task): The earlier turns below were not verified even if their model replies claimed success. Do not rely on those replies as established facts; obtain fresh evidence for the current request.\n" + corrections])
+                input.append(["type": "text", "text": "APP_RUNTIME_OUTCOME_CORRECTION (execution evidence, not a new task): The earlier turns below were not verified even if their model replies claimed success. Do not rely on those replies as established facts; obtain fresh evidence for the current request. These are historical outcomes, not current-turn tool failures or new permission restrictions. They do not make this request read-only or revoke the user's current authorization. Preserve ongoing user constraints and actual current denials; use fresh current-turn bindings and observations.\n" + corrections])
             }
             return input
         }
@@ -2845,8 +2845,9 @@ private extension CodexAppServerRuntime {
                     let websiteFailures = ((try? websiteTurnFailureStore().load(threadID: threadID)) ?? [])
                         .filter { historyTurnIDs.contains($0.turnID) }
                     let rejectedTurns = Set(failures.map(\.turnID) + websiteFailures.map(\.turnID))
-                    tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
-                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: threadID)
+                    tasks[index].entries = NativeFailureEvidenceStore.restoringFailures(failures,
+                        in: try AppServerThreadHistoryContract.entries(from: history,
+                            excludingAssistantTurns: rejectedTurns))
                     if !explicitlyNamedTaskIDs.contains(taskID) {
                         tasks[index].title = AppServerThreadHistoryContract.displayTitle(name: nil,
                             preview: tasks[index].title, entries: tasks[index].entries)
@@ -4580,10 +4581,7 @@ private extension CodexAppServerRuntime {
 
         private func nativeFailureEntries(threadID: String) -> [TimelineEntry] {
             do {
-                return try nativeFailureStore().load(threadID: threadID).map {
-                    TimelineEntry(id: "native-failure:\($0.turnID):\($0.callID)", kind: .system,
-                        title: "Native action stopped", body: $0.message, timestamp: $0.timestamp)
-                }
+                return try nativeFailureStore().load(threadID: threadID).map(\.entry)
             } catch {
                 return [TimelineEntry(kind: .system, title: "Native failure evidence unavailable",
                     body: "Saved native failure evidence could not be verified: \(error.localizedDescription)")]
@@ -4624,7 +4622,7 @@ private extension CodexAppServerRuntime {
             discardComputerV2Session(taskID: taskID)
             events.yield(.timelineEntryAppended(taskID: taskID,
                 entry: TimelineEntry(id: "native-failure:\(turnID):\(callID)", kind: .system,
-                    title: "Native action stopped", body: displayed, timestamp: timestamp)))
+                    title: "Native action stopped", body: displayed, timestamp: timestamp, turnID: turnID)))
             let generation = serverGeneration
             let operationID = UUID()
             nativeStopOperationIDs[taskID] = operationID

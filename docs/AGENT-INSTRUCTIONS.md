@@ -52,9 +52,28 @@ Computa's normal built-in WebKit tabs through a separate owned controller;
 the `computer_v2_*` tools operate native applications.
 Embedded ChatGPT, Gemini and Claude model pages remain private inference surfaces
 and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).
-Image/audio input remains unavailable. Full Access automatically resolves permitted
-approval requests; it does not remove the engine sandbox, private HOME, native
-privacy grants or the native interaction policy.
+Image/audio input remains unavailable. Full Access uses the engine's
+`danger-full-access` terminal/file mode and automatically resolves permitted
+approval requests. Private HOME, native privacy grants and the native interaction
+policy still apply.
+
+Background-only is an input-delivery constraint. It forbids native activation,
+focus theft and global keyboard/pointer input; it does not prohibit user-authorized
+changes through offered background browser or native controls. Filling forms,
+submitting them and sending a requested message remain available subject to the
+user's scope, approvals, actual access denials and outcome verification. A read-only
+lookup allows navigation and search/filter input, but not sends, edits, deletions
+or settings changes. A later explicit send request can authorize that
+send without permitting unrelated changes or cancelling continuing constraints.
+The host repeats this distinction in each turn's interaction policy and in each
+website browser handoff, including after retained assistant refusals.
+
+Each new user turn must acquire current browser bindings and observations; prior
+turn handles and cursors are not reusable, and task-owned pages may already have
+been cleaned up. Prior failed-action receipts are retained as historical outcome
+evidence, explicitly separated from the current turn's permission and tool state.
+They prevent unsupported success claims without creating a permanent read-only
+restriction or revoking a later user authorization.
 
 The instruction design takes inspiration from the public Codex autonomy/task
 template and terminal session/output schemas in the pinned source revision

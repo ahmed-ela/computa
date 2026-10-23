@@ -72,7 +72,7 @@ enum EmbeddedBrowserTools {
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for readable text and non-navigation listbox options, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. For a popup-only link without AXPress, use browser_navigate with its complete exact observed href in the same bound tab; never reconstruct href_fragment or href_omitted destinations. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
+                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for readable text and non-navigation listbox options, all for structure. Continue with browser_read(cursor=next_cursor) alone, omitting view and query; to change either filter start a fresh browser_read without cursor. Never use computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. For a popup-only link without AXPress, use browser_navigate with its complete exact observed href in the same bound tab; never reconstruct href_fragment or href_omitted destinations. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
                     "query": query, "cursor": cursor,
@@ -189,7 +189,7 @@ enum EmbeddedBrowserTools {
 /// A rejected preflight stays a tool failure. The runtime may publish this
 /// separate bounded read only after its normal failure/terminal checks.
 struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable {
-    let original: BrowserTabBrokerError = .staleSnapshot
+    let original: BrowserTabBrokerError
     let observationResponse: String
     var errorDescription: String? { original.localizedDescription }
 }
@@ -267,10 +267,10 @@ actor EmbeddedBrowserToolController {
         do {
             _ = try await capturedMutation(taskKey: taskKey, contextID: context.id,
                                            tool: tool, object: object, scope: scope)
-        } catch BrowserTabBrokerError.staleSnapshot {
+        } catch let original as BrowserTabBrokerError where original == .staleSnapshot || original == .staleDocument {
             let rejectedID = UUID(uuidString: object["snapshot_id"] as! String)!
             throw try await stalePreflightRecovery(taskKey: taskKey, contextID: context.id,
-                                                   rejectedID: rejectedID, scope: scope)
+                                                   rejectedID: rejectedID, original: original, scope: scope)
         }
     }
 
@@ -467,6 +467,17 @@ actor EmbeddedBrowserToolController {
                 query: object["query"] as? String,
                 view: view ?? (object["cursor"] == nil ? .overview : nil),
                 cursor: object["cursor"] as? String)
+            // A mismatched filter is a rejected request, not a new read. The
+            // broker rejects it before capture; do the same before retiring
+            // the controller's matching capability. Otherwise one malformed
+            // pagination call causes an unrelated stale-action cascade.
+            if let cursor = read.cursor, let previous = contexts[taskKey]?.snapshot,
+               previous.nextCursor == cursor, let receipt = previous.readReceipt {
+                let original = SemanticReadRequest(query: receipt.query, view: receipt.view)
+                guard read.continues(original) else {
+                    throw BrowserTabBrokerError.invalidRead(Self.continuationFilterGuidance)
+                }
+            }
             let snapshot: BrowserTabSnapshot
             do {
                 snapshot = try await currentObservation(
@@ -748,11 +759,13 @@ actor EmbeddedBrowserToolController {
     /// Called only after capturedMutation rejected before approval or input.
     /// Neither a failed recovery nor an explicit read refunds this turn's cap.
     private func stalePreflightRecovery(taskKey: String, contextID: UUID, rejectedID: UUID,
+                                         original: BrowserTabBrokerError,
                                          scope: ComputerTaskScope?) async throws -> EmbeddedBrowserPreflightRecoveryFailure {
         try Task.checkCancellation()
         try check(taskKey, contextID)
         var result: [String: Any] = [
-            "success": false, "error": ["code": "stale_snapshot", "message": BrowserTabBrokerError.staleSnapshot.localizedDescription],
+            "success": false, "error": ["code": original == .staleDocument ? "stale_document" : "stale_snapshot",
+                                        "message": original.localizedDescription],
             "dispatched": false, "no_replay": true,
         ]
         let repeated = contexts[taskKey]!.stalePreflightRecoveryIDs.contains(rejectedID)
@@ -760,7 +773,7 @@ actor EmbeddedBrowserToolController {
         if repeated || exhausted {
             result["current_observation"] = ["status": "unavailable", "reason": repeated ? "recovery_already_attempted" : "recovery_limit"]
             result["next"] = "No input was dispatched. The stale reference was rejected and not retried. Use browser_read for current evidence before choosing another input."
-            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: try json(result))
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: try json(result))
         }
         contexts[taskKey]?.stalePreflightRecoveryIDs.insert(rejectedID)
         do {
@@ -774,15 +787,17 @@ actor EmbeddedBrowserToolController {
             let response = try json(result)
             guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
             try Task.checkCancellation()
-            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: response)
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response)
         } catch {
             if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             try Task.checkCancellation()
             result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
             result["next"] = "No input was dispatched. The stale reference was rejected and not retried. Use browser_read for current evidence if the bound tab is still available."
-            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: try json(result))
+            return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: try json(result))
         }
     }
+
+    private static let continuationFilterGuidance = "a continuation retains its captured view/query. No read or input occurred. To continue the same capture call browser_read with only its next_cursor as cursor, omitting view and query. To change view/query call browser_read with the new filters and omit cursor entirely. The previous observation has not been replaced."
 
     private enum PostInputObservationFailure: Error { case outputLimit }
 

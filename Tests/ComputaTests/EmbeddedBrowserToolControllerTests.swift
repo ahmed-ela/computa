@@ -518,6 +518,64 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testInvalidContinuationFilterDoesNotDiscardUnchangedObservationOrDispatchInput() async throws {
+        for changedFilter in [["view": "content"], ["query": "Different control"]] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let first = try await call(controller, "browser_read", ["view": "overview", "query": "Extra control"])
+            let cursor = try field("next_cursor", in: first)
+            let before = await backend.counts()
+            var invalid: [String: Any] = changedFilter
+            invalid["cursor"] = cursor
+            do {
+                _ = try await call(controller, "browser_read", invalid)
+                XCTFail("A retained cursor cannot silently apply a changed view or query")
+            } catch {
+                guard let failure = error as? BrowserTabBrokerError, case .invalidRead(let guidance) = failure else {
+                    return XCTFail("Expected a rejected filter, got \(error)")
+                }
+                XCTAssertTrue(guidance.contains("No read or input occurred"))
+                XCTAssertTrue(guidance.contains("omit cursor entirely"))
+            }
+            let rejected = await backend.counts()
+            XCTAssertEqual(rejected.observes, before.observes)
+            XCTAssertEqual(rejected.presses, 0); XCTAssertEqual(rejected.fills, 0)
+            // No read happened. The old observed control is still subject to
+            // the exact same current-target/physical mutation checks.
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+                arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": try snapshotID(first), "element_index": 0]))
+            let next = try await call(controller, "browser_read", ["cursor": cursor])
+            XCTAssertEqual(try field("source_observation", in: first), try field("source_observation", in: next))
+            XCTAssertEqual(try field("view", in: next), "overview")
+            XCTAssertTrue(next.contains("Extra control")); XCTAssertFalse(next.contains("Different control"))
+            let fresh = try await call(controller, "browser_read", ["view": "content"])
+            XCTAssertNotEqual(try field("source_observation", in: first), try field("source_observation", in: fresh))
+            let finalCounts = await backend.counts()
+            XCTAssertEqual(finalCounts.presses, 0); XCTAssertEqual(finalCounts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testInvalidContinuationFilterPreservesNoAuthorityToChangedOrForeignTargets() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls()
+        let first = try await call(controller, "browser_read", ["view": "overview"])
+        do {
+            _ = try await call(controller, "browser_read", ["cursor": field("next_cursor", in: first), "view": "content"])
+            XCTFail("Changed filter must fail")
+        } catch { }
+        await backend.replaceOwnedTarget()
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 1])
+            XCTFail("Preserving the old observation cannot authorize a replacement target")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
     func testFreshReadDoesNotRetryAfterCancellationOrLeaseRelease() async throws {
         for cancelled in [false, true] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -705,6 +763,40 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(recovered.observes, before.observes + 1)
             XCTAssertEqual(recovered.presses, 0); XCTAssertEqual(recovered.fills, 0)
             arguments["snapshot_id"] = newID
+            try await controller.preflightMutation(taskKey: "turn-a", tool: tool,
+                arguments: JSONSerialization.data(withJSONObject: arguments))
+            _ = try await call(controller, tool, arguments)
+            let after = await backend.counts()
+            XCTAssertEqual(after.presses, tool == "browser_click" ? 1 : 0)
+            XCTAssertEqual(after.fills, tool == "browser_fill" ? 1 : 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testNavigatedDocumentPreflightProvidesFreshReadWithoutReplayingTheRejectedAction() async throws {
+        for tool in ["browser_click", "browser_fill"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let old = try await call(controller, "browser_read", ["view": "all"])
+            await backend.redirectOwnedTarget(to: URL(string: "http://localhost:8123/new-document")!)
+            var arguments: [String: Any] = ["snapshot_id": try snapshotID(old), "element_index": tool == "browser_click" ? 1 : 0]
+            if tool == "browser_fill" { arguments["text"] = "UA 4629" }
+            let before = await backend.counts()
+            let failure = try await stalePreflight(controller, tool: tool, arguments: arguments)
+            XCTAssertEqual(failure.original, .staleDocument)
+            XCTAssertEqual(failure.localizedDescription, BrowserTabBrokerError.staleDocument.localizedDescription)
+            let response = try jsonObject(failure.observationResponse)
+            XCTAssertEqual((response["error"] as? [String: Any])?["code"] as? String, "stale_document")
+            XCTAssertEqual(response["dispatched"] as? Bool, false)
+            let current = try XCTUnwrap(response["current_observation"] as? [String: Any])
+            XCTAssertEqual(current["status"] as? String, "available")
+            let text = try XCTUnwrap(current["text"] as? String)
+            XCTAssertTrue(text.contains("/new-document"))
+            XCTAssertNotEqual(try snapshotID(text), try snapshotID(old))
+            let recovered = await backend.counts()
+            XCTAssertEqual(recovered.observes, before.observes + 1)
+            XCTAssertEqual(recovered.presses, 0); XCTAssertEqual(recovered.fills, 0)
+            arguments["snapshot_id"] = try snapshotID(text)
             try await controller.preflightMutation(taskKey: "turn-a", tool: tool,
                 arguments: JSONSerialization.data(withJSONObject: arguments))
             _ = try await call(controller, tool, arguments)
@@ -1520,6 +1612,23 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let during = await backend.counts()
         XCTAssertEqual(during.creates,1); XCTAssertEqual(during.closes,0); XCTAssertEqual(during.navigations,0); XCTAssertEqual(during.presses,0); XCTAssertEqual(during.fills,0)
         XCTAssertFalse(read.isEmpty)
+        _ = await controller.shutdown()
+    }
+
+    func testProductTroubleshootingCanOpenOfficialHelpWhileExplicitChatDestinationRemainsBound() async throws {
+        let reported = ComputerTaskScope(userPrompt: "Help me enable Chrome access through ChatGPT’s supported settings. Focus on read-only Terminal diagnostics to identify why Local browser use is disabled in Work settings appears. Find the documented setting or supported command, and explain any action I must perform myself. Don’t alter internal permission databases or override safety restrictions. This is a read-only troubleshooting request: do not change settings or configuration files; report your findings and the supported user steps.")
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "https://help.openai.com/"], scope: reported)
+        let help = try await call(controller, "browser_read", scope: reported)
+        XCTAssertTrue(help.contains("https://help.openai.com/"))
+        let explicit = ComputerTaskScope(userPrompt: "Open ChatGPT")
+        do {
+            _ = try await call(controller, "browser_open", ["url": "https://help.openai.com/"], key: "turn-b", scope: explicit)
+            XCTFail("A specific chat destination cannot be silently replaced with a documentation site")
+        } catch { }
+        let after = await backend.counts()
+        XCTAssertEqual(after.creates, 1)
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
         _ = await controller.shutdown()
     }
 
