@@ -73,7 +73,12 @@ turn handles and cursors are not reusable, and task-owned pages may already have
 been cleaned up. Prior failed-action receipts are retained as historical outcome
 evidence, explicitly separated from the current turn's permission and tool state.
 They prevent unsupported success claims without creating a permanent read-only
-restriction or revoking a later user authorization.
+restriction or revoking a later user authorization. The host also repeats current
+browser lifecycle guidance in every turn's policy suffix, because cold-resumed
+threads can retain old developer instructions. A closed task tab can be reopened
+at its supplied or previously observed URL for the authorized follow-up; its old
+snapshot, handle and cursor cannot be reused. Website handoffs repeat this rule
+outside retained history as well.
 
 The instruction design takes inspiration from the public Codex autonomy/task
 template and terminal session/output schemas in the pinned source revision

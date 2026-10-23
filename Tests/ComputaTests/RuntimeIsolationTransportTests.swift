@@ -177,6 +177,8 @@ final class RuntimeIsolationTransportTests: XCTestCase {
                            "Every new/resumed turn and access mode must receive current host policy")
             XCTAssertTrue(turnInput.last?["text"]?.contains(ComputaAgentInstructions.backgroundActionAuthority) == true,
                           "Background delivery must not silently become read-only on resumed chats")
+            XCTAssertTrue(turnInput.last?["text"]?.contains(ComputaAgentInstructions.browserTurnLifecycle) == true,
+                          "Cold-resumed threads need current lifecycle even when developer instructions are retained")
         }
         let turn = try XCTUnwrap(turnRequests.first?["params"] as? [String: Any])
         // Each turn inherits the selected thread workspace without replacing

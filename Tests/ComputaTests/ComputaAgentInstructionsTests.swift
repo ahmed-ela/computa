@@ -362,8 +362,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let refusal = "Under the current background-only interaction policy, I am limited to read-only operations. Sending an email is not permitted."
         let current = "Send the requested message to recipient@example.test."
         let authority = ComputaAgentInstructions.backgroundActionAuthority
+        // Cold-resumed threads can retain the original developer message. The
+        // current host suffix and website handoff must not depend on replacing it.
+        let retained = native.replacingOccurrences(of: ComputaAgentInstructions.browserTurnLifecycle,
+                                                   with: "Bind anew each turn.")
         let input: [[String: Any]] = [
-            ["role": "developer", "content": native],
+            ["role": "developer", "content": retained],
             ["role": "user", "content": "Find the attachment. Read only; do not send anything."],
             ["role": "assistant", "content": refusal],
             ["role": "user", "content": [["type": "input_text", "text": current],
@@ -400,24 +404,28 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: api.body) as? [String: Any])
         let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
         XCTAssertTrue(messages.contains { $0["role"] as? String == "assistant" && $0["content"] as? String == refusal })
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "developer" && $0["content"] as? String == retained })
         let latest = try XCTUnwrap(messages.last { $0["role"] as? String == "user" })
         let latestText = try XCTUnwrap(latest["content"] as? String)
         XCTAssertTrue(latestText.hasPrefix(current))
         XCTAssertTrue(latestText.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
         XCTAssertTrue(latestText.contains(authority))
+        XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserTurnLifecycle))
+        XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserTurnLifecycle).count - 1, 1)
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(authority),
                        "No current browser capability must not acquire one from history")
-        XCTAssertLessThan(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.count, 1_000)
+        XCTAssertLessThan(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.count, 1_400)
     }
 
     func testFollowupBrowserGuidanceRequiresCurrentBindingsAfterOwnedTabCleanup() {
         for references in [true, false] {
             let instructions = ComputaAgentInstructions.developerInstructions(referenceTools: references,
                 embeddedBrowserTools: true).replacingOccurrences(of: "\n", with: " ")
-            XCTAssertTrue(instructions.contains("Each user turn needs browser_tabs/browser_bind or browser_open"))
-            XCTAssertTrue(instructions.contains("prior handles/snapshots/cursors are invalid"))
+            XCTAssertTrue(instructions.contains("Each new user turn must start browser work with browser_tabs then browser_bind, or browser_open"))
+            XCTAssertTrue(instructions.contains("Prior handles/snapshots/cursors are invalid"))
             XCTAssertTrue(instructions.contains("task-owned pages may be closed"))
-            XCTAssertTrue(instructions.contains("Reacquire missing tabs"))
+            XCTAssertTrue(instructions.contains("Reopen a needed task page at its supplied or previously observed URL"))
+            XCTAssertTrue(instructions.contains("Missing/closed tabs and empty inventory are not access denial"))
             XCTAssertTrue(instructions.contains("Never reuse consumed targets"))
             XCTAssertTrue(instructions.contains("Never repeat uncertain input"))
             XCTAssertTrue(instructions.contains("Preserve user tabs"))
@@ -447,7 +455,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_800)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100)
     }
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
@@ -485,7 +493,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(native.contains("Automatic cleanup is not proof"))
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(filenameRule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_800)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100)
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -617,7 +625,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_800,
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
@@ -677,7 +685,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_800,
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100,
                                 "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
     }
 

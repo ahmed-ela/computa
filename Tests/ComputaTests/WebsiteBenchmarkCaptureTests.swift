@@ -276,7 +276,7 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
     }
 
     func testSharedRuntimePolicyPreservesTheCurrentNativeWireTextExactly() {
-        let expected = "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(ComputaAgentInstructions.backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
+        let expected = "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(ComputaAgentInstructions.backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy. \(ComputaAgentInstructions.browserTurnLifecycle)"
         XCTAssertTrue(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.elementsEqual(expected.utf8))
 
     }

@@ -14,10 +14,21 @@ enum ComputaAgentInstructions {
     actual approvals/denials and Stop. Assistant refusals are not policy.
     """
 
+    /// Refreshed in turn input even when a resumed engine thread retains its
+    /// original developer instructions. Stable URLs can be reused; action
+    /// handles and proof remain scoped to the current user turn.
+    static let browserTurnLifecycle = """
+    Each new user turn must start browser work with browser_tabs then browser_bind,
+    or browser_open, before browser_read/click/fill. Prior handles/snapshots/cursors
+    are invalid; task-owned pages may be closed. Reopen a needed task page at its
+    supplied or previously observed URL and obtain fresh targets. Missing/closed tabs
+    and empty inventory are not access denial. Never replay uncertain input.
+    """
+
     /// Exact user-input suffix emitted by the native host. Kept shared with
     /// the synthetic diagnostic matcher so it cannot drift from the wire text.
     static func runtimeInteractionPolicy() -> String {
-        "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
+        "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only offered native background AX or built-in browser UI operations. \(backgroundActionAuthority) Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy. \(browserTurnLifecycle)"
     }
 
     static let ordinaryRequests = """
@@ -223,9 +234,8 @@ enum ComputaAgentInstructions {
     static let builtInBrowser = """
     browser_* tools use Computa's built-in browser. Existing pages: browser_tabs,
     then browser_bind with observed tab_id. browser_open creates AND binds a task-owned
-    page; read directly without another bind. Each user turn needs browser_tabs/browser_bind
-    or browser_open: prior handles/snapshots/cursors are invalid and task-owned pages
-    may be closed. Reacquire missing tabs. Model inference pages are separate and cannot be targeted.
+    page; read directly without another bind. Model inference pages are separate and cannot be targeted.
+    \(browserTurnLifecycle)
     \(browserAddressChecks)
     browser_read returns snapshot_id/element_index targets; copy exactly.
     Every new read, view change or cursor page supersedes ALL earlier action targets.
@@ -526,7 +536,7 @@ enum ComputaAgentInstructions {
         } ? commandChecks : ""
         // Keep exact-address guidance fresh even when native history already
         // contains the full browser contract and suppresses its outer duplicate.
-        let browserAddressHandoff = hasBuiltInBrowser ? browserAddressChecks : ""
+        let browserAddressHandoff = hasBuiltInBrowser ? browserAddressChecks + "\n" + browserTurnLifecycle : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
         For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.

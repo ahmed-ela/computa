@@ -126,6 +126,59 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testNewTurnReportsMissingBindingAndRecoversOnlyThroughAnExplicitFreshOpen() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let scope = ComputerTaskScope(userPrompt: "Use only http://127.0.0.1:63846 to send the requested test message.")
+        _ = try await call(controller, "browser_open", ["url": "http://127.0.0.1:63846"], scope: scope)
+        let old = try await call(controller, "browser_read", scope: scope)
+        let released = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(released.isSettled)
+        let before = await backend.counts()
+        for tool in ["browser_click", "browser_read"] {
+            do {
+                if tool == "browser_click" {
+                    try await controller.preflightMutation(taskKey: "turn-b", tool: tool,
+                        arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": try snapshotID(old), "element_index": 1]), scope: scope)
+                } else { _ = try await call(controller, tool, key: "turn-b", scope: scope) }
+                XCTFail("A new turn cannot inherit its previous binding")
+            } catch let failure as EmbeddedBrowserBindingRequiredFailure {
+                let state = try jsonObject(failure.localizedDescription)
+                XCTAssertLessThan(failure.localizedDescription.utf8.count, 2_048)
+                XCTAssertEqual((state["error"] as? [String: Any])?["code"] as? String, "browser_binding_required")
+                XCTAssertEqual(state["binding_state"] as? String, "unbound_current_turn")
+                XCTAssertEqual(state["inventory_evidence"] as? String, "not_observed")
+                XCTAssertEqual(state["permission_evidence"] as? String, "not_assessed")
+                XCTAssertEqual(state["dispatched"] as? Bool, false)
+                XCTAssertTrue((state["next"] as? String)?.contains("previously observed URL") == true)
+                XCTAssertTrue((state["next"] as? String)?.contains("subject to current user scope and approvals") == true)
+            }
+        }
+        let rejected = await backend.counts()
+        XCTAssertEqual(rejected, before, "Lifecycle guidance must not create, bind, observe or mutate anything")
+        let inventory = try jsonObject(await call(controller, "browser_tabs", key: "turn-b", scope: scope))
+        XCTAssertEqual(inventory["binding_state"] as? String, "unbound_current_turn")
+        XCTAssertEqual(inventory["count"] as? Int, 0)
+        XCTAssertTrue((inventory["next"] as? String)?.contains("including local URLs") == true)
+        _ = try await call(controller, "browser_open", ["url": "http://127.0.0.1:63846"], key: "turn-b", scope: scope)
+        let current = try await call(controller, "browser_read", key: "turn-b", scope: scope)
+        XCTAssertNotEqual(try field("tab_handle", in: current), try field("tab_handle", in: old))
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(old), "element_index": 1], key: "turn-b", scope: scope)
+            XCTFail("New binding must not revive old references")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let arguments: [String: Any] = ["snapshot_id": try snapshotID(current), "element_index": 0, "text": "UA 4629"]
+        try await controller.preflightMutation(taskKey: "turn-b", tool: "browser_fill",
+            arguments: JSONSerialization.data(withJSONObject: arguments), scope: scope)
+        _ = try await call(controller, "browser_fill", arguments, key: "turn-b", scope: scope)
+        let after = await backend.counts()
+        XCTAssertEqual(after.creates, 2); XCTAssertEqual(after.closes, 1)
+        XCTAssertEqual(after.fills, 1); XCTAssertEqual(after.presses, 0)
+        // A genuinely retired key remains retired and never invites revival.
+        do { _ = try await call(controller, "browser_read", key: "turn-a", scope: scope); XCTFail("Retired turns cannot recover authority") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        _ = await controller.shutdown()
+    }
+
     func testUnconfirmedClosePublishesNoLiteralGuidanceAndRetiresExistingAuthority() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -1498,15 +1551,16 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(inventory["authentication_evidence"] as? String, "not_observed")
         let next = try XCTUnwrap(inventory["next"] as? String)
         XCTAssertTrue(next.contains("does not establish logout, missing credentials or denied access"))
-        XCTAssertTrue(next.contains("For an authorized known service, use browser_open at its official entrypoint"))
-        XCTAssertTrue(next.contains("inspect the current session before asking for sign-in help"))
+        XCTAssertTrue(next.contains("Use browser_open with the task's supplied or previously observed URL"))
+        XCTAssertTrue(next.contains("empty inventory is not a reason to refuse"))
+        XCTAssertTrue(next.contains("then browser_read"))
         XCTAssertFalse(next.contains("://"), "The inventory must not manufacture a service URL")
         XCTAssertNil(inventory["authenticated"]); XCTAssertNil(inventory["snapshot_id"]); XCTAssertNil(inventory["tab_id"])
         XCTAssertLessThan(output.utf8.count, 1_024)
         let unrelatedHumanTabs = try await backend.humanTargets()
         XCTAssertEqual(unrelatedHumanTabs.count, 1, "No matching tabs does not assert the whole profile has no tabs")
         do { _ = try await call(controller, "browser_read", scope: scope); XCTFail("Inventory metadata grants no page binding") }
-        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure) }
         var counts = await backend.counts()
         XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.observes, 0)
         XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
@@ -1716,7 +1770,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 }
 
 private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
-    struct Counts: Sendable { var creates=0,closes=0,closeAttempts=0,observes=0,presses=0,fills=0,navigations=0 }
+    struct Counts: Equatable, Sendable { var creates=0,closes=0,closeAttempts=0,observes=0,presses=0,fills=0,navigations=0 }
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""

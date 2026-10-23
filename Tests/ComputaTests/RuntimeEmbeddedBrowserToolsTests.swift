@@ -499,6 +499,34 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testUnboundTurnGuidanceCanRecoverThroughApprovedOpenWithoutReplayingOldInput() async throws {
+        try await withHarness(approval: true) { harness in
+            try await harness.submit([
+                ["tool": "browser_click", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 1]],
+                ["tool": "browser_read", "arguments": ["view": "overview"]],
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+            ])
+            try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            for row in rows.prefix(2) {
+                XCTAssertEqual(row["success"] as? Bool, false)
+                let text = try XCTUnwrap(row["text"] as? String)
+                XCTAssertTrue(text.contains("browser_binding_required"))
+                XCTAssertTrue(text.contains("not a permission denial"))
+                XCTAssertTrue(text.contains("browser_open"))
+            }
+            XCTAssertTrue(rows.dropFirst(2).allSatisfy { $0["success"] as? Bool == true })
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertEqual(counts.mutations, 1); XCTAssertEqual(counts.activations, 0)
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Native action stopped" })
+            XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+        }
+    }
+
     func testTurnCompletionRetiresOldSnapshotAndPreservesBoundHumanPage() async throws {
         try await withHarness(approval: true) { harness in
             try await harness.submit([

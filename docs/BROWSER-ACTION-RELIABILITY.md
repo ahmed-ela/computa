@@ -21,6 +21,12 @@ old stop notice was appended after every subsequent turn, making it appear curre
 - Historical assistant refusals and outcome corrections do not establish current
   permissions. Actual denials, Stop, approval checks and ongoing user constraints
   remain binding. Each user turn reacquires browser handles and observations.
+  This lifecycle guidance is refreshed even in resumed chats retaining older
+  developer instructions; it is not limited to newly created conversations.
+- A missing current-turn binding is a typed lifecycle error, not a permission or
+  sign-in failure. Empty inventory guidance permits reopening a supplied or
+  previously observed task URL, including local test pages. No old binding is
+  silently reconnected and no automatic navigation or input is dispatched.
 - Known-service restrictions require destination language. A documentation topic
   does not create an exclusive service-host restriction. Explicit destination,
   URL, title and browser constraints remain enforced.

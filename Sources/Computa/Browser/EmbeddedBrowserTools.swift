@@ -194,6 +194,14 @@ struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable 
     var errorDescription: String? { original.localizedDescription }
 }
 
+/// A fresh turn has no inherited browser lease. This reports only host state;
+/// it does not inspect tabs, reconnect an old binding, or authorize any input.
+struct EmbeddedBrowserBindingRequiredFailure: Error, LocalizedError, Sendable {
+    var errorDescription: String? {
+        #"{"success":false,"error":{"code":"browser_binding_required","message":"No browser tab is bound in this user turn. Previous-turn bindings, snapshots and cursors do not carry over; task-created tabs may have been closed at turn end. This is a missing binding, not a permission denial or sign-in failure."},"browser":"computa_builtin","binding_state":"unbound_current_turn","inventory_evidence":"not_observed","permission_evidence":"not_assessed","dispatched":false,"no_replay":true,"next":"Do not retry browser_read, browser_click or browser_fill until you establish this turn's binding. Use browser_tabs then browser_bind for an observed matching user tab, or browser_open with the task's supplied or previously observed URL (including local URLs), or a named service's official entrypoint. Opening a fresh task tab is an offered operation, subject to current user scope and approvals. Empty human-tab inventory does not prohibit browser_open. Then browser_read for new action references. Do not ask the user to reopen a tab or supply a URL already present in the task."}"#
+    }
+}
+
 /// Each active turn receives its own taskKey from the runtime. The controller
 /// retains an exact tab lease and capability; it never operates on an active tab.
 actor EmbeddedBrowserToolController {
@@ -206,6 +214,7 @@ actor EmbeddedBrowserToolController {
         let id = UUID()
         let lifetime = BrowserTabLifetime()
         var binding: BrowserTabBinding?
+        var hasBoundTarget = false
         var snapshot: BrowserTabSnapshot?
         var ownedTarget: BrowserTarget?
         var leasedTarget: BrowserTarget?
@@ -260,7 +269,7 @@ actor EmbeddedBrowserToolController {
         }
         guard inFlight.insert(taskKey).inserted else { throw BrowserTabBrokerError.operationInProgress }
         defer { inFlight.remove(taskKey) }
-        guard let context = contexts[taskKey] else { throw BrowserTabBrokerError.handleMissing }
+        guard let context = contexts[taskKey] else { throw EmbeddedBrowserBindingRequiredFailure() }
         guard context.scope == scope else {
             throw BrowserTabBrokerError.invalidRead("The host browser scope changed within this turn; start a new turn.")
         }
@@ -340,6 +349,7 @@ actor EmbeddedBrowserToolController {
             contexts[taskKey] = context
             var result: [String: Any] = [
                 "browser": "computa_builtin", "tabs": rows, "count": context.inventory.count,
+                "binding_state": context.binding == nil ? "unbound_current_turn" : "bound_current_turn",
                 "returned": rows.count, "truncated": more,
                 "next_cursor": context.inventoryCursor as Any? ?? NSNull(),
                 "consistency": "retained_metadata", "content_evidence": "metadata_only",
@@ -347,7 +357,7 @@ actor EmbeddedBrowserToolController {
             if context.inventory.isEmpty && !more {
                 result["inventory_state"] = "no_matching_human_tabs"
                 result["authentication_evidence"] = "not_observed"
-                result["next"] = "No matching human tabs were listed; this does not establish logout, missing credentials or denied access. For an authorized known service, use browser_open at its official entrypoint, then inspect the current session before asking for sign-in help."
+                result["next"] = "No matching human tabs were listed; this does not establish logout, missing credentials or denied access. Previous task-created tabs may have been closed at turn end. Use browser_open with the task's supplied or previously observed URL (including local URLs), or an authorized known service's official entrypoint, then browser_read. Opening a new task tab remains an offered operation subject to current user scope and approvals; an empty inventory is not a reason to refuse the task or ask for an already-known URL."
             }
             return try json(result)
         case "browser_open", "browser_bind":
@@ -420,6 +430,7 @@ actor EmbeddedBrowserToolController {
                     throw BrowserTabBrokerError.operationInProgress
                 }
                 contexts[taskKey]?.binding = binding
+                contexts[taskKey]?.hasBoundTarget = true
                 // Creation and successful binding are a current observation of
                 // this exact instance. A redundant bind can reuse the existing
                 // no-op path, including its live target, lease and scope checks.
@@ -664,6 +675,7 @@ actor EmbeddedBrowserToolController {
     private func bound(_ taskKey: String, _ id: UUID) throws -> BrowserTabBinding {
         try check(taskKey, id)
         guard let binding = contexts[taskKey]?.binding else {
+            if contexts[taskKey]?.hasBoundTarget == false { throw EmbeddedBrowserBindingRequiredFailure() }
             throw BrowserTabBrokerError.handleMissing
         }
         try binding.lifetime.check()
