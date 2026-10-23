@@ -92,6 +92,153 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testCompactContentSignalsFilteredInputNodesWithoutExposingTheirLabelsOrAuthority() async throws {
+        for truncated in [false, true] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            let nodes = [
+                semanticNode(0, role: "heading", name: "Pick an account"),
+                semanticNode(1, role: "button", name: "PRIVATE_ACCOUNT_LABEL"),
+                semanticNode(2, role: "textbox", name: "PRIVATE_FIELD_LABEL"),
+                semanticNode(3, role: "button", name: "DISABLED_LABEL", disabled: true),
+                semanticNode(4, role: "textbox", name: "READ_ONLY_LABEL", readOnly: true),
+                BrowserDocumentNode(backendNodeID: 6, role: "button", name: "IGNORED_LABEL", value: nil,
+                    isDisabled: false, isReadOnly: false, isIgnored: true, nodeID: "n5"),
+                BrowserDocumentNode(backendNodeID: 7, role: "button", name: "NO_PRESS_LABEL", value: nil,
+                    isDisabled: false, isReadOnly: false, isIgnored: false, nodeID: "n6", isPressUnsupported: true),
+            ]
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                nodes: nodes, sourceTruncated: truncated, semanticReadiness: .ready)
+            let before = await fixture.transport.readinessRequests().count
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+            let after = await fixture.transport.readinessRequests().count
+            XCTAssertEqual(after, before + 1, "The signal uses the existing capture, without another read")
+            let text = read.snapshot.formattedText
+            XCTAssertTrue(text.contains("VIEW content omitted_input_nodes=2 basis=captured_view_and_query."))
+            XCTAssertTrue(text.contains("Read overview/all without cursor/query for controls before an access-block claim."))
+            XCTAssertTrue(text.contains("source_truncated=\(truncated ? 1 : 0)"))
+            XCTAssertTrue(text.contains("not website search or proof of relevance/absence"))
+            XCTAssertEqual(read.snapshot.elements.map(\.label), ["Pick an account"])
+            for hidden in ["PRIVATE_ACCOUNT_LABEL", "PRIVATE_FIELD_LABEL", "DISABLED_LABEL", "READ_ONLY_LABEL", "IGNORED_LABEL", "NO_PRESS_LABEL"] {
+                XCTAssertFalse(text.contains(hidden))
+            }
+            XCTAssertTrue(read.snapshot.actionWitnesses.isEmpty)
+            XCTAssertFalse(text.contains("click_ref=")); XCTAssertFalse(text.contains("fill_ref="))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text + BrowserCompleteObservation.footer(cursor: nil)), 0)
+            await fixture.assertNoInput()
+
+            let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+            XCTAssertFalse(all.snapshot.formattedText.contains("omitted_input_nodes="))
+            let account = try XCTUnwrap(all.snapshot.elements.first { $0.label == "PRIVATE_ACCOUNT_LABEL" })
+            XCTAssertNotNil(all.snapshot.actionWitnesses[account.index])
+            try await fixture.broker.perform(taskKey: "task-a", binding: all.binding,
+                snapshot: all.snapshot, elementIndex: account.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
+            XCTAssertEqual(pressed, [2], "Only the subsequently published exact control receives input")
+        }
+    }
+
+    func testCompactAllViewQueryReportsOnlyControlsExcludedByTheLocalSelection() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "heading", name: "Selected heading"),
+            semanticNode(1, role: "button", name: "Selected button"),
+            semanticNode(2, role: "textbox", name: "PRIVATE_OTHER_FIELD"),
+        ])
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Selected", view: .all), compact: true)
+        XCTAssertTrue(read.snapshot.formattedText.contains("VIEW all omitted_input_nodes=1 basis=captured_view_and_query."))
+        XCTAssertFalse(read.snapshot.formattedText.contains("PRIVATE_OTHER_FIELD"))
+        XCTAssertEqual(read.snapshot.totalMatches, 2)
+        XCTAssertEqual(read.snapshot.elements.map(\.label), ["Selected heading", "Selected button"])
+        XCTAssertEqual(read.snapshot.actionWitnesses.count, 1)
+        XCTAssertEqual(try selectionEvidence(read.snapshot)["site_search_evaluated"] as? Bool, false)
+        await fixture.assertNoInput()
+    }
+
+    func testCompactFilteredInputCountFollowsTheImmutableSelectionRatherThanLiveChangesOrPages() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let nodes = (0..<18).map { semanticNode($0, role: "StaticText", name: "Passage \($0) " + String(repeating: "observed text ", count: 18)) }
+            + [semanticNode(18, role: "button", name: "PRIVATE_FILTERED_CONTROL")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        let source = page.snapshot.readReceipt?.sourceID
+        // Continuation revalidates the document but retains its original capture.
+        try await fixture.transport.replaceNodes(targetID: page.binding.targetID,
+            nodes: Array(nodes.dropLast()))
+        var pages = 0
+        var seen = Set<Int64>()
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            XCTAssertEqual(page.snapshot.totalMatches, 18)
+            XCTAssertTrue(page.snapshot.formattedText.contains("omitted_input_nodes=1"))
+            XCTAssertFalse(page.snapshot.formattedText.contains("PRIVATE_FILTERED_CONTROL"))
+            XCTAssertTrue(page.snapshot.actionWitnesses.isEmpty)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            seen.formUnion(page.snapshot.elements.map(\.backendNodeID))
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(seen, Set((1...18).map(Int64.init)))
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        XCTAssertFalse(fresh.snapshot.formattedText.contains("omitted_input_nodes="))
+        await fixture.assertNoInput()
+    }
+
+    func testCompactPaginationDoesNotMislabelSelectedControlsAsFilteredOut() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: (0..<45).map { semanticNode($0, role: "button", name: "Selected control \($0)") })
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        var pages = 0
+        var seen = Set<Int64>()
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.totalMatches, 45)
+            XCTAssertFalse(page.snapshot.formattedText.contains("omitted_input_nodes="))
+            seen.formUnion(page.snapshot.elements.map(\.backendNodeID))
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(seen, Set((1...45).map(Int64.init)))
+        await fixture.assertNoInput()
+    }
+
+    func testCompactFilteredInputSignalRespectsSubtreeAndDoesNotInferAbsenceFromIncompleteCapture() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "generic", name: "Observed subtree", children: ["n1"]),
+            semanticNode(1, role: "heading", name: "Selected heading", parent: "n0"),
+            semanticNode(2, role: "button", name: "PRIVATE_OUTSIDE_CONTROL"),
+        ], sourceTruncated: true)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n0" })
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        XCTAssertEqual(read.snapshot.elements.map(\.label), ["Selected heading"])
+        XCTAssertTrue(read.snapshot.formattedText.contains("scope=subtree"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("source_truncated=1"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("not website search or proof of relevance/absence"))
+        XCTAssertFalse(read.snapshot.formattedText.contains("omitted_input_nodes="))
+        XCTAssertFalse(read.snapshot.formattedText.contains("PRIVATE_OUTSIDE_CONTROL"))
+        XCTAssertTrue(read.snapshot.actionWitnesses.isEmpty)
+        await fixture.assertNoInput()
+    }
+
     func testCompletedReadOmitsCursorFieldWithoutRewritingLiteralPageText() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let literal = "Observed documentation: next_cursor=none"

@@ -704,6 +704,7 @@ actor BrowserTabSessionBroker {
         let document: BrowserDocumentObservation
         let capturedAt: ContinuousClock.Instant
         let selected: [BrowserTabElement]
+        let omittedInputNodeCount: Int
         let request: SemanticReadRequest
         let scopeNodeID: String?
         let sourceID: UUID
@@ -1055,9 +1056,10 @@ actor BrowserTabSessionBroker {
         let capturedAt = retainingObservation ? priorRead!.capturedAt : readClock.now
         let effectiveRead = read.cursor == nil ? read : priorRead!.request
         if read.cursor != nil { scopeNodeID = priorRead?.scopeNodeID }
-        let selected = read.cursor == nil
-            ? makeElements(from: document, read: effectiveRead, scopeNodeID: scopeNodeID)
-            : priorRead!.selected
+        let selection = read.cursor == nil
+            ? makeElementSelection(from: document, read: effectiveRead, scopeNodeID: scopeNodeID)
+            : ElementSelection(elements: priorRead!.selected, omittedInputNodeCount: priorRead!.omittedInputNodeCount)
+        let selected = selection.elements
         let position = read.cursor == nil ? ReadPosition() : priorRead!.nextPosition
         let snapshotID = UUID()
         let currentBinding = binding(handle: suppliedBinding.handle, entry: entry)
@@ -1101,7 +1103,8 @@ actor BrowserTabSessionBroker {
                 rows: page.rows, sourceID: sourceID, read: effectiveRead, receipt: receipt,
                 scopeNodeID: scopeNodeID, totalMatches: selected.count, offset: position.element,
                 nextCursor: nextCursor, fieldsTruncated: page.fieldsTruncated,
-                retainedObservation: retainingObservation, compact: compact)
+                retainedObservation: retainingObservation, compact: compact,
+                omittedInputNodeCount: selection.omittedInputNodeCount)
             if !compact { break }
             let withFooter = formatted + (try BrowserCompleteObservation.footer(cursor: nextCursor))
             let encoded = try compactEncoding.encode(withFooter, snapshotID: snapshotID,
@@ -1162,7 +1165,7 @@ actor BrowserTabSessionBroker {
                 selectedIndex: selectedElement.offset, deadline: capturedAt + readLifetime)
         }
         if !corroborationCandidates.isEmpty {
-            let currentElements = makeElements(from: document, read: SemanticReadRequest(view: .all), scopeNodeID: nil)
+            let currentElements = makeElementSelection(from: document, read: SemanticReadRequest(view: .all), scopeNodeID: nil).elements
             for prior in corroborationCandidates {
                 guard let committed = prior.committedDocumentID, committed == document.committedDocumentID,
                       prior.bindingHandle == currentBinding.handle,
@@ -1178,7 +1181,8 @@ actor BrowserTabSessionBroker {
         }
         entry.activeSnapshot = snapshot
         entry.readState = ReadState(
-            document: document, capturedAt: capturedAt, selected: selected, request: effectiveRead, scopeNodeID: scopeNodeID,
+            document: document, capturedAt: capturedAt, selected: selected,
+            omittedInputNodeCount: selection.omittedInputNodeCount, request: effectiveRead, scopeNodeID: scopeNodeID,
             sourceID: sourceID, selectionID: selectionID,
             nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
         )
@@ -1573,11 +1577,16 @@ actor BrowserTabSessionBroker {
         )
     }
 
-    private func makeElements(
+    private struct ElementSelection {
+        let elements: [BrowserTabElement]
+        let omittedInputNodeCount: Int
+    }
+
+    private func makeElementSelection(
         from document: BrowserDocumentObservation,
         read: SemanticReadRequest,
         scopeNodeID: String?
-    ) -> [BrowserTabElement] {
+    ) -> ElementSelection {
         let sourceNodes = Dictionary(grouping: document.nodes.compactMap { node in
             node.nodeID.map { ($0, node) }
         }, by: { $0.0 }).filter { !$0.key.isEmpty && $0.value.count == 1 }.mapValues { $0[0].1 }
@@ -1613,9 +1622,13 @@ actor BrowserTabSessionBroker {
         let trimmedQuery = read.query?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        var capturedInputNodeCount = 0
         let elements: [BrowserTabElement] = document.nodes.compactMap { node in
             if let scopeIDs, !scopeIDs.contains(node.nodeID ?? "") { return nil }
             guard var element = browserElement(from: node, index: 0) else { return nil }
+            if element.isEnabled && (element.supportsPress || element.supportsSetText) {
+                capturedInputNodeCount += 1
+            }
             element.contentScope = contentScope(of: node, nodes: sourceNodes)
             element.contentKind = contentKind(of: node, nodes: sourceNodes)
             switch read.view {
@@ -1643,6 +1656,12 @@ actor BrowserTabSessionBroker {
             }
             return element
         }
+        // Count filtering of this immutable capture, not pagination or the live
+        // site's controls. Only counts leave this layer; omitted labels, rows
+        // and input references still require a separately published read.
+        let omittedInputNodeCount = capturedInputNodeCount - elements.filter {
+            $0.isEnabled && ($0.supportsPress || $0.supportsSetText)
+        }.count
         if read.view == .content {
             // A source-order result list can fill the first bounded page before
             // an already captured reading pane. Keep every field and its exact
@@ -1650,9 +1669,12 @@ actor BrowserTabSessionBroker {
             let documentText = elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }
             let otherText = elements.filter { $0.contentKind == .readable && !$0.contentScope.isDocumentContent }
             let controls = elements.filter { $0.contentKind != .readable }
-            return documentText + otherText + controls
+            return ElementSelection(elements: documentText + otherText + controls,
+                omittedInputNodeCount: omittedInputNodeCount)
         }
-        guard read.view == .overview else { return elements }
+        guard read.view == .overview else {
+            return ElementSelection(elements: elements, omittedInputNodeCount: omittedInputNodeCount)
+        }
         // Interleave observed controls, headings, document text, and navigation
         // within the same page budget. Post-input observations must show a
         // bounded sample of the new document, not only its heading and controls.
@@ -1670,7 +1692,7 @@ actor BrowserTabSessionBroker {
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
             for group in groups where offset < group.count { ordered.append(group[offset]) }
         }
-        return ordered
+        return ElementSelection(elements: ordered, omittedInputNodeCount: omittedInputNodeCount)
     }
 
     private func overviewCategory(_ element: BrowserTabElement) -> Int? {
@@ -2123,14 +2145,15 @@ actor BrowserTabSessionBroker {
         nextCursor: String?,
         fieldsTruncated: Bool,
         retainedObservation: Bool,
-        compact: Bool = false
+        compact: Bool = false,
+        omittedInputNodeCount: Int = 0
     ) throws -> String {
         if compact {
             return try formatCompactSnapshot(snapshotID: snapshotID, binding: binding,
                 document: document, elements: elements, rows: rows, sourceID: sourceID,
                 read: read, receipt: receipt, scopeNodeID: scopeNodeID, totalMatches: totalMatches,
                 offset: offset, nextCursor: nextCursor, fieldsTruncated: fieldsTruncated,
-                retainedObservation: retainedObservation)
+                retainedObservation: retainedObservation, omittedInputNodeCount: omittedInputNodeCount)
         }
         let documentURL = document.url.absoluteString
         let formattedURL = documentURL.utf8.count <= 2048
@@ -2206,7 +2229,7 @@ actor BrowserTabSessionBroker {
         document: BrowserDocumentObservation, elements: [BrowserTabElement], rows: [String], sourceID: UUID,
         read: SemanticReadRequest, receipt: SemanticReadReceipt, scopeNodeID: String?,
         totalMatches: Int, offset: Int, nextCursor: String?, fieldsTruncated: Bool,
-        retainedObservation: Bool) throws -> String {
+        retainedObservation: Bool, omittedInputNodeCount: Int) throws -> String {
         let url = document.url.absoluteString
         let title = fieldPrefix(document.title, startUTF8: 0, escapedByteLimit: 128)
         let metadataTruncated = title.end < document.title.utf8.count || url.utf8.count > 1_024
@@ -2221,7 +2244,9 @@ actor BrowserTabSessionBroker {
             try selectionEvidence(receipt: receipt, elements: elements),
             "SCOPE captured selection only, not website search or proof of relevance/absence. *_utf8 marks exact fragments; href_fragment is not a destination. Omitted row flags: enabled=true settable=false actions=[]. Only shown click_ref/fill_ref authorize input."
         ]
-        if read.view != .all {
+        if omittedInputNodeCount > 0 {
+            lines.append("VIEW \(readViewName(read.view)) omitted_input_nodes=\(omittedInputNodeCount) basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim.")
+        } else if read.view != .all {
             lines.append("VIEW \(readViewName(read.view)) omits other node kinds. Use content for message/document text; all includes toolbars.")
         }
         if document.semanticReadiness == .emptyAtDeadline {
