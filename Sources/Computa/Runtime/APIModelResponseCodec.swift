@@ -1390,12 +1390,16 @@ enum APIModelResponseCodec {
               let known = DiagnosticBuiltinTool(rawValue: tool.name), let canonical = diagnosticBuiltinSchema(known),
               let actualType = violation.actualType, violation.path.count <= 1,
               tool.schema["type"] as? String == "object", strictBool(tool.schema["additionalProperties"]) == false,
-              Set(tool.schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
+              Set(tool.schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description", "oneOf"]),
               let properties = tool.schema["properties"] as? [String: [String: Any]],
               let expectedProperties = canonical["properties"] as? [String: [String: Any]],
               Set(properties.keys) == Set(expectedProperties.keys),
               let required = tool.schema["required"] as? [String], let expectedRequired = canonical["required"] as? [String],
               Set(required) == Set(expectedRequired), Set(required).count == required.count else { return nil }
+        if tool.schema["oneOf"] != nil {
+            guard known == .browserRead, ComputaModelToolCatalog.browserCursorSchemaVariants(
+                name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil else { return nil }
+        }
         // The engine may omit these constraints when projecting dynamic tools.
         // Types, enums, fields and required membership must still match exactly;
         // any retained constraint must match the app-owned definition as well.
@@ -1450,7 +1454,13 @@ enum APIModelResponseCodec {
         guard matches(object, schema: tool.schema, root: tool.schema, depth: 0) else {
             if let onSchemaMismatch {
                 var nodes = 0
-                onSchemaMismatch(localizeSchemaFailure(object, schema: tool.schema, depth: 0, path: [], nodes: &nodes)
+                // The authoritative disjoint schema already rejected the call.
+                // Preserve finite field-type diagnostics for this known native
+                // contract; a combination-only mismatch remains generic.
+                let diagnosticSchema = !tool.custom && tool.name == "browser_read" && tool.schema["oneOf"] != nil
+                    ? ComputaModelToolCatalog.browserCursorSchemaVariants(name: tool.name,
+                        namespace: tool.namespace, schema: tool.schema)?.historical ?? tool.schema : tool.schema
+                onSchemaMismatch(localizeSchemaFailure(object, schema: diagnosticSchema, depth: 0, path: [], nodes: &nodes)
                     ?? .init(constraint: .schemaMismatch, path: []))
             }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments

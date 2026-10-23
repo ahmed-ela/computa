@@ -173,6 +173,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         var current = native
         current["parameters"] = current.removeValue(forKey: "inputSchema")
         var savedSchema = try XCTUnwrap(current["parameters"] as? [String: Any])
+        savedSchema.removeValue(forKey: "oneOf")
         var properties = try XCTUnwrap(savedSchema["properties"] as? [String: [String: Any]])
         properties["cursor"]?["type"] = "string"
         for field in properties.keys {

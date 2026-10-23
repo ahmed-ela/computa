@@ -2093,7 +2093,9 @@ actor BrowserTabSessionBroker {
             try selectionEvidence(receipt: receipt, elements: elements),
             "SCOPE captured selection only, not website search or proof of relevance/absence. *_utf8 marks exact fragments; href_fragment is not a destination. Omitted row flags: enabled=true settable=false actions=[]. Only shown click_ref/fill_ref authorize input."
         ]
-        if read.view != .all { lines.append("VIEW \(readViewName(read.view)) omits other kinds of captured nodes; use all for structural context.") }
+        if read.view != .all {
+            lines.append("VIEW \(readViewName(read.view)) omits other node kinds. Use content for message/document text; all includes toolbars.")
+        }
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
         }

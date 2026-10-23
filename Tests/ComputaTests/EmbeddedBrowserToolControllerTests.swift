@@ -1392,7 +1392,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let links = try await call(controller, "browser_read", ["view": "links"])
             let lines = links.split(separator: "\n")
             XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
-            XCTAssertTrue(links.contains("VIEW links omits other kinds of captured nodes; use all for structural context"))
+            XCTAssertTrue(links.contains("VIEW links omits other node kinds. Use content for message/document text; all includes toolbars."))
             XCTAssertTrue(links.contains("not website search or proof of relevance/absence"))
             XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
             if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }

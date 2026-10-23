@@ -10,16 +10,20 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
-    /// Only app-owned optional read and inventory cursors accept null as a fresh observation.
-    /// Match complete native schemas; required, narrowed or foreign contracts
-    /// keep their own semantics. Historical argument bytes are never rewritten.
+    /// App-owned reads distinguish fresh observations from cursor-only continuation.
+    /// Recognize complete native versions only; preserve a frozen flat history
+    /// contract, including completed old calls with repeated filters, byte-for-byte.
     static func browserCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
         -> (historical: [String: Any], current: [String: Any])? {
+        var canonical: [String: [String: Any]] = ["cursor": ["type": ["string", "null"], "minLength": 1]]
+        if name == "browser_read" {
+            canonical["view"] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
+            canonical["query"] = ["type": "string", "minLength": 1]
+        }
         guard ["browser_read", "browser_tabs"].contains(name), namespace == nil || namespace == "functions",
               let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
-              let canonical = current["properties"] as? [String: [String: Any]],
               schema["type"] as? String == "object",
-              Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
+              Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description", "oneOf"]),
               let properties = schema["properties"] as? [String: [String: Any]], Set(properties.keys) == Set(canonical.keys),
               let required = schema["required"] as? [String], required.isEmpty else { return nil }
         if let additional = schema["additionalProperties"] {
@@ -39,11 +43,37 @@ enum ComputaModelToolCatalog {
                 }
             }
         }
+        if let variants = schema["oneOf"] {
+            guard name == "browser_read", let actual = variants as? [[String: Any]],
+                  let cursorTypes = properties["cursor"]?["type"] as? [String],
+                  cursorTypes.count == 2, Set(cursorTypes) == ["string", "null"],
+                  let expected = current["oneOf"] as? [[String: Any]], actual.count == expected.count else { return nil }
+            // The pinned engine may omit scalar constraints and descriptions,
+            // but must retain each branch's fields, types, required and closure.
+            func matchesBranch(_ actual: [String: Any], _ expected: [String: Any]) -> Bool {
+                guard Set(actual.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)),
+                      Set(expected.keys).subtracting(omittable.union(["description"])).isSubset(of: Set(actual.keys)) else { return false }
+                for (key, value) in actual where key != "description" {
+                    if key == "properties" {
+                        guard let fields = value as? [String: [String: Any]],
+                              let wanted = expected[key] as? [String: [String: Any]], Set(fields.keys) == Set(wanted.keys),
+                              fields.allSatisfy({ matchesBranch($0.value, wanted[$0.key]!) }) else { return false }
+                    } else {
+                        guard let wanted = expected[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return false }
+                    }
+                }
+                return true
+            }
+            guard zip(actual, expected).allSatisfy({ matchesBranch($0.0, $0.1) }) else { return nil }
+        }
+        // Only exact recognized versions reach this point. Both use the frozen
+        // flat fields above for history; new calls use the disjoint current form.
         var historical = schema, historicalProperties = properties
         historicalProperties["cursor"]?["type"] = ["string", "null"]
         historical["properties"] = historicalProperties
-        // The nullable form is a superset, not a disjoint oneOf alternative.
-        // All saved constraints other than the cursor type remain untouched.
+        historical.removeValue(forKey: "oneOf")
+        // Use one flat historical superset, not overlapping oneOf alternatives.
+        // Saved scalar constraints remain untouched.
         return (historical, current)
     }
 

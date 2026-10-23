@@ -39,15 +39,12 @@ enum EmbeddedBrowserTools {
     static func definitions() -> [[String: Any]] {
         func specification(
             _ name: String, _ description: String, _ properties: [String: Any] = [:],
-            _ required: [String] = []
+            _ required: [String] = [], oneOf: [[String: Any]]? = nil
         ) -> [String: Any] {
-            [
-                "type": "function", "name": name, "description": description,
-                "inputSchema": [
-                    "type": "object", "properties": properties, "required": required,
-                    "additionalProperties": false,
-                ],
-            ]
+            var schema: [String: Any] = ["type": "object", "properties": properties,
+                "required": required, "additionalProperties": false]
+            if let oneOf { schema["oneOf"] = oneOf }
+            return ["type": "function", "name": name, "description": description, "inputSchema": schema]
         }
         let waitText: [String: Any] = ["type": "string", "minLength": 1,
             "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
@@ -58,6 +55,13 @@ enum EmbeddedBrowserTools {
             "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with only the exact nonempty next_cursor from the latest page in the current turn, without view/query. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
+        let readView: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
+        let readForms: [[String: Any]] = [
+            ["type": "object", "properties": ["view": readView, "query": query, "cursor": ["type": "null"]],
+             "required": [String](), "additionalProperties": false],
+            ["type": "object", "properties": ["cursor": ["type": "string", "minLength": 1]],
+             "required": ["cursor"], "additionalProperties": false],
+        ]
         let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let clickRef: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 128,
             "description": "Copy the exact click_ref on the intended current published row. Never construct it or use a fill_ref/native reference. The host resolves and validates the same observed target; the token never searches for a target."]
@@ -82,11 +86,8 @@ enum EmbeddedBrowserTools {
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. READ_SELECTION_EVIDENCE reports local capture selection and exposed query-match kinds; its counts and zero matches never establish website search results or absence. Use overview for controls/headings and a bounded document-text sample, content for readable text and non-navigation listbox options, all for structure. Continue with browser_read(cursor=next_cursor) alone, omitting view and query; to change either filter start a fresh browser_read without cursor. Never use computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. For a popup-only link without AXPress, use browser_navigate with its complete exact observed href in the same bound tab; never reconstruct href_fragment or href_omitted destinations. Use view=links or all with observed text to find the actual control. Only published click_ref/fill_ref values authorize browser input; act on the intended observed row without repeating unchanged reads. Cursor pages retain earlier exposed refs of the same capture within the 120-ref FIFO bound. Fresh reads expire omitted/changed refs; input consumes all refs.",
-                [
-                    "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
-                    "query": query, "cursor": readCursor,
-                ]),
+                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances; send cursor alone, without view/query. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only; containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use links/all with observed text to find controls. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads expire omitted/changed refs; input consumes all refs.",
+                ["view": readView, "query": query, "cursor": readCursor], [], oneOf: readForms),
             specification(
                 "browser_click",
                 "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",

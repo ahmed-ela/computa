@@ -86,6 +86,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(receipt.selectedElementCount, 18)
         XCTAssertTrue(receipt.exposures.allSatisfy { $0.kind == .readable && $0.provenance == .main })
         XCTAssertEqual(try BrowserCompleteObservation.excessBytes(full), 0)
+        XCTAssertTrue(full.contains("Use content for message/document text; all includes toolbars."))
         XCTAssertFalse(full.contains("click_ref=")); XCTAssertFalse(full.contains("fill_ref="))
         print("COMPACT_READ_CAPACITY rows=\(read.snapshot.elements.count) bytes=\(full.utf8.count) field_bytes=\(usefulBytes) field_ratio=\(Double(usefulBytes) / Double(full.utf8.count)) footer_bytes=\(try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor).utf8.count)")
         await fixture.assertNoInput()

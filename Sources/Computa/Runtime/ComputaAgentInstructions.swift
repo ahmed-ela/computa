@@ -65,13 +65,13 @@ enum ComputaAgentInstructions {
     """
 
     static let browserSearchEvidence = """
-    Search with short distinctive terms, not the whole request. Filling a query
-    does not prove submission: inspect actual results/message content. Broaden
-    unrelated results before claiming absence. Continue partial content with its
-    next_cursor instead of restarting the same view. browser_read(query) filters
-    captured UI, including input echoes; its counts are not site results. Report
-    observed positives with their scope; a negative needs relevant site-result
-    evidence. Partial reads or narrow-query misses leave absence unverified.
+    Search with short distinctive terms, not the whole request. Filling is not
+    submission: inspect site results/message content. Use view=content for message text;
+    view=all includes toolbars. Fresh reads restart page one; next_cursor alone advances,
+    without view/query. browser_read(query) filters captured UI, including input echoes;
+    counts are not site results. Broaden unrelated results. Report observed positives
+    with their scope; a negative needs relevant site-result evidence. Partial reads or
+    narrow-query misses leave absence unverified.
     """
 
     /// Exact policy emitted in the API developer checkpoint and existing

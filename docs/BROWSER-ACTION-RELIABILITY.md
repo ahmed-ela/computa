@@ -484,9 +484,9 @@ refreshed the shared sign-in session; later tests must disclose that condition.
 It neither establishes autonomous sign-in success nor recovers the exact cause
 of the earlier unavailable observation.
 
-The error classification itself is incorrect: every generic `invalidRead` was
-reported as `read_not_authorized`, including output-packing failures. The next
-follow-up introduces typed scope-denial and output-limit causes, with fixed
+The error classification itself was incorrect: every generic `invalidRead` was
+reported as `read_not_authorized`, including output-packing failures. Build 230
+introduces typed scope-denial and output-limit causes, with fixed
 `scope_denied`, `output_limit` and `invalid_read` observation reasons. This does
 not change permission checks, dispatch, replay policy or output/recovery budgets.
 
@@ -495,5 +495,54 @@ skips, including three enabled bundled API-engine integration cases. Native
 preflight classification retains the original treatment for all three causes,
 and regressions verify the existing three-failure stop without automatic reads
 or additional approvals. Version/product-identity tests passed 20 checks. The
-source-pinned mactopus-10 runtime is unchanged. Live installation is separate
-from these selected regression results.
+source-pinned mactopus-10 runtime is unchanged.
+
+Controlled 0.7.0 (230), source `305203d`, was Developer ID signed, installed and
+verified. Under the manually refreshed sign-in condition, the unchanged Outlook
+task reached the mailbox and submitted the sender search. It still failed after
+18.993 seconds and 25 calls (17 reads), with four native failures and one completed
+compaction. Three genuine cursors were combined with changed filters. After
+opening a message, five fresh all-view reads returned the same first 12 toolbar
+rows of the 284 captured nodes, despite an available continuation. Another result
+mentioned evidence, but the selected message's exposed label did not. Neither the
+requested evidence-packet message nor its filename was verified. The generic
+"Has attachments" control is not a filename. The owned tab closed, existing user
+tabs were preserved, and the composer was empty at the terminal error.
+
+The final retained candidate was 16,309 provider-input bytes against the unchanged
+12,288-byte limit; canonical history was 23,880 bytes and individual output limits
+fit. Repeated reads contributed avoidable receipts. This is an aggregate stop,
+not a permission denial, individual observation overflow or the 32-call bound.
+
+The separate build-229 documentation task also remains failed: 25 calls, including
+14 shell calls, produced a minimum candidate of 15,092 provider-input bytes.
+Historical debug identities were already omitted. Exact source-derived Chat
+Completions projection is smaller at 13,716 bytes but still exceeds 12,288 bytes;
+wire-accounting changes alone cannot resolve it. These measurements do not justify
+raising limits or discarding completed actions.
+
+## Build 231 disjoint read forms
+
+The native contract keeps the `browser_read` tool name and distinguishes two
+forms: a fresh read with optional view/query and absent or null cursor, or a
+continuation with only a nonempty cursor. The model-facing schema rejects mixed
+forms before native dispatch. Chat Completions keeps its existing single correction
+allowance; Responses rejects the invalid reply atomically without an automatic retry.
+Recognized saved catalogs receive the current form; completed historical calls
+remain byte-for-byte under their frozen flat schema. Legacy native matching-filter
+continuations, ownership checks and all budgets remain unchanged.
+
+Refreshed guidance distinguishes content reads for messages/documents from
+all-view structural reads that include toolbars. It states that fresh reads restart
+page one and cursor-only calls advance. Guidance delivery and schema enforcement
+are separate from a model following them; live qualification remains required.
+
+The final-source selected suite passed 493 unique Swift tests without failures or
+skips, including the three enabled bundled-engine integration cases. Correction
+tests cover both wires, saved flat and engine-projected schemas, exact historical
+argument bytes, and foreign/narrowed contracts. Version/product-identity checks
+passed 20 tests. The initial failed test run remains recorded: the fixture Bun
+path was omitted, two text checks needed alignment, and the new correction test
+used noncanonical UUIDs and incorrectly assumed identical retry policy on both
+wires. These were corrected without adding production retries. Runtime
+`mactopus-10` remains unchanged.
