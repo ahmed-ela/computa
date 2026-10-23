@@ -19,7 +19,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-6")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-7")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -216,7 +216,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-6")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-7")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -325,7 +325,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-6")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-7")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }

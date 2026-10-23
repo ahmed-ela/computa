@@ -135,6 +135,15 @@ classification before persistence, including failed compaction attempts, so they
 cannot later be restored as ordinary task replies. Legacy unmarked messages
 cannot retrospectively prove successful completion merely from their text/role.
 
+External-provider projection also preserves the authority distinction. A
+user-role message whose complete, cardinality-matched content provenance is
+`compaction.summary` is sent as assistant history before internal metadata is
+removed. Genuine user messages, mixed content and missing/malformed provenance
+keep their original roles and bytes. Classification never relies on a summary
+prefix or a text hash. Canonical history, current user instructions, approvals,
+tool receipts and retention limits remain unchanged. This prevents generated
+notes from acquiring user-message authority merely through serialization.
+
 The release tag's Cargo lock file contains `0.0.0` for local workspace packages
 while its manifest declares the release version. The mechanical lock correction
 changes those local version fields only; third-party dependency versions,

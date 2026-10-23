@@ -74,6 +74,15 @@ old stop notice was appended after every subsequent turn, making it appear curre
   cleared on retirement. They describe actual tool execution, never website
   result semantics, output exposure or permission grants. Actual observations
   remain necessary for content claims. The engine's history is not rewritten.
+- A build-223 documentation run exposed an authority error in the external
+  provider projection: generated summaries were tagged `compaction.summary` in
+  canonical history but sent as ordinary user messages after that tag was
+  removed. The run's six summaries propagated invented restrictions, and the
+  model repeatedly restarted browser inspection within the same turn.
+  Projection now sends fully proven summary
+  messages as assistant history, preserving genuine user messages and leaving
+  mixed or unclassified content untouched. No text-prefix heuristic, permission
+  change or larger history budget is used.
 - A subsequent live lookup reached relevant ODE results, then compaction changed
   the task into a request to write a historical summary. The host now retains the
   exact original request and accepted in-turn user messages outside compacted
@@ -112,6 +121,12 @@ old stop notice was appended after every subsequent turn, making it appear curre
   It cannot establish that submission was blocked or that no page handler ran:
   invalid controls can coexist with click side effects or validation bypass.
   Dispatch, no-replay, approval and receipt verification semantics are unchanged.
+- Submission guidance requires completing all requested and exposed required
+  fields before submission and checking a new result tied to the action. A build-223
+  local form run pressed the correct Send control before filling a visibly
+  required body, then mistook the pre-existing Sent navigation link for a new
+  notification. The independent fixture recorded no delivery. This was a model
+  planning/evidence failure, not an incorrect reference resolution.
 - Post-input overview reads share the ordinary fresh-read navigation recovery.
   When navigation invalidates the first read, one additional fresh read may run
   on the same lease, with the same identity, scope and cancellation checks.

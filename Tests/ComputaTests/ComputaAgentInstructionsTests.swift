@@ -717,6 +717,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Never batch fill and click"))
             XCTAssertTrue(text.contains("Preserve complete requested identifiers"))
             XCTAssertTrue(text.contains("Compare observed values before submit"))
+            XCTAssertTrue(text.contains("Before submitting, complete every requested field and exposed required field"))
+            XCTAssertTrue(text.contains("Verify a new result tied to the action; a pre-existing link or heading is not confirmation"))
             XCTAssertTrue(text.contains("transform only as requested"))
             XCTAssertTrue(text.contains("browser_close and verify released=true and existing_user_tab_preserved=true"))
             XCTAssertTrue(text.contains("Automatic cleanup is not proof that your requested close occurred"))

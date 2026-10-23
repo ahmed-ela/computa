@@ -305,7 +305,9 @@ enum ComputaAgentInstructions {
     that your requested close occurred. Report close failures.
     Page continuation: browser_read(cursor=next_cursor); inventory: browser_tabs(cursor=next_cursor).
     Send cursor alone, never to computer_v2_continue.
+    Before submitting, complete every requested field and exposed required field.
     Preserve complete requested identifiers. Compare observed values before submit; transform only as requested.
+    Verify a new result tied to the action; a pre-existing link or heading is not confirmation.
     """
 
     static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {

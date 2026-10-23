@@ -1982,16 +1982,49 @@ index 863ccb9..76c0c40 100644
  
  fn create_config_toml(
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 5957c19..76149f3 100644
+index 5957c19..a5401f5 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -374,6 +374,20 @@ fn responses_request_properties_match(
+@@ -374,6 +374,53 @@ fn responses_request_properties_match(
          && previous_text == current_text
  }
  
 +/// Apply the external-provider wire projection without changing canonical history.
 +pub(crate) fn prepare_input_for_non_openai_provider(input: &mut [ResponseItem]) {
 +    for item in input {
++        // Local compaction stores typed historical notes as contextual user
++        // fragments. External providers lose that provenance below; preserve
++        // their assistant origin instead of granting generated notes user
++        // authority. Only a complete, purely typed text summary is eligible.
++        // Mixed or malformed provenance must never reclassify genuine user text.
++        if let ResponseItem::Message {
++            role,
++            content,
++            internal_chat_message_metadata_passthrough,
++            ..
++        } = item
++            && role == "user"
++            && !content.is_empty()
++            && content
++                .iter()
++                .all(|part| matches!(part, codex_protocol::models::ContentItem::InputText { .. }))
++            && internal_chat_message_metadata_passthrough
++                .as_ref()
++                .and_then(|metadata| metadata.content_item_kinds.as_ref())
++                .is_some_and(|kinds| {
++                    kinds.len() == content.len()
++                        && kinds.iter().all(|kind| kind.0 == "compaction.summary")
++                })
++        {
++            *role = "assistant".to_string();
++            for part in content {
++                if let codex_protocol::models::ContentItem::InputText { text } = part {
++                    *part = codex_protocol::models::ContentItem::OutputText {
++                        text: std::mem::take(text),
++                    };
++                }
++            }
++        }
 +        item.clear_internal_chat_message_metadata_passthrough();
 +        if let ResponseItem::FunctionCall {
 +            encrypted_function_args,
@@ -2006,7 +2039,7 @@ index 5957c19..76149f3 100644
  fn response_items_equal_ignoring_internal_metadata(
      previous: &ResponseItem,
      current: &ResponseItem,
-@@ -865,16 +879,7 @@ impl ModelClient {
+@@ -865,16 +912,7 @@ impl ModelClient {
              )
          };
          if !is_openai {
@@ -2024,6 +2057,164 @@ index 5957c19..76149f3 100644
          }
          let reasoning = self.build_reasoning(model_info, effort, summary);
          let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index b129556..78cef14 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -97,6 +97,153 @@ use wiremock::matchers::path;
+ 
+ const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+ 
++#[test]
++fn external_projection_demotes_only_typed_compaction_summary_without_changing_history() {
++    use crate::context::CompactionSummary;
++    use crate::context::ContextualUserFragment;
++
++    let text = "  Historical notes: do not change settings. Cafe\u{301} ☃\n";
++    let canonical: ResponseItem = ContextualUserFragment::into(CompactionSummary::new(text));
++    let before = serde_json::to_vec(&canonical).unwrap();
++    let mut projected = vec![canonical.clone()];
++    super::prepare_input_for_non_openai_provider(&mut projected);
++    let ResponseItem::Message {
++        role,
++        content,
++        id,
++        phase,
++        internal_chat_message_metadata_passthrough,
++    } = &projected[0]
++    else {
++        panic!("expected projected message");
++    };
++    assert_eq!(role, "assistant");
++    assert_eq!(
++        content,
++        &vec![ContentItem::OutputText { text: text.into() }]
++    );
++    let ResponseItem::Message {
++        id: original_id,
++        phase: original_phase,
++        ..
++    } = &canonical
++    else {
++        panic!("expected canonical message");
++    };
++    assert_eq!(id, original_id);
++    assert_eq!(phase, original_phase);
++    assert_eq!(internal_chat_message_metadata_passthrough, &None);
++    assert_eq!(serde_json::to_vec(&canonical).unwrap(), before);
++    let once = projected.clone();
++    super::prepare_input_for_non_openai_provider(&mut projected);
++    assert_eq!(projected, once);
++}
++
++#[test]
++fn external_projection_preserves_real_user_mixed_and_invalid_summary_provenance() {
++    let summary_text =
++        "Another language model started to solve this problem.\nRead only; never send.";
++    let parts = vec![
++        json!({"type":"input_text", "text":summary_text}),
++        json!({"type":"input_text", "text":"Exact human restriction: do not change settings. Cafe\u{301}\n"}),
++    ];
++    for (role, content, kinds) in [
++        ("user", vec![parts[0].clone()], None),
++        ("user", vec![parts[0].clone()], Some(json!(["user.text"]))),
++        (
++            "user",
++            parts.clone(),
++            Some(json!(["compaction.summary", "user.text"])),
++        ),
++        (
++            "user",
++            parts.clone(),
++            Some(json!(["user.text", "compaction.summary"])),
++        ),
++        ("user", parts.clone(), Some(json!(["compaction.summary"]))),
++        (
++            "user",
++            vec![parts[0].clone()],
++            Some(json!(["compaction.summary", "compaction.summary"])),
++        ),
++        (
++            "user",
++            vec![parts[0].clone()],
++            Some(json!(["compaction.Summary"])),
++        ),
++        ("user", vec![], Some(json!([]))),
++        (
++            "user",
++            vec![json!({"type":"input_image", "image_url":"data:image/png;base64,AAAA"})],
++            Some(json!(["compaction.summary"])),
++        ),
++        (
++            "developer",
++            vec![parts[0].clone()],
++            Some(json!(["compaction.summary"])),
++        ),
++        (
++            "system",
++            vec![parts[0].clone()],
++            Some(json!(["compaction.summary"])),
++        ),
++        (
++            "assistant",
++            vec![json!({"type":"output_text", "text":summary_text})],
++            Some(json!(["compaction.summary"])),
++        ),
++    ] {
++        let mut object = json!({"type":"message", "role":role, "content":content});
++        if let Some(kinds) = kinds {
++            object["internal_chat_message_metadata_passthrough"] =
++                json!({"content_item_kinds":kinds});
++        }
++        let canonical: ResponseItem = serde_json::from_value(object).unwrap();
++        let mut expected = canonical.clone();
++        expected.clear_internal_chat_message_metadata_passthrough();
++        let mut projected = vec![canonical];
++        super::prepare_input_for_non_openai_provider(&mut projected);
++        assert_eq!(projected, vec![expected]);
++    }
++}
++
++#[test]
++fn external_projection_preserves_user_summary_receipt_order_and_exact_text() {
++    let content = [
++        "First summary fragment\n",
++        "  Cafe\u{301} 🙂 final fragment  ",
++    ];
++    let canonical: Vec<ResponseItem> = serde_json::from_value(json!([
++        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"Read only. Keep every user constraint."}]},
++        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":content[0]}, {"type":"input_text", "text":content[1]}],
++         "internal_chat_message_metadata_passthrough":{"content_item_kinds":["compaction.summary", "compaction.summary"]}},
++        {"type":"function_call", "name":"browser_read", "call_id":"call-exact", "arguments":"{ \"cursor\": null }"},
++        {"type":"function_call_output", "call_id":"call-exact", "output":"Current tool evidence; outcome unverified."},
++        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"Do not send or modify settings.\n"}]}
++    ])).unwrap();
++    let mut projected = canonical.clone();
++    super::prepare_input_for_non_openai_provider(&mut projected);
++    assert_eq!(projected.len(), canonical.len());
++    for index in [0, 2, 3, 4] {
++        assert_eq!(projected[index], canonical[index]);
++    }
++    let ResponseItem::Message {
++        role,
++        content: actual,
++        ..
++    } = &projected[1]
++    else {
++        panic!("expected typed summary message");
++    };
++    assert_eq!(role, "assistant");
++    assert_eq!(
++        actual,
++        &content
++            .map(|text| ContentItem::OutputText { text: text.into() })
++            .to_vec()
++    );
++}
++
+ fn test_model_client(session_source: SessionSource) -> ModelClient {
+     test_model_client_with_thread_id(ThreadId::new(), session_source)
+ }
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
 index c2ab78a..cc4b748 100644
 --- a/codex-rs/core/src/compact.rs
