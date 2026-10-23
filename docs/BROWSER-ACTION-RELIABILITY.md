@@ -808,3 +808,77 @@ and the engine confirmed termination of its four owned command sessions. A
 receipt-bound error was visible in the UI, but the canonical interrupted trace
 does not establish whether that error preceded the stop action. These failed
 trials remain part of qualification.
+
+
+Build 238 installed the filtered-control change on the unchanged `mactopus-12`
+runtime, with all 11 native build/signing/resource checks passing. The Outlook
+lookup used the new hint, read broader controls, selected the matching account,
+and reached signed-in Outlook without a password/MFA block. It still failed
+after 20 calls and 56.799 seconds: repeated invalid content continuations
+reached the existing recovery guard, without establishing the requested message
+or attachment filename. The ODE follow-up submitted searches but repeated
+queries instead of following relevant results; 37 calls, ten native failures and
+two successful compactions ended at the unchanged 32-call retention guard.
+Cleanup closed one and two owned tabs respectively and preserved user tabs.
+
+The request-order investigation found that every ordinary provider continuation
+currently appends a new user-role copy of the active request after tool results.
+The failed build 237 send had received a current Send reference before reopening
+a blank compose page. The copied request is a plausible restart signal, but the
+trace alone does not establish causation: the build 238 same-chat send control
+completed. A pending candidate will omit ordinary reminders only when native
+provenance and exact byte/order checks establish that all admitted user inputs
+remain intact at their original positions. Missing, truncated, dropped or
+unsupported proof retains the existing fallback; maintenance reminders and
+authorization remain unchanged.
+
+Build 238's local read passed with the exact attachment filename. Both synthetic
+sends delivered exactly once with the requested fields. However, the fresh-chat
+send subsequently read Sent and attributed the older message's subject and
+receipt to the new send. The mixed overview interleaved fields from separate
+articles without preserving their parent associations. The correct current
+receipt had already been observed; delivery therefore passed while the final
+attribution failed. No repeated send or external email occurred. All owned tabs
+were cleaned up, and the local fixture was stopped with its event log preserved.
+
+### Build 239 candidate and qualification boundaries
+
+The `mactopus-13` runtime emits an optional body-only retention proof for ordinary
+inference. Native current-turn provenance selects single-text human messages in
+the finalized outgoing history. The proof binds their exact bytes, order and raw
+input positions to the thread, turn and request kind. The API bridge independently
+matches the proof to all admitted human inputs and the translated user-message
+sequence before omitting redundant reminders. It never finds inputs by searching
+for matching prose or elevates user text to developer instructions. Missing or
+invalid proof preserves the existing reminder behavior. WebSocket requests omit
+the proof because incremental input positions can change. Existing request and
+metadata limits remain unchanged, and the proof is removed before remote dispatch.
+A bounded diagnostic reports proof acceptance and reminder counts without text,
+identities, hashes or headers.
+
+Compact browser rows now preserve observed semantic record ancestry using a
+capture-qualified `record_path`. Each row remains attributable when a historical
+excerpt omits its original header, including when two captures share the same
+local ordinal. Missing, ambiguous, ignored, cyclic or overly deep ancestry yields
+no association. Paths are passive read evidence, survive pagination, consume the
+existing output budget, and do not participate in action-reference corroboration.
+This addresses omitted structure; it cannot guarantee correct model attribution.
+
+The proof implementation passed 53 API server tests and 11 exact-source native
+checks. Three additional exact-source historical-row checks preserved distinct
+capture identities through repeated compaction/reload and retained or omitted
+whole UTF-8 rows at the byte boundary. The production runtime rebuilt successfully
+with its pinned patch unchanged. Broker, bundled-engine and installed live
+qualification are recorded separately below as they complete. These two changes
+are tested together; the live comparison is not a single-variable experiment.
+
+All 94 broker cases passed, including actual action-witness preservation across
+record renumbering and partial-source UTF-8 pagination within unchanged limits.
+All three bundled-engine API tests passed against the rebuilt `mactopus-13`
+artifact. The upstream fixture observed exactly one original user message before
+tool results, no trailing duplicate reminder, and both real user turns in the
+correct order after cold resume. Existing file-edit, command, reasoning, rate-limit
+and correction checks passed. All 20 version/product-identity checks passed.
+Initial new-test argument-order compile errors and the old runtime-version
+expectation failure were preserved, corrected and rerun; they are not hidden
+passes. Signed installation and live model behavior remain pending.

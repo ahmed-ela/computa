@@ -19,7 +19,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-12")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -39,9 +39,14 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try Data("untouched\n".utf8).write(to: project.appendingPathComponent("unrelated.txt"))
         try Data((finalMarker + "\n").utf8).write(to: project.appendingPathComponent("receipt.txt"))
         let capsuleKey = Data(repeating: 0x5A, count: 32)
+        let originalPrompt = "In this isolated project, change fixture.txt from old to fixed, "
+            + "verify the file and read receipt.txt with a command. Leave unrelated.txt unchanged. "
+            + "Return only the observed receipt."
+        let resumedPrompt = "Read our saved result and return the same receipt without editing files or running commands."
         let credentials = APIHarnessCredentials(providerID: "fixture-harness", value: fakeKey)
         let inference = APIHarnessInference(projectPath: project.path, marker: finalMarker,
-                                            privateReasoning: privateReasoning, expectedKey: fakeKey)
+                                            privateReasoning: privateReasoning, expectedKey: fakeKey,
+                                            originalPrompt: originalPrompt, resumedPrompt: resumedPrompt)
         let upstream = try APIHarnessHTTPFixture { await inference.respond($0) }
         var first: CodexAppServerRuntime?
         var reopened: CodexAppServerRuntime?
@@ -75,9 +80,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let initialTasks = try await runtime.loadTasks()
             XCTAssertTrue(initialTasks.isEmpty)
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
-            try await runtime.submit(prompt: "In this isolated project, change fixture.txt from old to fixed, "
-                + "verify the file and read receipt.txt with a command. Leave unrelated.txt unchanged. "
-                + "Return only the observed receipt.", toTaskID: taskID, modelID: modelID)
+            try await runtime.submit(prompt: originalPrompt, toTaskID: taskID, modelID: modelID)
             try await waitForTerminal(audit)
             XCTAssertEqual(audit.status, .completed)
             XCTAssertEqual(audit.errors, [])
@@ -110,6 +113,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(firstReceipt.patchOutputMatched)
             XCTAssertTrue(firstReceipt.commandOutputMatched)
             XCTAssertTrue(firstReceipt.reasoningRoundtripped)
+            XCTAssertTrue(firstReceipt.ordinaryHumanInputsPreserved,
+                          "Native proof must preserve one exact user request before later tool results, without reminder duplication")
             XCTAssertTrue(firstReceipt.semanticNamingStable,
                           "Actual Core thread/start must opt the fresh chat into semantic naming before the provider receives its tools")
             XCTAssertEqual(firstReceipt.failures, [])
@@ -153,7 +158,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                 && $0.toolEvent?.status == .succeeded && $0.toolEvent?.output?.contains(finalMarker) == true })
             let resumedAudit = APIHarnessEventAudit(taskID: saved.id)
             reopenedPump = Task { for await event in resumed.events() { resumedAudit.receive(event) } }
-            try await resumed.submit(prompt: "Read our saved result and return the same receipt without editing files or running commands.",
+            try await resumed.submit(prompt: resumedPrompt,
                                      toTaskID: saved.id, modelID: modelID)
             try await waitForTerminal(resumedAudit)
             XCTAssertEqual(resumedAudit.status, .completed)
@@ -166,6 +171,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(finalReceipt.requestCount, 4, "No inference, edit, or command may be replayed during cold resume.")
             XCTAssertTrue(finalReceipt.reasoningSurvivedColdResume)
             XCTAssertTrue(finalReceipt.originalToolResultsSurvivedColdResume)
+            XCTAssertTrue(finalReceipt.coldResumeHumanInputsPreserved)
             XCTAssertTrue(finalReceipt.semanticNamingStable)
             XCTAssertEqual(try Data(contentsOf: namingPin), pinBytes)
             XCTAssertEqual(finalReceipt.failures, [])
@@ -216,7 +222,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-12")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -325,7 +331,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-12")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-13")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -628,18 +634,24 @@ private actor APIHarnessInference {
         var reasoningSurvivedColdResume = false
         var originalToolResultsSurvivedColdResume = false
         var semanticNamingStable = true
+        var ordinaryHumanInputsPreserved = false
+        var coldResumeHumanInputsPreserved = false
         var failures = [String]()
     }
     private let projectPath: String
     private let marker: String
     private let privateReasoning: [String]
     private let expectedKey: String
+    private let originalPrompt: Data
+    private let resumedPrompt: Data
     private let patchCallID = "fixture-native-patch-call"
     private let commandCallID = "fixture-native-command-call"
     private var observations = Receipt()
     private var firstToolNames: Set<String>?
-    init(projectPath: String, marker: String, privateReasoning: [String], expectedKey: String) {
+    init(projectPath: String, marker: String, privateReasoning: [String], expectedKey: String,
+         originalPrompt: String, resumedPrompt: String) {
         self.projectPath = projectPath; self.marker = marker; self.privateReasoning = privateReasoning; self.expectedKey = expectedKey
+        self.originalPrompt = Data(originalPrompt.utf8); self.resumedPrompt = Data(resumedPrompt.utf8)
     }
     func receipt() -> Receipt { observations }
     func respond(_ request: APIModelServer.HTTPRequest) -> APIHarnessHTTPFixture.Response {
@@ -660,6 +672,32 @@ private actor APIHarnessInference {
             else { firstToolNames = currentNames }
             observations.semanticNamingStable = observations.semanticNamingStable && semantic
             let count = observations.requestCount
+            var originalPositions: [Int] = [], resumedPositions: [Int] = []
+            for (index, message) in messages.enumerated() {
+                guard message["role"] as? String == "user", let text = message["content"] as? String else { continue }
+                let bytes = Data(text.utf8)
+                if bytes == originalPrompt { originalPositions.append(index) }
+                if bytes == resumedPrompt { resumedPositions.append(index) }
+            }
+            guard originalPositions.count == 1, resumedPositions.count == (count == 4 ? 1 : 0),
+                  body["client_metadata"] == nil,
+                  !String(decoding: request.body, as: UTF8.self).contains("current_user_text_v1") else {
+                throw APIHarnessFailure("active_user_projection")
+            }
+            if count == 2 || count == 3 {
+                guard let lastTool = messages.lastIndex(where: { $0["role"] as? String == "tool" }),
+                      originalPositions[0] < lastTool,
+                      !messages.suffix(from: lastTool + 1).contains(where: { $0["role"] as? String == "user" }) else {
+                    throw APIHarnessFailure("active_user_reordered_after_tool")
+                }
+                observations.ordinaryHumanInputsPreserved = true
+            } else if count == 4 {
+                guard let lastTool = messages.lastIndex(where: { $0["role"] as? String == "tool" }),
+                      originalPositions[0] < lastTool, resumedPositions[0] > lastTool else {
+                    throw APIHarnessFailure("cold_resume_user_chronology")
+                }
+                observations.coldResumeHumanInputsPreserved = true
+            }
             let message: [String: Any], finish: String
             if count == 1 {
                 guard !String(decoding: request.body, as: UTF8.self).contains(marker),

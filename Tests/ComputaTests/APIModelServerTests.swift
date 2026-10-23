@@ -2,6 +2,7 @@ import AutomationCore
 import XCTest
 import Network
 import Darwin
+import CryptoKit
 @testable import Computa
 
 private actor APIRequestRecorder {
@@ -144,6 +145,199 @@ private final class CerebrasStreamErrorURLProtocol: URLProtocol, @unchecked Send
 }
 
 final class APIModelServerTests: XCTestCase, @unchecked Sendable {
+    private func nativeUserProofMetadata(thread: String, turn: String, indices: [Int], texts: [String],
+                                         kind: String = "turn") throws -> [String: Any] {
+        var bytes = Data("computa.current_user_text.v1\0".utf8)
+        func number(_ value: Int) {
+            var big = UInt64(value).bigEndian
+            withUnsafeBytes(of: &big) { bytes.append(contentsOf: $0) }
+        }
+        func field(_ text: String) { let data = Data(text.utf8); number(data.count); bytes.append(data) }
+        for value in [thread.lowercased(), turn.lowercased(), "turn"] { field(value) }
+        number(indices.count)
+        for (index, text) in zip(indices, texts) { number(index); field(text) }
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let proof = try JSONSerialization.data(withJSONObject: ["indices": indices, "sha256": digest])
+        let identity = try JSONSerialization.data(withJSONObject: ["thread_id": thread, "turn_id": turn, "request_kind": kind])
+        return ["x-codex-turn-metadata": String(decoding: identity, as: UTF8.self),
+                "current_user_text_v1": String(decoding: proof, as: UTF8.self)]
+    }
+
+    private func nativeUserMessage(_ text: String, role: String = "user") -> [String: Any] {
+        ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+    }
+
+    func testNativeCurrentUserProofMatchesCrossLanguageVectorAndRejectsFalseEvidenceOnBothWires() throws {
+        let thread = "11111111-1111-4111-8111-111111111111", turn = "22222222-2222-4222-8222-222222222222"
+        let texts = ["  e\u{301} 🧭\n\u{0000}\"quoted\"  ", "Keep it read-only.\nNo sending."]
+        let metadata = try nativeUserProofMetadata(thread: thread, turn: turn, indices: [1, 4], texts: texts)
+        let encoded = try XCTUnwrap(metadata["current_user_text_v1"] as? String)
+        let proof = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(proof["sha256"] as? String, "1f83b894cedf6049f768ada9c879c83686569d5d33e296dd7f437be3032b06f8",
+                       "Independent native/Python vector includes indices, UTF-8 lengths, NUL and decomposed Unicode")
+        let input = [nativeUserMessage(texts[0]), nativeUserMessage(texts[0]),
+                     nativeUserMessage("Historical assistant claim", role: "assistant"),
+                     nativeUserMessage("Earlier user restriction"), nativeUserMessage(texts[1])]
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: URL(string: "https://example.invalid/v1")!,
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+            let localModel = APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id)
+            let raw: [String: Any] = ["model": localModel, "input": input, "tools": [], "client_metadata": metadata]
+            let selection = try XCTUnwrap(APIProviderCatalog.selection(for: localModel, providers: [p]))
+            func translated(_ body: [String: Any]) throws -> APIModelResponseCodec.Request {
+                try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: body), selection: selection,
+                    threadID: thread, capsules: .init(key: Data(repeating: 1, count: 32)))
+            }
+            let prepared = try translated(raw)
+            func matches(_ body: [String: Any], expected: [String] = texts, kind: String? = "turn",
+                         threadID: String = thread, turnID: String = turn,
+                         projection: APIModelResponseCodec.Request? = nil) -> Bool {
+                APIModelServer.hasExactCurrentUserTextProof(body, translated: projection ?? prepared,
+                    threadID: threadID, turnID: turnID, requestKind: kind, expected: expected.map { Data($0.utf8) })
+            }
+            XCTAssertTrue(matches(raw))
+            var absent = raw; absent.removeValue(forKey: "client_metadata")
+            XCTAssertFalse(matches(absent))
+            for kind in [nil, "compaction", "memory", "prewarm"] as [String?] { XCTAssertFalse(matches(raw, kind: kind)) }
+            XCTAssertFalse(matches(raw, turnID: UUID().uuidString))
+            XCTAssertFalse(matches(raw, threadID: UUID().uuidString))
+            for expected in [Array(texts.prefix(1)), Array(texts.reversed()), [texts[0], texts[0]], texts + [texts[1]],
+                             [texts[0].precomposedStringWithCanonicalMapping, texts[1]]] {
+                XCTAssertFalse(matches(raw, expected: expected))
+            }
+            var changedProofs: [[String: Any]] = []
+            for indices in [[0, 4], [1, 1], [4, 1], [-1, 4], [1, 5], [true, 4], [1.5, 4], []] as [[Any]] {
+                var changed = proof; changed["indices"] = indices; changedProofs.append(changed)
+            }
+            var unknown = proof; unknown["extra"] = true; changedProofs.append(unknown)
+            for digest in ["bad", String(repeating: "g", count: 64), (proof["sha256"] as! String).uppercased()] {
+                var changed = proof; changed["sha256"] = digest; changedProofs.append(changed)
+            }
+            for changed in changedProofs {
+                var altered = raw, meta = metadata
+                meta["current_user_text_v1"] = String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)
+                altered["client_metadata"] = meta; XCTAssertFalse(matches(altered))
+            }
+            for invalid in [proof, "{\"indices\":[1,4],\"indices\":[1,4],\"sha256\":\"\(proof["sha256"]!)\"}", "null"] as [Any] {
+                var altered = raw, meta = metadata; meta["current_user_text_v1"] = invalid
+                altered["client_metadata"] = meta; XCTAssertFalse(matches(altered))
+            }
+            var oversized = raw, largeMetadata = metadata
+            largeMetadata["unrelated"] = String(repeating: "x", count: 16_384)
+            oversized["client_metadata"] = largeMetadata; XCTAssertFalse(matches(oversized))
+            var tooMany = raw; tooMany["input"] = input + Array(repeating: nativeUserMessage("other"), count: 8_192)
+            XCTAssertFalse(matches(tooMany))
+            var alteredInput = input; alteredInput[1] = nativeUserMessage(texts[0], role: "assistant")
+            var altered = raw; altered["input"] = alteredInput; XCTAssertFalse(matches(altered))
+            alteredInput = input
+            alteredInput[1]["content"] = [["type": "input_text", "text": "  "], ["type": "input_text", "text": String(texts[0].dropFirst(2))]]
+            altered["input"] = alteredInput; XCTAssertFalse(matches(altered), "Fragmented native input requires fallback even if concatenation matches")
+            alteredInput[1]["content"] = [["type": "output_text", "text": texts[0]]]
+            altered["input"] = alteredInput; XCTAssertFalse(matches(altered))
+            alteredInput = input; alteredInput[1] = nativeUserMessage(texts[0].precomposedStringWithCanonicalMapping)
+            altered["input"] = alteredInput; XCTAssertFalse(matches(altered))
+            XCTAssertFalse(matches(raw, projection: try translated(altered)), "Actual provider translation must retain the admitted bytes")
+            alteredInput = input; alteredInput.remove(at: 4); altered["input"] = alteredInput
+            XCTAssertFalse(matches(raw, projection: try translated(altered)), "Translation cannot silently lose an accepted steer")
+        }
+    }
+
+    func testNativeCurrentUserProofKeepsOrdinaryToolChronologyAndCompactionRemindersOnBothWires() async throws {
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let records = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder()
+            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
+                status: "200 OK", headers: ["Content-Type": "application/json"],
+                body: try JSONSerialization.data(withJSONObject: ["id": "proof-reply", "object": "response",
+                    "status": "completed", "model": "fixture-model", "output": [["id": "proof-message", "type": "message",
+                        "role": "assistant", "status": "completed", "content": [["type": "output_text", "text": "done", "annotations": []]]]]]))
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+            let server = try server(); try await server.updateProviders([p])
+            await server.setUserProjectionObserverForTesting { diagnostics.record($0) }
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                turn = UUID().uuidString, preparation = UUID()
+            let original = "  Inspect the current form cafe\u{301}.\nDo not submit.  "
+            let steer = "Keep that restriction and inspect the next field."
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                executionPolicy: "Fixed native policy.", userRequest: original)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            func pair(_ id: String) -> [[String: Any]] {
+                [["type": "function_call", "name": "browser_read", "call_id": id, "arguments": "{}"],
+                 ["type": "function_call_output", "call_id": id, "output": "Current observed page \(id)"]]
+            }
+            var input = [nativeUserMessage("Earlier ongoing user restriction."), nativeUserMessage(original)] + pair("observed-1")
+            func infer(_ input: [[String: Any]], indices: [Int], texts: [String], kind: String = "turn") async throws -> [[String: Any]] {
+                var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+                body["input"] = input
+                let read = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+                body["tools"] = kind == "compaction" ? [Any]() : [["type": "function", "name": "browser_read", "parameters": try XCTUnwrap(read["inputSchema"])]]
+                body["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: indices, texts: texts, kind: kind)
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let count = await records.count()
+                let (_, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                let requests = await records.snapshot(); XCTAssertEqual(requests.count, count + 1, "Proof selection adds no inference or correction")
+                let actual = try XCTUnwrap(requests.last)
+                let forwarded = try XCTUnwrap(JSONSerialization.jsonObject(with: actual.body) as? [String: Any])
+                XCTAssertNil(forwarded["client_metadata"])
+                XCTAssertFalse(String(decoding: actual.body, as: UTF8.self).contains("current_user_text_v1"))
+                XCTAssertFalse(String(decoding: actual.body, as: UTF8.self).contains("sha256"))
+                return try XCTUnwrap(forwarded[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
+            }
+            func text(_ message: [String: Any]) -> String? {
+                message["content"] as? String ?? (message["content"] as? [[String: Any]])?.first?["text"] as? String
+            }
+            func assertOrdinary(_ messages: [[String: Any]], expected: [String], lastCall: String) throws {
+                XCTAssertEqual(messages.last?["role"] as? String, "developer")
+                let host = try XCTUnwrap(messages.last.flatMap(text))
+                XCTAssertTrue(host.contains("APP_RUNTIME_EXECUTION_CHECKPOINT")); XCTAssertTrue(host.contains("Fixed native policy."))
+                XCTAssertFalse(host.contains("following user messages repeat")); XCTAssertFalse(host.contains(original))
+                XCTAssertEqual(messages.filter { $0["role"] as? String == "user" }.compactMap(text).map { Data($0.utf8) },
+                    (["Earlier ongoing user restriction."] + expected).map { Data($0.utf8) })
+                let lastEvidence = messages[messages.count - 2]
+                XCTAssertEqual(lastEvidence[wire == .chatCompletions ? "tool_call_id" : "call_id"] as? String, lastCall)
+                XCTAssertEqual(lastEvidence[wire == .chatCompletions ? "role" : "type"] as? String,
+                    wire == .chatCompletions ? "tool" : "function_call_output")
+            }
+            try assertOrdinary(try await infer(input, indices: [1], texts: [original]), expected: [original], lastCall: "observed-1")
+            var accepted = [original], indices = [1]
+            for ordinal in 0..<2 {
+                let ticket = try await server.beginUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                    preparationID: preparation, prompt: steer)
+                try await server.resolveUserInputUpdate(taskID: task, threadID: thread, turnID: turn,
+                    preparationID: preparation, ticket: ticket, accepted: true)
+                accepted.append(steer)
+                let staleProof = try await infer(input, indices: indices, texts: Array(accepted.dropLast()))
+                XCTAssertEqual(staleProof.suffix(accepted.count).compactMap(text).map { Data($0.utf8) }, accepted.map { Data($0.utf8) },
+                    "A not-yet-drained accepted steer requires the complete reminder fallback")
+                indices.append(input.count); input.append(nativeUserMessage(steer)); input += pair("observed-\(ordinal + 2)")
+                try assertOrdinary(try await infer(input, indices: indices, texts: accepted), expected: accepted, lastCall: "observed-\(ordinal + 2)")
+            }
+            let maintenance = "Internal maintenance only; preserve the active request."
+            let compacted = try await infer(input + [nativeUserMessage(maintenance)], indices: indices, texts: accepted, kind: "compaction")
+            XCTAssertEqual(compacted.suffix(accepted.count + 1).compactMap(text).map { Data($0.utf8) },
+                (accepted + [maintenance]).map { Data($0.utf8) })
+            XCTAssertTrue(compacted.suffix(accepted.count + 1).allSatisfy { $0["role"] as? String == "user" })
+            XCTAssertTrue(compacted.last { $0["role"] as? String == "developer" }.flatMap(text)?.contains("context maintenance only") == true)
+            let requestCount = await records.count(); XCTAssertEqual(requestCount, 6)
+            let logs = diagnostics.snapshot()
+            XCTAssertEqual(logs.count, requestCount, "One content-free projection record per admitted dispatch")
+            XCTAssertEqual(logs.map { $0.components(separatedBy: " reason=").last! },
+                ["matched", "invalid_proof", "matched", "invalid_proof", "matched", "ineligible_kind"])
+            XCTAssertTrue(logs[0].contains("proof_accepted=true reminders_omitted=true input_count=1 reminder_count=0"))
+            XCTAssertTrue(logs[4].contains("proof_accepted=true reminders_omitted=true input_count=3 reminder_count=0"))
+            XCTAssertTrue(logs[5].contains("proof_accepted=false reminders_omitted=false input_count=3 reminder_count=3"))
+            for log in logs {
+                XCTAssertLessThan(log.utf8.count, 180)
+                for privateValue in [original, steer, thread, turn, task, "fixture-secret", "sha256", "current_user_text_v1"] {
+                    XCTAssertFalse(log.contains(privateValue))
+                }
+            }
+            await server.shutdown()
+        }
+    }
     private func provider(_ url: URL) -> APIProviderDefinition { .init(id: "fixture", name: "Fixture", baseURL: url, wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")]) }
     private func response(_ content: String = "done") -> APILoopbackFixture.Response {
         .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: Data("{\"id\":\"r1\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"\(content)\"}}]}".utf8))

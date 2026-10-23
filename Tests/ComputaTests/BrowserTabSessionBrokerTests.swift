@@ -4,6 +4,183 @@ import XCTest
 @testable import Computa
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testOverviewAssociatesInterleavedRecordHeadingsAndReceiptsWithoutNewAuthority() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        // The live238 Sent view interleaved the fresh heading before the old
+        // receipt. Record identity must survive that ordering and a page cut.
+        let nodes = [
+            semanticNode(0, role: "main", name: "", children: ["n1", "n10", "n20", "n30"]),
+            semanticNode(1, role: "heading", name: "Sent messages", parent: "n0"),
+            semanticNode(10, role: "article", name: "UNEXPOSED_OLD_CONTAINER", parent: "n0", children: ["n11", "n14", "n12", "n13"]),
+            semanticNode(11, role: "heading", name: "ODE schedule test 238", parent: "n10"),
+            semanticNode(14, role: "StaticText", name: "To: course-staff@example.invalid", parent: "n10"),
+            semanticNode(12, role: "StaticText", name: "Please confirm Tuesday at 10:30 AM.", parent: "n10"),
+            semanticNode(13, role: "StaticText", name: "Receipt: LOCAL-dee65262e116fe66", parent: "n10"),
+            semanticNode(20, role: "article", name: "UNEXPOSED_FRESH_CONTAINER", parent: "n0", children: ["n21", "n24", "n22", "n23"]),
+            semanticNode(21, role: "heading", name: "ODE schedule test 238 fresh", parent: "n20"),
+            semanticNode(24, role: "StaticText", name: "To: course-staff@example.invalid", parent: "n20"),
+            semanticNode(22, role: "StaticText", name: "Please confirm Tuesday at 10:30 AM.", parent: "n20"),
+            semanticNode(23, role: "StaticText", name: "Receipt: LOCAL-d11da0d0c59ffe80", parent: "n20"),
+            semanticNode(30, role: "button", name: "Existing action", parent: "n0"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview), compact: true)
+        let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        var records: [String: String] = [:], seen: [String] = []
+        var pages = 0
+        repeat {
+            pages += 1
+            XCTAssertLessThan(pages, 12)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertLessThanOrEqual(page.snapshot.elements.count, 18)
+            XCTAssertFalse(complete.contains("UNEXPOSED_"))
+            for row in try XCTUnwrap(page.snapshot.presentation).rows {
+                let element = try XCTUnwrap(page.snapshot.element(at: row.index))
+                seen.append(element.label)
+                if element.recordPath.isEmpty { XCTAssertFalse(row.text.contains(" record_path=")); continue }
+                let path = try renderedJSONField("record_path", in: row.text)
+                XCTAssertEqual(path, source.uuidString + "/" + element.recordPath.map(String.init).joined(separator: "/"))
+                records[element.label] = path
+                XCTAssertTrue(row.text.contains(source.uuidString), "Historical whole-row excerpts need their own capture scope")
+                XCTAssertFalse(element.supportsPress); XCTAssertFalse(element.supportsSetText)
+                XCTAssertFalse(row.text.contains("UNEXPOSED_"))
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertEqual(records["ODE schedule test 238"], records["Receipt: LOCAL-dee65262e116fe66"])
+        XCTAssertEqual(records["ODE schedule test 238 fresh"], records["Receipt: LOCAL-d11da0d0c59ffe80"])
+        XCTAssertNotEqual(records["ODE schedule test 238"], records["ODE schedule test 238 fresh"])
+        XCTAssertLessThan(try XCTUnwrap(seen.firstIndex(of: "ODE schedule test 238 fresh")),
+                          try XCTUnwrap(seen.firstIndex(of: "Receipt: LOCAL-dee65262e116fe66")),
+                          "Reproduce cross-record interleaving rather than hiding it in a sorted fixture")
+        XCTAssertTrue(seen.contains("Existing action"))
+        let filtered = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "LOCAL-", view: .content), compact: true)
+        let freshSource = try XCTUnwrap(filtered.snapshot.readReceipt?.sourceID)
+        XCTAssertNotEqual(freshSource, source)
+        XCTAssertEqual(filtered.snapshot.elements.map(\.recordPath), [[1], [2]])
+        for row in try XCTUnwrap(filtered.snapshot.presentation).rows {
+            XCTAssertTrue(try renderedJSONField("record_path", in: row.text).hasPrefix(freshSource.uuidString + "/"))
+            XCTAssertFalse(row.text.contains(source.uuidString))
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testRecordAncestrySurvivesNestedSubtreeAndEscapedFieldContinuationWithinExistingCaps() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let label = String(repeating: "\"quoted\\cafe\u{301}\" 🧭\n", count: 180) + "EXACT_END"
+        let nodes = [semanticNode(0, role: "main", name: "", children: ["n1"]),
+                     semanticNode(1, role: "article", name: "", parent: "n0", children: ["n2"]),
+                     semanticNode(2, role: "listitem", name: "", parent: "n1", children: ["n3"]),
+                     semanticNode(3, role: "StaticText", name: label, parent: "n2")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes,
+            sourceTruncated: true)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n2" })
+        let source = try XCTUnwrap(all.snapshot.readReceipt?.sourceID)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        var reconstructed = "", pages = 0
+        repeat {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceTruncated, true)
+            XCTAssertTrue(complete.contains("source_truncated=1"))
+            XCTAssertTrue(complete.contains("Records may span pages. Not input targets or verified outcomes."))
+            for row in try XCTUnwrap(page.snapshot.presentation).rows {
+                XCTAssertEqual(try renderedJSONField("record_path", in: row.text), source.uuidString + "/1/2")
+                XCTAssertNil(row.parentIndex, "Ancestor metadata must not fabricate a parent row outside this selected page")
+                let exposure = try XCTUnwrap(page.snapshot.readReceipt?.exposures.first { $0.field == .label })
+                XCTAssertEqual(exposure.startUTF8, reconstructed.utf8.count)
+                reconstructed += try renderedJSONField("label", in: row.text)
+                XCTAssertEqual(exposure.endUTF8, reconstructed.utf8.count)
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(Data(reconstructed.utf8), Data(label.utf8))
+        await fixture.assertNoInput()
+    }
+
+    func testFreshCaptureRecordRenumberingPreservesOnlyCorroboratedPublishedActionAuthority() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let target = fixture.observation.binding.targetID, committedID = UUID()
+        let nodes = [semanticNode(10, role: "article", name: "", children: ["n11"]),
+                     semanticNode(11, role: "button", name: "Existing action", parent: "n10")]
+        try await fixture.transport.replaceNodes(targetID: target, nodes: nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: target, id: committedID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let original = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        XCTAssertEqual(original.element.recordPath, [1])
+        // A different source-order record precedes the unchanged target in the
+        // same committed document. Only passive group numbering changes.
+        try await fixture.transport.replaceNodes(targetID: target,
+            nodes: [semanticNode(20, role: "article", name: "Unrelated record")] + nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: target, id: committedID)
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true,
+            priorPublishedActions: [original])
+        let proof = try XCTUnwrap(fresh.snapshot.corroboratedActionWitnesses.first)
+        XCTAssertEqual(fresh.snapshot.elements.first { $0.nodeID == "n11" }?.recordPath, [2])
+        XCTAssertNotEqual(first.snapshot.readReceipt?.sourceID, fresh.snapshot.readReceipt?.sourceID)
+        XCTAssertEqual(proof.publicationID, original.publicationID)
+        XCTAssertEqual(proof.element.recordPath, [1], "Original published target remains frozen")
+        XCTAssertEqual(proof.exposures, original.exposures)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: original)
+        }
+        try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: proof)
+        _ = try await fixture.broker.perform(taskKey: "task-a", binding: fresh.binding, witness: proof, action: "AXPress")
+        let count = await fixture.transport.pressCount(targetID: target)
+        XCTAssertEqual(count, 1)
+        await assertBrowserError(.staleSnapshot) {
+            _ = try await fixture.broker.perform(taskKey: "task-a", binding: fresh.binding, witness: proof, action: "AXPress")
+        }
+        let finalCount = await fixture.transport.pressCount(targetID: target)
+        XCTAssertEqual(finalCount, 1)
+    }
+
+    func testRecordAncestryFailsClosedOnIncompleteIgnoredDuplicateCyclicOrDeepAncestors() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let target = semanticNode(1, role: "StaticText", name: "Target", parent: "n2")
+        let ignored = BrowserDocumentNode(backendNodeID: 3, role: "article", name: "HIDDEN_PARENT",
+            value: nil, isDisabled: false, isReadOnly: true, isIgnored: true, nodeID: "n2")
+        let cases: [[BrowserDocumentNode]] = [
+            [target],
+            [target, ignored],
+            [target, semanticNode(2, role: "article", name: "A"), semanticNode(2, role: "article", name: "B")],
+            [target, semanticNode(2, role: "article", name: "", parent: "n3"), semanticNode(3, role: "article", name: "", parent: "n2")],
+            [target] + (2...10).map { semanticNode($0, role: "article", name: "", parent: $0 == 10 ? nil : "n\($0 + 1)") },
+        ]
+        for nodes in cases {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Target", view: .all), compact: true)
+            XCTAssertEqual(page.snapshot.elements.count, 1)
+            XCTAssertEqual(page.snapshot.elements.first?.recordPath, [])
+            XCTAssertFalse(page.snapshot.formattedText.contains("record_path="))
+            XCTAssertFalse(page.snapshot.formattedText.contains("HIDDEN_PARENT"))
+        }
+        var action = BrowserTabElement(index: 0, backendNodeID: 1, role: "AXButton", label: "Action",
+            value: nil, isEnabled: true, supportsPress: true, supportsSetText: false, recordPath: [1])
+        let prior = action
+        action.recordPath = [22, 23]
+        XCTAssertTrue(action.hasIdenticalActionSemantics(to: prior), "Capture-local record renumbering cannot change input authority")
+        await fixture.assertNoInput()
+    }
+
     func testLegacyPressBackendDefaultFeedbackAdapterDispatchesExactlyOnce() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let feedback = try await fixture.broker.perform(taskKey: "task-a", binding: fixture.observation.binding,
@@ -2863,9 +3040,9 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         states[targetID] = state
     }
 
-    func setCommittedDocumentID(targetID: String) throws {
+    func setCommittedDocumentID(targetID: String, id: UUID = UUID()) throws {
         guard var state = states[targetID] else { throw BrowserTabBrokerError.targetClosed }
-        state.document.committedDocumentID = UUID()
+        state.document.committedDocumentID = id
         states[targetID] = state
     }
 

@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Darwin
 import CoreFoundation
+import CryptoKit
 import OSLog
 
 /// The engine speaks Responses on loopback; only this actor handles provider credentials.
@@ -68,8 +69,18 @@ actor APIModelServer {
         let threadID: UUID
         let turnID: UUID
     }
+    private struct CurrentUserProjection: Sendable {
+        enum Reason: String, Sendable { case matched, missingProof = "missing_proof", invalidProof = "invalid_proof", ineligibleKind = "ineligible_kind", noActiveInput = "no_active_input" }
+        let reason: Reason
+        let inputCount: Int
+        let reminderCount: Int
+        var record: String {
+            "currentUserProjection proof_accepted=\(reason == .matched) reminders_omitted=\(reason == .matched) input_count=\(inputCount) reminder_count=\(reminderCount) reason=\(reason.rawValue)"
+        }
+    }
 #if DEBUG
     private var failureDiagnosticsObserverForTesting: (@Sendable (String) -> Void)?
+    private var userProjectionObserverForTesting: (@Sendable (String) -> Void)?
     private var beforeCorrectionDispatchForTesting: (@Sendable () async throws -> Void)?
     private var beforeInferenceDispatchForTesting: (@Sendable () async throws -> Void)?
     func setBeforeCorrectionDispatchForTesting(_ hook: (@Sendable () async throws -> Void)?) { beforeCorrectionDispatchForTesting = hook }
@@ -77,6 +88,7 @@ actor APIModelServer {
     func setFailureDiagnosticsObserverForTesting(_ observer: (@Sendable (String) -> Void)?) {
         failureDiagnosticsObserverForTesting = observer
     }
+    func setUserProjectionObserverForTesting(_ observer: (@Sendable (String) -> Void)?) { userProjectionObserverForTesting = observer }
 #endif
     private struct Connection { let socket: NWConnection; let task: Task<Void, Never> }
     private var connections: [UUID: Connection] = [:]
@@ -369,6 +381,71 @@ actor APIModelServer {
         guard let id = UUID(uuidString: value) else { throw Failure.inferenceContextRequired }
         return id.uuidString.lowercased()
     }
+
+    /// Native-only evidence that the admitted human inputs already occupy their
+    /// original chronological positions. Never locate them by matching prose.
+    /// Missing, partial or obsolete proof retains the existing reminder fallback.
+    static func hasExactCurrentUserTextProof(_ body: [String: Any], translated: APIModelResponseCodec.Request,
+                                            threadID: String, turnID: String, requestKind: String?,
+                                            expected: [Data]) -> Bool {
+        guard requestKind == "turn", (1...1_024).contains(expected.count),
+              let thread = try? canonicalID(threadID), let turn = try? canonicalID(turnID),
+              let metadata = body["client_metadata"] as? [String: Any],
+              let metadataBytes = try? JSONSerialization.data(withJSONObject: metadata), metadataBytes.count <= 16_384,
+              let encoded = metadata["current_user_text_v1"] as? String, encoded.utf8.count <= 16_384,
+              APIModelCorrectionJSON.isUnambiguous(Data(encoded.utf8)),
+              let proof = try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any],
+              Set(proof.keys) == Set(["indices", "sha256"]),
+              let numbers = proof["indices"] as? [NSNumber], numbers.count == expected.count,
+              let digest = proof["sha256"] as? String, digest.utf8.count == 64,
+              digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              let input = body["input"] as? [[String: Any]], input.count <= 8_192,
+              let upstream = try? JSONSerialization.jsonObject(with: translated.body) as? [String: Any],
+              let projected = upstream[translated.provider.wireAPI == .chatCompletions ? "messages" : "input"] as? [[String: Any]] else {
+            return false
+        }
+        var indices: [Int] = []
+        for number in numbers {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite,
+                  number.doubleValue >= 0, number.doubleValue < Double(input.count),
+                  number.doubleValue == Double(number.intValue),
+                  indices.last.map({ number.intValue > $0 }) ?? true else { return false }
+            indices.append(number.intValue)
+        }
+        // Translation must preserve the user-message sequence and selected
+        // bytes too. This uses native indices/ordinals, never textual search.
+        let userIndices = input.indices.filter {
+            (input[$0]["type"] as? String ?? "message") == "message" && input[$0]["role"] as? String == "user"
+        }
+        let projectedUsers = projected.filter { $0["role"] as? String == "user" }
+        guard projectedUsers.count == userIndices.count else { return false }
+        var framed = Data("computa.current_user_text.v1\0".utf8)
+        func appendNumber(_ value: Int) {
+            var number = UInt64(value).bigEndian
+            withUnsafeBytes(of: &number) { framed.append(contentsOf: $0) }
+        }
+        func appendBytes(_ bytes: Data) { appendNumber(bytes.count); framed.append(bytes) }
+        for value in [thread, turn, "turn"] { appendBytes(Data(value.utf8)) }
+        appendNumber(indices.count)
+        for (index, admitted) in zip(indices, expected) {
+            let message = input[index]
+            guard message["type"] as? String == "message", message["role"] as? String == "user",
+                  let parts = message["content"] as? [[String: Any]], parts.count == 1,
+                  Set(parts[0].keys) == Set(["type", "text"]), parts[0]["type"] as? String == "input_text",
+                  let text = parts[0]["text"] as? String, Data(text.utf8) == admitted,
+                  let ordinal = userIndices.firstIndex(of: index) else { return false }
+            let projectedMessage = projectedUsers[ordinal]
+            let projectedText: String?
+            if let text = projectedMessage["content"] as? String { projectedText = text }
+            else if let parts = projectedMessage["content"] as? [[String: Any]], parts.count == 1,
+                    ["text", "input_text"].contains(parts[0]["type"] as? String ?? "") {
+                projectedText = parts[0]["text"] as? String
+            } else { projectedText = nil }
+            guard projectedText.map({ Data($0.utf8) == admitted }) == true else { return false }
+            appendNumber(index); appendBytes(admitted)
+        }
+        return SHA256.hash(data: framed).map { String(format: "%02x", $0) }.joined() == digest
+    }
     private static func nativeIdentity(_ body: [String: Any], header: String?) throws -> NativeRequestContext {
         func parse(_ value: String) throws -> NativeRequestContext {
             guard value.utf8.count <= 16_384,
@@ -512,10 +589,17 @@ actor APIModelServer {
             let purpose: APIModelResponseCodec.HostProjectionPurpose = nativeRequest.requestKind == "compaction"
                 ? .nativeCompaction : .ordinaryInference
             let userInputs: [String]
+            let userProjection: CurrentUserProjection
             if context.userRequest != nil {
                 guard let active = activeUserInputs[taskID], active.context == context else { throw Failure.inferenceContextRequired }
-                userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
-            } else { userInputs = [] }
+                let alreadyRetained = Self.hasExactCurrentUserTextProof(object, translated: translated,
+                    threadID: context.identity.threadID, turnID: context.identity.turnID,
+                    requestKind: nativeRequest.requestKind, expected: active.inputs)
+                userInputs = alreadyRetained ? [] : active.inputs.map { String(decoding: $0, as: UTF8.self) }
+                let hasProof = (object["client_metadata"] as? [String: Any])?["current_user_text_v1"] != nil
+                userProjection = .init(reason: alreadyRetained ? .matched : nativeRequest.requestKind != "turn" ? .ineligibleKind : hasProof ? .invalidProof : .missingProof,
+                    inputCount: active.inputs.count, reminderCount: userInputs.count)
+            } else { userInputs = []; userProjection = .init(reason: .noActiveInput, inputCount: 0, reminderCount: 0) }
             let hostMessage = try executionMessage(taskID: taskID, context: context, remindsUser: !userInputs.isEmpty, purpose: purpose)
             let prepared = try hostMessage.map {
                 try APIModelResponseCodec.appendingHostDeveloperMessage($0, to: translated, userInputs: userInputs, purpose: purpose)
@@ -545,7 +629,7 @@ actor APIModelServer {
                     group.addTask { try await self.performInference(prepared, key: key, taskID: taskID,
                         context: context, userInputRevision: userInputRevision, laneID: laneID,
                         deadline: inferenceDeadline, onRejection: onRejection,
-                        projectionExpectation: projectionExpectation, requestCapture: capture) }
+                        projectionExpectation: projectionExpectation, requestCapture: capture, userProjection: userProjection) }
                     group.addTask {
                         try await ContinuousClock().sleep(until: inferenceDeadline)
                         throw StagedFailure(stage: .requestTransport, cause: APIProviderHTTPClient.Failure.timeout)
@@ -619,12 +703,20 @@ actor APIModelServer {
                                   context: Context, userInputRevision: Int?, laneID: UUID, deadline: ContinuousClock.Instant,
                                   onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?,
                                   projectionExpectation: APIProviderHTTPClient.RequestProjectionExpectation?,
-                                  requestCapture: APIRejectedRequestCapture.Ticket?) async throws -> APIModelResponseCodec.Reply {
+                                  requestCapture: APIRejectedRequestCapture.Ticket?,
+                                  userProjection: CurrentUserProjection) async throws -> APIModelResponseCodec.Reply {
 #if DEBUG
         try await beforeInferenceDispatchForTesting?()
 #endif
         try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
         try requireUserInputSnapshot(taskID: taskID, context: context, revision: userInputRevision)
+        // One finite diagnostic at admitted initial dispatch, never per retry or
+        // for a retired user revision. No identities, text, hashes or headers.
+        let projectionRecord = userProjection.record
+        Self.responseLog.notice("\(projectionRecord, privacy: .public)")
+#if DEBUG
+        userProjectionObserverForTesting?(projectionRecord)
+#endif
         let first: APIProviderHTTPClient.Result
         do { first = try await client.request(provider: original.provider, key: key, path: original.path,
             body: original.body, modelID: original.model.id, onRejection: onRejection,

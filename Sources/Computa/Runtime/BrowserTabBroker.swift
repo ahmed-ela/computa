@@ -430,6 +430,9 @@ struct BrowserTabElement: Equatable, Sendable {
     var contentScope: BrowserContentScope = .unknown
     var contentKind: SemanticReadContentKind = .unknown
     var constraintValidation: BrowserConstraintValidation? = nil
+    /// Passive record ancestry within one immutable capture. These ordinals
+    /// are never input targets and are excluded from action corroboration.
+    var recordPath: [Int] = []
 
     /// Exact bounded native semantics, independent of selected-page indexing.
     /// Corroboration never normalizes Unicode or relaxes a prior exposure.
@@ -1088,7 +1091,7 @@ actor BrowserTabSessionBroker {
         while true {
             page = try makePage(selected: selected, position: position, regionCandidates: candidates,
                 navigationCandidates: navigationCandidates, overview: effectiveRead.view == .overview,
-                bodyByteLimit: bodyLimit, compact: compact)
+                bodyByteLimit: bodyLimit, compact: compact, sourceID: sourceID)
             nextCursor = page.nextPosition.element < selected.count ? continuationID : nil
             receipt = SemanticReadReceipt(
                 id: snapshotID, sourceID: sourceID,
@@ -1590,6 +1593,15 @@ actor BrowserTabSessionBroker {
         let sourceNodes = Dictionary(grouping: document.nodes.compactMap { node in
             node.nodeID.map { ($0, node) }
         }, by: { $0.0 }).filter { !$0.key.isEmpty && $0.value.count == 1 }.mapValues { $0[0].1 }
+        // Number only observed semantic record containers, independently of
+        // view/query/page selection. Never publish their DOM IDs or labels.
+        let recordRoles: Set<String> = ["article", "listitem", "option", "row"]
+        var recordOrdinals: [String: Int] = [:]
+        for node in document.nodes where !node.isIgnored && recordRoles.contains(node.role.lowercased()) {
+            if let id = node.nodeID, sourceNodes[id] == node {
+                recordOrdinals[id] = recordOrdinals.count + 1
+            }
+        }
         let scopeIDs: Set<String>?
         if let scopeNodeID {
             var included: Set<String> = [scopeNodeID]
@@ -1631,6 +1643,7 @@ actor BrowserTabSessionBroker {
             }
             element.contentScope = contentScope(of: node, nodes: sourceNodes)
             element.contentKind = contentKind(of: node, nodes: sourceNodes)
+            element.recordPath = recordPath(of: node, nodes: sourceNodes, ordinals: recordOrdinals)
             switch read.view {
             case .all:
                 break
@@ -1711,6 +1724,28 @@ actor BrowserTabSessionBroker {
            !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !(element.value ?? "").isEmpty { return 4 }
         return nil
+    }
+
+    /// Association requires a complete, unambiguous observed ancestor chain.
+    /// Missing/ignored/cyclic ancestry never receives a guessed group. A short
+    /// path preserves nesting without unbounded per-row metadata or page text.
+    private func recordPath(of node: BrowserDocumentNode, nodes: [String: BrowserDocumentNode],
+                            ordinals: [String: Int]) -> [Int] {
+        var current = node
+        var seen = Set<String>()
+        var path: [Int] = []
+        for _ in 0..<128 {
+            guard !current.isIgnored, let id = current.nodeID,
+                  nodes[id] == current, seen.insert(id).inserted else { return [] }
+            if let ordinal = ordinals[id] {
+                guard path.count < 8 else { return [] }
+                path.append(ordinal)
+            }
+            guard let parentID = current.parentNodeID else { return Array(path.reversed()) }
+            guard let parent = nodes[parentID] else { return [] }
+            current = parent
+        }
+        return []
     }
 
     private func contentScope(of node: BrowserDocumentNode,
@@ -1821,12 +1856,13 @@ actor BrowserTabSessionBroker {
             isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
             nodeID: original.nodeID, parentNodeID: original.parentNodeID, childNodeIDs: original.childNodeIDs,
             linkURL: original.linkURL, semanticRole: original.semanticRole, contentScope: original.contentScope,
-            contentKind: original.contentKind, constraintValidation: original.constraintValidation)
+            contentKind: original.contentKind, constraintValidation: original.constraintValidation,
+            recordPath: original.recordPath)
     }
 
     private func makePage(selected: [BrowserTabElement], position: ReadPosition,
                           regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false,
-                          bodyByteLimit: Int, compact: Bool = false) throws -> ReadPage {
+                          bodyByteLimit: Int, compact: Bool = false, sourceID: UUID) throws -> ReadPage {
         let maximumElements = overview ? 18 : 60
         var page = ReadPage(nextPosition: position)
         var pageFragments = [[FieldFragment]]()
@@ -1857,7 +1893,7 @@ actor BrowserTabSessionBroker {
                         start: next.utf8Offset, end: part.end, total: field.text.utf8.count)
                     guard fragment.end > fragment.start || fragment.total == 0 else { break }
                     let rowBytes = formatElement(element, fragments: fragments + [fragment],
-                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact).utf8.count
+                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID).utf8.count
                     if rowBytes <= available { accepted = fragment; break }
                     budget -= max(1, rowBytes - available)
                 }
@@ -1879,7 +1915,7 @@ actor BrowserTabSessionBroker {
                 break
             }
             let row = formatElement(element, fragments: fragments,
-                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact)
+                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID)
             page.elements.append(element)
             pageFragments.append(fragments)
             bytes += row.utf8.count + 1 + referenceReserve
@@ -1906,7 +1942,7 @@ actor BrowserTabSessionBroker {
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
             return formatElement(element, fragments: fragments,
                 parentIndex: parentIndex == element.index ? nil : parentIndex,
-                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact)
+                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID)
         }
         page.presentedRows = zip(page.elements, page.rows).map { element, row in
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
@@ -1952,7 +1988,8 @@ actor BrowserTabSessionBroker {
     }
 
     private func formatElement(_ element: BrowserTabElement, fragments: [FieldFragment],
-                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool, compact: Bool = false) -> String {
+                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool,
+                               compact: Bool = false, sourceID: UUID) -> String {
         let actions = element.supportsPress ? "[\"AXPress\"]" : "[]"
         let pressSource: String
         if element.supportsPress && !supportsSemanticPress(role: element.semanticRole ?? element.role) {
@@ -1978,7 +2015,10 @@ actor BrowserTabSessionBroker {
         // indices. Only #index and an exposed parent's index address this page.
         let parent = parentIndex.map { " parent_index=\($0)" } ?? ""
         let children = element.childNodeIDs.isEmpty ? "" : " child_count=\(element.childNodeIDs.count) expandable=true"
-        return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children) "
+        // The capture UUID is repeated on each row because historical bounded
+        // excerpts may preserve a whole row without its page header.
+        let record = element.recordPath.isEmpty ? "" : " record_path=\(quote(sourceID.uuidString + "/" + element.recordPath.map(String.init).joined(separator: "/")))"
+        return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children)\(record) "
             + "content_scope=\(element.contentScope.rawValue) content_kind=\(element.contentKind.rawValue) "
             + (compact ? (element.isEnabled ? "" : "enabled=false ") : "enabled=\(element.isEnabled ? "true" : "false") ")
             + (compact ? (element.supportsSetText ? "settable=true " : "") : "settable=\(element.supportsSetText ? "true" : "false") ")
@@ -2197,6 +2237,7 @@ actor BrowserTabSessionBroker {
         if read.view == .overview {
             lines.append("OVERVIEW selection=observed_controls_headings_document_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
         }
+        if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append(read.view == .content
@@ -2252,10 +2293,13 @@ actor BrowserTabSessionBroker {
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
         }
+        if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
         if nextCursor != nil { lines.append("Continue with cursor only for remaining captured fields/rows.") }
         return lines.joined(separator: "\n")
     }
+
+    private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting. Records may span pages. Not input targets or verified outcomes."
 
     private func quote(_ value: String) -> String {
         var result = "\""

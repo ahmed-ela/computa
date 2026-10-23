@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index cdb51f2..83d5333 100644
+index cdb51f2..3537d37 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -416,7 +416,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
@@ -372,7 +372,15 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "arc-swap",
-@@ -3099,7 +3099,7 @@ dependencies = [
+@@ -3073,6 +3073,7 @@ dependencies = [
+  "serde_json",
+  "serial_test",
+  "sha1 0.10.6",
++ "sha2 0.10.9",
+  "shlex",
+  "similar",
+  "tempfile",
+@@ -3099,7 +3100,7 @@ dependencies = [
  
  [[package]]
  name = "codex-core-api"
@@ -381,7 +389,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-analytics",
   "codex-app-server-protocol",
-@@ -3122,7 +3122,7 @@ dependencies = [
+@@ -3122,7 +3123,7 @@ dependencies = [
  
  [[package]]
  name = "codex-core-plugins"
@@ -390,7 +398,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -3177,7 +3177,7 @@ dependencies = [
+@@ -3177,7 +3178,7 @@ dependencies = [
  
  [[package]]
  name = "codex-diagnostics"
@@ -399,7 +407,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "libc",
   "pretty_assertions",
-@@ -3185,7 +3185,7 @@ dependencies = [
+@@ -3185,7 +3186,7 @@ dependencies = [
  
  [[package]]
  name = "codex-exec"
@@ -408,7 +416,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "assert_cmd",
-@@ -3236,7 +3236,7 @@ dependencies = [
+@@ -3236,7 +3237,7 @@ dependencies = [
  
  [[package]]
  name = "codex-exec-server"
@@ -417,7 +425,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "arc-swap",
-@@ -3296,7 +3296,7 @@ dependencies = [
+@@ -3296,7 +3297,7 @@ dependencies = [
  
  [[package]]
  name = "codex-exec-server-protocol"
@@ -426,7 +434,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-file-system",
-@@ -3312,7 +3312,7 @@ dependencies = [
+@@ -3312,7 +3313,7 @@ dependencies = [
  
  [[package]]
  name = "codex-exec-server-test-support"
@@ -435,7 +443,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-exec-server",
-@@ -3327,7 +3327,7 @@ dependencies = [
+@@ -3327,7 +3328,7 @@ dependencies = [
  
  [[package]]
  name = "codex-execpolicy"
@@ -444,7 +452,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "clap",
-@@ -3345,7 +3345,7 @@ dependencies = [
+@@ -3345,7 +3346,7 @@ dependencies = [
  
  [[package]]
  name = "codex-experimental-api-macros"
@@ -453,7 +461,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "proc-macro2",
   "quote",
-@@ -3354,7 +3354,7 @@ dependencies = [
+@@ -3354,7 +3355,7 @@ dependencies = [
  
  [[package]]
  name = "codex-extension-api"
@@ -462,7 +470,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-config",
   "codex-context-fragments",
-@@ -3372,7 +3372,7 @@ dependencies = [
+@@ -3372,7 +3373,7 @@ dependencies = [
  
  [[package]]
  name = "codex-extension-items"
@@ -471,7 +479,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-utils-absolute-path",
   "pretty_assertions",
-@@ -3384,7 +3384,7 @@ dependencies = [
+@@ -3384,7 +3385,7 @@ dependencies = [
  
  [[package]]
  name = "codex-external-agent-migration"
@@ -480,7 +488,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "chrono",
   "codex-analytics",
-@@ -3414,7 +3414,7 @@ dependencies = [
+@@ -3414,7 +3415,7 @@ dependencies = [
  
  [[package]]
  name = "codex-features"
@@ -489,7 +497,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-network-proxy",
   "codex-otel",
-@@ -3428,7 +3428,7 @@ dependencies = [
+@@ -3428,7 +3429,7 @@ dependencies = [
  
  [[package]]
  name = "codex-feedback"
@@ -498,7 +506,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "bytes",
-@@ -3451,7 +3451,7 @@ dependencies = [
+@@ -3451,7 +3452,7 @@ dependencies = [
  
  [[package]]
  name = "codex-file-search"
@@ -507,7 +515,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "clap",
-@@ -3467,7 +3467,7 @@ dependencies = [
+@@ -3467,7 +3468,7 @@ dependencies = [
  
  [[package]]
  name = "codex-file-system"
@@ -516,7 +524,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "bytes",
   "codex-protocol",
-@@ -3479,7 +3479,7 @@ dependencies = [
+@@ -3479,7 +3480,7 @@ dependencies = [
  
  [[package]]
  name = "codex-file-watcher"
@@ -525,7 +533,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "notify",
   "pretty_assertions",
-@@ -3490,7 +3490,7 @@ dependencies = [
+@@ -3490,7 +3491,7 @@ dependencies = [
  
  [[package]]
  name = "codex-git-attribution"
@@ -534,7 +542,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-backend-client",
   "codex-extension-api",
-@@ -3503,7 +3503,7 @@ dependencies = [
+@@ -3503,7 +3504,7 @@ dependencies = [
  
  [[package]]
  name = "codex-git-utils"
@@ -543,7 +551,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -3529,7 +3529,7 @@ dependencies = [
+@@ -3529,7 +3530,7 @@ dependencies = [
  
  [[package]]
  name = "codex-goal-extension"
@@ -552,7 +560,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -3553,7 +3553,7 @@ dependencies = [
+@@ -3553,7 +3554,7 @@ dependencies = [
  
  [[package]]
  name = "codex-guardian-context"
@@ -561,7 +569,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-context-fragments",
   "codex-history",
-@@ -3564,7 +3564,7 @@ dependencies = [
+@@ -3564,7 +3565,7 @@ dependencies = [
  
  [[package]]
  name = "codex-guardian-reviewer"
@@ -570,7 +578,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-analytics",
-@@ -3588,7 +3588,7 @@ dependencies = [
+@@ -3588,7 +3589,7 @@ dependencies = [
  
  [[package]]
  name = "codex-guardian-v2"
@@ -579,7 +587,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-analytics",
-@@ -3618,7 +3618,7 @@ dependencies = [
+@@ -3618,7 +3619,7 @@ dependencies = [
  
  [[package]]
  name = "codex-history"
@@ -588,7 +596,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-protocol",
-@@ -3630,7 +3630,7 @@ dependencies = [
+@@ -3630,7 +3631,7 @@ dependencies = [
  
  [[package]]
  name = "codex-history-notes-extension"
@@ -597,7 +605,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-analytics",
   "codex-api",
-@@ -3655,7 +3655,7 @@ dependencies = [
+@@ -3655,7 +3656,7 @@ dependencies = [
  
  [[package]]
  name = "codex-home"
@@ -606,7 +614,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-extension-api",
   "codex-utils-absolute-path",
-@@ -3667,7 +3667,7 @@ dependencies = [
+@@ -3667,7 +3668,7 @@ dependencies = [
  
  [[package]]
  name = "codex-hooks"
@@ -615,7 +623,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "async-channel",
-@@ -3693,7 +3693,7 @@ dependencies = [
+@@ -3693,7 +3694,7 @@ dependencies = [
  
  [[package]]
  name = "codex-http-client"
@@ -624,7 +632,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "bytes",
   "codex-utils-cargo-bin",
-@@ -3726,7 +3726,7 @@ dependencies = [
+@@ -3726,7 +3727,7 @@ dependencies = [
  
  [[package]]
  name = "codex-image-generation-extension"
@@ -633,7 +641,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-api",
-@@ -3753,7 +3753,7 @@ dependencies = [
+@@ -3753,7 +3754,7 @@ dependencies = [
  
  [[package]]
  name = "codex-install-context"
@@ -642,7 +650,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-utils-absolute-path",
   "codex-utils-home-dir",
-@@ -3766,7 +3766,7 @@ dependencies = [
+@@ -3766,7 +3767,7 @@ dependencies = [
  
  [[package]]
  name = "codex-keyring-store"
@@ -651,7 +659,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "keyring",
   "tracing",
-@@ -3774,7 +3774,7 @@ dependencies = [
+@@ -3774,7 +3775,7 @@ dependencies = [
  
  [[package]]
  name = "codex-linux-sandbox"
@@ -660,7 +668,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "clap",
   "codex-core",
-@@ -3801,7 +3801,7 @@ dependencies = [
+@@ -3801,7 +3802,7 @@ dependencies = [
  
  [[package]]
  name = "codex-lmstudio"
@@ -669,7 +677,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-core",
   "codex-http-client",
-@@ -3815,7 +3815,7 @@ dependencies = [
+@@ -3815,7 +3816,7 @@ dependencies = [
  
  [[package]]
  name = "codex-login"
@@ -678,7 +686,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "base64 0.22.1",
-@@ -3858,7 +3858,7 @@ dependencies = [
+@@ -3858,7 +3859,7 @@ dependencies = [
  
  [[package]]
  name = "codex-mcp"
@@ -687,7 +695,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "arc-swap",
-@@ -3898,7 +3898,7 @@ dependencies = [
+@@ -3898,7 +3899,7 @@ dependencies = [
  
  [[package]]
  name = "codex-mcp-extension"
@@ -696,7 +704,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "axum",
-@@ -3929,7 +3929,7 @@ dependencies = [
+@@ -3929,7 +3930,7 @@ dependencies = [
  
  [[package]]
  name = "codex-memories-extension"
@@ -705,7 +713,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-core",
   "codex-extension-api",
-@@ -3951,7 +3951,7 @@ dependencies = [
+@@ -3951,7 +3952,7 @@ dependencies = [
  
  [[package]]
  name = "codex-memories-read"
@@ -714,7 +722,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-protocol",
   "codex-shell-command",
-@@ -3961,7 +3961,7 @@ dependencies = [
+@@ -3961,7 +3962,7 @@ dependencies = [
  
  [[package]]
  name = "codex-memories-write"
@@ -723,7 +731,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -3998,7 +3998,7 @@ dependencies = [
+@@ -3998,7 +3999,7 @@ dependencies = [
  
  [[package]]
  name = "codex-message-history"
@@ -732,7 +740,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-config",
   "memchr",
-@@ -4012,7 +4012,7 @@ dependencies = [
+@@ -4012,7 +4013,7 @@ dependencies = [
  
  [[package]]
  name = "codex-model-provider"
@@ -741,7 +749,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "chrono",
-@@ -4042,7 +4042,7 @@ dependencies = [
+@@ -4042,7 +4043,7 @@ dependencies = [
  
  [[package]]
  name = "codex-model-provider-info"
@@ -750,7 +758,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-api",
   "codex-protocol",
-@@ -4059,7 +4059,7 @@ dependencies = [
+@@ -4059,7 +4060,7 @@ dependencies = [
  
  [[package]]
  name = "codex-models-manager"
@@ -759,7 +767,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "chrono",
   "codex-collaboration-mode-templates",
-@@ -4078,7 +4078,7 @@ dependencies = [
+@@ -4078,7 +4079,7 @@ dependencies = [
  
  [[package]]
  name = "codex-mxc-sandbox"
@@ -768,7 +776,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "appcontainer_common",
-@@ -4100,7 +4100,7 @@ dependencies = [
+@@ -4100,7 +4101,7 @@ dependencies = [
  
  [[package]]
  name = "codex-network-proxy"
@@ -777,7 +785,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "base64 0.22.1",
-@@ -4144,7 +4144,7 @@ dependencies = [
+@@ -4144,7 +4145,7 @@ dependencies = [
  
  [[package]]
  name = "codex-ollama"
@@ -786,7 +794,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "assert_matches",
   "async-stream",
-@@ -4164,7 +4164,7 @@ dependencies = [
+@@ -4164,7 +4165,7 @@ dependencies = [
  
  [[package]]
  name = "codex-otel"
@@ -795,7 +803,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "chrono",
   "codex-api",
-@@ -4197,7 +4197,7 @@ dependencies = [
+@@ -4197,7 +4198,7 @@ dependencies = [
  
  [[package]]
  name = "codex-otel-trace-websocket"
@@ -804,7 +812,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "axum",
-@@ -4208,7 +4208,7 @@ dependencies = [
+@@ -4208,7 +4209,7 @@ dependencies = [
  
  [[package]]
  name = "codex-plugin"
@@ -813,7 +821,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-config",
   "codex-protocol",
-@@ -4222,7 +4222,7 @@ dependencies = [
+@@ -4222,7 +4223,7 @@ dependencies = [
  
  [[package]]
  name = "codex-process-hardening"
@@ -822,7 +830,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "libc",
   "pretty_assertions",
-@@ -4230,7 +4230,7 @@ dependencies = [
+@@ -4230,7 +4231,7 @@ dependencies = [
  
  [[package]]
  name = "codex-prompts"
@@ -831,7 +839,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-context-fragments",
-@@ -4244,7 +4244,7 @@ dependencies = [
+@@ -4244,7 +4245,7 @@ dependencies = [
  
  [[package]]
  name = "codex-protocol"
@@ -840,7 +848,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chardetng",
-@@ -4288,7 +4288,7 @@ dependencies = [
+@@ -4288,7 +4289,7 @@ dependencies = [
  
  [[package]]
  name = "codex-queue-extension"
@@ -849,7 +857,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-core",
-@@ -4309,7 +4309,7 @@ dependencies = [
+@@ -4309,7 +4310,7 @@ dependencies = [
  
  [[package]]
  name = "codex-realtime-webrtc"
@@ -858,7 +866,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-build-info",
-@@ -4327,7 +4327,7 @@ dependencies = [
+@@ -4327,7 +4328,7 @@ dependencies = [
  
  [[package]]
  name = "codex-response-debug-context"
@@ -867,7 +875,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-api",
-@@ -4338,7 +4338,7 @@ dependencies = [
+@@ -4338,7 +4339,7 @@ dependencies = [
  
  [[package]]
  name = "codex-responses-api-proxy"
@@ -876,7 +884,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "clap",
-@@ -4355,7 +4355,7 @@ dependencies = [
+@@ -4355,7 +4356,7 @@ dependencies = [
  
  [[package]]
  name = "codex-rmcp-client"
@@ -885,7 +893,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "axum",
-@@ -4403,7 +4403,7 @@ dependencies = [
+@@ -4403,7 +4404,7 @@ dependencies = [
  
  [[package]]
  name = "codex-rollout"
@@ -894,7 +902,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -4430,7 +4430,7 @@ dependencies = [
+@@ -4430,7 +4431,7 @@ dependencies = [
  
  [[package]]
  name = "codex-rollout-trace"
@@ -903,7 +911,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-code-mode",
-@@ -4446,7 +4446,7 @@ dependencies = [
+@@ -4446,7 +4447,7 @@ dependencies = [
  
  [[package]]
  name = "codex-sandboxing"
@@ -912,7 +920,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-mxc-sandbox",
-@@ -4472,7 +4472,7 @@ dependencies = [
+@@ -4472,7 +4473,7 @@ dependencies = [
  
  [[package]]
  name = "codex-secrets"
@@ -921,7 +929,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "age",
   "anyhow",
-@@ -4493,7 +4493,7 @@ dependencies = [
+@@ -4493,7 +4494,7 @@ dependencies = [
  
  [[package]]
  name = "codex-shell-command"
@@ -930,7 +938,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "base64 0.22.1",
-@@ -4516,7 +4516,7 @@ dependencies = [
+@@ -4516,7 +4517,7 @@ dependencies = [
  
  [[package]]
  name = "codex-shell-escalation"
@@ -939,7 +947,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "clap",
-@@ -4536,7 +4536,7 @@ dependencies = [
+@@ -4536,7 +4537,7 @@ dependencies = [
  
  [[package]]
  name = "codex-skills"
@@ -948,7 +956,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-protocol",
   "codex-shell-command",
-@@ -4553,7 +4553,7 @@ dependencies = [
+@@ -4553,7 +4554,7 @@ dependencies = [
  
  [[package]]
  name = "codex-skills-extension"
@@ -957,7 +965,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "assert_matches",
   "codex-analytics",
-@@ -4590,7 +4590,7 @@ dependencies = [
+@@ -4590,7 +4591,7 @@ dependencies = [
  
  [[package]]
  name = "codex-state"
@@ -966,7 +974,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "chrono",
-@@ -4614,7 +4614,7 @@ dependencies = [
+@@ -4614,7 +4615,7 @@ dependencies = [
  
  [[package]]
  name = "codex-stdio-to-uds"
@@ -975,7 +983,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-uds",
-@@ -4626,7 +4626,7 @@ dependencies = [
+@@ -4626,7 +4627,7 @@ dependencies = [
  
  [[package]]
  name = "codex-terminal-detection"
@@ -984,7 +992,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "pretty_assertions",
   "tracing",
-@@ -4634,7 +4634,7 @@ dependencies = [
+@@ -4634,7 +4635,7 @@ dependencies = [
  
  [[package]]
  name = "codex-test-binary-support"
@@ -993,7 +1001,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-arg0",
   "tempfile",
-@@ -4642,7 +4642,7 @@ dependencies = [
+@@ -4642,7 +4643,7 @@ dependencies = [
  
  [[package]]
  name = "codex-thread-manager-sample"
@@ -1002,7 +1010,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "clap",
-@@ -4653,7 +4653,7 @@ dependencies = [
+@@ -4653,7 +4654,7 @@ dependencies = [
  
  [[package]]
  name = "codex-thread-store"
@@ -1011,7 +1019,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "chrono",
   "codex-app-server-protocol",
-@@ -4683,7 +4683,7 @@ dependencies = [
+@@ -4683,7 +4684,7 @@ dependencies = [
  
  [[package]]
  name = "codex-tools"
@@ -1020,7 +1028,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "bitflags 2.13.1",
   "codex-code-mode",
-@@ -4708,7 +4708,7 @@ dependencies = [
+@@ -4708,7 +4709,7 @@ dependencies = [
  
  [[package]]
  name = "codex-tui"
@@ -1029,7 +1037,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "app_test_support",
-@@ -4829,7 +4829,7 @@ dependencies = [
+@@ -4829,7 +4830,7 @@ dependencies = [
  
  [[package]]
  name = "codex-uds"
@@ -1038,7 +1046,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "async-io",
   "pretty_assertions",
-@@ -4842,7 +4842,7 @@ dependencies = [
+@@ -4842,7 +4843,7 @@ dependencies = [
  
  [[package]]
  name = "codex-user-verification"
@@ -1047,7 +1055,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "core-foundation 0.10.1",
-@@ -4862,7 +4862,7 @@ dependencies = [
+@@ -4862,7 +4863,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-absolute-path"
@@ -1056,7 +1064,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "dirs",
   "dunce",
-@@ -4876,14 +4876,14 @@ dependencies = [
+@@ -4876,14 +4877,14 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-approval-presets"
@@ -1073,7 +1081,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-protocol",
-@@ -4897,7 +4897,7 @@ dependencies = [
+@@ -4897,7 +4898,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-cache"
@@ -1082,7 +1090,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "lru",
   "sha1 0.10.6",
-@@ -4906,7 +4906,7 @@ dependencies = [
+@@ -4906,7 +4907,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-cargo-bin"
@@ -1091,7 +1099,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "assert_cmd",
   "runfiles",
-@@ -4915,7 +4915,7 @@ dependencies = [
+@@ -4915,7 +4916,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-cli"
@@ -1100,7 +1108,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "clap",
   "codex-protocol",
-@@ -4927,15 +4927,15 @@ dependencies = [
+@@ -4927,15 +4928,15 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-elapsed"
@@ -1119,7 +1127,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-git-utils",
   "codex-utils-absolute-path",
-@@ -4948,7 +4948,7 @@ dependencies = [
+@@ -4948,7 +4949,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-home-dir"
@@ -1128,7 +1136,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-utils-absolute-path",
   "dirs",
-@@ -4958,7 +4958,7 @@ dependencies = [
+@@ -4958,7 +4959,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-image"
@@ -1137,7 +1145,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-utils-cache",
-@@ -4971,7 +4971,7 @@ dependencies = [
+@@ -4971,7 +4972,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-json-to-toml"
@@ -1146,7 +1154,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "pretty_assertions",
   "serde_json",
-@@ -4980,7 +4980,7 @@ dependencies = [
+@@ -4980,7 +4981,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-oss"
@@ -1155,7 +1163,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-core",
   "codex-lmstudio",
-@@ -4990,7 +4990,7 @@ dependencies = [
+@@ -4990,7 +4991,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-output-truncation"
@@ -1164,7 +1172,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-protocol",
   "codex-utils-string",
-@@ -4999,7 +4999,7 @@ dependencies = [
+@@ -4999,7 +5000,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-path"
@@ -1173,7 +1181,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-utils-absolute-path",
   "dunce",
-@@ -5010,7 +5010,7 @@ dependencies = [
+@@ -5010,7 +5011,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-path-uri"
@@ -1182,7 +1190,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "base64 0.22.1",
   "codex-utils-absolute-path",
-@@ -5026,7 +5026,7 @@ dependencies = [
+@@ -5026,7 +5027,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-plugins"
@@ -1191,7 +1199,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-exec-server",
   "codex-exec-server-protocol",
-@@ -5040,7 +5040,7 @@ dependencies = [
+@@ -5040,7 +5041,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-pty"
@@ -1200,7 +1208,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "filedescriptor",
-@@ -5056,7 +5056,7 @@ dependencies = [
+@@ -5056,7 +5057,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-readiness"
@@ -1209,7 +1217,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "assert_matches",
   "thiserror 2.0.18",
-@@ -5066,7 +5066,7 @@ dependencies = [
+@@ -5066,7 +5067,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-redacted-string"
@@ -1218,7 +1226,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "schemars 0.8.22",
   "serde",
-@@ -5074,14 +5074,14 @@ dependencies = [
+@@ -5074,14 +5075,14 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-rustls-provider"
@@ -1235,7 +1243,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-protocol",
   "codex-utils-absolute-path",
-@@ -5090,7 +5090,7 @@ dependencies = [
+@@ -5090,7 +5091,7 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-sleep-inhibitor"
@@ -1244,7 +1252,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "core-foundation 0.9.4",
   "libc",
-@@ -5100,14 +5100,14 @@ dependencies = [
+@@ -5100,14 +5101,14 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-stream-parser"
@@ -1261,7 +1269,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "pretty_assertions",
   "regex-lite",
-@@ -5117,14 +5117,14 @@ dependencies = [
+@@ -5117,14 +5118,14 @@ dependencies = [
  
  [[package]]
  name = "codex-utils-template"
@@ -1278,7 +1286,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "pretty_assertions",
   "v8",
-@@ -5132,7 +5132,7 @@ dependencies = [
+@@ -5132,7 +5133,7 @@ dependencies = [
  
  [[package]]
  name = "codex-voice-host"
@@ -1287,7 +1295,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-install-context",
-@@ -5159,7 +5159,7 @@ dependencies = [
+@@ -5159,7 +5160,7 @@ dependencies = [
  
  [[package]]
  name = "codex-web-search-extension"
@@ -1296,7 +1304,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-api",
   "codex-core",
-@@ -5180,7 +5180,7 @@ dependencies = [
+@@ -5180,7 +5181,7 @@ dependencies = [
  
  [[package]]
  name = "codex-websocket-client"
@@ -1305,7 +1313,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-http-client",
   "codex-utils-rustls-provider",
-@@ -5196,7 +5196,7 @@ dependencies = [
+@@ -5196,7 +5197,7 @@ dependencies = [
  
  [[package]]
  name = "codex-windows-sandbox"
@@ -1314,7 +1322,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "base64 0.22.1",
-@@ -5222,7 +5222,7 @@ dependencies = [
+@@ -5222,7 +5223,7 @@ dependencies = [
  
  [[package]]
  name = "codex-windows-sandbox-service"
@@ -1323,7 +1331,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-cloud-config",
-@@ -5239,7 +5239,7 @@ dependencies = [
+@@ -5239,7 +5240,7 @@ dependencies = [
  
  [[package]]
  name = "codex-workload-identity"
@@ -1332,7 +1340,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "codex-http-client",
   "pretty_assertions",
-@@ -5254,7 +5254,7 @@ dependencies = [
+@@ -5254,7 +5255,7 @@ dependencies = [
  
  [[package]]
  name = "codex-worktree"
@@ -1341,7 +1349,7 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "codex-git-utils",
-@@ -5494,7 +5494,7 @@ dependencies = [
+@@ -5494,7 +5495,7 @@ dependencies = [
  
  [[package]]
  name = "core_test_support"
@@ -12992,11 +13000,40 @@ index 863ccb9..76c0c40 100644
  }
  
  fn create_config_toml(
+diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
+index 24c6640..a851e53 100644
+--- a/codex-rs/core/Cargo.toml
++++ b/codex-rs/core/Cargo.toml
+@@ -105,6 +105,7 @@ rmcp = { workspace = true, default-features = false, features = [
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true }
+ sha1 = { workspace = true }
++sha2 = { workspace = true }
+ shlex = { workspace = true }
+ similar = { workspace = true }
+ tempfile = { workspace = true }
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 5957c19..af1bde9 100644
+index 5957c19..1cd91b8 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -374,6 +374,63 @@ fn responses_request_properties_match(
+@@ -126,6 +126,7 @@ use crate::context::ContextualUserFragment;
+ use crate::cyber_access_program;
+ use crate::feedback_tags;
+ use crate::responses_metadata::CodexResponsesMetadata;
++use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::subagent_header_value;
+ use crate::util::emit_feedback_auth_recovery_tags;
+ use codex_feedback::FeedbackRequestTags;
+@@ -171,6 +172,8 @@ const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
+     "x-openai-internal-codex-responses-lite";
+ const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
+ const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
++#[path = "client_current_user_text.rs"]
++mod current_user_text;
+ #[cfg(test)]
+ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
+     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
+@@ -374,6 +377,63 @@ fn responses_request_properties_match(
          && previous_text == current_text
  }
  
@@ -13060,9 +13097,21 @@ index 5957c19..af1bde9 100644
  fn response_items_equal_ignoring_internal_metadata(
      previous: &ResponseItem,
      current: &ResponseItem,
-@@ -865,16 +922,7 @@ impl ModelClient {
+@@ -864,17 +924,19 @@ impl ModelClient {
+                 Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
              )
          };
++        let mut client_metadata = responses_metadata.client_metadata();
++        if !is_openai
++            && matches!(responses_metadata.request_kind, Some(CodexResponsesRequestKind::Turn))
++            && let Some(turn_id) = responses_metadata.turn_id.as_deref()
++        {
++            // Bind the proof to the finalized input before external projection
++            // removes its native per-item provenance. Never infer from prose.
++            current_user_text::add_to_request(
++                &input, &responses_metadata.thread_id, turn_id, &mut client_metadata,
++            );
++        }
          if !is_openai {
 -            for item in &mut input {
 -                item.clear_internal_chat_message_metadata_passthrough();
@@ -13078,14 +13127,561 @@ index 5957c19..af1bde9 100644
          }
          let reasoning = self.build_reasoning(model_info, effort, summary);
          let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+@@ -917,7 +979,7 @@ impl ModelClient {
+             service_tier,
+             prompt_cache_key,
+             text,
+-            client_metadata: Some(responses_metadata.client_metadata()),
++            client_metadata: Some(client_metadata),
+             access_programs: None,
+         };
+         Ok(request)
+@@ -1666,6 +1728,7 @@ impl ModelClientSession {
+             );
+             self.client
+                 .prepare_response_items_for_request(&mut request.input);
++            current_user_text::enforce_http_body_budget(&mut request);
+             if crate::guardian::is_basic_session_source(&self.client.state.session_source) {
+                 crate::guardian::observe_guardian_request(session_telemetry, &request);
+             }
+@@ -1795,6 +1858,7 @@ impl ModelClientSession {
+                 service_tier.clone(),
+                 responses_metadata,
+             )?;
++            current_user_text::remove_for_websocket(&mut request);
+             ModelClient::filter_tool_result_metadata(
+                 &mut request.input,
+                 &client_setup.api_provider,
+diff --git a/codex-rs/core/src/client_current_user_text.rs b/codex-rs/core/src/client_current_user_text.rs
+new file mode 100644
+index 0000000..e643159
+--- /dev/null
++++ b/codex-rs/core/src/client_current_user_text.rs
+@@ -0,0 +1,146 @@
++//! Request-local evidence that exact current-turn user text remains in input.
++//! This is not authority to alter history. The local API bridge independently
++//! matches these bytes against its admitted original request and accepted steers.
++
++use std::collections::HashMap;
++
++use codex_api::ResponsesApiRequest;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use sha2::Digest;
++use sha2::Sha256;
++use uuid::Uuid;
++
++use crate::responses_metadata::CURRENT_USER_TEXT_PROOF_KEY;
++
++// Mirror existing bridge admission limits; exceeding any omits the optional
++// proof and leaves its established user-reminder fallback in place.
++const MAX_INPUT_ITEMS: usize = 8_192;
++const MAX_USER_INPUTS: usize = 1_024;
++const MAX_USER_BYTES: usize = 2_000_000;
++const MAX_METADATA_BYTES: usize = 16_384;
++const MAX_HTTP_BODY_BYTES: usize = 2_000_000;
++const DOMAIN: &[u8] = b"computa.current_user_text.v1\0";
++
++/// Called only for an explicitly ordinary native turn, on finalized input before
++/// provenance stripping. Re-ID is irrelevant; indices identify this request.
++pub(super) fn add_to_request(
++    input: &[ResponseItem],
++    thread_id: &str,
++    turn_id: &str,
++    metadata: &mut HashMap<String, String>,
++) {
++    // Defensive removal also makes accidental reuse fail closed. External
++    // client/config metadata is separately forbidden from supplying this key.
++    metadata.remove(CURRENT_USER_TEXT_PROOF_KEY);
++    let Some(proof) = proof(input, thread_id, turn_id) else {
++        return;
++    };
++    metadata.insert(CURRENT_USER_TEXT_PROOF_KEY.to_string(), proof);
++    if !serde_json::to_vec(metadata).is_ok_and(|bytes| bytes.len() <= MAX_METADATA_BYTES) {
++        metadata.remove(CURRENT_USER_TEXT_PROOF_KEY);
++    }
++}
++
++/// Check the finalized HTTP request, after all normal request preparation. An
++/// optional proof must not make a previously admissible bridge body too large.
++/// Requests without the proof keep their existing serialization/error behavior.
++pub(super) fn enforce_http_body_budget(request: &mut ResponsesApiRequest) {
++    if !request
++        .client_metadata
++        .as_ref()
++        .is_some_and(|metadata| metadata.contains_key(CURRENT_USER_TEXT_PROOF_KEY))
++    {
++        return;
++    }
++    if !serde_json::to_vec(&*request).is_ok_and(|bytes| bytes.len() <= MAX_HTTP_BODY_BYTES)
++        && let Some(metadata) = request.client_metadata.as_mut()
++    {
++        metadata.remove(CURRENT_USER_TEXT_PROOF_KEY);
++    }
++}
++
++/// WebSocket deltas can change input positions. This v1 proof is HTTP-only;
++/// suppress it before any incremental input or previous-response shaping.
++pub(super) fn remove_for_websocket(request: &mut ResponsesApiRequest) {
++    if let Some(metadata) = request.client_metadata.as_mut() {
++        metadata.remove(CURRENT_USER_TEXT_PROOF_KEY);
++    }
++}
++
++fn proof(input: &[ResponseItem], thread_id: &str, turn_id: &str) -> Option<String> {
++    if input.len() > MAX_INPUT_ITEMS {
++        return None;
++    }
++    let thread = Uuid::parse_str(thread_id).ok()?.to_string();
++    let turn = Uuid::parse_str(turn_id).ok()?;
++    let mut entries = Vec::<(usize, &str)>::new();
++    let mut bytes = 0usize;
++    for (index, item) in input.iter().enumerate() {
++        let ResponseItem::Message {
++            role,
++            content,
++            phase,
++            internal_chat_message_metadata_passthrough: Some(native),
++            ..
++        } = item
++        else {
++            continue;
++        };
++        if role != "user"
++            || native
++                .turn_id
++                .as_deref()
++                .and_then(|id| Uuid::parse_str(id).ok())
++                != Some(turn)
++        {
++            continue;
++        }
++        let kinds = native.content_item_kinds.as_ref()?;
++        if kinds.len() != content.len() {
++            return None;
++        }
++        if !kinds.iter().any(|kind| kind.0 == "user.text") {
++            continue; // Typed environment/summary data is never human input.
++        }
++        // Multi-part or mixed contextual messages cannot establish the exact
++        // one-input-per-native-message contract. Do not guess a separator.
++        if phase.is_some() || kinds.len() != 1 || kinds[0].0 != "user.text" {
++            return None;
++        }
++        let [ContentItem::InputText { text }] = content.as_slice() else {
++            return None;
++        };
++        bytes = bytes.checked_add(text.len())?;
++        if text.is_empty() || bytes > MAX_USER_BYTES || entries.len() == MAX_USER_INPUTS {
++            return None;
++        }
++        entries.push((index, text));
++    }
++    if entries.is_empty() {
++        return None;
++    }
++    let mut hash = Sha256::new();
++    hash.update(DOMAIN);
++    let canonical_turn = turn.to_string();
++    for value in [thread.as_str(), canonical_turn.as_str(), "turn"] {
++        hash.update((value.len() as u64).to_be_bytes());
++        hash.update(value.as_bytes());
++    }
++    hash.update((entries.len() as u64).to_be_bytes());
++    for (index, text) in &entries {
++        hash.update((*index as u64).to_be_bytes());
++        hash.update((text.len() as u64).to_be_bytes());
++        hash.update(text.as_bytes());
++    }
++    let digest = format!("{:x}", hash.finalize());
++    serde_json::to_string(&serde_json::json!({
++        "indices": entries.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
++        "sha256": digest,
++    }))
++    .ok()
++}
++
++#[cfg(test)]
++#[path = "client_current_user_text_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/client_current_user_text_tests.rs b/codex-rs/core/src/client_current_user_text_tests.rs
+new file mode 100644
+index 0000000..b8a7b9c
+--- /dev/null
++++ b/codex-rs/core/src/client_current_user_text_tests.rs
+@@ -0,0 +1,308 @@
++use super::*;
++use codex_protocol::models::ContentItemKind;
++use codex_protocol::models::InternalChatMessageMetadataPassthrough;
++use serde_json::Value;
++use serde_json::json;
++
++const THREAD: &str = "11111111-1111-4111-8111-111111111111";
++const TURN: &str = "22222222-2222-4222-8222-222222222222";
++const OTHER: &str = "33333333-3333-4333-8333-333333333333";
++
++fn message(role: &str, turn: Option<&str>, parts: &[(&str, &str)]) -> ResponseItem {
++    ResponseItem::Message {
++        id: None,
++        role: role.to_string(),
++        content: parts
++            .iter()
++            .map(|(_, text)| ContentItem::InputText {
++                text: (*text).to_string(),
++            })
++            .collect(),
++        phase: None,
++        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
++            turn_id: turn.map(str::to_string),
++            content_item_kinds: Some(
++                parts
++                    .iter()
++                    .map(|(kind, _)| ContentItemKind((*kind).to_string()))
++                    .collect(),
++            ),
++            ..Default::default()
++        }),
++    }
++}
++
++fn human(text: &str) -> ResponseItem {
++    message("user", Some(TURN), &[("user.text", text)])
++}
++
++fn parsed(input: &[ResponseItem]) -> Value {
++    serde_json::from_str(&proof(input, THREAD, TURN).expect("native proof")).unwrap()
++}
++
++#[test]
++fn proof_matches_independent_utf8_framing_vector_and_precise_positions() {
++    let input = vec![
++        message("user", Some(TURN), &[("environments.environment_context", "environment")]),
++        human("  e\u{301} 🧭\n\0\"quoted\"  "),
++        serde_json::from_value(json!({"type":"function_call","call_id":"call-1","name":"browser_read","arguments":"{}"})).unwrap(),
++        serde_json::from_value(json!({"type":"function_call_output","call_id":"call-1","output":"observed page"})).unwrap(),
++        human("Keep it read-only.\nNo sending."),
++    ];
++    let before = serde_json::to_vec(&input).unwrap();
++    let value = parsed(&input);
++    assert_eq!(
++        value,
++        json!({"indices":[1,4], "sha256":"1f83b894cedf6049f768ada9c879c83686569d5d33e296dd7f437be3032b06f8"})
++    );
++    assert_eq!(serde_json::to_vec(&input).unwrap(), before);
++    let mut moved = input.clone();
++    moved.insert(
++        0,
++        message("assistant", Some(TURN), &[("assistant.text", "context")]),
++    );
++    assert_ne!(parsed(&moved)["sha256"], value["sha256"]);
++    assert_ne!(proof(&input, OTHER, TURN), proof(&input, THREAD, TURN));
++}
++
++#[test]
++fn proof_requires_native_current_user_text_and_rejects_mixed_messages() {
++    let mut input = vec![
++        message("user", Some(OTHER), &[("user.text", "same")]),
++        message("user", None, &[("user.text", "same")]),
++        message("assistant", Some(TURN), &[("user.text", "same")]),
++        message("user", Some(TURN), &[("compaction.summary", "same")]),
++        human("same"),
++    ];
++    assert_eq!(parsed(&input)["indices"], json!([4]));
++    input.pop();
++    assert!(proof(&input, THREAD, TURN).is_none());
++    for parts in [
++        vec![("user.text", "same"), ("user.text", "steer")],
++        vec![
++            ("user.text", "same"),
++            ("environments.environment_context", "environment"),
++        ],
++    ] {
++        input.push(message("user", Some(TURN), &parts));
++        assert!(proof(&input, THREAD, TURN).is_none());
++        input.pop();
++    }
++    let mut missing_kind = human("same");
++    if let ResponseItem::Message {
++        internal_chat_message_metadata_passthrough: Some(native),
++        ..
++    } = &mut missing_kind
++    {
++        native.content_item_kinds = None;
++    }
++    input.extend([human("valid"), missing_kind]);
++    assert!(proof(&input, THREAD, TURN).is_none());
++}
++
++#[test]
++fn proof_preserves_order_multiplicity_unicode_and_does_not_follow_item_ids() {
++    let input = vec![human("first"), human("e\u{301}"), human("first")];
++    let original = parsed(&input);
++    assert_eq!(original["indices"], json!([0, 1, 2]));
++    let mut changed = input.clone();
++    changed.swap(0, 1);
++    assert_ne!(parsed(&changed)["sha256"], original["sha256"]);
++    changed = input.clone();
++    changed[1] = human("é");
++    assert_ne!(parsed(&changed)["sha256"], original["sha256"]);
++    changed = input.clone();
++    changed.pop();
++    assert_ne!(parsed(&changed)["sha256"], original["sha256"]);
++    let mut reidentified = input.clone();
++    for item in &mut reidentified {
++        item.set_id(Some(codex_protocol::ResponseItemId::new("msg")));
++    }
++    let reloaded: Vec<ResponseItem> =
++        serde_json::from_slice(&serde_json::to_vec(&reidentified).unwrap()).unwrap();
++    assert_eq!(parsed(&reloaded), original);
++    let framed_a = parsed(&[human("ab"), human("c")]);
++    let framed_b = parsed(&[human("a"), human("bc")]);
++    assert_ne!(framed_a["sha256"], framed_b["sha256"]);
++}
++
++#[test]
++fn proof_records_only_remaining_bytes_after_truncation_or_missing_steer() {
++    let full = parsed(&[human("original request"), human("accepted restriction")]);
++    let truncated = parsed(&[human("original"), human("accepted restriction")]);
++    let dropped = parsed(&[human("accepted restriction")]);
++    // The bridge compares these against the full independent admitted sequence;
++    // neither can suppress its original-input reminder fallback.
++    assert_ne!(full["sha256"], truncated["sha256"]);
++    assert_ne!(full["sha256"], dropped["sha256"]);
++    assert_eq!(dropped["indices"], json!([0]));
++}
++
++#[test]
++fn proof_obeys_existing_input_count_and_text_bounds() {
++    let max_inputs = vec![human("x"); MAX_USER_INPUTS];
++    assert!(proof(&max_inputs, THREAD, TURN).is_some());
++    let mut too_many = max_inputs;
++    too_many.push(human("x"));
++    assert!(proof(&too_many, THREAD, TURN).is_none());
++    assert!(proof(&[human(&"x".repeat(MAX_USER_BYTES))], THREAD, TURN).is_some());
++    assert!(proof(&[human(&"x".repeat(MAX_USER_BYTES + 1))], THREAD, TURN).is_none());
++    let filler = message("assistant", Some(TURN), &[("assistant.text", "x")]);
++    let mut input = vec![filler; MAX_INPUT_ITEMS];
++    input[MAX_INPUT_ITEMS - 1] = human("last");
++    assert_eq!(parsed(&input)["indices"], json!([MAX_INPUT_ITEMS - 1]));
++    input.push(human("too late"));
++    assert!(proof(&input, THREAD, TURN).is_none());
++    assert!(proof(&[human("x")], "bad-thread", TURN).is_none());
++    assert!(proof(&[human("x")], THREAD, "bad-turn").is_none());
++}
++
++#[test]
++fn proof_budget_counts_the_entire_escaped_metadata_without_mutating_other_fields() {
++    let input = [human("read only")];
++    let mut metadata = HashMap::from([("native".to_string(), "\"\\\n🧭".to_string())]);
++    add_to_request(&input, THREAD, TURN, &mut metadata);
++    assert!(metadata.contains_key(CURRENT_USER_TEXT_PROOF_KEY));
++    metadata.insert("padding".to_string(), String::new());
++    let room = MAX_METADATA_BYTES - serde_json::to_vec(&metadata).unwrap().len();
++    metadata.insert("padding".to_string(), "x".repeat(room));
++    add_to_request(&input, THREAD, TURN, &mut metadata);
++    assert_eq!(
++        serde_json::to_vec(&metadata).unwrap().len(),
++        MAX_METADATA_BYTES
++    );
++    assert!(metadata.contains_key(CURRENT_USER_TEXT_PROOF_KEY));
++    metadata.get_mut("padding").unwrap().push('x');
++    let original_padding = metadata["padding"].clone();
++    add_to_request(&input, THREAD, TURN, &mut metadata);
++    assert!(!metadata.contains_key(CURRENT_USER_TEXT_PROOF_KEY));
++    assert_eq!(metadata["padding"], original_padding);
++    assert_eq!(metadata["native"], "\"\\\n🧭");
++    metadata.insert(
++        CURRENT_USER_TEXT_PROOF_KEY.to_string(),
++        "untrusted stale proof".to_string(),
++    );
++    add_to_request(&[], THREAD, TURN, &mut metadata);
++    assert!(!metadata.contains_key(CURRENT_USER_TEXT_PROOF_KEY));
++}
++
++fn http_request() -> ResponsesApiRequest {
++    let input = vec![human("Keep e\u{301} 🧭\n\0\"quoted\" exact.")];
++    let mut metadata = HashMap::from([("native".to_string(), "\"\\\n🧭".to_string())]);
++    add_to_request(&input, THREAD, TURN, &mut metadata);
++    ResponsesApiRequest {
++        model: "test".to_string(),
++        instructions: "Escaped \"body\"\n\0🧭".to_string(),
++        input,
++        tools: None,
++        tool_choice: "auto".to_string(),
++        parallel_tool_calls: false,
++        reasoning: None,
++        store: false,
++        stream: true,
++        stream_options: None,
++        include: Vec::new(),
++        service_tier: None,
++        prompt_cache_key: None,
++        text: None,
++        client_metadata: Some(metadata),
++        access_programs: None,
++    }
++}
++
++#[test]
++fn final_http_body_budget_preserves_exact_limit_and_removes_only_optional_proof_at_plus_one() {
++    let mut request = http_request();
++    let room = MAX_HTTP_BODY_BYTES - serde_json::to_vec(&request).unwrap().len();
++    request.instructions.push_str(&"x".repeat(room));
++    assert_eq!(
++        serde_json::to_vec(&request).unwrap().len(),
++        MAX_HTTP_BODY_BYTES
++    );
++    let exact = request.clone();
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, exact);
++
++    request.instructions.push('x');
++    assert_eq!(
++        serde_json::to_vec(&request).unwrap().len(),
++        MAX_HTTP_BODY_BYTES + 1
++    );
++    let mut legacy = request.clone();
++    legacy
++        .client_metadata
++        .as_mut()
++        .unwrap()
++        .remove(CURRENT_USER_TEXT_PROOF_KEY);
++    assert!(serde_json::to_vec(&legacy).unwrap().len() < MAX_HTTP_BODY_BYTES);
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, legacy);
++    assert_eq!(
++        serde_json::to_vec(&request).unwrap(),
++        serde_json::to_vec(&legacy).unwrap()
++    );
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, legacy);
++}
++
++#[test]
++fn final_http_body_budget_counts_late_request_fields_and_preserves_legacy_oversize() {
++    let mut request = http_request();
++    let room = MAX_HTTP_BODY_BYTES - serde_json::to_vec(&request).unwrap().len();
++    request.instructions.push_str(&"x".repeat(room));
++    // This field can be assigned after the request builder returns.
++    request.prompt_cache_key = Some("late\"\\\n🧭".to_string());
++    let mut legacy = request.clone();
++    legacy
++        .client_metadata
++        .as_mut()
++        .unwrap()
++        .remove(CURRENT_USER_TEXT_PROOF_KEY);
++    assert!(serde_json::to_vec(&request).unwrap().len() > MAX_HTTP_BODY_BYTES);
++    assert!(serde_json::to_vec(&legacy).unwrap().len() <= MAX_HTTP_BODY_BYTES);
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, legacy);
++
++    request.instructions.push_str(&"x".repeat(1_024));
++    assert!(serde_json::to_vec(&request).unwrap().len() > MAX_HTTP_BODY_BYTES);
++    let oversized_legacy = request.clone();
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, oversized_legacy);
++    request.client_metadata = None;
++    let no_metadata = request.clone();
++    enforce_http_body_budget(&mut request);
++    assert_eq!(request, no_metadata);
++}
++
++#[test]
++fn websocket_suppresses_http_proof_before_any_input_delta_without_other_changes() {
++    let mut request = http_request();
++    assert!(
++        request
++            .client_metadata
++            .as_ref()
++            .unwrap()
++            .contains_key(CURRENT_USER_TEXT_PROOF_KEY)
++    );
++    let mut expected = request.clone();
++    expected
++        .client_metadata
++        .as_mut()
++        .unwrap()
++        .remove(CURRENT_USER_TEXT_PROOF_KEY);
++    remove_for_websocket(&mut request);
++    assert_eq!(request, expected);
++    // A subsequent delta/rebase cannot carry a proof for the original indexes.
++    request.input.clear();
++    let payload = codex_api::ResponseCreateWsRequest::from(&request);
++    assert!(
++        !payload
++            .client_metadata
++            .unwrap()
++            .contains_key(CURRENT_USER_TEXT_PROOF_KEY)
++    );
++    remove_for_websocket(&mut request);
++    request.client_metadata = None;
++    remove_for_websocket(&mut request);
++    assert!(request.client_metadata.is_none());
++}
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index b129556..911db5e 100644
+index b129556..2095a7b 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -97,6 +97,178 @@ use wiremock::matchers::path;
+@@ -97,6 +97,234 @@ use wiremock::matchers::path;
  
  const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
  
++#[test]
++fn ordinary_external_request_proves_finalized_current_user_positions_before_stripping_metadata()
++-> anyhow::Result<()> {
++    use crate::responses_metadata::CURRENT_USER_TEXT_PROOF_KEY;
++    use crate::responses_metadata::CodexResponsesRequestKind;
++    use codex_protocol::models::ContentItemKind;
++    use codex_protocol::models::InternalChatMessageMetadataPassthrough;
++
++    let client = test_model_client(SessionSource::Cli);
++    let turn = "22222222-2222-4222-8222-222222222222";
++    let user = ResponseItem::Message {
++        id: Some(codex_protocol::ResponseItemId::new("msg")),
++        role: "user".to_string(),
++        content: vec![ContentItem::InputText { text: "  Read e\u{301}; do not send.  ".to_string() }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
++            turn_id: Some(turn.to_string()),
++            content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
++            ..Default::default()
++        }),
++    };
++    let prompt = Prompt {
++        input: vec![user.clone()],
++        base_instructions: BaseInstructions { text: "native base".to_string(), provenance: None },
++        ..Default::default()
++    };
++    let original = serde_json::to_vec(&prompt.input)?;
++    let metadata = test_responses_metadata_for_client(
++        &client, Some(turn), format!("{}:0", client.state.thread_id), None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    for lite in [false, true] {
++        let mut model = test_model_info();
++        model.use_responses_lite = lite;
++        let build = |metadata: &CodexResponsesMetadata| client.build_responses_request(
++            &prompt, &model, None, codex_protocol::config_types::ReasoningSummary::None, None, metadata,
++        );
++        let request = build(&metadata)?;
++        let native_proof: serde_json::Value = serde_json::from_str(
++            &request.client_metadata.as_ref().unwrap()[CURRENT_USER_TEXT_PROOF_KEY],
++        )?;
++        let index = if lite { 2 } else { 0 };
++        assert_eq!(native_proof["indices"], json!([index]));
++        let mut expected = prompt.input.clone();
++        super::prepare_input_for_non_openai_provider(&mut expected);
++        assert_eq!(request.input[index], expected[0]);
++        assert_eq!(serde_json::to_vec(&prompt.input)?, original);
++        for kind in [None, Some(CodexResponsesRequestKind::Prewarm), Some(CodexResponsesRequestKind::Memory)] {
++            let mut nonordinary = metadata.clone();
++            nonordinary.request_kind = kind;
++            assert!(!build(&nonordinary)?.client_metadata.unwrap().contains_key(CURRENT_USER_TEXT_PROOF_KEY));
++        }
++    }
++    Ok(())
++}
++
 +#[test]
 +fn external_projection_omits_only_function_record_ids_without_changing_pairing_or_history() {
 +    let canonical: Vec<ResponseItem> = serde_json::from_value(json!([
@@ -16982,6 +17578,27 @@ index 0000000..9101121
 +    let indexed=vec![(0,source[0].clone()),(2,source[2].clone())];
 +    assert_eq!(native_read_ledger::pack(&indexed,&source,"turn",&[],&HashSet::new(),&HashSet::new(),&HashMap::new()).unwrap(),indexed);
 +}
+diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
+index fbd3661..08d2348 100644
+--- a/codex-rs/core/src/responses_metadata.rs
++++ b/codex-rs/core/src/responses_metadata.rs
+@@ -33,6 +33,8 @@ pub(crate) const WINDOW_ID_KEY: &str = "window_id";
+ pub(crate) const WINDOW_NUMBER_KEY: &str = "window_number";
+ pub(crate) const CONTEXT_WINDOW_ID_KEY: &str = "context_window_id";
+ pub(crate) const REQUEST_KIND_KEY: &str = "request_kind";
++// Native request-local proof. App-server/config metadata cannot mint it.
++pub(crate) const CURRENT_USER_TEXT_PROOF_KEY: &str = "current_user_text_v1";
+ pub(crate) const COMPACTION_KEY: &str = "compaction";
+ // Keep the removed inventory reserved so callers cannot reintroduce oversized metadata.
+ pub(crate) const LEGACY_CODE_MODE_TOOL_NAMES_KEY: &str = "code_mode_tool_names";
+@@ -74,6 +76,7 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
+     X_CODEX_PARENT_THREAD_ID_HEADER,
+     X_OPENAI_SUBAGENT_HEADER,
+     REQUEST_KIND_KEY,
++    CURRENT_USER_TEXT_PROOF_KEY,
+     COMPACTION_KEY,
+     LEGACY_CODE_MODE_TOOL_NAMES_KEY,
+     TOOL_NAMESPACES_INFO_KEY,
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
 index dc739a5..30abb44 100644
 --- a/codex-rs/core/src/session/handlers.rs
@@ -18113,6 +18730,30 @@ index 9d3c5e8..a365813 100644
      };
  
      let action = codex_shell_escalation::EscalationPolicy::determine_action(
+diff --git a/codex-rs/core/src/turn_metadata_tests.rs b/codex-rs/core/src/turn_metadata_tests.rs
+index 85c9279..c51b754 100644
+--- a/codex-rs/core/src/turn_metadata_tests.rs
++++ b/codex-rs/core/src/turn_metadata_tests.rs
+@@ -1099,6 +1099,7 @@ fn responses_api_metadata_rejects_reserved_keys() {
+         TURN_TRIGGER_KEY,
+         WINDOW_ID_KEY,
+         CONTEXT_WINDOW_ID_KEY,
++        crate::responses_metadata::CURRENT_USER_TEXT_PROOF_KEY,
+     ] {
+         assert_eq!(
+             validate_extra_metadata(
+@@ -1107,6 +1108,11 @@ fn responses_api_metadata_rejects_reserved_keys() {
+             Err("responses_api_metadata contains a reserved key")
+         );
+     }
++    let filtered = crate::responses_metadata::filter_extra_metadata([
++        (crate::responses_metadata::CURRENT_USER_TEXT_PROOF_KEY.to_string(), "forged".to_string()),
++        ("ordinary_custom_key".to_string(), "kept".to_string()),
++    ]);
++    assert_eq!(filtered, BTreeMap::from([("ordinary_custom_key".to_string(), "kept".to_string())]));
+ }
+ 
+ #[test]
 diff --git a/codex-rs/core/src/unified_exec/async_watcher.rs b/codex-rs/core/src/unified_exec/async_watcher.rs
 index 245bdb0..72f239c 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher.rs
