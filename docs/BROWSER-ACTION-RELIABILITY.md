@@ -1426,3 +1426,13 @@ stable source hashes. Eight held-load regressions cover the startup race and its
 selection, model, prompt, snapshot, streaming, cancellation and shutdown edges.
 Version validation passed for 0.7.0 (246). The deterministic held-load tests prove
 the race handling; live installation and UI checks are recorded separately.
+
+Installed signed-test build246 matches source `60da065` and unchanged runtime15;
+all eleven build, signing and source/resource checks passed. The live UI started
+at “Connecting to runtime”. A new task and exact unsent test prompt were created
+before history finished loading. After restoration, the prompt remained exact,
+the new task stayed selected and Cerebras GPT-OSS120B remained selected. The test
+text was cleared; Send was disabled and no request was dispatched. This validates
+the observed startup overlap in addition to the deterministic held-load tests.
+It does not requalify the unchanged browser/model behavior from build245. No
+release, notarization or merge was performed.
