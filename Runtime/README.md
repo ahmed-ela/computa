@@ -99,10 +99,11 @@ not part of this release source or its manifest.
 Retained historical replies remain assistant-role excerpts, not new assertions
 of success. Up to four replies use at most 1 KiB of text each and 4 KiB serialized
 in total. Ambiguous, truncated, or misordered user boundaries are skipped. Tool
-receipts retain at most 32 genuine pairs and 12 KiB of serialized provider-input
+receipts retain at most 32 genuine calls and 12 KiB of serialized provider-input
 text/headers, including array punctuation. The budget uses the same external-
-provider projection as the request builder: LM Studio does not receive internal
-chat metadata or encrypted arguments. This projection is measured on a clone;
+provider projection as the request builder: external providers do not receive
+internal chat metadata, encrypted arguments, or optional function item IDs. They
+still receive exact call IDs for pairing. This projection is measured on a clone;
 canonical call identities, turn IDs, timestamps, failures, and ordering remain
 unchanged in history. A separate 24 KiB bound covers serialized canonical items
 and their metadata arrays. Both byte budgets use a placeholder for the separately
@@ -119,10 +120,14 @@ Successful native `browser_read`, `browser_click` and `browser_fill` observation
 can opt into complete retention with the exact leading
 `complete_browser_observation_v1` marker. Reads have two text items; inputs have
 three: marker, the existing compact dispatch cue, and the complete post-input JSON.
-The input cue and available observation must match the exact native shape and
+Rejected stale inputs and changed-filter reads may also carry three items: the
+marker, a closed rejection cue, and a separately captured complete read. Their
+outer result remains failed, undispatched and unverified. Unavailable recoveries
+remain ordinary failures. The cue and available observation must match the exact native shape and
 action kind. The producer pages within the existing 4 KiB text limit, including
 the marker, cue, references and continuation, and the native 4.5 KiB encoded-item
-limit. When this is the latest completed output, compaction retains all items
+limit. For the newest complete browser page, even when a later inventory or
+terminal result exists, compaction retains all items
 unchanged or stops if the existing aggregate bounds cannot fit them. It never
 cuts out rows while retaining a cursor that skips them. Older marked pages use
 `browser_observation_excerpt_v1`: the exact dispatch cue remains separate from
@@ -135,6 +140,28 @@ same bounds; it cannot turn the excerpt back into a complete observation or rene
 a reference. Malformed marked shapes fail closed. Custom/namespaced tools and
 unmarked results retain the generic behavior. The marker grants no authority,
 does not verify an action, and never replaces native target freshness checks.
+
+If ordinary receipts cannot fit, older successful native `browser_read` and
+`browser_tabs` pairs may become versioned historical read records. Only typed
+provenance issued by the native controller after successful execution qualifies;
+page text, tool names and imported Responses items cannot create it. Changed
+post-tool-hook output loses that provenance. Mutations, failures, foreign tools,
+unsupported metadata combinations and the protected newest outputs keep their
+ordinary pairs. Records combine serial reads only when adjacent or separated
+solely by current-turn reasoning items already omitted by receipt projection;
+messages and all other item types remain boundaries. Existing stored run
+boundaries survive repeated compaction. Records retain the original ordering,
+raw arguments, IDs and timestamps. Their model-visible
+text explicitly omits old page content and claims neither content nor absence,
+current references, or action authority. This is a lossy history projection;
+the original rollout still contains the actual outputs.
+
+Both the readable text and typed local records count toward the existing byte
+bounds. Repeated compaction validates and recounts the original calls, including
+records restored from disk; it never refunds the 32-call limit or emits invented
+tool replies. These assistant-role records are excluded from prior-answer and
+compaction-summary selection. If the bounded projection still cannot fit, the
+existing retention error remains terminal.
 Empty IDs, duplicate IDs,
 count overflow, and byte overflow have distinct errors.
 

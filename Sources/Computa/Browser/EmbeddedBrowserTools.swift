@@ -305,19 +305,25 @@ struct EmbeddedBrowserReadFailureScope: Equatable, Sendable {
 }
 
 struct EmbeddedBrowserToolExecution: Sendable {
+    /// Issued only by the successful native read/inventory branches. This is
+    /// history provenance, never permission, a page claim, or action authority.
+    enum NativeRead: String, Sendable { case read = "read_v1", inventory = "inventory_v1" }
     let response: String
     let actionReceipt: EmbeddedBrowserActionReceipt?
     let completeObservation: Bool
+    let nativeRead: NativeRead?
     /// Native-only evidence of an observed binding/document generation.
     /// A fresh snapshot UUID or URL alone cannot reset a read failure budget.
     let readFailureScope: EmbeddedBrowserReadFailureScope?
 
     init(response: String, actionReceipt: EmbeddedBrowserActionReceipt? = nil,
-         readFailureScope: EmbeddedBrowserReadFailureScope? = nil, completeObservation: Bool = false) {
+         readFailureScope: EmbeddedBrowserReadFailureScope? = nil, completeObservation: Bool = false,
+         nativeRead: NativeRead? = nil) {
         self.completeObservation = completeObservation
         self.response = response
         self.actionReceipt = actionReceipt
         self.readFailureScope = readFailureScope
+        self.nativeRead = nativeRead
     }
 }
 
@@ -327,6 +333,9 @@ struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable 
     let original: BrowserTabBrokerError
     let observationResponse: String
     var readFailureScope: EmbeddedBrowserReadFailureScope? = nil
+    /// Present only when the separate read's full page and rejection cue fit
+    /// the existing atomic output bounds. Unavailable recoveries stay unmarked.
+    var rejectionReceipt: BrowserCompleteObservation.RejectionReceipt? = nil
     var errorDescription: String? { original.localizedDescription }
 }
 
@@ -442,7 +451,8 @@ actor EmbeddedBrowserToolController {
                                            tool: tool, invocation: invocation, scope: scope)
         } catch let original as BrowserTabBrokerError where original == .staleSnapshot || original == .staleDocument {
             throw try await stalePreflightRecovery(taskKey: taskKey, contextID: context.id,
-                                                   rejectedID: invocation.snapshotID, original: original, scope: scope)
+                                                   rejectedID: invocation.snapshotID, original: original,
+                                                   wasFill: tool == "browser_fill", scope: scope)
         }
     }
 
@@ -531,7 +541,7 @@ actor EmbeddedBrowserToolController {
                 result["authentication_evidence"] = "not_observed"
                 result["next"] = "No matching human tabs were listed; this does not establish logout, missing credentials or denied access. Previous task-created tabs may have been closed at turn end. Use browser_open with the task's supplied or previously observed URL (including local URLs), or an authorized known service's official entrypoint, then browser_read. Opening a new task tab remains an offered operation subject to current user scope and approvals; an empty inventory is not a reason to refuse the task or ask for an already-known URL."
             }
-            return try .init(response: json(result))
+            return try .init(response: json(result), nativeRead: .inventory)
         case "browser_open", "browser_bind":
             let owned = tool == "browser_open"
             if owned { try requireScope(scope, url: URL(string: object["url"] as! String)!) }
@@ -674,7 +684,7 @@ actor EmbeddedBrowserToolController {
             let snapshot = try await currentReadObservation(
                 taskKey: taskKey, contextID: contextID, scope: scope, read: read, compact: true)
             return try .init(response: readResponse(snapshot, taskKey: taskKey, compact: true),
-                readFailureScope: .init(snapshot: snapshot), completeObservation: true)
+                readFailureScope: .init(snapshot: snapshot), completeObservation: true, nativeRead: .read)
         case "browser_click", "browser_fill":
             let invocation = try prepared ?? prepareMutation(taskKey: taskKey, tool: tool, arguments: arguments)
             guard invocation.matches(taskKey: taskKey, contextID: contextID, tool: tool, arguments: object) else {
@@ -1044,7 +1054,7 @@ actor EmbeddedBrowserToolController {
     /// Called only after capturedMutation rejected before approval or input.
     /// Neither a failed recovery nor an explicit read refunds this turn's cap.
     private func stalePreflightRecovery(taskKey: String, contextID: UUID, rejectedID: UUID,
-                                         original: BrowserTabBrokerError,
+                                         original: BrowserTabBrokerError, wasFill: Bool,
                                          scope: ComputerTaskScope?) async throws -> EmbeddedBrowserPreflightRecoveryFailure {
         try Task.checkCancellation()
         try check(taskKey, contextID)
@@ -1063,18 +1073,17 @@ actor EmbeddedBrowserToolController {
         }
         contexts[taskKey]?.stalePreflightRecoveryIDs.insert(rejectedID)
         do {
+            let cue = BrowserCompleteObservation.RejectionReceipt.stale(
+                wasFill: wasFill, documentChanged: original == .staleDocument)
+            let encoding = BrowserCompleteObservation.Encoding.recovery(receipt: cue, view: .overview)
             let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
-                scope: scope, read: SemanticReadRequest(view: .overview))
+                scope: scope, read: SemanticReadRequest(view: .overview), compact: true, compactEncoding: encoding)
             try Task.checkCancellation()
             try check(taskKey, contextID)
-            result["current_observation"] = ["status": "available", "view": "overview",
-                "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot, taskKey: taskKey)]
-            result["next"] = "No input was dispatched or retried. Inspect the current row's label/action and use only its new references in a separate call; never reuse the rejected reference or assume its old index still identifies the intended control."
-            let response = try json(result)
-            guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
+            let response = try completeRecoveryResponse(snapshot, taskKey: taskKey, encoding: encoding)
             try Task.checkCancellation()
             return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response,
-                readFailureScope: .init(snapshot: snapshot))
+                readFailureScope: .init(snapshot: snapshot), rejectionReceipt: cue)
         } catch {
             if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             try Task.checkCancellation()
@@ -1107,18 +1116,16 @@ actor EmbeddedBrowserToolController {
         contexts[taskKey]?.changedFilterRecoveryCursors.insert(cursor)
         var captured = false
         do {
+            let cue = BrowserCompleteObservation.RejectionReceipt.changedFilters
+            let encoding = BrowserCompleteObservation.Encoding.recovery(receipt: cue, view: read.view)
             let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
-                scope: scope, read: read, replacingCursor: cursor)
+                scope: scope, read: read, replacingCursor: cursor, compact: true, compactEncoding: encoding)
             captured = true
             try Task.checkCancellation()
             try check(taskKey, contextID)
-            result["current_observation"] = ["status": "available", "view": read.view.rawValue,
-                "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot, taskKey: taskKey)]
-            result["next"] = "Inspect this separate fresh observation of the requested filters; it supersedes prior references. To continue it, use only its next_cursor. To change filters again, omit cursor. No input was dispatched."
-            let response = try json(result)
-            guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
+            let response = try completeRecoveryResponse(snapshot, taskKey: taskKey, encoding: encoding)
             return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: response,
-                readFailureScope: .init(snapshot: snapshot))
+                readFailureScope: .init(snapshot: snapshot), rejectionReceipt: cue)
         } catch {
             if captured, contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
             try Task.checkCancellation()
@@ -1126,6 +1133,18 @@ actor EmbeddedBrowserToolController {
             result["next"] = "The continuation was rejected and no input was dispatched. No replacement observation is available. Request browser_read with the desired filters and omit cursor; do not infer absent content."
             return EmbeddedBrowserPreflightRecoveryFailure(original: original, observationResponse: try json(result))
         }
+    }
+
+    /// The broker sizes the same envelope while paging its immutable capture.
+    /// Recheck actual published refs without clipping rows or advancing a cursor.
+    private func completeRecoveryResponse(_ snapshot: BrowserTabSnapshot, taskKey: String,
+                                           encoding: BrowserCompleteObservation.Encoding) throws -> String {
+        let text = try readResponse(snapshot, taskKey: taskKey, compact: true)
+        let response = try encoding.encode(text, snapshotID: snapshot.id)
+        guard try BrowserCompleteObservation.excessBytes(response, actionReceipt: encoding.retentionCue) == 0 else {
+            throw PostInputObservationFailure.outputLimit
+        }
+        return response
     }
 
     private enum PostInputObservationFailure: Error { case outputLimit }

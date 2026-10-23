@@ -1910,7 +1910,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(try field("view", in: fresh), changedFilter["view"] ?? "overview")
             XCTAssertTrue(fresh.contains(changedFilter["query"] ?? "Result marker"))
             XCTAssertFalse(fresh.contains("label=\"Extra control"), "Omitted old query must not leak into the requested fresh view")
-            XCTAssertLessThanOrEqual(rejected.observationResponse.utf8.count, 20_480)
+            try assertCompleteRecovery(rejected, kind: "read", reason: "continuation_filters_changed")
             let after = await backend.counts()
             XCTAssertEqual(after.observes, before.observes + 1)
             XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
@@ -1928,6 +1928,96 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         }
     }
 
+    func testCompoundRecoveryPagesEveryPublishedRowWithinAtomicBudgetWithoutRecaptureOrInput() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls(count: 36)
+        let first = try await call(controller, "browser_read", ["view": "overview"])
+        let before = await backend.counts()
+        let failure = try await changedFilterFailure(controller,
+            arguments: ["cursor": field("next_cursor", in: first), "view": "all", "query": "Extra control"])
+        try assertCompleteRecovery(failure, kind: "read", reason: "continuation_filters_changed")
+        let body = try jsonObject(failure.observationResponse)
+        XCTAssertEqual(body["dispatched"] as? Bool, false)
+        let recovery = try XCTUnwrap(body["current_observation"] as? [String: Any])
+        XCTAssertEqual(recovery["source"] as? String, "separate_recovery_read")
+        XCTAssertEqual(recovery["view"] as? String, "all")
+        var page = try XCTUnwrap(recovery["text"] as? String)
+        let source = try field("source_observation", in: page)
+        var labels = [String](), pages = 0
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 36)
+            XCTAssertEqual(try field("source_observation", in: page), source)
+            for raw in page.split(separator: "\n") where raw.hasPrefix("#") {
+                if let label = try publishedString("label", in: String(raw)), label.hasPrefix("Extra control") {
+                    labels.append(label)
+                }
+            }
+            let metadata = try actionReferenceMetadata(page)
+            guard let continuation = metadata["continuation"] as? [String: Any],
+                  let arguments = continuation["arguments"] as? [String: Any] else { break }
+            page = try await call(controller, "browser_read", arguments)
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(labels.count, 36); XCTAssertEqual(Set(labels).count, 36, "Pagination must not skip or duplicate a row")
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes + pages, "Packing retries reuse one capture; continuation retains its usual immediate validation")
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testOversizedRecoveryMetadataKeepsFailureUnmarkedWithoutExtraReadOrInput() async throws {
+        for tool in ["browser_read", "browser_click", "browser_fill"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            await backend.showManyControls()
+            let old = try await call(controller, "browser_read", ["view": "overview"])
+            if tool != "browser_read" { _ = try await call(controller, "browser_read", ["view": "overview"]) }
+            await backend.setObservationSourceName(String(repeating: "x", count: 4_096))
+            let before = await backend.counts()
+            let failure: EmbeddedBrowserPreflightRecoveryFailure
+            if tool == "browser_read" {
+                failure = try await changedFilterFailure(controller,
+                    arguments: ["cursor": field("next_cursor", in: old), "view": "all"])
+            } else {
+                var arguments: [String: Any] = ["snapshot_id": try snapshotID(old), "element_index": tool == "browser_fill" ? 0 : 1]
+                if tool == "browser_fill" { arguments["text"] = "MUST_NOT_FILL" }
+                failure = try await stalePreflight(controller, tool: tool, arguments: arguments)
+            }
+            XCTAssertNil(failure.rejectionReceipt)
+            let body = try jsonObject(failure.observationResponse)
+            XCTAssertEqual(body["success"] as? Bool, false); XCTAssertEqual(body["dispatched"] as? Bool, false)
+            let observation = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            XCTAssertEqual(observation["status"] as? String, "unavailable")
+            XCTAssertEqual(observation["reason"] as? String, "output_limit")
+            XCTAssertNil(observation["text"]); XCTAssertNil(observation["snapshot_id"])
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + 1)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    private func assertCompleteRecovery(_ failure: EmbeddedBrowserPreflightRecoveryFailure,
+                                        kind: String, reason: String,
+                                        file: StaticString = #filePath, line: UInt = #line) throws {
+        let cue = try XCTUnwrap(failure.rejectionReceipt?.compactText, file: file, line: line)
+        let items = [BrowserCompleteObservation.marker, cue, failure.observationResponse]
+            .map { ["type": "inputText", "text": $0] }
+        XCTAssertLessThanOrEqual(items.reduce(2) { $0 + $1["text", default: ""].utf8.count }, 4_096, file: file, line: line)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: items).count, 4_608, file: file, line: line)
+        let rejection = try jsonObject(cue)
+        XCTAssertEqual(rejection["kind"] as? String, kind, file: file, line: line)
+        XCTAssertEqual(rejection["reason"] as? String, reason, file: file, line: line)
+        XCTAssertEqual(rejection["dispatched"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(rejection["outcome"] as? String, "unverified", file: file, line: line)
+        let body = try jsonObject(failure.observationResponse)
+        XCTAssertEqual(body["success"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(body["result_verified"] as? Bool, false, file: file, line: line)
+        XCTAssertNil((body["error"] as? [String: Any])?["message"], "Original diagnostic remains on the local error", file: file, line: line)
+    }
+
     func testFailedChangedFilterReadPreservesValidSnapshotAndCannotRetryRecovery() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -1943,6 +2033,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(unavailable["reason"] as? String, "read_failed")
         XCTAssertNil(unavailable["text"]); XCTAssertNil(unavailable["snapshot_id"])
         XCTAssertFalse(rejected.observationResponse.contains("PRIVATE_RECOVERY_ERROR"))
+        XCTAssertNil(rejected.rejectionReceipt, "An unavailable read cannot claim a complete observation")
         let repeated = try await changedFilterFailure(controller, arguments: invalid)
         XCTAssertEqual((try jsonObject(repeated.observationResponse)["current_observation"] as? [String: Any])?["reason"] as? String, "recovery_already_attempted")
         let after = await backend.counts()
@@ -2234,7 +2325,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(failure.original, .staleSnapshot)
             XCTAssertEqual(failure.localizedDescription, BrowserTabBrokerError.staleSnapshot.localizedDescription)
             XCTAssertLessThan(failure.localizedDescription.utf8.count, 256)
-            XCTAssertLessThanOrEqual(failure.observationResponse.utf8.count, 20_480)
+            try assertCompleteRecovery(failure, kind: tool == "browser_fill" ? "fill" : "click", reason: "stale_snapshot")
             let response = try jsonObject(failure.observationResponse)
             XCTAssertEqual(response["success"] as? Bool, false); XCTAssertEqual(response["dispatched"] as? Bool, false)
             XCTAssertEqual(response["no_replay"] as? Bool, true)
@@ -2273,6 +2364,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let failure = try await stalePreflight(controller, tool: tool, arguments: arguments)
             XCTAssertEqual(failure.original, .staleDocument)
             XCTAssertEqual(failure.localizedDescription, BrowserTabBrokerError.staleDocument.localizedDescription)
+            try assertCompleteRecovery(failure, kind: tool == "browser_fill" ? "fill" : "click", reason: "stale_document")
             let response = try jsonObject(failure.observationResponse)
             XCTAssertEqual((response["error"] as? [String: Any])?["code"] as? String, "stale_document")
             XCTAssertEqual(response["dispatched"] as? Bool, false)
@@ -2306,7 +2398,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let failure = try await stalePreflight(controller, arguments: ["snapshot_id": id, "element_index": 1])
             let current = try XCTUnwrap(jsonObject(failure.observationResponse)["current_observation"] as? [String: Any])
             XCTAssertEqual(current["status"] as? String, offset < 3 ? "available" : "unavailable")
-            if offset == 3 { XCTAssertEqual(current["reason"] as? String, "recovery_limit"); XCTAssertNil(current["text"]) }
+            if offset == 3 {
+                XCTAssertEqual(current["reason"] as? String, "recovery_limit"); XCTAssertNil(current["text"])
+                XCTAssertNil(failure.rejectionReceipt)
+            } else { try assertCompleteRecovery(failure, kind: "click", reason: "stale_snapshot") }
             let after = await backend.counts()
             XCTAssertEqual(after.observes, before.observes + (offset < 3 ? 1 : 0))
             if offset == 0 {
@@ -2315,6 +2410,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 let repeated = try await stalePreflight(controller, arguments: ["snapshot_id": id, "element_index": 1])
                 let unavailable = try XCTUnwrap(jsonObject(repeated.observationResponse)["current_observation"] as? [String: Any])
                 XCTAssertEqual(unavailable["reason"] as? String, "recovery_already_attempted")
+                XCTAssertNil(repeated.rejectionReceipt)
                 XCTAssertNil(unavailable["text"]); XCTAssertNil(unavailable["snapshot_id"])
                 let afterRepeat = await backend.counts()
                 XCTAssertEqual(afterRepeat.observes, beforeRepeat.observes, "Explicit reads cannot refund rejected-reference recovery")
@@ -2337,6 +2433,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(rejected.original, .staleSnapshot)
             XCTAssertFalse(rejected.localizedDescription.contains("PRIVATE_RECOVERY_ERROR"))
             XCTAssertFalse(rejected.observationResponse.contains("PRIVATE_RECOVERY_ERROR"))
+            XCTAssertNil(rejected.rejectionReceipt)
             let current = try XCTUnwrap(jsonObject(rejected.observationResponse)["current_observation"] as? [String: Any])
             XCTAssertEqual(current["status"] as? String, "unavailable")
             XCTAssertNil(current["text"]); XCTAssertNil(current["snapshot_id"])

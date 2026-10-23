@@ -23,11 +23,38 @@ enum BrowserCompleteObservation {
         return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
     }
 
-    /// Size the actual post-input envelope before advancing a read cursor. A
-    /// dispatch receipt remains separate from the observation through compaction.
+    /// Only the native recovery paths can construct these closed rejection
+    /// cues. They describe a failed request, never a dispatched input.
+    struct RejectionReceipt: Sendable {
+        enum Kind: String, Sendable { case read, click, fill }
+        enum Reason: String, Sendable {
+            case continuationFiltersChanged = "continuation_filters_changed"
+            case staleSnapshot = "stale_snapshot", staleDocument = "stale_document"
+        }
+        let kind: Kind
+        let reason: Reason
+
+        private init(kind: Kind, reason: Reason) { self.kind = kind; self.reason = reason }
+        static let changedFilters = Self(kind: .read, reason: .continuationFiltersChanged)
+        static func stale(wasFill: Bool, documentChanged: Bool) -> Self {
+            Self(kind: wasFill ? .fill : .click, reason: documentChanged ? .staleDocument : .staleSnapshot)
+        }
+        var compactText: String {
+            "{\"dispatched\":false,\"kind\":\"\(kind.rawValue)\",\"outcome\":\"unverified\",\"reason\":\"\(reason.rawValue)\"}"
+        }
+    }
+
+    /// Size the actual input/recovery envelope before advancing a read cursor.
+    /// Its dispatch or rejection cue remains separate through compaction.
     enum Encoding: Sendable {
         case read
         case input(wasFill: Bool, receipt: String, feedback: BrowserInputFeedback? = nil)
+        case recovery(receipt: RejectionReceipt, view: SemanticReadView)
+
+        var retentionCue: String? {
+            if case let .recovery(receipt, _) = self { return receipt.compactText }
+            return actionReceipt
+        }
 
         var actionReceipt: String? {
             if case let .input(_, receipt, _) = self { return receipt }
@@ -35,6 +62,17 @@ enum BrowserCompleteObservation {
         }
 
         func encode(_ text: String, snapshotID: UUID, page: BrowserInputFeedback.PublishedPage? = nil) throws -> String {
+            if case let .recovery(receipt, view) = self {
+                let result: [String: Any] = [
+                    "success": false, "error": ["code": receipt.reason.rawValue],
+                    "dispatched": false, "no_replay": true, "result_verified": false,
+                    "current_observation": ["status": "available", "source": "separate_recovery_read", "view": view.rawValue,
+                        "snapshot_id": snapshotID.uuidString, "text": text],
+                    "next": "Request rejected; no input dispatched. Inspect this separate fresh observation before a separate call. Continue only with its next_cursor; omit cursor to change view/query. Never reuse the rejected reference."
+                ]
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+                return String(decoding: data, as: UTF8.self)
+            }
             guard case let .input(wasFill, _, feedback) = self else { return text }
             let effect = wasFill
                 ? "Fill dispatched; no Enter or submit click. Page handlers may react. Compare the complete field value before a distinct submit action."
@@ -1071,7 +1109,7 @@ actor BrowserTabSessionBroker {
                             committedDocumentID: document.committedDocumentID))
             let excess = try BrowserCompleteObservation.excessBytes(encoded,
                 referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) },
-                actionReceipt: compactEncoding.actionReceipt)
+                actionReceipt: compactEncoding.retentionCue)
             if excess == 0 { break }
             // This can fail even with zero rows when the host metadata itself
             // cannot fit. Do not publish any partial page or reference menu.

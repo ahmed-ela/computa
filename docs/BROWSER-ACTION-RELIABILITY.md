@@ -673,3 +673,55 @@ cases, with no skips. The first run passed 573 cases and found one obsolete
 guidance-string assertion. Only that assertion changed; its targeted rerun
 passed with all production hashes unchanged. Both logs are retained. Version
 and product identity checks passed 20 tests. Live qualification remains separate.
+
+## Native read history and complete recovery observations
+
+Build 235's fresh Outlook lookup reached the mailbox and actual search results,
+then failed retention after 28 calls and 37.642 seconds. It did not verify the
+requested filename. Local synthetic sends dispatched exactly one POST with the
+requested fields, but a fresh-chat final reply attributed an older message to
+the new send. A separate read changed ASCII hyphens in the filename. Those are
+failed semantic acceptance checks, regardless of successful native dispatch.
+
+The build 236 candidate preserves a failed operation and its separate successful
+recovery read as one bounded, complete result. The rejection cue remains explicit
+and the outer result stays failed, undispatched and unverified. The existing
+producer limits include the complete escaped envelope before cursor publication.
+The newest complete browser page remains intact even after a later inventory or
+terminal result. No read, reference, action, correction or retry budget increases.
+
+Runtime `mactopus-11` adds typed provenance for successful native reads and
+inventories. When ordinary receipts cannot fit, only those older results can
+become versioned read records with an explicit old-content omission notice.
+Original IDs, raw arguments, timestamps and chronological call counts remain
+local. Failures and mutations keep their ordinary receipts; current pages keep
+their complete output. Adjacent serial reads can share a record, including
+across same-turn reasoning that the existing compactor already omits. User or
+assistant messages, other tool items, foreign/missing turn identities and
+nondefault harness metadata remain boundaries. Existing run boundaries survive
+reload and repeated compaction. These records cannot become prior assistant
+answers or the model's compaction summary. External requests omit only optional
+function item IDs, preserving exact `call_id` pairing and canonical history.
+
+The actual-source serializer retained the sanitized 75-position Outlook history
+at **11,097 provider bytes / 21,496 canonical bytes**, with 1,191 / 3,080 bytes
+remaining under the unchanged limits. Its 15 reasoning positions and all four
+message boundaries preserve the original typed layout. Five representative
+32-call continuations also fit. The most constrained one has only 69 / 481 bytes
+remaining; this is not a worst-case guarantee. Deliberate byte overflow and the
+33rd genuine call still stop. Initial fixture omissions and the first repeated-
+compaction grouping defect are retained as failed evidence, not discarded runs.
+
+Source qualification passed 59 isolated retention, projection and restoration
+checks (one private-rollout export intentionally skipped), five isolated native
+provenance checks, four history checks and the two focused protocol checks.
+The restoration harness uses a strict plain-user fixture parser with the actual
+restoration/filter code; it is not a full Core-suite result. Stable and experimental
+protocol exports were regenerated and independently checked. Native recovery
+and RPC tests passed 159 cases after fixing the missing separate-read source
+field and a test-helper mismatch. The final thirteen-suite run passed all 590
+native cases without failures or skips, including all three bundled-engine API
+tests. Version and product identity checks passed 20 cases. The production
+runtime compiled successfully and its packaged binary and pinned patch were
+verified. The signed app and fresh live acceptance results remain separate
+required evidence.

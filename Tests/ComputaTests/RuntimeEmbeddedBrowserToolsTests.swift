@@ -19,6 +19,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
             let rows = try harness.rows()
             XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            XCTAssertEqual(rows.map { $0["nativeBrowserRead"] as? String },
+                ["inventory_v1", nil, "read_v1", "inventory_v1", "read_v1"])
             for index in [2, 4] {
                 XCTAssertTrue((rows[index]["text"] as? String)?.contains("United flight fixture") == true,
                               "A fresh inventory must preserve the current bound tab")
@@ -373,6 +375,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             let rows = try harness.rows()
             XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
             for (index, kind, label) in [(2, "fill", "Search flights"), (4, "click", "Find flight")] {
+                XCTAssertNil(rows[index]["nativeBrowserRead"] as? String,
+                    "A post-input observation must not classify an input as a read-only operation")
                 let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
                 XCTAssertEqual(items.count, 3, "Atomic post-input evidence retains its separate historical dispatch cue")
                 XCTAssertEqual(items[0]["text"] as? String, BrowserCompleteObservation.marker)
@@ -398,6 +402,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             }
             XCTAssertEqual((rows[0]["contentItems"] as? [[String: Any]])?.count, 1)
             for index in [1, 3, 5] {
+                XCTAssertEqual(rows[index]["nativeBrowserRead"] as? String, "read_v1")
                 let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
                 XCTAssertEqual(items.count, 2, "Successful ordinary reads publish one complete marked page")
                 XCTAssertEqual(items[0]["text"] as? String, BrowserCompleteObservation.marker)
@@ -694,6 +699,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
             let rows = try harness.rows()
             XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, true, true])
+            try assertCompleteRecovery(rows[3], kind: "fill", reason: "stale_snapshot")
+            XCTAssertNil(rows[4]["nativeBrowserRead"] as? String)
             let failure = try XCTUnwrap(rows[3]["text"] as? String)
             XCTAssertTrue(failure.contains("stale_snapshot"))
             XCTAssertTrue(failure.contains("\"dispatched\":false"))
@@ -728,6 +735,13 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             }
             let rows = try harness.rows()
             XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, false, false])
+            for row in rows.suffix(3) { XCTAssertNil(row["nativeBrowserRead"] as? String) }
+            try assertCompleteRecovery(rows[3], kind: "fill", reason: "stale_snapshot")
+            for row in rows.suffix(2) {
+                XCTAssertFalse((row["contentItems"] as? [[String: Any]])?.contains {
+                    $0["text"] as? String == BrowserCompleteObservation.marker
+                } == true, "Unavailable or terminal recovery must not publish a complete page marker")
+            }
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("\"status\":\"available\"") == true)
             XCTAssertTrue((rows[3]["text"] as? String)?.contains("PAGE_UPDATED_VALUE") == true)
             XCTAssertTrue((rows[4]["text"] as? String)?.contains("\"status\":\"unavailable\"") == true)
@@ -813,6 +827,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             let rows = try harness.rows()
             XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true, false, true, true, false, true])
             for index in [2, 4, 7] {
+                try assertCompleteRecovery(rows[index], kind: "read", reason: "continuation_filters_changed")
                 let items = try XCTUnwrap(rows[index]["contentItems"] as? [[String: Any]])
                 let recovery = try XCTUnwrap(items.compactMap { item -> [String: Any]? in
                     guard let text = item["text"] as? String else { return nil }
@@ -1278,6 +1293,36 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    private func assertCompleteRecovery(_ row: [String: Any], kind: String, reason: String,
+                                        file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(row["success"] as? Bool, false, file: file, line: line)
+        XCTAssertNil(row["nativeBrowserRead"] as? String, file: file, line: line)
+        let items = try XCTUnwrap(row["contentItems"] as? [[String: Any]], file: file, line: line)
+        XCTAssertEqual(items.count, 3, file: file, line: line)
+        guard items.count == 3 else { return }
+        XCTAssertEqual(items[0]["text"] as? String, BrowserCompleteObservation.marker, file: file, line: line)
+        let cueText = try XCTUnwrap(items[1]["text"] as? String, file: file, line: line)
+        let cue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(cueText.utf8)) as? [String: Any], file: file, line: line)
+        XCTAssertEqual(cue["kind"] as? String, kind, file: file, line: line)
+        XCTAssertEqual(cue["reason"] as? String, reason, file: file, line: line)
+        XCTAssertEqual(cue["dispatched"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(cue["outcome"] as? String, "unverified", file: file, line: line)
+        let bodyText = try XCTUnwrap(items[2]["text"] as? String, file: file, line: line)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any], file: file, line: line)
+        for key in ["success", "dispatched", "result_verified"] {
+            XCTAssertEqual(body[key] as? Bool, false, file: file, line: line)
+        }
+        XCTAssertEqual(body["no_replay"] as? Bool, true, file: file, line: line)
+        let observation = try XCTUnwrap(body["current_observation"] as? [String: Any], file: file, line: line)
+        XCTAssertEqual(observation["source"] as? String, "separate_recovery_read", file: file, line: line)
+        XCTAssertEqual(observation["status"] as? String, "available", file: file, line: line)
+        XCTAssertTrue((observation["text"] as? String)?.hasPrefix("AXSNAPSHOT ") == true, file: file, line: line)
+        XCTAssertLessThanOrEqual(items.reduce(items.count - 1) { $0 + ($1["text"] as? String ?? "").utf8.count },
+            BrowserCompleteObservation.maximumTextBytes, file: file, line: line)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: items).count,
+            BrowserCompleteObservation.maximumSerializedItemsBytes, file: file, line: line)
+    }
+
     private func withHarness(configured: Bool = true, approval: Bool? = nil,
                              legacyPIDFixture: LegacyPIDFixture? = nil,
                              allowsCleanupFailure: Bool = false,
@@ -1377,7 +1422,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       }
       if (message.id !== `request-${turnCount}-${step}`) return;
       const text = (message.result?.contentItems ?? []).map(item => item.text ?? '').join('\n');
-      rows.push({turnId, tool:plan.calls[step].tool, success:message.result?.success === true, contentItems:message.result?.contentItems ?? [], text, error:message.error?.message ?? null});
+      rows.push({turnId, tool:plan.calls[step].tool, success:message.result?.success === true, contentItems:message.result?.contentItems ?? [], nativeBrowserRead:message.result?.nativeBrowserRead ?? null, text, error:message.error?.message ?? null});
       save('results.json', rows);
       let observationText = message.result?.success ? text : null;
       if (!message.result?.success && plan.calls[step].captureRecovery) {

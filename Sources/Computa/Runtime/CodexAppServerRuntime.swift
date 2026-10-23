@@ -4435,13 +4435,16 @@ private extension CodexAppServerRuntime {
                     throw ComputerInputError.applicationActivationFailed(processIdentifier: pid)
                 }
                 #endif
-                var contentItems = try await executeDynamicTool(
-                    tool,
-                    arguments: arguments,
-                    taskID: taskID,
-                    legacyProcessIdentity: legacyProcessIdentity,
-                    browserMutation: browserMutation
-                )
+                let execution: DynamicToolExecution
+                if tool.hasPrefix("browser_") {
+                    execution = try await executeEmbeddedBrowserTool(tool, arguments: arguments,
+                        taskID: taskID, prepared: browserMutation)
+                } else {
+                    execution = DynamicToolExecution(contentItems: try await executeDynamicTool(
+                        tool, arguments: arguments, taskID: taskID,
+                        legacyProcessIdentity: legacyProcessIdentity, browserMutation: browserMutation))
+                }
+                var contentItems = execution.contentItems
                 guard !Task.isCancelled,
                       !isShuttingDown,
                       generation == serverGeneration else { return }
@@ -4504,10 +4507,12 @@ private extension CodexAppServerRuntime {
                 } else { publishedRead = nil }
                 guard await updateBrowserExecutionCheckpoint(taskID: taskID, params: params,
                     callID: callID, tool: tool, succeeded: true, generation: generation) else { return }
-                try sendResponse(
-                    id: id,
-                    result: ["contentItems": publishedRead?.contentItems ?? contentItems, "success": true]
-                )
+                var response: [String: Any] = ["contentItems": publishedRead?.contentItems ?? contentItems, "success": true]
+                // The typed controller result, not page/model text or a tool
+                // name, establishes read-only native provenance. Publish it
+                // only after the same turn/generation/checkpoint fences.
+                if let nativeRead = execution.nativeRead { response["nativeBrowserRead"] = nativeRead.rawValue }
+                try sendResponse(id: id, result: response)
                 if let taskID, let publishedRead { computerReadEvidence[taskID] = publishedRead.evidence }
                 if let taskID, let referencePublication { computerV2Sessions[taskID]?.modelReferences = referencePublication.references }
                 if EmbeddedBrowserTools.names.contains(tool), let taskID {
@@ -4588,10 +4593,14 @@ private extension CodexAppServerRuntime {
                 var failureItems = [textContent(message)]
                 if EmbeddedBrowserTools.names.contains(tool),
                    let recovery = error as? EmbeddedBrowserPreflightRecoveryFailure {
-                    // This remains a failed, undispatched action. The controller
-                    // only refreshed a read before approval; retry accounting
-                    // above and the normal final publication fences still apply.
-                    failureItems.append(textContent(recovery.observationResponse))
+                    // The request remains failed and undispatched. Its complete
+                    // separate read is atomic; the original diagnostic stays on
+                    // the local error instead of being duplicated on the wire.
+                    // Failure accounting and publication fences are unchanged.
+                    if let cue = recovery.rejectionReceipt {
+                        failureItems = [textContent(BrowserCompleteObservation.marker),
+                            textContent(cue.compactText), textContent(recovery.observationResponse)]
+                    } else { failureItems.append(textContent(recovery.observationResponse)) }
                 }
                 if requestedAlias != nil, terminal == nil, let taskID,
                    let recovery = await recoverReferencePresentation(after: error, taskID: taskID) {
@@ -4823,11 +4832,16 @@ private extension CodexAppServerRuntime {
             }
         }
 
+        private struct DynamicToolExecution {
+            let contentItems: [[String: Any]]
+            var nativeRead: EmbeddedBrowserToolExecution.NativeRead? = nil
+        }
+
         /// Browser mechanics live behind a separate controller; this boundary
         /// supplies only current-turn authority and the existing native approval.
         private func executeEmbeddedBrowserTool(_ tool: String, arguments: [String: Any],
                                                 taskID: AgentTask.ID?,
-                                                prepared: EmbeddedBrowserActionReferences.Prepared? = nil) async throws -> [[String: Any]] {
+                                                prepared: EmbeddedBrowserActionReferences.Prepared? = nil) async throws -> DynamicToolExecution {
             guard let controller = embeddedBrowserTools, EmbeddedBrowserTools.names.contains(tool),
                   let taskID, let turnID = turnIdentity.activeTurnID(for: taskID),
                   let epoch = computerV2Sessions[taskID]?.epoch,
@@ -4902,7 +4916,7 @@ private extension CodexAppServerRuntime {
             // complete observed rows, without old pagination metadata.
             let marker = result.completeObservation ? [textContent(BrowserCompleteObservation.marker)] : []
             let receipt = result.actionReceipt.map { [textContent($0.compactText)] } ?? []
-            return marker + receipt + [textContent(result.response)]
+            return DynamicToolExecution(contentItems: marker + receipt + [textContent(result.response)], nativeRead: result.nativeRead)
         }
 
         private func executeDynamicTool(
@@ -4915,7 +4929,7 @@ private extension CodexAppServerRuntime {
 
             if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
             if tool.hasPrefix("browser_") {
-                return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID, prepared: browserMutation)
+                return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID, prepared: browserMutation).contentItems
             }
             if tool.hasPrefix("computer_v2_"), tool != ComputerOutcomeToolContract.name {
                 return try await executeComputerV2(tool, arguments: arguments, taskID: taskID)

@@ -153,6 +153,64 @@ final class BrowserCompleteObservationEncodingTests: XCTestCase {
                                     try BrowserCompleteObservation.excessBytes(nearBoundaryPublished, actionReceipt: receipt))
     }
 
+    func testRecoveryCueAndCompletePageKeepRejectionDistinctFromSeparateObservation() throws {
+        let receipts: [BrowserCompleteObservation.RejectionReceipt] = [.changedFilters,
+            .stale(wasFill: false, documentChanged: false), .stale(wasFill: true, documentChanged: false),
+            .stale(wasFill: false, documentChanged: true), .stale(wasFill: true, documentChanged: true)]
+        let page = #"#0 role="AXButton" label="Send \" é 🙂\nmessage" actions=["AXPress"] click_ref="bclick_00000000-0000-0000-0000-000000000010""#
+            + "\n" + #"READ next_cursor="exact-current-cursor" output_truncated=1"#
+        for receipt in receipts {
+            let cue = receipt.compactText, cueObject = try object(cue)
+            XCTAssertEqual(Set(cueObject.keys), ["kind", "dispatched", "reason", "outcome"])
+            XCTAssertEqual(cueObject["kind"] as? String, receipt.kind.rawValue)
+            XCTAssertEqual(cueObject["reason"] as? String, receipt.reason.rawValue)
+            XCTAssertEqual(cueObject["dispatched"] as? Bool, false)
+            XCTAssertEqual(cueObject["outcome"] as? String, "unverified")
+            XCTAssertLessThanOrEqual(cue.utf8.count, 128)
+            let encoding = BrowserCompleteObservation.Encoding.recovery(receipt: receipt, view: .all)
+            XCTAssertEqual(encoding.retentionCue, cue); XCTAssertNil(encoding.actionReceipt)
+            let encoded = try encoding.encode(page, snapshotID: snapshotID)
+            let items = try XCTUnwrap(JSONSerialization.jsonObject(with: serializedParts(encoded, receipt: cue)) as? [[String: String]])
+            XCTAssertEqual(items.count, 3)
+            XCTAssertEqual(items[0]["text"], BrowserCompleteObservation.marker)
+            XCTAssertEqual(items[1]["text"], cue)
+            let body = try self.object(XCTUnwrap(items[2]["text"]))
+            XCTAssertEqual(body["success"] as? Bool, false)
+            XCTAssertEqual(body["dispatched"] as? Bool, false)
+            XCTAssertEqual(body["no_replay"] as? Bool, true)
+            XCTAssertEqual(body["result_verified"] as? Bool, false)
+            let error = try XCTUnwrap(body["error"] as? [String: String])
+            XCTAssertEqual(error, ["code": receipt.reason.rawValue], "Do not duplicate the local diagnostic in the provider envelope")
+            let observed = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            XCTAssertEqual(observed["status"] as? String, "available")
+            XCTAssertEqual(observed["view"] as? String, "all")
+            XCTAssertEqual(observed["snapshot_id"] as? String, snapshotID.uuidString)
+            XCTAssertEqual(Array(try XCTUnwrap(observed["text"] as? String).utf8), Array(page.utf8))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: cue), 0)
+        }
+    }
+
+    func testRecoveryEnvelopeCountsCueNestedEscapingAndEverySeparatorWithoutTrimming() throws {
+        let receipt = BrowserCompleteObservation.RejectionReceipt.changedFilters
+        let cue = receipt.compactText
+        let encoding = BrowserCompleteObservation.Encoding.recovery(receipt: receipt, view: .content)
+        let empty = try encoding.encode("", snapshotID: snapshotID)
+        let available = 4_096 - rawBytes(empty, receipt: cue)
+        let exact = try encoding.encode(String(repeating: "x", count: available), snapshotID: snapshotID)
+        XCTAssertEqual(rawBytes(exact, receipt: cue), 4_096)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(exact, actionReceipt: cue), 0)
+        let over = try encoding.encode(String(repeating: "x", count: available + 1), snapshotID: snapshotID)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(over, actionReceipt: cue), 1)
+        let escaped = String(repeating: "\\", count: 1_200) + "e\u{301} 🙂 \"\n\t\u{0001}"
+        let encoded = try encoding.encode(escaped, snapshotID: snapshotID)
+        XCTAssertLessThanOrEqual(rawBytes(encoded, receipt: cue), 4_096)
+        let serialized = try serializedParts(encoded, receipt: cue)
+        XCTAssertGreaterThan(serialized.count, 4_608)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, actionReceipt: cue), serialized.count - 4_608)
+        let observation = try XCTUnwrap(object(encoded)["current_observation"] as? [String: Any])
+        XCTAssertEqual(Array(try XCTUnwrap(observation["text"] as? String).utf8), Array(escaped.utf8))
+    }
+
     private func cue(wasFill: Bool) -> String {
         wasFill
             ? #"{"dispatched":true,"kind":"fill","label":"Message","outcome":"unverified","partial":false}"#
