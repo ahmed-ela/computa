@@ -881,4 +881,33 @@ correct order after cold resume. Existing file-edit, command, reasoning, rate-li
 and correction checks passed. All 20 version/product-identity checks passed.
 Initial new-test argument-order compile errors and the old runtime-version
 expectation failure were preserved, corrected and rerun; they are not hidden
-passes. Signed installation and live model behavior remain pending.
+passes.
+
+Signed build 239 installed from `65595af`, matching all 11 signing, version,
+resource and source checks. The local read passed (2.686 seconds, four calls,
+no failures or compactions, no POST). The same-chat send failed: after one
+recovered missing-binding error, the model incorrectly demanded later
+authorization despite the explicit current send request. No POST occurred.
+All five ordinary inferences in each of those turns accepted the native proof
+and omitted reminders, so the refusal is not a fallback or proof-admission error.
+
+The independent send passed delivery and attribution: exactly one POST matched
+all three requested fields, and the final cited its current receipt. It still
+took 22.572 seconds and 31 calls, with three recovered failures and two completed
+compactions. It used an old Send reference after filling fields, restarted reads
+instead of continuing them, and unnecessarily reopened compose. All 32 ordinary
+inferences accepted the proof; both maintenance inferences retained their
+reminder. The last observation, message IDs and exact active user text survived
+both compactions. This is a successful individual task, not reliable acceptance.
+
+The real attachment lookup failed in 47.652 seconds with 23 calls, three native
+failures and one completed compaction. The model reached an account picker but
+repeated filtered text reads after being told six input-capable controls were
+omitted. No password/MFA block or attachment was established. The natural ODE
+follow-up repeated that historical sign-in claim without inspecting the current
+browser. The diagnostics trial was interrupted after repeated broad local
+searches; all 16 command receipts were terminal, so historical session IDs found
+inside search output were not evidence of leaked current commands. No settings
+were changed. Owned tabs were cleaned up and the fixture stopped with its eight
+events and single POST unchanged. These failures remain unresolved acceptance
+work; request chronology and record association alone did not solve them.
