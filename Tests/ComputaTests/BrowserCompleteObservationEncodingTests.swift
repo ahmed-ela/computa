@@ -81,7 +81,7 @@ final class BrowserCompleteObservationEncodingTests: XCTestCase {
             XCTAssertTrue(try XCTUnwrap(observation["text"] as? String).contains(send))
             XCTAssertTrue(try XCTUnwrap(observation["text"] as? String).contains(sent))
             if wasFill {
-                XCTAssertTrue(try XCTUnwrap(body["next"] as? String).contains("no Enter or submit click"))
+                XCTAssertTrue(try XCTUnwrap(body["next"] as? String).contains("no Enter/submit"))
             }
             XCTAssertEqual(try BrowserCompleteObservation.excessBytes(envelope, actionReceipt: receipt), 0)
             XCTAssertLessThanOrEqual(wire.count, 4_608)

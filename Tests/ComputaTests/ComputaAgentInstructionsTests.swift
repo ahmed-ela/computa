@@ -198,7 +198,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_900, "CLI guidance includes bounded repository and per-command outcome context.")
         let commandInstructions = ComputaAgentInstructions.commandLine.replacingOccurrences(of: "\n", with: " ")
         for rule in [
-            "Use observed absolute paths or \"$HOME/...\"; quoted ~ is literal",
+            "HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal",
             "Locate files before content search; prefer rg with bounded output",
             "Scope product diagnostics to relevant config/help files; skip histories/logs unless needed",
             "Fix observed path errors before repeating",
@@ -402,78 +402,82 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         // qualification must separately perform and verify an authorized write.
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
         let refusal = "Under the current background-only interaction policy, I am limited to read-only operations. Sending an email is not permitted."
-        let current = "Send the requested message to recipient@example.test."
+        let currentRequests = ["Send the requested message to recipient@example.test.",
+                               "Inspect the mailbox only; do not send, edit or delete anything."]
         let ongoing = "For this entire conversation, never send outside example.test."
         let authority = ComputaAgentInstructions.backgroundActionAuthority
         // Cold-resumed threads can retain the original developer message. The
         // current host suffix and website handoff must not depend on replacing it.
         let retained = native.replacingOccurrences(of: ComputaAgentInstructions.browserTurnLifecycle,
                                                    with: "Bind anew each turn.").replacingOccurrences(of: ComputaAgentInstructions.browserSearchEvidence, with: "")
-        let input: [[String: Any]] = [
-            ["role": "developer", "content": retained],
-            ["role": "user", "content": ongoing],
-            ["role": "user", "content": "Find the attachment. Read only; do not send anything."],
-            ["role": "assistant", "content": refusal],
-            ["role": "user", "content": [["type": "input_text", "text": current],
-                ["type": "input_text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()]]],
-        ]
-        let functions = EmbeddedBrowserTools.definitions().map { definition -> [String: Any] in
-            var function = definition
-            function["parameters"] = function.removeValue(forKey: "inputSchema")
-            return function
-        }
-        let original: [String: Any] = ["model": "browser/chatgpt", "input": input, "tools": functions]
-        let web = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: original))
-        let end = try XCTUnwrap(web.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
-        let afterHistory = String(web.prompt[end.upperBound...])
-        XCTAssertEqual(afterHistory.components(separatedBy: authority).count - 1, 1,
-                       "The fresh browser handoff cannot be suppressed by old retained instructions or refusals")
-        XCTAssertTrue(afterHistory.replacingOccurrences(of: "\n", with: " ")
-            .contains("A user's read-only task allows"))
-        XCTAssertTrue(afterHistory.contains("navigation/search/filtering, not sends, edits, deletions or settings changes"))
-        XCTAssertTrue(afterHistory.contains("Honor ongoing user restrictions"))
-        XCTAssertTrue(afterHistory.contains("actual approvals/denials and Stop"))
-        XCTAssertTrue(afterHistory.contains("A current explicit send authorizes only that send"))
-        XCTAssertTrue(afterHistory.contains("no second request is"))
-        XCTAssertTrue(afterHistory.contains("needed after task-local read-only work"))
-        let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: web.continuationRequest) as? NSDictionary)
-        XCTAssertEqual(continued, original as NSDictionary, "Current guidance must not rewrite earlier user constraints or history")
+        for current in currentRequests {
+            let input: [[String: Any]] = [
+                ["role": "developer", "content": retained],
+                ["role": "user", "content": ongoing],
+                ["role": "user", "content": "Find the attachment. Read only; do not send anything."],
+                ["role": "assistant", "content": refusal],
+                ["role": "user", "content": [["type": "input_text", "text": current],
+                    ["type": "input_text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()]]],
+            ]
+            let functions = EmbeddedBrowserTools.definitions().map { definition -> [String: Any] in
+                var function = definition
+                function["parameters"] = function.removeValue(forKey: "inputSchema")
+                return function
+            }
+            let original: [String: Any] = ["model": "browser/chatgpt", "input": input, "tools": functions]
+            let web = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: original))
+            let end = try XCTUnwrap(web.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+            let afterHistory = String(web.prompt[end.upperBound...])
+            XCTAssertEqual(afterHistory.components(separatedBy: authority).count - 1, 1,
+                           "The fresh browser handoff cannot be suppressed by old retained instructions or refusals")
+            let currentAuthority = afterHistory.replacingOccurrences(of: "\n", with: " ")
+            XCTAssertTrue(currentAuthority.contains("Follow the current user's task scope"))
+            XCTAssertTrue(currentAuthority.contains("Keep earlier task-local limits with their original task"))
+            XCTAssertTrue(afterHistory.contains("Honor explicit ongoing user restrictions"))
+            XCTAssertTrue(afterHistory.contains("actual approvals/denials and Stop"))
+            XCTAssertTrue(afterHistory.contains("A current explicit send authorizes only that send"))
+            XCTAssertTrue(currentAuthority.contains("no second user request is needed"))
+            let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: web.continuationRequest) as? NSDictionary)
+            XCTAssertEqual(continued, original as NSDictionary, "Current guidance must not rewrite earlier user constraints or history")
 
-        let provider = APIProviderDefinition(id: "action-authority-fixture", name: "Fixture",
-            baseURL: try XCTUnwrap(URL(string: "https://example.invalid/v1")), wireAPI: .chatCompletions,
-            models: [.init(id: "fixture-model", name: "Fixture")])
-        var apiInput = original
-        apiInput["model"] = APIProviderCatalog.appModelID(providerID: provider.id, modelID: provider.models[0].id)
-        let api = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: apiInput),
-            selection: .init(provider: provider, model: provider.models[0]),
-            threadID: "550e8400-e29b-41d4-a716-446655440000",
-            capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
-        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: api.body) as? [String: Any])
-        let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
-        XCTAssertTrue(messages.contains { $0["role"] as? String == "assistant" && $0["content"] as? String == refusal })
-        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["content"] as? String == ongoing },
-                      "Current-send clarification must not rewrite or promote an ongoing user restriction")
-        XCTAssertTrue(messages.contains { $0["role"] as? String == "developer" && $0["content"] as? String == retained })
-        let latest = try XCTUnwrap(messages.last { $0["role"] as? String == "user" })
-        let latestText = try XCTUnwrap(latest["content"] as? String)
-        XCTAssertTrue(latestText.hasPrefix(current))
-        XCTAssertTrue(latestText.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
-        XCTAssertTrue(latestText.contains(authority))
-        XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserTurnLifecycle))
-        XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserSearchEvidence))
-        let responsesProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
-            wireAPI: .responses, models: provider.models)
-        let responses = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: apiInput),
-            selection: .init(provider: responsesProvider, model: responsesProvider.models[0]),
-            threadID: "550e8400-e29b-41d4-a716-446655440000",
-            capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
-        let responsesBody = try XCTUnwrap(JSONSerialization.jsonObject(with: responses.body) as? [String: Any])
-        XCTAssertEqual(responsesBody["input"] as? NSArray, input as NSArray,
-                       "Explicit ongoing restrictions, task-local bounds and the new request preserve their original user authority and bytes")
-        XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserTurnLifecycle).count - 1, 1)
-        XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserSearchEvidence).count - 1, 1)
-        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(authority),
-                       "No current browser capability must not acquire one from history")
+            let provider = APIProviderDefinition(id: "action-authority-fixture", name: "Fixture",
+                baseURL: try XCTUnwrap(URL(string: "https://example.invalid/v1")), wireAPI: .chatCompletions,
+                models: [.init(id: "fixture-model", name: "Fixture")])
+            var apiInput = original
+            apiInput["model"] = APIProviderCatalog.appModelID(providerID: provider.id, modelID: provider.models[0].id)
+            let api = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: apiInput),
+                selection: .init(provider: provider, model: provider.models[0]),
+                threadID: "550e8400-e29b-41d4-a716-446655440000",
+                capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+            let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: api.body) as? [String: Any])
+            let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
+            XCTAssertTrue(messages.contains { $0["role"] as? String == "assistant" && $0["content"] as? String == refusal })
+            XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["content"] as? String == ongoing },
+                          "Current-send clarification must not rewrite or promote an ongoing user restriction")
+            XCTAssertTrue(messages.contains { $0["role"] as? String == "developer" && $0["content"] as? String == retained })
+            let latest = try XCTUnwrap(messages.last { $0["role"] as? String == "user" })
+            let latestText = try XCTUnwrap(latest["content"] as? String)
+            XCTAssertTrue(latestText.hasPrefix(current))
+            XCTAssertTrue(latestText.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
+            XCTAssertTrue(latestText.contains(authority))
+            XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserTurnLifecycle))
+            XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserSearchEvidence))
+            let responsesProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+                wireAPI: .responses, models: provider.models)
+            let responses = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: apiInput),
+                selection: .init(provider: responsesProvider, model: responsesProvider.models[0]),
+                threadID: "550e8400-e29b-41d4-a716-446655440000",
+                capsules: try APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+            let responsesBody = try XCTUnwrap(JSONSerialization.jsonObject(with: responses.body) as? [String: Any])
+            XCTAssertEqual(responsesBody["input"] as? NSArray, input as NSArray,
+                           "Explicit ongoing restrictions, task-local bounds and the new request preserve their original user authority and bytes")
+            XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserTurnLifecycle).count - 1, 1)
+            XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserSearchEvidence).count - 1, 1)
+            XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(authority),
+                           "No current browser capability must not acquire one from history")
+        }
+        XCTAssertLessThanOrEqual(authority.utf8.count, 383, "Simplification must not grow the prior authority paragraph")
+        XCTAssertFalse(authority.contains("read-only"), "Task scope comes from the preserved user request, not a generic effect prohibition list")
         XCTAssertLessThan(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.count, 1_900)
     }
 

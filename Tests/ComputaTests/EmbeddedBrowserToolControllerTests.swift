@@ -8,6 +8,99 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    func testOrdinaryMailboxKeepsSendAndAllFieldValuesInCompleteReadFillAndRecoveryPages() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.showCompactMailboxForm()
+        _ = try await call(controller, "browser_open", ["url": "http://127.0.0.1:54746/compose"])
+        func checkPage(_ text: String, count: Int) throws {
+            XCTAssertEqual(try field("shown", in: text), String(count))
+            XCTAssertEqual(try field("matches", in: text), String(count))
+            XCTAssertEqual(try field("source_nodes", in: text), "15")
+            XCTAssertEqual(try field("source_truncated", in: text), "0")
+            XCTAssertEqual(try field("output_truncated", in: text), "0")
+            XCTAssertNil(try continuationMetadata(text))
+            XCTAssertFalse(text.contains("document_epoch="))
+            let rows = text.split(separator: "\n").filter { $0.hasPrefix("#") }
+            let send = try XCTUnwrap(rows.first { $0.contains("label=\"Send message\"") })
+            XCTAssertTrue(send.contains("actions=[\"AXPress\"]")); XCTAssertTrue(send.contains("click_ref="))
+            for (label, value) in [("To", "course-staff@example.invalid"), ("Subject", "ODE schedule test 241 fresh"),
+                                   ("Message", "Please confirm Tuesday at 10:30 AM.")] {
+                let row = try XCTUnwrap(rows.first { $0.contains("label=\"\(label)\"") && $0.contains("fill_ref=") })
+                XCTAssertEqual(try publishedString("value", in: String(row)), value)
+            }
+        }
+        func checkSize(_ text: String, cue: String?, stage: String) throws {
+            let parts = [BrowserCompleteObservation.marker] + (cue.map { [$0] } ?? []) + [text]
+            let raw = parts.reduce(parts.count - 1) { $0 + $1.utf8.count }
+            let serialized = try JSONSerialization.data(withJSONObject: parts.map { ["type": "inputText", "text": $0] }).count
+            XCTAssertLessThanOrEqual(raw, 4_096); XCTAssertLessThanOrEqual(serialized, 4_608)
+            print("COMPACT_FORM_243 stage=\(stage) raw=\(raw) serialized=\(serialized)")
+        }
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        try checkPage(read, count: 15); try checkSize(read, cue: nil, stage: "read")
+        let targets = try XCTUnwrap(publishedTargets[snapshotID(read)])
+        let fill = try XCTUnwrap(targets.values.first { $0.label == "Message" && $0.fillRef != nil }?.fillRef)
+        let arguments = try JSONSerialization.data(withJSONObject: ["fill_ref": fill, "text": "Please confirm Tuesday at 10:30 AM."])
+        let filled = try await controller.executeResult(taskKey: "turn-a", tool: "browser_fill", arguments: arguments)
+        XCTAssertTrue(filled.completeObservation)
+        try checkPage(availableObservation(filled.response), count: 12)
+        try checkSize(filled.response, cue: filled.actionReceipt?.compactText, stage: "fill")
+        do {
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_fill", arguments: arguments)
+            XCTFail("A consumed fill must stay rejected")
+        } catch let failure as EmbeddedBrowserPreflightRecoveryFailure {
+            XCTAssertEqual(failure.original, .staleSnapshot)
+            let cue = try XCTUnwrap(failure.rejectionReceipt)
+            let body = try jsonObject(failure.observationResponse)
+            XCTAssertEqual(body["dispatched"] as? Bool, false)
+            XCTAssertEqual(body["result_verified"] as? Bool, false)
+            let observation = try XCTUnwrap(body["current_observation"] as? [String: Any])
+            XCTAssertEqual(observation["status"] as? String, "available")
+            XCTAssertEqual(observation["view"] as? String, "overview")
+            XCTAssertEqual(body["no_replay"] as? Bool, true)
+            let text = try XCTUnwrap(observation["text"] as? String)
+            XCTAssertEqual(observation["snapshot_id"] as? String, try snapshotID(text))
+            try checkPage(text, count: 12)
+            try checkSize(failure.observationResponse, cue: cue.compactText, stage: "recovery")
+        }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testCompactMailboxLongEscapedFieldContinuesExactBytesBeforeFollowingSendControl() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let value = String(repeating: "\"\\e\u{301}🙂\n", count: 240) + "END"
+        await backend.showCompactMailboxForm(message: value)
+        _ = try await call(controller, "browser_open", ["url": "http://127.0.0.1:54746/compose"])
+        var page = try await call(controller, "browser_read", ["view": "all"]), reconstructed = "", pages = 0
+        let source = try field("source_observation", in: page)
+        var sawSend = false
+        while true {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(page), 0)
+            XCTAssertEqual(try field("source_observation", in: page), source)
+            for row in page.split(separator: "\n") where row.hasPrefix("#") {
+                if row.contains("value_utf8=") {
+                    reconstructed += try XCTUnwrap(publishedString("value", in: String(row)))
+                }
+                if row.contains("label=\"Send message\"") {
+                    XCTAssertEqual(Array(reconstructed.utf8), Array(value.utf8), "Following control must not skip field tails")
+                    XCTAssertFalse(sawSend); sawSend = true
+                }
+            }
+            guard let next = try continuationMetadata(page) else { break }
+            let args = try XCTUnwrap(next["arguments"] as? [String: Any])
+            let cursor = try XCTUnwrap(args["cursor"] as? String)
+            XCTAssertEqual(page.components(separatedBy: cursor).count - 1, 1, "Cursor is published once")
+            page = try await call(controller, "browser_continue", args)
+        }
+        XCTAssertGreaterThan(pages, 1); XCTAssertTrue(sawSend)
+        XCTAssertEqual(Array(reconstructed.utf8), Array(value.utf8))
+        let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
     func testFreshReadAndContinueHaveDisjointSchemasWithFrozenLegacyDefinition() throws {
         let definitions = EmbeddedBrowserTools.definitions()
         let read = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_read" })
@@ -185,7 +278,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                     XCTAssertTrue(labels.insert(label).inserted, "Short rows must not be duplicated or skipped while packing feedback")
                 }
             }
-            guard let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] else { break }
+            guard let continuation = try continuationMetadata(page) else { break }
             page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
         }
         XCTAssertGreaterThan(pages, 1)
@@ -248,7 +341,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 observed += try XCTUnwrap(row.label)
             }
             pages += 1
-            guard let next = try actionReferenceMetadata(result.response)["continuation"] as? [String: Any] else { break }
+            guard let next = try continuationMetadata(result.response) else { break }
             XCTAssertLessThan(pages, 24)
             arguments = try XCTUnwrap(next["arguments"] as? [String: Any])
         }
@@ -282,8 +375,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             }
             pages += 1
             let metadata = try actionReferenceMetadata(result.response)
-            XCTAssertTrue((metadata["references"] as? String)?.contains("same capture") == true)
-            guard let continuation = metadata["continuation"] as? [String: Any] else { break }
+            XCTAssertTrue((metadata["refs"] as? String)?.contains("same-capture") == true)
+            guard let continuation = try continuationMetadata(result.response) else { break }
             XCTAssertLessThan(pages, 32)
             arguments = try XCTUnwrap(continuation["arguments"] as? [String: Any])
         }
@@ -348,7 +441,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 }
                 reconstructed += fragment
             }
-            guard let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] else { break }
+            guard let continuation = try continuationMetadata(page) else { break }
             let arguments = try XCTUnwrap(continuation["arguments"] as? [String: Any])
             let next = try await controller.executeResult(taskKey: "turn-a", tool: "browser_read",
                 arguments: JSONSerialization.data(withJSONObject: arguments))
@@ -720,7 +813,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let oldest = try XCTUnwrap(publishedTargets[id]?[0]?.clickRef)
         var page = try await call(controller, "browser_read", ["view": "all", "query": "Extra control"])
         let extraID = try snapshotID(page), extra = try XCTUnwrap(publishedTargets[extraID]?[0]?.clickRef)
-        while let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] {
+        while let continuation = try continuationMetadata(page) {
             page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
         }
         _ = try await call(controller, "browser_read", ["view": "all", "query": "Flight number"])
@@ -885,7 +978,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let frozen = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
         try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: frozen)
         var pages = 0
-        while let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] {
+        while let continuation = try continuationMetadata(page) {
             pages += 1; XCTAssertLessThan(pages, 40)
             page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
             let currentID = try snapshotID(page)
@@ -983,7 +1076,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 if let label = target.label { XCTAssertTrue(seen.insert(label).inserted) }
                 if target.label == "Send message" { send = target.clickRef }
             }
-            guard let continuation = try actionReferenceMetadata(page)["continuation"] as? [String: Any] else { break }
+            guard let continuation = try continuationMetadata(page) else { break }
             pages += 1; XCTAssertLessThan(pages, 20)
             page = try await call(controller, "browser_read", XCTUnwrap(continuation["arguments"] as? [String: Any]))
         }
@@ -1153,9 +1246,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
         let read = try await call(controller, "browser_read", ["view": "all"])
         let state = try actionReferenceMetadata(read)
-        let guidance = try XCTUnwrap(state["literal_copy_guidance"] as? String)
+        let guidance = try XCTUnwrap(state["copy"] as? String)
         XCTAssertLessThanOrEqual(guidance.utf8.count, 384)
-        XCTAssertEqual(guidance, "Copy observed values verbatim, preserving Unicode and whitespace.")
+        XCTAssertEqual(guidance, "Verbatim Unicode/whitespace.")
         let row = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("#2 ") }).description
         let regex = try NSRegularExpression(pattern: #"label=("(?:[^"\\]|\\.)*")"#)
         let match = try XCTUnwrap(regex.firstMatch(in: row, range: NSRange(row.startIndex..., in: row)))
@@ -1241,7 +1334,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
         let read = try await call(controller, "browser_read")
-        XCTAssertNotNil(try actionReferenceMetadata(read)["literal_copy_guidance"])
+        XCTAssertNotNil(try actionReferenceMetadata(read)["copy"])
         await backend.failNextClose()
         var closeOutput: String?
         do { closeOutput = try await call(controller, "browser_close"); XCTFail("Unconfirmed close cannot return success guidance") }
@@ -1280,6 +1373,14 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    /// The compact page publishes a cursor once, in READ. Constructing the
+    /// cursor-only call here exercises the same public contract as the model.
+    private func continuationMetadata(_ read: String) throws -> [String: Any]? {
+        let header = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("READ ") })
+        guard header.contains(" next_cursor=") else { return nil }
+        return ["arguments": ["cursor": try field("next_cursor", in: String(header))]]
+    }
+
     private func actionReferenceMetadata(_ read: String) throws -> [String: Any] {
         let line = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("BROWSER_ACTION_REFERENCES ") })
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst("BROWSER_ACTION_REFERENCES ".count).utf8)) as? [String: Any])
@@ -1291,15 +1392,15 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let read = try await call(controller, "browser_read", ["view": "all"])
         let line = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("BROWSER_ACTION_REFERENCES ") })
         let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst("BROWSER_ACTION_REFERENCES ".count).utf8)) as? [String: Any])
-        XCTAssertTrue((state["references"] as? String)?.contains("same capture") == true)
-        XCTAssertEqual(state["consumed_by_admitted_input"] as? Bool, true)
+        XCTAssertTrue((state["refs"] as? String)?.contains("same-capture") == true)
+        XCTAssertTrue((state["refs"] as? String)?.contains("input consumes all") == true)
         let id = try snapshotID(read)
         XCTAssertNotNil(publishedTargets[id]?[1]?.clickRef)
         XCTAssertNotNil(publishedTargets[id]?[0]?.fillRef)
         XCTAssertNil(publishedTargets[id]?[1]?.fillRef)
         XCTAssertNil(state["continuation"], "An exhausted read cannot invent a continuation")
-        XCTAssertEqual(state["next_after_input"] as? String,
-                       "Use current_observation or browser_read; never replay.")
+        XCTAssertEqual(state["next"] as? String,
+                       "current_observation/browser_read; never replay.")
         XCTAssertLessThanOrEqual(read.utf8.count, 16_384)
         let output = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(read), "element_index": 0, "text": "UA 1842"])
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
@@ -1309,8 +1410,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let observed = try XCTUnwrap(result["current_observation"] as? [String: Any])
         XCTAssertEqual(observed["status"] as? String, "available")
         let returned = try XCTUnwrap(observed["text"] as? String)
-        XCTAssertEqual(try actionReferenceMetadata(returned)["literal_copy_guidance"] as? String,
-                       "Copy observed values verbatim, preserving Unicode and whitespace.")
+        XCTAssertEqual(try actionReferenceMetadata(returned)["copy"] as? String,
+                       "Verbatim Unicode/whitespace.")
         XCTAssertNotEqual(try snapshotID(returned), try snapshotID(read))
         do {
             _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(read), "element_index": 1])
@@ -1354,10 +1455,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(fillReceipt["result_verified"] as? Bool, false)
         XCTAssertEqual(fillReceipt["no_replay"] as? Bool, true)
         let next = try XCTUnwrap(fillReceipt["next"] as? String)
-        XCTAssertTrue(next.contains("Fill dispatched; no Enter or submit click"))
-        XCTAssertTrue(next.contains("Page handlers may react"))
-        XCTAssertTrue(next.contains("distinct submit action"))
-        XCTAssertTrue(next.contains("do not repeat input"))
+        XCTAssertTrue(next.contains("no Enter/submit"))
+        XCTAssertTrue(next.contains("page handlers may react"))
+        XCTAssertTrue(next.contains("before separate submit"))
+        XCTAssertTrue(next.contains("no replay"))
         XCTAssertFalse(next.contains("if the page is unchanged"))
         try assertCompleteActionObservation(filled)
         let fresh = try availableObservation(fill)
@@ -1695,7 +1796,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(try field("semantic_readiness", in: read), "ready")
         XCTAssertEqual(read.components(separatedBy: "semantic_readiness=").count - 1, 1)
         XCTAssertTrue(read.contains("Check flight"))
-        XCTAssertTrue(read.contains("not website search or proof of relevance/absence"), "Readiness is not task success or document relevance")
+        XCTAssertTrue(read.contains("not site results/relevance/absence"), "Readiness is not task success or document relevance")
         let id = try snapshotID(read)
         XCTAssertNotNil(publishedTargets[id]?[1]?.clickRef)
         XCTAssertNotNil(publishedTargets[id]?[0]?.fillRef)
@@ -1714,7 +1815,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertTrue(empty.contains("READINESS deadline reached without qualifying content"))
         XCTAssertTrue(empty.contains("search completion and absence remain unverified"))
         XCTAssertTrue(empty.contains("source_nodes=0")); XCTAssertTrue(empty.contains("no_matches=1"))
-        XCTAssertTrue(empty.contains("not website search or proof of relevance/absence"))
+        XCTAssertTrue(empty.contains("not site results/relevance/absence"))
         XCTAssertNotEqual(try snapshotID(empty), try snapshotID(first))
         XCTAssertFalse(empty.contains("click_ref=")); XCTAssertFalse(empty.contains("fill_ref="))
         do {
@@ -1744,7 +1845,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let lines = links.split(separator: "\n")
             XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
             XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim."))
-            XCTAssertTrue(links.contains("not website search or proof of relevance/absence"))
+            XCTAssertTrue(links.contains("not site results/relevance/absence"))
             XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
             if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }
             let overview = try await call(controller, "browser_read", ["view": "overview"])
@@ -2006,12 +2107,14 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         await backend.showManyControls()
         let first = try await call(controller, "browser_read", ["view": "overview", "query": "Extra control"])
         let metadata = try actionReferenceMetadata(first)
-        let continuation = try XCTUnwrap(metadata["continuation"] as? [String: Any])
+        XCTAssertNil(metadata["continuation"], "The exact cursor is published only in READ")
+        let continuation = try XCTUnwrap(continuationMetadata(first))
         XCTAssertEqual(Set(continuation.keys), ["arguments"])
         XCTAssertNil(continuation["tool"], "The native page must not prescribe a tool absent from a saved catalog")
         let arguments = try XCTUnwrap(continuation["arguments"] as? [String: Any])
         XCTAssertEqual(Set(arguments.keys), ["cursor"], "Do not suggest a new view/query beside a retained cursor")
         XCTAssertEqual(arguments["cursor"] as? String, try field("next_cursor", in: first))
+        XCTAssertEqual(first.components(separatedBy: try field("next_cursor", in: first)).count - 1, 1)
         let next = try await call(controller, "browser_read", arguments)
         XCTAssertEqual(try field("source_observation", in: next), try field("source_observation", in: first))
         XCTAssertEqual(try field("view", in: next), "overview")
@@ -2021,8 +2124,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let retainedRef = try XCTUnwrap(publishedTargets[originalID]?[0]?.clickRef)
         try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
             arguments: argumentData(["click_ref": retainedRef]))
-        let nextMetadata = try actionReferenceMetadata(next)
-        let nextContinuation = try XCTUnwrap(nextMetadata["continuation"] as? [String: Any])
+        let nextContinuation = try XCTUnwrap(continuationMetadata(next))
         var wrongArguments = try XCTUnwrap(nextContinuation["arguments"] as? [String: Any])
         wrongArguments["view"] = "content"
         do {
@@ -2111,8 +2213,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                     labels.append(label)
                 }
             }
-            let metadata = try actionReferenceMetadata(page)
-            guard let continuation = metadata["continuation"] as? [String: Any],
+            guard let continuation = try continuationMetadata(page),
                   let arguments = continuation["arguments"] as? [String: Any] else { break }
             page = try await call(controller, "browser_read", arguments)
         }
@@ -2354,7 +2455,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             if scenario == "pagination" {
                 let cursor = try field("next_cursor", in: fresh)
                 let source = try field("source_observation", in: fresh)
-                let continuation = try XCTUnwrap(try actionReferenceMetadata(fresh)["continuation"] as? [String: Any])
+                let continuation = try XCTUnwrap(try continuationMetadata(fresh))
                 XCTAssertNil(continuation["tool"], "The exact arguments work with the admitted continuation tool")
                 let arguments = try XCTUnwrap(continuation["arguments"] as? [String: String])
                 XCTAssertEqual(arguments, ["cursor": cursor], "Post-input overview supplies a cursor-only call too")
@@ -2494,7 +2595,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             XCTAssertEqual(current["snapshot_id"] as? String, newID); XCTAssertNotEqual(newID, try snapshotID(old))
             XCTAssertNotNil(publishedTargets[newID]?[1]?.clickRef)
             XCTAssertNotNil(publishedTargets[newID]?[0]?.fillRef)
-            XCTAssertTrue((response["next"] as? String)?.contains("separate call") == true)
+            XCTAssertTrue((response["next"] as? String)?.contains("Inspect this separate fresh read") == true)
+            XCTAssertTrue((response["next"] as? String)?.contains("Never reuse rejected refs") == true)
             let recovered = await backend.counts()
             XCTAssertEqual(recovered.observes, before.observes + 1)
             XCTAssertEqual(recovered.presses, 0); XCTAssertEqual(recovered.fills, 0)
@@ -3669,7 +3771,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let row = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("#0 ") }).description
         XCTAssertTrue(row.contains("semantic_role=\"link\""))
         XCTAssertTrue(row.contains("href=\"\(destination)\""))
-        XCTAssertTrue(read.contains("Omitted row flags: enabled=true settable=false actions=[]"))
+        XCTAssertTrue(read.contains("Defaults enabled=true settable=false actions=[]"))
         XCTAssertFalse(row.contains("enabled=false")); XCTAssertFalse(row.contains("actions="))
         XCTAssertFalse(row.contains("click_ref=")); XCTAssertFalse(row.contains("fill_ref="))
         XCTAssertFalse(row.contains("follow_link=true"))
@@ -3730,6 +3832,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var shouldFailClose = false
     private var createWaiters=[CheckedContinuation<Void,Never>](), mutationWaiters=[CheckedContinuation<Void,Never>]()
     private var afterInputScenario: String?, postInputPending = false, manyControls = false
+    private var compactMailboxForm = false
     private var invalidFieldOnPress = false
     private var extraControlCount = 100, buttonAfterControls = false
     private var protectedTargets = Set<String>()
@@ -3913,10 +4016,11 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         if buttonAfterControls, let index = nodes.firstIndex(where: { $0.backendNodeID == buttonID }) {
             nodes.append(nodes.remove(at: index))
         }
+        if compactMailboxForm { nodes = compactMailboxFixtureNodes(message: field) }
         let capturedOutscope = postCaptureScopeScenario == "post_capture_outscope_document"
         let capturedURL = capturedOutscope ? URL(string: "https://unrelated.example/PRIVATE_POST_CAPTURE_ROUTE")!
             : targets[target.targetID]?.url ?? target.url
-        var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:capturedURL,nodes:emptyObservation ? [] : nodes)
+        var observation=BrowserDocumentObservation(loaderID:generation,title:compactMailboxForm ? "Compose message" : target.title,url:capturedURL,nodes:emptyObservation ? [] : nodes)
         observation.committedDocumentID = committedIdentityExposed ? committedDocumentID : nil
         observation.sourceName = observationSourceName
         observation.semanticReadiness = semanticReadiness
@@ -3960,6 +4064,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         try permit.commit { stats.navigations += 1; generation=UUID().uuidString; committedDocumentID=UUID(); targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url) }
     }
     func wait(target:BrowserTarget,text:String?,timeoutMS:Int) async throws -> Bool { text == nil || result.contains(text!) }
+    func showCompactMailboxForm(message: String = "Please confirm Tuesday at 10:30 AM.") {
+        compactMailboxForm = true; field = message; semanticReadiness = .ready
+    }
     func holdNextCreate() { holdCreate=true }
     func waitUntilCreateHeld() async { if !createHeld { await withCheckedContinuation { createWaiters.append($0) } } }
     func resumeCreate() { createContinuation?.resume(); createContinuation=nil; holdCreate=false }

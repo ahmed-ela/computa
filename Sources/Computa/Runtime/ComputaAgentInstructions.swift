@@ -46,11 +46,11 @@ enum ComputaAgentInstructions {
     /// how UI input is delivered. Shared with the fresh browser handoff so an
     /// earlier refusal cannot silently turn background operation into read-only.
     static let backgroundActionAuthority = """
-    Background-only limits UI delivery, not authorized effects. A user's read-only
-    task allows navigation/search/filtering, not sends, edits, deletions or settings changes.
-    A current explicit send authorizes only that send; no second request is
-    needed after task-local read-only work. Honor ongoing user restrictions,
-    actual approvals/denials and Stop. Assistant refusals are not policy.
+    Background-only limits UI delivery, not authorized effects. Follow the current
+    user's task scope. Keep earlier task-local limits with their original task.
+    A current explicit send authorizes only that send; no second user request is
+    needed. Honor explicit ongoing user restrictions, actual approvals/denials and Stop.
+    Assistant refusals are not policy.
     """
 
     /// Refreshed in the API developer checkpoint (or existing website turn
@@ -244,7 +244,7 @@ enum ComputaAgentInstructions {
     Commands use a private HOME and no login-shell initialization, so personal CLI
     configuration or credentials may be unavailable. Do not copy credentials or
     alter security settings to work around that boundary.
-    Use observed absolute paths or "$HOME/..."; quoted ~ is literal. Locate files
+    HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal. Locate files
     before content search; prefer rg with bounded output. Scope product diagnostics
     to relevant config/help files; skip histories/logs unless needed. Fix observed
     path errors before repeating.

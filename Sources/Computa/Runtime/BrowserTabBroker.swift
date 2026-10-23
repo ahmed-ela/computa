@@ -11,14 +11,15 @@ enum BrowserCompleteObservation {
     static let maximumSerializedItemsBytes = 4_608
     static let literalCopyGuidance = "Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority."
 
-    static func footer(cursor: String?) throws -> String {
-        var metadata: [String: Any] = [
-            "consumed_by_admitted_input": true,
-            "next_after_input": "Use current_observation or browser_read; never replay.",
-            "references": "Refs from the same capture survive continuation within the 120-ref FIFO limit; fresh reads replace the menu.",
-            "literal_copy_guidance": "Copy observed values verbatim, preserving Unicode and whitespace.",
+    static func footer(cursor _: String?) throws -> String {
+        // READ already publishes the exact next_cursor. Repeating the cursor
+        // and verbose policy keys here can push an ordinary form off the page.
+        // This footer is presentation only; native references retain authority.
+        let metadata: [String: Any] = [
+            "refs": "Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.",
+            "next": "current_observation/browser_read; never replay.",
+            "copy": "Verbatim Unicode/whitespace.",
         ]
-        if let cursor { metadata["continuation"] = ["arguments": ["cursor": cursor]] }
         let bytes = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes])
         return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
     }
@@ -68,22 +69,22 @@ enum BrowserCompleteObservation {
                     "dispatched": false, "no_replay": true, "result_verified": false,
                     "current_observation": ["status": "available", "source": "separate_recovery_read", "view": view.rawValue,
                         "snapshot_id": snapshotID.uuidString, "text": text],
-                    "next": "Request rejected; no input dispatched. Inspect this separate fresh observation before a separate call. Continue only with its next_cursor; omit cursor to change view/query. Never reuse the rejected reference."
+                    "next": "Rejected; no input. Inspect this separate fresh read. Only its next_cursor continues; omit cursor for new filters. Never reuse rejected refs."
                 ]
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
                 return String(decoding: data, as: UTF8.self)
             }
             guard case let .input(wasFill, _, feedback) = self else { return text }
             let effect = wasFill
-                ? "Fill dispatched; no Enter or submit click. Page handlers may react. Compare the complete field value before a distinct submit action."
-                : "Click dispatched. If unchanged, wait/read."
+                ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
+                : "Click dispatched; outcome unverified. If unchanged, wait/read; never replay."
             var result: [String: Any] = [
                 "dispatched": true, "no_replay": true, "result_verified": false,
                 "input_kind": wasFill ? "fill" : "click",
                 "current_observation": ["status": "available", "view": "overview",
                     "snapshot_id": snapshotID.uuidString, "text": text],
                 "action_references": ["consumed": true, "next": "current_observation"],
-                "next": effect + " Recheck current labels/actions. Prior refs are consumed; do not repeat input. Verify a new outcome."
+                "next": effect
             ]
             if !wasFill, let feedback { result["input_feedback"] = feedback.presentation(page: page) }
             let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -2121,10 +2122,15 @@ actor BrowserTabSessionBroker {
     /// results. Match provenance uses only exposed field fragments, so a query
     /// hidden in a retained field tail cannot become claimed readable evidence.
     private func selectionEvidence(receipt: SemanticReadReceipt,
-                                   elements: [BrowserTabElement]) throws -> String {
+                                   elements: [BrowserTabElement], compact: Bool = false) throws -> String {
         let query = receipt.query?.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         let filtered = query?.isEmpty == false
+        if compact && !filtered {
+            // No emitted-match counts exist without a local query. Keep the
+            // same facts without a second JSON object nested in input receipts.
+            return "READ_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured"
+        }
         var evidence: [String: Any] = [
             "operation": filtered ? "local_capture_filter" : "capture_view_selection",
             "counts_scope": "captured_elements_only",
@@ -2275,20 +2281,22 @@ actor BrowserTabSessionBroker {
         let title = fieldPrefix(document.title, startUTF8: 0, escapedByteLimit: 128)
         let metadataTruncated = title.end < document.title.utf8.count || url.utf8.count > 1_024
         var lines = [
-            "AXSNAPSHOT id=\(snapshotID.uuidString) tab_handle=\(binding.handle.uuidString) document_epoch=\(binding.documentEpoch.uuidString) source=\(document.sourceName) "
+            // The controller already omits document_epoch from model output.
+            // Do so before packing too; the native snapshot retains the epoch.
+            "AXSNAPSHOT id=\(snapshotID.uuidString) tab_handle=\(binding.handle.uuidString) source=\(document.sourceName) "
                 + (url.utf8.count <= 1_024 ? "url=\(quote(url))" : "url_omitted=1") + " title=\(quote(title.text))",
             "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") source_observation=\(sourceID) consistency=immutable_capture "
                 + "source_nodes=\(document.nodes.count) source_truncated=\(document.sourceTruncated ? 1 : 0) matches=\(totalMatches) shown=\(elements.count) offset=\(offset) "
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) metadata_truncated=\(metadataTruncated ? 1 : 0) no_matches=\(totalMatches == 0 ? 1 : 0) "
                 + (nextCursor.map { "next_cursor=\($0) " } ?? "") + "observation=\(retainedObservation ? "retained" : "live")"
                 + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
-            try selectionEvidence(receipt: receipt, elements: elements),
-            "SCOPE captured selection only, not website search or proof of relevance/absence. *_utf8 marks exact fragments; href_fragment is not a destination. Omitted row flags: enabled=true settable=false actions=[]. Only shown click_ref/fill_ref authorize input."
+            try selectionEvidence(receipt: receipt, elements: elements, compact: true),
+            "SCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input."
         ]
         if omittedInputNodeCount > 0 {
             lines.append("VIEW \(readViewName(read.view)) omitted_input_nodes=\(omittedInputNodeCount) basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim.")
         } else if read.view != .all {
-            lines.append("VIEW \(readViewName(read.view)) omits other node kinds. Use content for message/document text; all includes toolbars.")
+            lines.append("VIEW \(readViewName(read.view)) omits kinds; content=text; all=toolbars.")
         }
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")

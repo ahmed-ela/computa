@@ -1071,10 +1071,23 @@ Installed live trials used remote Cerebras GPT-OSS120b at medium effort:
   query unsubmitted. It then treated autocomplete absence as mailbox absence and
   overstated which searches had run. Valid continuation transport and successful
   compaction did not establish the requested announcements or a justified absence.
-- Read-only diagnostics were stopped through the UI after roughly 35 seconds of
-  repetitive broad shell searches without useful progress. There was no completed
-  answer. Native cancellation and termination of one owned command session were
-  observed; the detailed command audit was still pending when this note froze.
+- Read-only diagnostics were stopped through the UI after 38.033 seconds and
+  47 shell calls: 34 listings, eight searches, three file-discovery commands and
+  two file reads. Twenty-eight calls exited with code 1; 29 outputs explicitly
+  reported missing paths. The model repeatedly appended application paths to its
+  private HOME, including ten repetitions of one command, despite path-error
+  guidance and successful absolute-path listings. One broad search remained
+  running and was never polled. No supported setting or command was established,
+  and there was no final answer. Native cancellation and termination of that
+  owned session were separately confirmed. All commands were read-only.
+
+The diagnostic trace retains all 47 matched call/result pairs, including the
+short path-error receipts, with no compaction or orphaned outputs. Source review
+found no result-dropping or tool-name mapping defect: the codec preserves these
+strings as matched tool messages. This is canonical-history and source evidence,
+not an independent capture of the remote request. The delivered instructions
+already warned about private HOME, scoped searches and fixing errors before
+repeating; no missing-instruction cause was proven.
 
 Owned-tab cleanup was observed for the synthetic read, attachment lookup and ODE
 follow-up; the zero-tool refusals created none. No real mail was sent, forwarded,
@@ -1082,12 +1095,75 @@ removed or downloaded. Finite evidence is preserved in `audits241/`; task status
 and cleanup are recorded separately. No execution or retention budget, native
 permission, runtime package or approval policy changed in build 241.
 
-### Build 242 candidate — live qualification pending
+### Build 242: fresh delivery passed; same-chat refusal remains
 
-The candidate replaces only the first background-policy paragraph to state
-explicitly that background-only permits user-authorized native AX/browser writes
-under native checks. Existing restrictions on recovery, activation, global input
-and image authority remain. The rendered paragraph is 313 bytes, one byte shorter
-than before. All 45 focused tool-contract tests passed with unchanged sources;
-this is source qualification only. Installed live evidence is still pending, and
-the build 241 send refusals remain unresolved.
+Installed source `ce8a46e` uses the unchanged `mactopus-14` runtime. The code
+change replaces only the first background-policy paragraph to state explicitly
+that background-only permits user-authorized native AX/browser writes under
+native checks. Existing restrictions on recovery, activation, global input and
+image authority remain. The paragraph is 313 bytes, one byte shorter than before.
+All 45 focused tool-contract tests passed with unchanged sources.
+
+Three live trials used remote Cerebras GPT-OSS120b at medium effort and exactly
+matched their build 241 user prompts:
+
+- Fresh synthetic send delivered the exact recipient, subject and body once in
+  12.569 seconds with seventeen calls, one stale-reference rejection and one
+  compaction. The stale Send reference had been consumed by later fills; it was
+  rejected before input and returned a separate recovery read. Five subsequent
+  `all` reads restarted page one instead of using the offered continuation. Send
+  remained beyond those bounded pages, then a filtered fresh read exposed the
+  current button and one click produced the single POST. The newest observation
+  survived compaction byte-for-byte. The final answer changed the receipt and
+  recipient hyphens to U+2011 and a body space to U+202F: delivery passed, literal
+  final copying failed.
+- Synthetic read passed in 3.440 seconds with five calls, no errors or compaction,
+  and zero POSTs. It read the actual message and copied the attachment filename
+  exactly. Its body quotation changed a space to U+202F; exact body transcription
+  was not requested.
+- Same-chat send failed in 2.512 seconds after three successful calls: open, read
+  and Compose click. The current observation exposed all three editable fields
+  with usable fill references and no access or permission denial. The model then
+  falsely claimed background-only permits only read-only actions. No fill or POST
+  occurred. The trace's base instructions contain the new write-authority wording;
+  its retained developer instructions also explicitly authorize a current send
+  after task-local read-only work. A raw remote request was not captured, so this
+  does not independently establish downstream instruction processing.
+
+Each trial closed one owned tab, preserved user tabs and left an empty composer
+with Send disabled. The fixture recorded exactly one synthetic POST across these
+trials, attributable to the fresh send. No real mail mutation occurred. Finite
+per-turn audits are in `audits242/`; the earlier failures remain preserved. The
+fresh success is one observation, not proof that the wording caused it or that
+send reliability is repaired. Same-chat authorization adherence, literal copying,
+search interpretation and useful diagnostics remain unresolved. The goal remains
+active, with all execution, retention, permission and approval limits unchanged.
+
+### Build 243: compact form observations and task scope
+
+The build 242 source captured the entire fifteen-row synthetic Compose form.
+Repeated metadata and conservative reference reserves split its model-facing
+representation, leaving Send beyond the first page. The candidate shortens
+presentation metadata without changing captured rows, field values, roles,
+ancestry, reference checks or the 4,096-byte text/4,608-byte serialized limits.
+The exact continuation remains in the READ header. Filtered match evidence keeps
+its existing JSON shape; unfiltered compact reads state the same capture-only
+facts more concisely. The native document epoch remains in the binding and
+snapshot, while its already-hidden display copy is removed before sizing.
+
+The shared authority paragraph now describes current and prior task scopes
+without a generic list of forbidden effects. Ongoing user restrictions, actual
+approvals/denials and Stop remain binding. Command guidance explicitly identifies
+HOME as isolated rather than the macOS home. This clarifies an upfront environment
+ambiguity; it does not explain away later repetition after the model had already
+observed correct absolute paths and errors. Live qualification remains pending.
+
+Validation passed 305 tests with zero failures or skips, including 34 isolated
+WebKit transport tests. Source hashes remained stable throughout the final run.
+All fifteen read rows occupy 3,840 raw / 4,081 serialized bytes; all twelve
+post-fill rows occupy 3,996 / 4,427, and the rejected-input recovery occupies
+4,009 / 4,436. Each exposes the current Send action within unchanged limits. Long
+escaped field values still paginate and reconstruct exactly. The first failed
+run is preserved with its stale wording assertions and an instruction-length
+regression; both were corrected without increasing any limit. These are
+representation and contract results, not live-model acceptance.

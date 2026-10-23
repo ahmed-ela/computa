@@ -3,21 +3,82 @@ import Foundation
 import XCTest
 @testable import Computa
 
+/// The unchanged local mailbox's 15 captured nodes. In build242 its final
+/// Message and Send rows fell off ordinary pages despite complete capture.
+func compactMailboxFixtureNodes(message: String = "Please confirm Tuesday at 10:30 AM.") -> [BrowserDocumentNode] {
+    func node(_ id: Int, _ role: String, _ name: String, parent: Int? = nil, children: [Int] = [],
+              value: String? = nil, href: String? = nil) -> BrowserDocumentNode {
+        let field = role == "textbox", disabled = role == "statictext"
+        return BrowserDocumentNode(backendNodeID: Int64(id + 1), role: role, name: name, value: value,
+            isDisabled: disabled, isReadOnly: disabled, isIgnored: false, nodeID: "n\(id)",
+            parentNodeID: parent.map { "n\($0)" }, childNodeIDs: children.map { "n\($0)" }, linkURL: href,
+            isDOMClickable: role == "button" || role == "link", isEditable: field,
+            constraintValidation: field ? .init(required: true, candidate: true, valid: true, issues: []) : nil)
+    }
+    return [
+        node(0, "main", "", children: [1, 2, 8, 9, 10, 11, 12, 13, 14]),
+        node(1, "heading", "Compose message", parent: 0),
+        node(2, "navigation", "", parent: 0, children: [3, 4, 5, 6, 7]),
+        node(3, "link", "Inbox", parent: 2, href: "http://127.0.0.1:54746/"),
+        node(4, "statictext", "|", parent: 2),
+        node(5, "link", "Compose", parent: 2, href: "http://127.0.0.1:54746/compose"),
+        node(6, "statictext", "|", parent: 2),
+        node(7, "link", "Sent", parent: 2, href: "http://127.0.0.1:54746/sent"),
+        node(8, "statictext", "To", parent: 0),
+        node(9, "textbox", "To", parent: 0, value: "course-staff@example.invalid"),
+        node(10, "statictext", "Subject", parent: 0),
+        node(11, "textbox", "Subject", parent: 0, value: "ODE schedule test 241 fresh"),
+        node(12, "statictext", "Message", parent: 0),
+        node(13, "textbox", "Message", parent: 0, value: message),
+        node(14, "button", "Send message", parent: 0),
+    ]
+}
+
 final class BrowserTabSessionBrokerTests: XCTestCase {
-    func testContinuationFooterPreservesExactArgumentsWithoutNamingAnUnavailableTool() throws {
+    func testCompactFooterDoesNotDuplicateCursorOrNameAnUnavailableTool() throws {
         let cursor = "opaque-\"\\🙂-cursor"
         let footer = try BrowserCompleteObservation.footer(cursor: cursor)
         let prefix = "\nBROWSER_ACTION_REFERENCES "
         XCTAssertTrue(footer.hasPrefix(prefix))
         let metadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(footer.dropFirst(prefix.count).utf8)) as? [String: Any])
-        let continuation = try XCTUnwrap(metadata["continuation"] as? [String: Any])
-        XCTAssertEqual(Set(continuation.keys), ["arguments"])
-        XCTAssertEqual(continuation["arguments"] as? [String: String], ["cursor": cursor])
+        XCTAssertEqual(Set(metadata.keys), ["refs", "next", "copy"])
+        XCTAssertFalse(footer.contains(cursor)); XCTAssertNil(metadata["continuation"])
+        XCTAssertTrue(try XCTUnwrap(metadata["refs"] as? String).contains("input consumes all"))
         XCTAssertFalse(footer.contains("browser_continue")); XCTAssertFalse(footer.contains("\"tool\""))
         XCTAssertEqual(try BrowserCompleteObservation.excessBytes(footer), 0)
         let completed = try BrowserCompleteObservation.footer(cursor: nil)
         let completedMetadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(completed.dropFirst(prefix.count).utf8)) as? [String: Any])
         XCTAssertNil(completedMetadata["continuation"])
+        XCTAssertEqual(footer, completed)
+    }
+
+    func testCompactOrdinaryMailboxFitsEveryRowInReadInputAndRecoveryEnvelopes() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: compactMailboxFixtureNodes(), semanticReadiness: .ready)
+        let fill = #"{"dispatched":true,"kind":"fill","label":"Message","outcome":"unverified","partial":false}"#
+        let rejection = BrowserCompleteObservation.RejectionReceipt.stale(wasFill: false, documentChanged: false)
+        for (name, view, encoding, expected) in [
+            ("read", SemanticReadView.all, BrowserCompleteObservation.Encoding.read, 15),
+            ("input", .overview, .input(wasFill: true, receipt: fill), 12),
+            ("recovery", .overview, .recovery(receipt: rejection, view: .overview), 12),
+        ] {
+            let observed = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: view), compact: true, compactEncoding: encoding)
+            let snapshot = observed.snapshot
+            XCTAssertEqual(snapshot.elements.count, expected, name)
+            XCTAssertEqual(snapshot.totalMatches, expected); XCTAssertNil(snapshot.nextCursor)
+            XCTAssertTrue(snapshot.elements.contains { $0.label == "Send message" && $0.supportsPress })
+            XCTAssertTrue(snapshot.elements.contains { $0.label == "Message" && $0.value == "Please confirm Tuesday at 10:30 AM." })
+            XCTAssertFalse(snapshot.formattedText.contains("document_epoch="))
+            XCTAssertEqual(snapshot.documentEpoch, observed.binding.documentEpoch)
+            let complete = snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: nil))
+            let encoded = try encoding.encode(complete, snapshotID: snapshot.id)
+            let reserve = snapshot.elements.reduce(0) { $0 + ($1.isEnabled ? (($1.supportsPress ? 64 : 0) + ($1.supportsSetText ? 64 : 0)) : 0) }
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, referenceReserve: reserve,
+                actionReceipt: encoding.retentionCue), 0, name)
+        }
+        await fixture.assertNoInput()
     }
 
     func testOverviewAssociatesInterleavedRecordHeadingsAndReceiptsWithoutNewAuthority() async throws {
@@ -279,7 +340,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(receipt.selectedElementCount, 18)
         XCTAssertTrue(receipt.exposures.allSatisfy { $0.kind == .readable && $0.provenance == .main })
         XCTAssertEqual(try BrowserCompleteObservation.excessBytes(full), 0)
-        XCTAssertTrue(full.contains("Use content for message/document text; all includes toolbars."))
+        XCTAssertTrue(full.contains("content=text; all=toolbars."))
         XCTAssertFalse(full.contains("click_ref=")); XCTAssertFalse(full.contains("fill_ref="))
         print("COMPACT_READ_CAPACITY rows=\(read.snapshot.elements.count) bytes=\(full.utf8.count) field_bytes=\(usefulBytes) field_ratio=\(Double(usefulBytes) / Double(full.utf8.count)) footer_bytes=\(try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor).utf8.count)")
         await fixture.assertNoInput()
@@ -310,7 +371,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertTrue(text.contains("VIEW content omitted_input_nodes=2 basis=captured_view_and_query."))
             XCTAssertTrue(text.contains("Read overview/all without cursor/query for controls before an access-block claim."))
             XCTAssertTrue(text.contains("source_truncated=\(truncated ? 1 : 0)"))
-            XCTAssertTrue(text.contains("not website search or proof of relevance/absence"))
+            XCTAssertTrue(text.contains("not site results/relevance/absence"))
             XCTAssertEqual(read.snapshot.elements.map(\.label), ["Pick an account"])
             for hidden in ["PRIVATE_ACCOUNT_LABEL", "PRIVATE_FIELD_LABEL", "DISABLED_LABEL", "READ_ONLY_LABEL", "IGNORED_LABEL", "NO_PRESS_LABEL"] {
                 XCTAssertFalse(text.contains(hidden))
@@ -425,7 +486,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(read.snapshot.elements.map(\.label), ["Selected heading"])
         XCTAssertTrue(read.snapshot.formattedText.contains("scope=subtree"))
         XCTAssertTrue(read.snapshot.formattedText.contains("source_truncated=1"))
-        XCTAssertTrue(read.snapshot.formattedText.contains("not website search or proof of relevance/absence"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("not site results/relevance/absence"))
         XCTAssertFalse(read.snapshot.formattedText.contains("omitted_input_nodes="))
         XCTAssertFalse(read.snapshot.formattedText.contains("PRIVATE_OUTSIDE_CONTROL"))
         XCTAssertTrue(read.snapshot.actionWitnesses.isEmpty)
