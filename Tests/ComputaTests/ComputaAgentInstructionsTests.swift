@@ -365,7 +365,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         // Cold-resumed threads can retain the original developer message. The
         // current host suffix and website handoff must not depend on replacing it.
         let retained = native.replacingOccurrences(of: ComputaAgentInstructions.browserTurnLifecycle,
-                                                   with: "Bind anew each turn.")
+                                                   with: "Bind anew each turn.").replacingOccurrences(of: ComputaAgentInstructions.browserSearchEvidence, with: "")
         let input: [[String: Any]] = [
             ["role": "developer", "content": retained],
             ["role": "user", "content": "Find the attachment. Read only; do not send anything."],
@@ -411,10 +411,32 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(latestText.contains(ComputaAgentInstructions.runtimeInteractionPolicy()))
         XCTAssertTrue(latestText.contains(authority))
         XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserTurnLifecycle))
+        XCTAssertTrue(latestText.contains(ComputaAgentInstructions.browserSearchEvidence))
         XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserTurnLifecycle).count - 1, 1)
+        XCTAssertEqual(afterHistory.components(separatedBy: ComputaAgentInstructions.browserSearchEvidence).count - 1, 1)
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(authority),
                        "No current browser capability must not acquire one from history")
-        XCTAssertLessThan(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.count, 1_400)
+        XCTAssertLessThan(ComputaAgentInstructions.runtimeInteractionPolicy().utf8.count, 1_900)
+    }
+
+    func testFreshSearchGuidanceSeparatesLocalFiltersFromSiteResultsWithoutSuppressingPositiveEvidence() {
+        let guidance = ComputaAgentInstructions.browserSearchEvidence
+        let current = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        for delivered in [current, ComputaAgentInstructions.runtimeInteractionPolicy(),
+            ComputaAgentInstructions.webResponseContract(offeredToolNames: ["browser_read"],
+                includedInstructionText: [current])] {
+            XCTAssertEqual(delivered.components(separatedBy: guidance).count - 1, 1)
+        }
+        let text = guidance.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(text.contains("short distinctive terms, not the whole request"))
+        XCTAssertTrue(text.contains("submitted query and actual result/message content"))
+        XCTAssertTrue(text.contains("local-filter counts alone never establish zero results"))
+        XCTAssertTrue(text.contains("Refine or broaden irrelevant results"))
+        XCTAssertTrue(text.contains("including input echoes; its counts are not site results"))
+        XCTAssertTrue(text.contains("Report observed positives with their scope"))
+        XCTAssertTrue(text.contains("a negative needs relevant site-result evidence"))
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(guidance))
+        XCTAssertLessThan(guidance.utf8.count, 550)
     }
 
     func testFollowupBrowserGuidanceRequiresCurrentBindingsAfterOwnedTabCleanup() {
@@ -455,7 +477,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
     }
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
@@ -493,7 +515,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(native.contains("Automatic cleanup is not proof"))
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(filenameRule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -625,7 +647,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100,
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
@@ -685,7 +707,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_100,
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
                                 "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
     }
 

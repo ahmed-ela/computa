@@ -38,6 +38,19 @@ old stop notice was appended after every subsequent turn, making it appear curre
   input is never replayed. Approval, ownership and unchanged-attempt limits remain.
 - Saved stop notices retain their turn identity and appear beside that turn after
   reload rather than below an unrelated later reply.
+- Browser reads identify their counts as a selection of captured UI elements,
+  not a website search result count. Query-match provenance distinguishes input
+  value echoes from exposed readable text. Partial overviews cannot establish
+  mailbox absence. Fresh search guidance requires actual result content and
+  refinement when an overly literal query returns irrelevant results.
+
+The follow-up Outlook check proved that field entry and Search activation worked.
+Its incorrect negative answer came after reading an incomplete overview; the host
+had not reported an empty mailbox. An independent search with the shorter term
+`ODE` exposed course announcements. Changing WebKit or synthesizing extra input
+events was therefore not justified. A real-WebKit regression separately verifies
+that isolated-world fills reach delegated, controlled application state for text,
+search and textarea controls before an observed submit button is pressed.
 
 ## Reproduction and qualification
 
@@ -54,6 +67,10 @@ origin in its `connection.json` through Computa's installed model-driven browser
    observation of the server-generated receipt, a matching final answer, and
    cleanup of owned tabs. A model's success claim alone is not a pass.
 4. Repeat after a previously failed/refusing turn to check recovery from history.
+5. Open `/search` for search qualification. HTTP query receipts distinguish actual
+   website searches from local snapshot filters. Read a positive announcement,
+   then check an unrelated subject whose search returns an explicit empty state.
+   An echoed query or zero captured elements alone is never a successful check.
 
 The fixture uses a threaded server because WebKit can open idle preconnections;
 a serial HTTP server can block real navigation behind those sockets. Such a

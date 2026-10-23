@@ -848,6 +848,122 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testLocalFilterEchoInSearchFieldIsNotPresentedAsWebsiteSearchResults() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "RootWebArea", name: "Mailbox", children: ["n1", "n2"]),
+            semanticNode(1, role: "searchbox", name: "Search", parent: "n0", value: "ODE"),
+            semanticNode(2, role: "StaticText", name: "Unrelated message", parent: "n0"),
+        ], sourceTruncated: true)
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .all))
+        let evidence = try selectionEvidence(read.snapshot)
+        XCTAssertEqual(evidence["operation"] as? String, "local_capture_filter")
+        XCTAssertEqual(evidence["counts_scope"] as? String, "captured_elements_only")
+        XCTAssertEqual(evidence["query_applied"] as? Bool, true)
+        XCTAssertEqual(read.snapshot.totalMatches, 1)
+        XCTAssertTrue(read.snapshot.sourceTruncated)
+        XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false)
+        XCTAssertEqual(evidence["site_result_count"] as? String, "not_measured")
+        let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+        XCTAssertEqual(hits["basis"] as? String, "emitted_field_fragments")
+        XCTAssertEqual(hits["input_value_elements"] as? Int, 1)
+        XCTAssertEqual(hits["readable_text_elements"] as? Int, 0)
+        XCTAssertEqual(hits["other_field_elements"] as? Int, 0)
+        XCTAssertEqual(hits["only_input_values"] as? Bool, true)
+        let encoded = try JSONSerialization.data(withJSONObject: evidence)
+        XCTAssertLessThan(encoded.count, 420, "Selection provenance stays compact and does not repeat header counts")
+        XCTAssertTrue(try XCTUnwrap(read.snapshot.elements.first).supportsSetText,
+                      "Evidence classification does not change the observed input capability")
+        await fixture.assertNoInput()
+    }
+
+    func testEmptyLocalSelectionIsNotSiteAbsenceEvenWhenCaptureIsNotTruncated() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for truncated in [false, true] {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: "StaticText", name: "Other captured content"),
+            ], sourceTruncated: truncated)
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .content))
+            let evidence = try selectionEvidence(read.snapshot)
+            XCTAssertEqual(read.snapshot.totalMatches, 0)
+            XCTAssertTrue(read.snapshot.elements.isEmpty)
+            XCTAssertEqual(read.snapshot.sourceTruncated, truncated)
+            XCTAssertNil(read.snapshot.nextCursor)
+            XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false)
+            XCTAssertEqual(evidence["site_result_count"] as? String, "not_measured")
+            XCTAssertTrue(read.snapshot.elements.isEmpty)
+            XCTAssertTrue(read.snapshot.formattedText.contains("This is not a website search result or proof of absent content"))
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testSelectionEvidencePreservesReadablePositiveAndExplicitEmptyResultText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for text in ["ODE exam announcement: the time changed.", "No results found for ODE in this folder."] {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: "main", name: "", children: ["n1"]),
+                semanticNode(1, role: "StaticText", name: text, parent: "n0"),
+            ], sourceTruncated: true)
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .content))
+            let evidence = try selectionEvidence(read.snapshot)
+            let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+            XCTAssertEqual(hits["readable_text_elements"] as? Int, 1)
+            XCTAssertEqual(hits["input_value_elements"] as? Int, 0)
+            XCTAssertEqual(hits["only_input_values"] as? Bool, false)
+            XCTAssertTrue(read.snapshot.formattedText.contains(text),
+                          "Truthful positive or scoped empty-state reports must remain available from literal page evidence")
+            XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false,
+                           "The host does not classify site-specific result semantics from generic text")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testQueryMatchProvenanceCountsOnlyEmittedFragmentsAndFollowsCursorPages() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let tail = "TAIL_QUERY_MATCH"
+        let text = String(repeating: "unrelated prefix ", count: 700) + tail
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: [semanticNode(0, role: "StaticText", name: text)])
+        var read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: tail, view: .content))
+        var pages = 0, matchedPages = 0
+        while true {
+            let evidence = try selectionEvidence(read.snapshot)
+            let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+            XCTAssertEqual(read.snapshot.totalMatches, 1)
+            XCTAssertEqual(evidence["query_applied"] as? Bool, true)
+            XCTAssertEqual(read.snapshot.readReceipt?.outputTruncated, read.snapshot.nextCursor != nil)
+            XCTAssertLessThanOrEqual(read.snapshot.formattedText.utf8.count, 16_384)
+            let exposed = read.snapshot.formattedText.split(separator: "\n")
+                .filter { $0.hasPrefix("#") }.contains { $0.contains(tail) }
+            XCTAssertEqual(hits["readable_text_elements"] as? Int, exposed ? 1 : 0,
+                           "Retained field tails are not emitted query evidence")
+            if exposed { matchedPages += 1 }
+            pages += 1
+            guard let cursor = read.snapshot.nextCursor else { break }
+            read = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(matchedPages, 1)
+        let unfiltered = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        let evidence = try selectionEvidence(unfiltered.snapshot)
+        XCTAssertEqual(evidence["operation"] as? String, "capture_view_selection")
+        XCTAssertEqual(evidence["query_applied"] as? Bool, false)
+        XCTAssertNil(evidence["emitted_query_matches"])
+        await fixture.assertNoInput()
+    }
+
+    private func selectionEvidence(_ snapshot: BrowserTabSnapshot) throws -> [String: Any] {
+        let prefix = "READ_SELECTION_EVIDENCE "
+        let line = try XCTUnwrap(snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst(prefix.count).utf8)) as? [String: Any])
+    }
+
     func testNoMatchReturnsNoUnrelatedFallbackAndReportsIncompleteSource() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(

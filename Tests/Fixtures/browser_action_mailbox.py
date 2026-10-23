@@ -46,12 +46,28 @@ def main():
             self.wfile.write(data)
 
         def do_GET(self):
-            path = urlparse(self.path).path
-            record({"method": "GET", "path": path})
+            request = urlparse(self.path)
+            path = request.path
+            query = parse_qs(request.query).get("q", [""])[0]
+            record({"method": "GET", "path": path, **({"query": query} if path == "/search" else {})})
             if path == "/":
                 self.page("Local mailbox", "<h2>Inbox</h2><p>Mailbox: learner@example.invalid</p>"
                           "<p><a href='/message/ode'>ODE class announcement — Course staff</a></p>"
                           "<p><a href='/message/other'>Library opening hours — Librarian</a></p>")
+            elif path == "/search":
+                form = ("<form method='get' action='/search'><label>Search mailbox"
+                        f"<input type='search' name='q' value='{html.escape(query, quote=True)}'></label>"
+                        "<button type='submit'>Search</button></form>")
+                if not query:
+                    body = "<p>Search messages across this local test mailbox.</p>"
+                elif query.casefold().strip() in {"ode", "exam", "announcement", "announcements"}:
+                    body = ("<section aria-label='Search results'><h2>Search results</h2>"
+                            "<article><a href='/message/ode'>ODE class announcement — Course staff</a>"
+                            "<p>The exam schedule has changed.</p></article></section>")
+                else:
+                    body = ("<section aria-label='Search results'><h2>Search results</h2>"
+                            "<output>No results found</output></section>")
+                self.page("Search local mailbox", form + body)
             elif path == "/message/ode":
                 self.page("ODE class announcement", "<p>From: Course staff &lt;staff@example.invalid&gt;</p>"
                           "<p>The exam is moved to Tuesday at 10:30 AM. The Teams screenshot is posted "

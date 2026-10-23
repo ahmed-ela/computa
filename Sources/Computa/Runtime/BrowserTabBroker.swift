@@ -697,7 +697,7 @@ actor BrowserTabSessionBroker {
             sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
             outputTruncated: nextCursor != nil, exposures: page.exposures
         )
-        let formatted = formatSnapshot(
+        let formatted = try formatSnapshot(
             snapshotID: snapshotID,
             binding: currentBinding,
             bundleIdentifier: bundleIdentifier,
@@ -706,6 +706,7 @@ actor BrowserTabSessionBroker {
             rows: page.rows,
             sourceID: sourceID,
             read: effectiveRead,
+            receipt: receipt,
             scopeNodeID: scopeNodeID,
             totalMatches: selected.count,
             offset: position.element,
@@ -1509,6 +1510,58 @@ actor BrowserTabSessionBroker {
         }
     }
 
+    /// Selection counts describe this capture, never the website's search
+    /// results. Match provenance uses only exposed field fragments, so a query
+    /// hidden in a retained field tail cannot become claimed readable evidence.
+    private func selectionEvidence(receipt: SemanticReadReceipt,
+                                   elements: [BrowserTabElement]) throws -> String {
+        let query = receipt.query?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let filtered = query?.isEmpty == false
+        var evidence: [String: Any] = [
+            "operation": filtered ? "local_capture_filter" : "capture_view_selection",
+            "counts_scope": "captured_elements_only",
+            "query_applied": filtered,
+            "site_search_evaluated": false,
+            "site_result_count": "not_measured",
+        ]
+        if let query, filtered {
+            let exposures = Dictionary(grouping: receipt.exposures, by: \.nodeID)
+            var readable = Set<Int>(), inputValues = Set<Int>(), other = Set<Int>()
+            for element in elements {
+                let fields = readFields(element)
+                for exposure in exposures["backend:\(element.backendNodeID)", default: []] {
+                    guard let field = fields.first(where: { $0.field == exposure.field })?.text else { continue }
+                    let bytes = field.utf8
+                    guard exposure.startUTF8 >= 0, exposure.endUTF8 >= exposure.startUTF8,
+                          exposure.endUTF8 <= bytes.count else { continue }
+                    let start = bytes.index(bytes.startIndex, offsetBy: exposure.startUTF8)
+                    let end = bytes.index(bytes.startIndex, offsetBy: exposure.endUTF8)
+                    guard let fragment = String(bytes: bytes[start..<end], encoding: .utf8),
+                          fragment.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                            .contains(query) else { continue }
+                    if exposure.field == .value,
+                       element.supportsSetText || ["textbox", "searchbox", "combobox"].contains((element.semanticRole ?? "").lowercased()) {
+                        inputValues.insert(element.index)
+                    } else if exposure.kind == .readable, exposure.field != .linkURL {
+                        readable.insert(element.index)
+                    } else {
+                        other.insert(element.index)
+                    }
+                }
+            }
+            evidence["emitted_query_matches"] = [
+                "basis": "emitted_field_fragments",
+                "readable_text_elements": readable.count,
+                "input_value_elements": inputValues.count,
+                "other_field_elements": other.count,
+                "only_input_values": !inputValues.isEmpty && readable.isEmpty && other.isEmpty,
+            ] as [String: Any]
+        }
+        let data = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+        return "READ_SELECTION_EVIDENCE " + String(decoding: data, as: UTF8.self)
+    }
+
     private func formatSnapshot(
         snapshotID: UUID,
         binding: BrowserTabBinding,
@@ -1518,13 +1571,14 @@ actor BrowserTabSessionBroker {
         rows: [String],
         sourceID: UUID,
         read: SemanticReadRequest,
+        receipt: SemanticReadReceipt,
         scopeNodeID: String?,
         totalMatches: Int,
         offset: Int,
         nextCursor: String?,
         fieldsTruncated: Bool,
         retainedObservation: Bool
-    ) -> String {
+    ) throws -> String {
         let documentURL = document.url.absoluteString
         let formattedURL = documentURL.utf8.count <= 2048
             ? "url=\(quote(documentURL))" : "url_omitted=1"
@@ -1545,6 +1599,7 @@ actor BrowserTabSessionBroker {
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
                 + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")"
                 + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
+            try selectionEvidence(receipt: receipt, elements: elements),
             "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }.count) "
                 + "navigation_shown=\(elements.filter { $0.contentScope == .navigation }.count) "
                 + "complementary_shown=\(elements.filter { $0.contentScope == .complementary }.count) "
@@ -1584,7 +1639,7 @@ actor BrowserTabSessionBroker {
             lines.append("Source tree is incomplete. Counts describe captured nodes, not the entire page; do not infer absent content from no_matches.")
         }
         if totalMatches == 0 {
-            lines.append("No matching captured elements. Try view=content, headings, or links without a literal query; no unrelated fallback nodes were substituted.")
+            lines.append("No matching captured elements in this view/filter. This is not a website search result or proof of absent content. Read without a local query to inspect the site's actual result state; no unrelated fallback nodes were substituted.")
         }
         return lines.joined(separator: "\n")
     }

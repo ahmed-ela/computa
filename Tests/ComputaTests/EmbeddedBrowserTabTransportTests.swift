@@ -178,6 +178,122 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         }
     }
 
+    /// The older flight fixture reads input.value directly when clicked. That
+    /// cannot detect a visible DOM value that never reached application state.
+    /// This fixture models a controlled field's per-element value tracker and
+    /// delegated input listener in the page world; the driver runs separately
+    /// in its production isolated world. It is not a claim about Outlook's
+    /// particular framework implementation.
+    func testRealWebKitFillUpdatesDelegatedControlledStateBeforeSubmittingSearch() async throws {
+        for kind in ["text", "search", "textarea"] {
+            let fieldMarkup = kind == "textarea"
+                ? "<textarea id='query' aria-label='Search query'></textarea>"
+                : "<input id='query' type='\(kind)' aria-label='Search query'>"
+            let html = """
+            <!doctype html><html><body><main>
+            \(fieldMarkup)<button id="search">Search</button>
+            <output id="result">Previous results</output>
+            <script>
+            (() => {
+              const field = document.getElementById('query');
+              const prototype = field.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              const nativeValue = Object.getOwnPropertyDescriptor(prototype, 'value');
+              let modelQuery = 'prior-query', trackedValue = modelQuery;
+              let events = [], updates = 0, submits = 0, focuses = 0, blurs = 0;
+              // Framework-owned writes update both the DOM and its tracker.
+              // Native user edits (or the driver's native setter) change only
+              // the DOM until the delegated input listener reconciles state.
+              Object.defineProperty(field, 'value', {
+                configurable: true,
+                get() { return nativeValue.get.call(this); },
+                set(value) { trackedValue = String(value); nativeValue.set.call(this, value); }
+              });
+              const render = () => { field.value = modelQuery; };
+              render();
+              field.addEventListener('focus', () => { focuses++; render(); });
+              field.addEventListener('blur', () => { blurs++; render(); });
+              document.addEventListener('input', event => {
+                if (event.target !== field) return;
+                events.push({type: event.type, focused: document.activeElement === field});
+                const next = field.value;
+                if (next !== trackedValue) {
+                  trackedValue = next;
+                  modelQuery = next;
+                  updates++;
+                  render();
+                }
+              });
+              document.addEventListener('change', event => {
+                if (event.target === field) events.push({type: event.type, focused: document.activeElement === field});
+              });
+              document.getElementById('search').addEventListener('click', () => {
+                field.blur();
+                submits++;
+                // Deliberately use application state, never the field's value.
+                document.getElementById('result').textContent = 'Results for ' + modelQuery;
+              });
+              window.controlledFieldAudit = () => ({modelQuery, domValue: field.value, updates, submits, focuses, blurs, events});
+              window.resetControlledFieldDiagnostics = () => { events = []; focuses = 0; blurs = 0; };
+            })();
+            </script></main></body></html>
+            """
+            let session = EmbeddedBrowserSession(persistent: false)
+            let transport = EmbeddedBrowserTabTransport(session: session)
+            defer { session.shutdown() }
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+            view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/controlled-search"))
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+
+            // Prove the oracle rejects the DOM-only implementation the previous
+            // fixture would accept, then restore the original controlled state.
+            let negative = try await script(view, """
+                const field = document.getElementById('query');
+                field.focus(); field.value = 'DOM-only';
+                field.dispatchEvent(new Event('input', {bubbles: true}));
+                return window.controlledFieldAudit();
+                """)
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: negative) as? [String: Any])
+            XCTAssertEqual(before["domValue"] as? String, "DOM-only", kind)
+            XCTAssertEqual(before["modelQuery"] as? String, "prior-query", kind)
+            XCTAssertEqual(before["updates"] as? Int, 0, kind)
+            _ = try await script(view, "document.getElementById('query').blur(); window.resetControlledFieldDiagnostics(); return true;")
+
+            let targetValue = try await transport.target(id: id.uuidString)
+            let target = try XCTUnwrap(targetValue)
+            let observed = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observed.nodes.first { $0.name == "Search query" && $0.isEditable })
+            XCTAssertEqual(field.value, "prior-query", "Blur must restore retained application state")
+            let query = "ODE & exact + search"
+            try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID),
+                text: query, document: observed, permit: BrowserMutationPermit())
+            let auditData = try await script(view, "return window.controlledFieldAudit();")
+            let filled = try XCTUnwrap(JSONSerialization.jsonObject(with: auditData) as? [String: Any])
+            XCTAssertEqual(filled["modelQuery"] as? String, query, "Delegated page-world state must receive the isolated-world fill: \(kind)")
+            XCTAssertEqual(filled["domValue"] as? String, query, kind)
+            XCTAssertEqual(filled["updates"] as? Int, 1, kind)
+            XCTAssertEqual(filled["focuses"] as? Int, 1, kind)
+            XCTAssertEqual(filled["submits"] as? Int, 0, "Fill must not submit")
+            let events = try XCTUnwrap(filled["events"] as? [[String: Any]])
+            XCTAssertEqual(events.compactMap { $0["type"] as? String }, ["input", "change"], kind)
+            XCTAssertTrue(events.allSatisfy { $0["focused"] as? Bool == true }, kind)
+
+            let afterFill = try await transport.observe(target: target)
+            let button = try XCTUnwrap(afterFill.nodes.first { $0.role == "button" && $0.name == "Search" })
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID),
+                document: afterFill, permit: BrowserMutationPermit())
+            let afterSubmit = try await transport.observe(target: target)
+            XCTAssertTrue(afterSubmit.nodes.contains { $0.name == "Results for " + query }, kind)
+            let submittedData = try await script(view, "return window.controlledFieldAudit();")
+            let submitted = try XCTUnwrap(JSONSerialization.jsonObject(with: submittedData) as? [String: Any])
+            XCTAssertEqual(submitted["modelQuery"] as? String, query, kind)
+            XCTAssertEqual(submitted["domValue"] as? String, query, "Blur re-render must preserve the accepted query: \(kind)")
+            XCTAssertEqual(submitted["updates"] as? Int, 1, kind)
+            XCTAssertEqual(submitted["submits"] as? Int, 1, kind)
+            XCTAssertEqual(submitted["blurs"] as? Int, 1, kind)
+        }
+    }
+
     func testUnicodeRoleOverByteLimitPreservesBoundedUsableObservation() async throws {
         let role=String(repeating:"界",count:40)
         XCTAssertLessThan(role.utf16.count,100)

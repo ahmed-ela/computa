@@ -80,6 +80,14 @@ at its supplied or previously observed URL for the authorized follow-up; its old
 snapshot, handle and cursor cannot be reused. Website handoffs repeat this rule
 outside retained history as well.
 
+Browser reads publish `READ_SELECTION_EVIDENCE` separately from website content.
+It identifies local view/filter selection, truncation and whether exposed query
+hits occur in readable text or input values. The host does not infer website
+search result counts from those matches. Search guidance asks for concise site
+queries, actual result/message content, and refinement of irrelevant results.
+Partial captures still support truthful scoped positives; a negative needs
+observed relevant site-result evidence.
+
 The instruction design takes inspiration from the public Codex autonomy/task
 template and terminal session/output schemas in the pinned source revision
 `4607249e430dac1c961df4dc615beae88e33cec8`. It does not discover or import another
