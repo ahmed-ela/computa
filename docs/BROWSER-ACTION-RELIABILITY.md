@@ -97,6 +97,16 @@ old stop notice was appended after every subsequent turn, making it appear curre
   authorized task and approvals. The model must not infer that a password or MFA
   is required before observing that requirement. Actual credential requirements,
   account ambiguity and approval boundaries still require appropriate help.
+- New clicks and fills carry `expected_role` and `expected_label` copied from the
+  intended current row. The host compares the exact exposed UTF-8 bytes before
+  approval and again before dispatch. A mismatch leaves the read intact and
+  dispatches nothing; it never searches for a different target. Continuation
+  reads permit only their exposed label fragment, and an absent label cannot be
+  treated as an explicitly empty label. Existing snapshot, document, eligibility
+  and outcome checks remain in effect. Completed historical calls retain their
+  older argument format; only new calls require the current assertions.
+  This catches a wrong index paired with the intended control's label or role.
+  It cannot detect a model consistently choosing the wrong labeled control.
 - DOM capture traverses `display: contents` wrappers even though those wrappers
   have no layout box. Visible descendants and direct text retain their semantic
   ancestry; the wrapper itself receives no input capability. Hidden, inert and
@@ -141,6 +151,11 @@ origin in its `connection.json` through Computa's installed model-driven browser
 The fixture uses a threaded server because WebKit can open idle preconnections;
 a serial HTTP server can block real navigation behind those sockets. Such a
 fixture timeout is not evidence of a production browser navigation failure.
+Its search accepts exact normalized keywords (`ode`, `exam`, `announcement`, or
+`announcements`), not arbitrary title phrases. The unassisted title-search case
+therefore tests recovery from an adverse search result; it is not a realistic
+full-text search implementation. Preserve it separately from an explicitly
+steered keyword control when comparing builds.
 
 Synthetic mailbox qualification does not establish delivery through a real mail
 provider. Real mailbox checks must preserve the user's task-specific limits.

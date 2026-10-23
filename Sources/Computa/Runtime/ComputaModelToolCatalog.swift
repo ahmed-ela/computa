@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// An app-owned model catalog opts our model IDs into the native Codex patch
 /// executor for website providers. Local MLX keeps its existing function-only
@@ -9,6 +10,44 @@ import Foundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
+    /// Only the two app-owned argument shapes are eligible for evolution. A
+    /// similarly named MCP/custom tool or a modified schema keeps its contract.
+    /// The pinned engine can omit constraints when projecting dynamic schemas.
+    static func browserMutationSchemaVariants(name: String, namespace: String?, schema: [String: Any])
+        -> (legacy: [String: Any], current: [String: Any])? {
+        if let additional = schema["additionalProperties"] {
+            guard let flag = additional as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID(), !flag.boolValue else { return nil }
+        }
+        guard namespace == nil || namespace == "functions",
+              ["browser_click", "browser_fill"].contains(name),
+              let definition = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name }),
+              let current = definition["inputSchema"] as? [String: Any],
+              let canonical = current["properties"] as? [String: [String: Any]],
+              schema["type"] as? String == "object",
+              Set(schema.keys).isSubset(of: ["type", "properties", "required", "additionalProperties", "description"]),
+              let properties = schema["properties"] as? [String: [String: Any]],
+              let required = schema["required"] as? [String], Set(required).count == required.count
+        else { return nil }
+        let assertions: Set<String> = ["expected_role", "expected_label"]
+        let currentKeys = Set(canonical.keys), legacyKeys = currentKeys.subtracting(assertions)
+        guard Set(properties.keys) == legacyKeys || Set(properties.keys) == currentKeys,
+              Set(required) == Set(properties.keys) else { return nil }
+        for (field, property) in properties {
+            guard let expected = canonical[field], property["type"] as? String == expected["type"] as? String,
+                  Set(property.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)) else { return nil }
+            for (key, value) in property where key != "description" {
+                guard let wanted = expected[key], NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return nil }
+            }
+        }
+        // Preserve the saved legacy constraints for historical calls. Do not
+        // add fields to that shape or accept a half-upgraded argument object.
+        var legacy = schema
+        legacy["properties"] = properties.filter { !assertions.contains($0.key) }
+        legacy["required"] = required.filter { !assertions.contains($0) }
+        legacy["additionalProperties"] = false
+        return (legacy, current)
+    }
+
     /// Also applies to schemas retained by old native threads. History stays
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String) -> [[String: Any]] {
@@ -27,10 +66,10 @@ enum ComputaModelToolCatalog {
                   let properties = schema["properties"] as? [String: Any] else { return }
             result[name] = properties
         }
-        func visible(_ definition: [String: Any]) -> [String: Any]? {
+        func visible(_ definition: [String: Any], namespace: String? = nil) -> [String: Any]? {
             var value = definition
             if value["type"] as? String == "namespace", let children = value["tools"] as? [[String: Any]] {
-                let tools = children.compactMap(visible)
+                let tools = children.compactMap { visible($0, namespace: value["name"] as? String) }
                 guard !tools.isEmpty else { return nil }
                 value["tools"] = tools
                 return value
@@ -40,6 +79,16 @@ enum ComputaModelToolCatalog {
             // but only the current native contract may be offered for new calls.
             guard !name.hasPrefix("computer_v2_") || currentComputerNames.contains(name) else { return nil }
             if let description = overrides[name] { value["description"] = description }
+            if value["type"] as? String == "function", ["browser_click", "browser_fill"].contains(name) {
+                for key in ["parameters", "inputSchema"] {
+                    guard let schema = value[key] as? [String: Any],
+                          let variants = browserMutationSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
+                    value[key] = variants.current
+                    value["description"] = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"]
+                }
+                // Do not partially refresh a custom shape under this name.
+                return value
+            }
             if name == "computer_v2_apps", value["type"] as? String == "function", let appsSchema {
                 // Refresh current calls only. API history is parsed against its
                 // original catalog before this projection, including old errors.
@@ -79,7 +128,7 @@ enum ComputaModelToolCatalog {
             }
             return value
         }
-        return definitions.compactMap(visible)
+        return definitions.compactMap { visible($0) }
     }
 
     static func nativeToolDescriptions(modelID: String) -> [String: String] {

@@ -124,9 +124,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@heading"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "text": "MUST_NOT_FILL"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@heading", "expected_role": "@headingRole", "expected_label": "@headingLabel"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel", "text": "MUST_NOT_FILL"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -141,6 +141,31 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertEqual(counts.presses, 0)
             XCTAssertEqual(counts.navigations, 0)
             XCTAssertTrue((rows.last?["text"] as? String)?.contains("UA 123") == true)
+        }
+    }
+
+    func testBrowserTargetMismatchDoesNotPromptOrDispatchAndPreservesCurrentRead() async throws {
+        try await withHarness(approval: true) { harness in
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button",
+                    "expected_role": "@buttonRole", "expected_label": "Sent"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button",
+                    "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
+            ])
+            try await self.waitFor { harness.rowCount == 4 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, true])
+            let failure = try XCTUnwrap(rows[2]["text"] as? String)
+            XCTAssertTrue(failure.contains("target_mismatch"))
+            XCTAssertTrue(failure.contains("No input was dispatched"))
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_click"],
+                           "A wrong expected label must fail before approval, without consuming the valid read")
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.presses, 1)
+            XCTAssertEqual(counts.fills, 0)
+            XCTAssertEqual(counts.navigations, 0)
         }
     }
 
@@ -281,9 +306,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -422,7 +447,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                         ["tool": "browser_tabs", "arguments": [:]],
                         ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
                         ["tool": "browser_read", "arguments": ["view": "all"]],
-                        ["tool": mutation, "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "MUST_NOT_FILL"]],
+                        ["tool": mutation, "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"]],
                     ]
                 try await harness.submit(calls)
                 try await self.waitFor { harness.rowCount == calls.count && harness.audit.status == .completed }
@@ -530,11 +555,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     func testUnboundTurnGuidanceCanRecoverThroughApprovedOpenWithoutReplayingOldInput() async throws {
         try await withHarness(approval: true) { harness in
             try await harness.submit([
-                ["tool": "browser_click", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 1]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": UUID().uuidString, "element_index": 1, "expected_role": "AXButton", "expected_label": "Find flight"]],
                 ["tool": "browser_read", "arguments": ["view": "overview"]],
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
             ])
             try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
             let rows = try harness.rows()
@@ -568,7 +593,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["tool": "browser_tabs", "arguments": [:]],
                 ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "text": "MUST_NOT_FILL"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"]],
             ])
             try await self.waitFor { harness.rowCount == 7 && harness.audit.status == .completed }
             let rows = try harness.rows()
@@ -588,8 +613,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "text": "MUST_NOT_FILL"], "captureRecovery": true],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL"], "captureRecovery": true],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
             ])
             try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
@@ -610,14 +635,14 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     func testBrowserReadRecoveryDoesNotResetRepeatedFailureStopOrReplayInput() async throws {
         try await withHarness(approval: true) { harness in
             let stale: [String: Any] = ["tool": "browser_fill", "arguments": [
-                "snapshot_id": "@old_snapshot", "element_index": "@field", "text": "MUST_NOT_FILL",
+                "snapshot_id": "@old_snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL",
             ]]
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
                 ["tool": "browser_read", "arguments": ["view": "content"]],
                 stale, stale, stale,
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "MUST_NOT_FILL_AFTER_STOP"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "MUST_NOT_FILL_AFTER_STOP"]],
             ])
             try await self.waitFor {
                 harness.rowCount == 6 && harness.audit.status == .waiting
@@ -662,7 +687,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "expected_role": "@fieldRole", "expected_label": "@fieldLabel", "text": "UA 123"]],
             ], hold: true)
             try await self.waitForAsync { await harness.backend.isPostInputObservationHeld() }
             XCTAssertEqual(harness.rowCount, 2, "The fill result remains unpublished while its fresh read is pending")
@@ -696,7 +721,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await harness.submit([
                 ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
-                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "expected_role": "@buttonRole", "expected_label": "@buttonLabel"]],
             ])
             try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
             let last = try XCTUnwrap(harness.rows().last)
@@ -983,7 +1008,13 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
       }
       if (observationText) {
-        try { const data = JSON.parse(text); if (data.tabs?.[0]?.tab_id) refs.human = data.tabs[0].tab_id; } catch {}
+        for (const item of message.result?.contentItems ?? []) {
+          try {
+            const data = JSON.parse(item.text);
+            if (data.tabs?.[0]?.tab_id) refs.human = data.tabs[0].tab_id;
+            if (data.current_observation?.status === 'available') observationText = data.current_observation.text;
+          } catch {}
+        }
         const snapshot = observationText.match(/AXSNAPSHOT id=([A-Fa-f0-9-]{36})/);
         if (snapshot) {
           refs.snapshot = snapshot[1];
@@ -992,9 +1023,14 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
           const button = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Find flight"'));
           const heading = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="United flight fixture"'));
           const nativeRow = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Pending native selection"'));
-          if (field) refs.field = Number(field.match(/^#(\d+)/)[1]);
-          if (button) refs.button = Number(button.match(/^#(\d+)/)[1]);
-          if (heading) refs.heading = Number(heading.match(/^#(\d+)/)[1]);
+          // Copy assertions only from the exact row returned by the runtime.
+          // Fixture labels are ASCII; no backend or hidden-label lookup is used.
+          for (const [key, row] of Object.entries({field, button, heading})) {
+            if (!row) continue;
+            refs[key] = Number(row.match(/^#(\d+)/)[1]);
+            refs[`${key}Role`] = JSON.parse(row.match(/role=("[^"]*")/)[1]);
+            refs[`${key}Label`] = JSON.parse(row.match(/label=("[^"]*")/)[1]);
+          }
           if (nativeRow) refs.nativeRow = Number(nativeRow.match(/^#(\d+)/)[1]);
         }
       }

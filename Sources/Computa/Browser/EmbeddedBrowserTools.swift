@@ -5,6 +5,20 @@ import Foundation
 /// Strict model-facing contract for Computa's own browser, independent of
 /// native computer/window input.
 enum EmbeddedBrowserTools {
+    /// An assertion mismatch never grants a lookup, retarget, approval or input.
+    /// Do not echo model arguments or unexposed retained page fields in errors.
+    enum TargetAssertionFailure: Error, LocalizedError, Equatable, Sendable {
+        case required, mismatch
+
+        var errorDescription: String? {
+            switch self {
+            case .required:
+                #"{"success":false,"error":{"code":"browser_target_assertion_required","message":"No input was dispatched. Both expected_role and expected_label are required for a new browser input."},"dispatched":false,"no_replay":true,"next":"Copy the intended current row's exact role and complete exposed label fragment into expected_role and expected_label. An explicitly exposed empty label is valid; a missing label is not. Use browser_read if that row's label is not exposed. This does not authorize replay of an earlier input."}"#
+            case .mismatch:
+                #"{"success":false,"error":{"code":"browser_target_mismatch","message":"No input was dispatched. The expected role or label does not match this current row's exposed bytes."},"dispatched":false,"no_replay":true,"next":"Recheck the intended row and its snapshot_id, element_index, role and exposed label together. Use browser_read if needed, then make a separate correctly matched call. No target was searched for or substituted, and no earlier input was replayed."}"#
+            }
+        }
+    }
     enum MutationEligibilityFailure: Error, LocalizedError, Equatable {
         case disabledTarget, pressUnavailable, fillUnavailable
 
@@ -52,6 +66,10 @@ enum EmbeddedBrowserTools {
         let mutation: [String: Any] = [
             "snapshot_id": ["type": "string", "minLength": 1, "description": "Use the latest browser_read or available current_observation from input or stale rejection. Recheck that row's label/action against the intended operation; indices change. Input consumes it: never batch another input; use new references, or browser_read if unavailable."],
             "element_index": ["type": "integer", "minimum": 0, "maximum": 2_999],
+            "expected_role": ["type": "string", "minLength": 1, "maxLength": 128,
+                "description": "Copy the intended current row's exact role, such as AXButton or AXLink (not semantic_role). This assertion must match the row addressed by snapshot_id and element_index; it never searches for or substitutes a target."],
+            "expected_label": ["type": "string", "maxLength": 4_096,
+                "description": "Copy the intended current row's complete displayed label string exactly, including Unicode and whitespace (at most 4096 UTF-8 bytes). For label_utf8 continuation, copy only that displayed fragment, not retained or earlier text. Use an empty string only for an explicitly displayed empty label; if label is absent, read a row exposing it. This assertion never searches for a target."],
         ]
         return [
             specification(
@@ -80,12 +98,12 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_click",
                 "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action against the intended operation; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
-                mutation, ["snapshot_id", "element_index"]),
+                mutation, ["snapshot_id", "element_index", "expected_role", "expected_label"]),
             specification(
                 "browser_fill",
                 "Replace one observed field with enabled=true and settable=true and dispatch input/change events; no Enter key or submit-control click is sent. Page handlers may react to these events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting. A distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Use only new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
                 mutation.merging(["text": ["type": "string", "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it."]], uniquingKeysWith: { _, right in right }),
-                ["snapshot_id", "element_index", "text"]),
+                ["snapshot_id", "element_index", "expected_role", "expected_label", "text"]),
             specification(
                 "browser_wait",
                 "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
@@ -118,10 +136,10 @@ enum EmbeddedBrowserTools {
             allowed = ["view", "query", "cursor"]
         case "browser_click":
             required = ["snapshot_id", "element_index"]
-            allowed = required
+            allowed = required.union(["expected_role", "expected_label"])
         case "browser_fill":
             required = ["snapshot_id", "element_index", "text"]
-            allowed = required
+            allowed = required.union(["expected_role", "expected_label"])
         case "browser_wait":
             required = []
             allowed = ["text", "timeout_ms"]
@@ -133,6 +151,15 @@ enum EmbeddedBrowserTools {
         else {
             throw BrowserTabBrokerError.invalidRead(
                 "The built-in browser tool has missing or unexpected arguments.")
+        }
+        if tool == "browser_click" || tool == "browser_fill" {
+            guard arguments["expected_role"] != nil, arguments["expected_label"] != nil else {
+                throw TargetAssertionFailure.required
+            }
+            guard let role = arguments["expected_role"] as? String, !role.isEmpty, role.utf8.count <= 128,
+                  let label = arguments["expected_label"] as? String, label.utf8.count <= 4_096 else {
+                throw BrowserTabBrokerError.invalidRead("Browser target assertions require a nonempty role within 128 UTF-8 bytes and a label within 4096 UTF-8 bytes.")
+            }
         }
         for key in ["url", "tab_id", "snapshot_id", "view", "query", "cursor", "text"]
         where arguments[key] != nil {
@@ -182,6 +209,28 @@ enum EmbeddedBrowserTools {
                     "Browser tool navigation requires an explicit HTTP or HTTPS URL.")
             }
             try EmbeddedBrowserURLPolicy.validate(url)
+        }
+    }
+}
+
+/// Assertions refer only to one row in the current, already published read.
+/// A retained full label is not evidence that its unexposed bytes were seen.
+enum EmbeddedBrowserTargetAssertion {
+    static func matches(snapshot: BrowserTabSnapshot, element: BrowserTabElement,
+                        role: String, label: String) -> Bool {
+        guard snapshot.element(at: element.index) == element, element.role.utf8.elementsEqual(role.utf8),
+              let receipt = snapshot.readReceipt, receipt.id == snapshot.id else { return false }
+        let bytes = Array(element.label.utf8)
+        return receipt.exposures.contains { exposure in
+            guard exposure.nodeID == "backend:\(element.backendNodeID)", exposure.field == .label,
+                  exposure.totalUTF8 == bytes.count, exposure.startUTF8 >= 0,
+                  exposure.endUTF8 >= exposure.startUTF8, exposure.endUTF8 <= bytes.count,
+                  exposure.startUTF8 < exposure.endUTF8 || bytes.isEmpty && exposure.startUTF8 == 0,
+                  let fragment = String(bytes: bytes[exposure.startUTF8..<exposure.endUTF8], encoding: .utf8)
+            else { return false }
+            // Swift String equality accepts canonically equivalent Unicode.
+            // This contract instead requires the bytes the user/model saw.
+            return fragment.utf8.elementsEqual(label.utf8)
         }
     }
 }
@@ -768,6 +817,10 @@ actor EmbeddedBrowserToolController {
         else { throw BrowserTabBrokerError.staleSnapshot }
         let index = (object["element_index"] as! NSNumber).intValue
         guard let element = snapshot.element(at: index) else { throw BrowserTabBrokerError.elementNotFound }
+        guard EmbeddedBrowserTargetAssertion.matches(snapshot: snapshot, element: element,
+            role: object["expected_role"] as! String, label: object["expected_label"] as! String) else {
+            throw EmbeddedBrowserTools.TargetAssertionFailure.mismatch
+        }
         guard element.isEnabled else { throw EmbeddedBrowserTools.MutationEligibilityFailure.disabledTarget }
         if tool == "browser_click" {
             guard element.supportsPress else { throw EmbeddedBrowserTools.MutationEligibilityFailure.pressUnavailable }
@@ -973,6 +1026,7 @@ actor EmbeddedBrowserToolController {
             "clickable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsPress }.map(\.index),
             "fillable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsSetText }.map(\.index),
             "next_after_input": "Use available current_observation from input or stale rejection; otherwise browser_read.",
+            "target_assertions": "For click/fill copy the intended row's exact role and exposed label into expected_role and expected_label; a missing label requires another read, not an empty-label guess.",
             "literal_copy_guidance": Self.literalCopyGuidance,
         ]
         if let cursor = snapshot.nextCursor {

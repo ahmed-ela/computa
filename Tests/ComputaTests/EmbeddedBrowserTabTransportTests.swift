@@ -8,6 +8,13 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    /// These synthetic labels contain no escaped quotes. Read expectations from
+    /// the emitted row, independently of the backend document used by the test.
+    private func exposedField(_ name: String, in row: Substring) throws -> String {
+        let range = try XCTUnwrap(row.range(of: "\(name)=\""))
+        return String(row[range.upperBound...].prefix { $0 != "\"" })
+    }
+
     func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {
         let html = """
         <!doctype html><html><body><main>
@@ -22,7 +29,9 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 $0.hasPrefix("#") && $0.contains("semantic_role=\"\(role)\"")
             })
             let index = try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber }))
-            return ["snapshot_id": String(id.dropFirst(3)), "element_index": index]
+            return ["snapshot_id": String(id.dropFirst(3)), "element_index": index,
+                    "expected_role": try exposedField("role", in: row),
+                    "expected_label": try exposedField("label", in: row)]
         }
         for change in ["unchanged", "disabled", "replaced"] {
             let session = EmbeddedBrowserSession(persistent: false)
@@ -367,7 +376,9 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let snapshot = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
         func arguments(_ row: Substring) throws -> Data {
             try JSONSerialization.data(withJSONObject: ["snapshot_id": String(snapshot.dropFirst(3)),
-                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber }))])
+                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber })),
+                "expected_role": try exposedField("role", in: row),
+                "expected_label": try exposedField("label", in: row)])
         }
         do {
             _ = try await controller.execute(taskKey: "popup-link", tool: "browser_click", arguments: arguments(popup))

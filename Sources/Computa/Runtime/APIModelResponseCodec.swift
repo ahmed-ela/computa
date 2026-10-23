@@ -672,7 +672,7 @@ enum APIModelResponseCodec {
                     guard let value = item["arguments"] as? String else { throw Failure.invalidHistory }
                     arguments = value
                 }
-                if let tool { _ = try validatedArguments(arguments, tool: tool) }
+                if let tool { try validateHistoricalArguments(arguments, tool: tool) }
                 else {
                     // No unavailable schema is invented for already-completed
                     // history; retain the same bounded JSON-object requirement.
@@ -1331,6 +1331,22 @@ enum APIModelResponseCodec {
             onRejection?(.schemaMismatch); throw Failure.invalidArguments
         }
         return object
+    }
+
+    /// Saved native threads retain their original dynamic schemas. Completed
+    /// browser calls can therefore precede or follow the assertion upgrade in
+    /// either catalog. Only history accepts these two exact shapes; new replies
+    /// still use validatedArguments with the strict current callable schema.
+    private static func validateHistoricalArguments(_ text: String, tool: Tool) throws {
+        guard !tool.custom,
+              let variants = ComputaModelToolCatalog.browserMutationSchemaVariants(
+                name: tool.name, namespace: tool.namespace, schema: tool.schema) else {
+            _ = try validatedArguments(text, tool: tool)
+            return
+        }
+        let historyTool = Tool(name: tool.name, namespace: tool.namespace, wireName: tool.wireName,
+            custom: false, schema: ["oneOf": [variants.legacy, variants.current]], description: tool.description)
+        _ = try validatedArguments(text, tool: historyTool)
     }
     /// Observational localization after the authoritative matches() has refused
     /// the arguments. It never accepts anything. References/composition and any
