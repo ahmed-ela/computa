@@ -183,7 +183,7 @@ enum APIModelResponseCodec {
         var isConsistent: Bool {
             guard schemaPath.count <= 1, actualType != .stringOrNull else { return false }
             guard let field = schemaPath.first else { return expectedType == .object && actualType != .missing }
-            if expectedType == .stringOrNull { return tool == .browserRead && field == .cursor }
+            if expectedType == .stringOrNull { return (tool == .browserRead || tool == .browserTabs) && field == .cursor }
             // A journal remains readable after an app-owned schema evolves.
             // Admission is checked against the actual schema at capture time;
             // decoding only recognizes this closed historical vocabulary.
@@ -1417,7 +1417,7 @@ enum APIModelResponseCodec {
         let expectedType: DiagnosticJSONType
         if let type = selected["type"] as? String, let knownType = DiagnosticJSONType(rawValue: type) {
             expectedType = knownType
-        } else if known == .browserRead, path == [.cursor],
+        } else if (known == .browserRead || known == .browserTabs), path == [.cursor],
                   let types = selected["type"] as? [String], types.count == 2, Set(types) == ["string", "null"] {
             expectedType = .stringOrNull
         } else { return nil }
@@ -1463,7 +1463,7 @@ enum APIModelResponseCodec {
     /// upgrade under any saved catalog. Only history accepts these exact shapes; new replies
     /// still use validatedArguments with the strict current callable schema.
     private static func validateHistoricalArguments(_ text: String, tool: Tool) throws {
-        if !tool.custom, let variants = ComputaModelToolCatalog.browserReadCursorSchemaVariants(
+        if !tool.custom, let variants = ComputaModelToolCatalog.browserCursorSchemaVariants(
             name: tool.name, namespace: tool.namespace, schema: tool.schema) {
             let historyTool = Tool(name: tool.name, namespace: tool.namespace, wireName: tool.wireName,
                 custom: false, schema: variants.historical, description: tool.description)

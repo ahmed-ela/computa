@@ -10,12 +10,12 @@ import CoreFoundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
-    /// Only the app-owned optional read cursor accepts null as a fresh read.
+    /// Only app-owned optional read and inventory cursors accept null as a fresh observation.
     /// Match complete native schemas; required, narrowed or foreign contracts
     /// keep their own semantics. Historical argument bytes are never rewritten.
-    static func browserReadCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
+    static func browserCursorSchemaVariants(name: String, namespace: String?, schema: [String: Any])
         -> (historical: [String: Any], current: [String: Any])? {
-        guard name == "browser_read", namespace == nil || namespace == "functions",
+        guard ["browser_read", "browser_tabs"].contains(name), namespace == nil || namespace == "functions",
               let current = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any],
               let canonical = current["properties"] as? [String: [String: Any]],
               schema["type"] as? String == "object",
@@ -140,10 +140,10 @@ enum ComputaModelToolCatalog {
             // but only the current native contract may be offered for new calls.
             guard !name.hasPrefix("computer_v2_") || currentComputerNames.contains(name) else { return nil }
             if let description = overrides[name] { value["description"] = description }
-            if value["type"] as? String == "function", name == "browser_read" {
+            if value["type"] as? String == "function", ["browser_read", "browser_tabs"].contains(name) {
                 for key in ["parameters", "inputSchema"] {
                     guard let schema = value[key] as? [String: Any],
-                          let variants = browserReadCursorSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
+                          let variants = browserCursorSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
                     value[key] = variants.current
                     value["description"] = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"]
                 }

@@ -366,109 +366,116 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(output.first?["arguments"] as? String, "{\"cmd\":\"echo fixture\"}")
         await server.shutdown()
     }
-    func testNullBrowserReadCursorAndCompletedHistoryNeedNoCorrectionOnBothWireFormats() async throws {
-        for wire in APIProviderDefinition.WireAPI.allCases {
-            let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let accounting = root.appendingPathComponent("accounting")
-            let arguments = " { \"cursor\" : null, \"view\" : \"content\" } "
-            let remote = try APILoopbackFixture { request in
-                await recorder.record(request)
-                let ordinal = await recorder.count()
-                let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
-                let offered = (body["tools"] as! [[String: Any]])[0]
-                let name = wire == .chatCompletions
-                    ? (offered["function"] as! [String: Any])["name"] as! String
-                    : offered["name"] as! String
-                let envelope: [String: Any]
-                if wire == .chatCompletions {
-                    envelope = ["id": "null-read-response-\(ordinal)", "object": "chat.completion", "model": "fixture-model",
-                        "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant",
-                            "tool_calls": [["id": "null-read-call-\(ordinal)", "type": "function",
-                                "function": ["name": name, "arguments": arguments]]]]]],
-                        "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]]
-                } else {
-                    envelope = ["id": "null-read-response-\(ordinal)", "object": "response", "status": "completed",
-                        "model": "fixture-model", "output": [["id": "null-read-item-\(ordinal)", "type": "function_call",
-                            "status": "completed", "call_id": "null-read-call-\(ordinal)", "name": name, "arguments": arguments]],
-                        "usage": ["input_tokens": 10, "output_tokens": 4, "total_tokens": 14]]
-                }
-                return .init(status: "200 OK", headers: ["Content-Type": "application/json"],
-                    body: try! JSONSerialization.data(withJSONObject: envelope))
-            }
-            defer { remote.stop() }
-            let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
-                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
-            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)),
-                correctionAccountingDirectory: accounting)
-            try await server.updateProviders([provider])
-            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
-                turn = UUID().uuidString, preparation = UUID()
-            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
-            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
-
-            // This is the persisted, engine-thinned catalog from before the
-            // nullable cursor contract. Keep using it for the next inference.
-            let savedSchema: [String: Any] = ["type": "object", "properties": [
-                "cursor": ["type": "string"], "query": ["type": "string"],
-                "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]],
-                "required": [String](), "additionalProperties": false]
-            var request = try localRequest(base: base, token: server.bearerToken, task: task,
-                thread: thread, turn: turn, provider: provider)
-            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
-            raw["tools"] = [["type": "function", "name": "browser_read", "parameters": savedSchema]]
-            let initialInput: [[String: Any]] = [["role": "user", "content": "Read the current page."]]
-            raw["input"] = initialInput
-            var firstCall: [String: Any]?
-            for inference in 1...2 {
-                if inference == 2 {
-                    let prior = try XCTUnwrap(firstCall)
-                    raw["input"] = initialInput + [prior, ["type": "function_call_output",
-                        "call_id": try XCTUnwrap(prior["call_id"] as? String), "output": "Synthetic fresh page observation."]]
-                }
-                request.httpBody = try JSONSerialization.data(withJSONObject: raw)
-                let (bytes, response) = try await URLSession.shared.data(for: request)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-                let completed = try completedResponse(bytes)
-                XCTAssertNil(completed["x_computa_correction"])
-                let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
-                XCTAssertEqual(output.count, 1)
-                let call = try XCTUnwrap(output.first)
-                XCTAssertEqual(call["type"] as? String, "function_call")
-                XCTAssertEqual(call["name"] as? String, "browser_read")
-                XCTAssertEqual(call["call_id"] as? String, "null-read-call-\(inference)")
-                XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(arguments.utf8))
-                if inference == 1 { firstCall = call }
-                let count = await recorder.count()
-                XCTAssertEqual(count, inference, "A valid null cursor must never consume a corrective inference")
-                XCTAssertFalse(FileManager.default.fileExists(atPath: accounting.path))
-            }
-            let requests = await recorder.snapshot()
-            for (index, upstream) in requests.enumerated() {
-                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: upstream.body) as? [String: Any])
-                let offered = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first)
-                let schema = try XCTUnwrap((wire == .chatCompletions ? offered["function"] as? [String: Any] : offered)?["parameters"] as? [String: Any])
-                let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
-                XCTAssertEqual(Set(try XCTUnwrap(properties["cursor"]?["type"] as? [String])), ["string", "null"])
-                XCTAssertEqual(properties["view"]?["type"] as? String, "string")
-                XCTAssertEqual(properties["query"]?["type"] as? String, "string")
-                if index == 1 {
-                    let history = try XCTUnwrap(body[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
-                    let historyArguments: [String]
+    func testNullBrowserCursorsAndCompletedHistoryNeedNoCorrectionOnBothWireFormats() async throws {
+        for name in ["browser_read", "browser_tabs"] {
+            for wire in APIProviderDefinition.WireAPI.allCases {
+                let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let accounting = root.appendingPathComponent("accounting")
+                let arguments = name == "browser_read" ? " { \"cursor\" : null, \"view\" : \"content\" } " : " { \"cursor\" : null } "
+                let remote = try APILoopbackFixture { request in
+                    await recorder.record(request)
+                    let ordinal = await recorder.count()
+                    let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+                    let offered = (body["tools"] as! [[String: Any]])[0]
+                    let name = wire == .chatCompletions
+                        ? (offered["function"] as! [String: Any])["name"] as! String
+                        : offered["name"] as! String
+                    let envelope: [String: Any]
                     if wire == .chatCompletions {
-                        historyArguments = history.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
-                            .compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
+                        envelope = ["id": "null-read-response-\(ordinal)", "object": "chat.completion", "model": "fixture-model",
+                            "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant",
+                                "tool_calls": [["id": "null-read-call-\(ordinal)", "type": "function",
+                                    "function": ["name": name, "arguments": arguments]]]]]],
+                            "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]]
                     } else {
-                        historyArguments = history.filter { $0["type"] as? String == "function_call" }
-                            .compactMap { $0["arguments"] as? String }
+                        envelope = ["id": "null-read-response-\(ordinal)", "object": "response", "status": "completed",
+                            "model": "fixture-model", "output": [["id": "null-read-item-\(ordinal)", "type": "function_call",
+                                "status": "completed", "call_id": "null-read-call-\(ordinal)", "name": name, "arguments": arguments]],
+                            "usage": ["input_tokens": 10, "output_tokens": 4, "total_tokens": 14]]
                     }
-                    XCTAssertEqual(historyArguments.map { Data($0.utf8) }, [Data(arguments.utf8)],
-                        "Completed null arguments must retain their exact bytes under the old saved catalog")
+                    return .init(status: "200 OK", headers: ["Content-Type": "application/json"],
+                        body: try! JSONSerialization.data(withJSONObject: envelope))
                 }
+                defer { remote.stop() }
+                let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                    wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+                let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)),
+                    correctionAccountingDirectory: accounting)
+                try await server.updateProviders([provider])
+                let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
+                    turn = UUID().uuidString, preparation = UUID()
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+
+                // This is the persisted, engine-thinned catalog from before the
+                // nullable cursor contract. Keep using it for the next inference.
+                var savedProperties: [String: Any] = ["cursor": ["type": "string"]]
+                if name == "browser_read" {
+                    savedProperties["query"] = ["type": "string"]
+                    savedProperties["view"] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
+                }
+                let savedSchema: [String: Any] = ["type": "object", "properties": savedProperties,
+                    "required": [String](), "additionalProperties": false]
+                var request = try localRequest(base: base, token: server.bearerToken, task: task,
+                    thread: thread, turn: turn, provider: provider)
+                var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                raw["tools"] = [["type": "function", "name": name, "parameters": savedSchema]]
+                let initialInput: [[String: Any]] = [["role": "user", "content": "Read the current page."]]
+                raw["input"] = initialInput
+                var firstCall: [String: Any]?
+                for inference in 1...2 {
+                    if inference == 2 {
+                        let prior = try XCTUnwrap(firstCall)
+                        raw["input"] = initialInput + [prior, ["type": "function_call_output",
+                            "call_id": try XCTUnwrap(prior["call_id"] as? String), "output": "Synthetic fresh page observation."]]
+                    }
+                    request.httpBody = try JSONSerialization.data(withJSONObject: raw)
+                    let (bytes, response) = try await URLSession.shared.data(for: request)
+                    XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                    let completed = try completedResponse(bytes)
+                    XCTAssertNil(completed["x_computa_correction"])
+                    let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+                    XCTAssertEqual(output.count, 1)
+                    let call = try XCTUnwrap(output.first)
+                    XCTAssertEqual(call["type"] as? String, "function_call")
+                    XCTAssertEqual(call["name"] as? String, name)
+                    XCTAssertEqual(call["call_id"] as? String, "null-read-call-\(inference)")
+                    XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(arguments.utf8))
+                    if inference == 1 { firstCall = call }
+                    let count = await recorder.count()
+                    XCTAssertEqual(count, inference, "A valid null cursor must never consume a corrective inference")
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: accounting.path))
+                }
+                let requests = await recorder.snapshot()
+                for (index, upstream) in requests.enumerated() {
+                    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: upstream.body) as? [String: Any])
+                    let offered = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first)
+                    let schema = try XCTUnwrap((wire == .chatCompletions ? offered["function"] as? [String: Any] : offered)?["parameters"] as? [String: Any])
+                    let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+                    XCTAssertEqual(Set(try XCTUnwrap(properties["cursor"]?["type"] as? [String])), ["string", "null"])
+                    if name == "browser_read" {
+                        XCTAssertEqual(properties["view"]?["type"] as? String, "string")
+                        XCTAssertEqual(properties["query"]?["type"] as? String, "string")
+                    } else { XCTAssertEqual(Set(properties.keys), ["cursor"]) }
+                    if index == 1 {
+                        let history = try XCTUnwrap(body[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
+                        let historyArguments: [String]
+                        if wire == .chatCompletions {
+                            historyArguments = history.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                                .compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
+                        } else {
+                            historyArguments = history.filter { $0["type"] as? String == "function_call" }
+                                .compactMap { $0["arguments"] as? String }
+                        }
+                        XCTAssertEqual(historyArguments.map { Data($0.utf8) }, [Data(arguments.utf8)],
+                            "Completed null arguments must retain their exact bytes under the old saved catalog")
+                    }
+                }
+                XCTAssertEqual(credentials.counts().reads, 2); XCTAssertEqual(credentials.counts().writes, 0)
+                XCTAssertEqual((savedSchema["properties"] as? [String: [String: Any]])?["cursor"]?["type"] as? String, "string")
+                await server.shutdown()
             }
-            XCTAssertEqual(credentials.counts().reads, 2); XCTAssertEqual(credentials.counts().writes, 0)
-            XCTAssertEqual((savedSchema["properties"] as? [String: [String: Any]])?["cursor"]?["type"] as? String, "string")
-            await server.shutdown()
         }
     }
     func testCorrectionPreservesValidSecondReplyWithUnknownUsageWithoutInventingZero() async throws {

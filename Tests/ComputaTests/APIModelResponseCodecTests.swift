@@ -154,10 +154,10 @@ final class APIModelResponseCodecTests: XCTestCase {
                 for field in ["cursor", "query"] where oldProperties[field] != nil {
                     let property = try XCTUnwrap(properties[field] as? [String: Any])
                     XCTAssertEqual(property["minLength"] as? Int, 1)
-                    if name == "browser_read", field == "cursor" {
+                    if field == "cursor" {
                         XCTAssertEqual(property["type"] as? [String], ["string", "null"])
                     } else { XCTAssertEqual(property["type"] as? String, "string") }
-                    if name == "browser_tabs" { XCTAssertNil(property["description"], "Unchanged inventory constraint repair preserves saved metadata") }
+                    XCTAssertNotNil(property["description"], "Recognized native cursor catalogs receive current guidance")
                 }
                 XCTAssertEqual(properties["view"] as? NSDictionary, oldProperties["view"] as? NSDictionary)
                 XCTAssertEqual(schema["required"] as? [String], [])
@@ -179,7 +179,7 @@ final class APIModelResponseCodecTests: XCTestCase {
             for field in ["cursor", "query"] where oldProperties[field] != nil {
                 let property = try XCTUnwrap(properties[field] as? [String: Any])
                 XCTAssertEqual(property["minLength"] as? Int, 1)
-                if name == "browser_read", field == "cursor" {
+                if field == "cursor" {
                     XCTAssertEqual(property["type"] as? [String], ["string", "null"])
                 } else { XCTAssertEqual(property["type"] as? String, "string") }
             }
@@ -187,6 +187,8 @@ final class APIModelResponseCodecTests: XCTestCase {
             let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
             let oldCall = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
             XCTAssertEqual((oldCall["function"] as? [String: Any])?["arguments"] as? String, "{\"cursor\":\"\"}")
+            XCTAssertEqual(messages.first { $0["role"] as? String == "tool" }?["content"] as? String,
+                           "Invalid built-in browser string argument.")
             let alias = try XCTUnwrap(wire["name"] as? String)
             XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
                 "function": ["name": alias, "arguments": "{}"]]]], finish: "tool_calls", request: prepared, model: p.models[0].id))
@@ -200,8 +202,8 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
-    private func savedBrowserReadSchema() throws -> [String: Any] {
-        var schema = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }?["inputSchema"] as? [String: Any])
+    private func savedBrowserCursorSchema(_ name: String = "browser_read") throws -> [String: Any] {
+        var schema = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
         var properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
         properties = properties.mapValues { $0.filter { !["description", "minLength", "maxLength", "pattern"].contains($0.key) } }
         properties["cursor"] = ["type": "string"]
@@ -209,74 +211,81 @@ final class APIModelResponseCodecTests: XCTestCase {
         return schema
     }
 
-    func testNullableReadCursorPreservesRawCallsAndCompletedHistoryUnderSavedCatalogs() throws {
-        let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }?["inputSchema"] as? [String: Any])
+    func testNullableBrowserCursorsPreserveRawCallsAndCompletedHistoryUnderSavedCatalogs() throws {
         let providers = [provider, APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
             wireAPI: .responses, models: provider.models)]
-        for p in providers {
-            for schema in [try savedBrowserReadSchema(), current] {
-                let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
-                    ["type": "function", "name": "browser_read", "description": "Saved snapshot/index action guidance", "parameters": schema]]]]
-                let prepared = try request(["tools": catalog], provider: p)
-                XCTAssertEqual(prepared.tools.first?.schema as? NSDictionary, current as NSDictionary)
-                XCTAssertEqual(prepared.tools.first?.description,
-                    EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }?["description"] as? String)
-                for arguments in ["{ \"cursor\": null, \"view\": \"content\" }", #"{"cursor":"exact-issued-cursor"}"#, "{}"] {
-                    let reply = try browserMutationReply(arguments, request: prepared, callID: "read-current")
-                    let call = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
-                    XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(arguments.utf8))
-                    let history = [call, ["type": "function_call_output", "call_id": "read-current", "output": "Observed page"]]
-                    let next = try request(["tools": catalog, "input": history], provider: p)
-                    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: next.body) as? [String: Any])
-                    let actual: String?
-                    if p.wireAPI == .responses {
-                        actual = (body["input"] as? [[String: Any]])?.first?["arguments"] as? String
-                    } else {
-                        let calls = (body["messages"] as? [[String: Any]])?.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
-                        actual = (calls?.first?["function"] as? [String: Any])?["arguments"] as? String
+        for name in ["browser_read", "browser_tabs"] {
+            let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
+            for p in providers {
+                for schema in [try savedBrowserCursorSchema(name), current] {
+                    let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
+                        ["type": "function", "name": name, "description": "Saved snapshot/index action guidance", "parameters": schema]]]]
+                    let prepared = try request(["tools": catalog], provider: p)
+                    XCTAssertEqual(prepared.tools.first?.schema as? NSDictionary, current as NSDictionary)
+                    XCTAssertEqual(prepared.tools.first?.description,
+                        EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"] as? String)
+                    let nullArguments = name == "browser_read" ? "{ \"cursor\": null, \"view\": \"content\" }" : " { \"cursor\" : null } "
+                    for arguments in [nullArguments, #"{"cursor":"exact-issued-cursor"}"#, "{}"] {
+                        let reply = try browserMutationReply(arguments, request: prepared, callID: "read-current")
+                        let call = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+                        XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(arguments.utf8))
+                        let history = [call, ["type": "function_call_output", "call_id": "read-current", "output": "Observed page"]]
+                        let next = try request(["tools": catalog, "input": history], provider: p)
+                        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: next.body) as? [String: Any])
+                        let actual: String?
+                        if p.wireAPI == .responses {
+                            actual = (body["input"] as? [[String: Any]])?.first?["arguments"] as? String
+                        } else {
+                            let calls = (body["messages"] as? [[String: Any]])?.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                            actual = (calls?.first?["function"] as? [String: Any])?["arguments"] as? String
+                        }
+                        XCTAssertEqual(actual.map { Data($0.utf8) }, Data(arguments.utf8))
+                        XCTAssertEqual(next.tools.first?.schema as? NSDictionary, current as NSDictionary)
                     }
-                    XCTAssertEqual(actual.map { Data($0.utf8) }, Data(arguments.utf8))
-                    XCTAssertEqual(next.tools.first?.schema as? NSDictionary, current as NSDictionary)
-                }
-                for arguments in [#"{"cursor":""}"#, #"{"cursor":false}"#, #"{"cursor":123}"#,
-                    #"{"cursor":[]}"#, #"{"cursor":{}}"#, #"{"view":null}"#, #"{"query":null}"#,
-                    #"{"cursor":null,"click_ref":"bclick_unknown"}"#] {
-                    XCTAssertThrowsError(try browserMutationReply(arguments, request: prepared)) {
-                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    for arguments in [#"{"cursor":""}"#, #"{"cursor":false}"#, #"{"cursor":123}"#,
+                        #"{"cursor":[]}"#, #"{"cursor":{}}"#, #"{"view":null}"#, #"{"query":null}"#,
+                        #"{"cursor":null,"click_ref":"bclick_unknown"}"#] {
+                        XCTAssertThrowsError(try browserMutationReply(arguments, request: prepared)) {
+                            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                        }
                     }
                 }
             }
         }
     }
 
-    func testNullableReadCursorMigrationPreservesForeignRequiredAndModifiedSchemas() throws {
-        let original = try savedBrowserReadSchema()
-        var required = original; required["required"] = ["cursor"]
-        var narrowed = original
-        var properties = try XCTUnwrap(original["properties"] as? [String: Any])
-        properties["view"] = ["type": "string", "enum": ["content"]]; narrowed["properties"] = properties
-        var extra = original
-        properties = try XCTUnwrap(original["properties"] as? [String: Any]); properties["custom_field"] = ["type": "string"]
-        extra["properties"] = properties
-        var restricted = original
-        properties = try XCTUnwrap(original["properties"] as? [String: Any]); properties["cursor"] = ["type": "string", "maxLength": 12]
-        restricted["properties"] = properties
-        let cases: [([String: Any], String?)] = [(original, "mcp_external"), (required, nil), (narrowed, nil), (extra, nil), (restricted, nil)]
-        for (schema, namespace) in cases {
-            let function: [String: Any] = ["type": "function", "name": "browser_read", "parameters": schema]
-            let definitions: [[String: Any]] = namespace.map { [["type": "namespace", "name": $0, "tools": [function]]] } ?? [function]
-            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: "fixture") as NSArray, definitions as NSArray)
-            let prepared = try request(["tools": definitions])
-            XCTAssertEqual(prepared.tools.first?.schema as? NSDictionary, schema as NSDictionary)
-            var call: [String: Any] = ["type": "function_call", "name": "browser_read", "call_id": "old", "arguments": #"{"cursor":null}"#]
-            if let namespace { call["namespace"] = namespace }
-            XCTAssertThrowsError(try request(["tools": definitions, "input": [call,
-                ["type": "function_call_output", "call_id": "old", "output": "Historical result"]]])) {
-                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+    func testNullableBrowserCursorMigrationPreservesForeignRequiredAndModifiedSchemas() throws {
+        for name in ["browser_read", "browser_tabs"] {
+            let original = try savedBrowserCursorSchema(name)
+            var required = original; required["required"] = ["cursor"]
+            var narrowed = original
+            var properties = try XCTUnwrap(original["properties"] as? [String: Any])
+            if name == "browser_read" { properties["view"] = ["type": "string", "enum": ["content"]] }
+            else { properties["cursor"] = ["type": "string", "enum": ["only-this-cursor"]] }
+            narrowed["properties"] = properties
+            var extra = original
+            properties = try XCTUnwrap(original["properties"] as? [String: Any]); properties["custom_field"] = ["type": "string"]
+            extra["properties"] = properties
+            var restricted = original
+            properties = try XCTUnwrap(original["properties"] as? [String: Any]); properties["cursor"] = ["type": "string", "maxLength": 12]
+            restricted["properties"] = properties
+            let cases: [([String: Any], String?)] = [(original, "mcp_external"), (required, nil), (narrowed, nil), (extra, nil), (restricted, nil)]
+            for (schema, namespace) in cases {
+                let function: [String: Any] = ["type": "function", "name": name, "parameters": schema]
+                let definitions: [[String: Any]] = namespace.map { [["type": "namespace", "name": $0, "tools": [function]]] } ?? [function]
+                XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: "fixture") as NSArray, definitions as NSArray)
+                let prepared = try request(["tools": definitions])
+                XCTAssertEqual(prepared.tools.first?.schema as? NSDictionary, schema as NSDictionary)
+                var call: [String: Any] = ["type": "function_call", "name": name, "call_id": "old", "arguments": #"{"cursor":null}"#]
+                if let namespace { call["namespace"] = namespace }
+                XCTAssertThrowsError(try request(["tools": definitions, "input": [call,
+                    ["type": "function_call_output", "call_id": "old", "output": "Historical result"]]])) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
             }
+            let custom: [[String: Any]] = [["type": "custom", "name": name, "format": ["type": "text"]]]
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(custom, modelID: "fixture") as NSArray, custom as NSArray)
         }
-        let custom: [[String: Any]] = [["type": "custom", "name": "browser_read", "format": ["type": "text"]]]
-        XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(custom, modelID: "fixture") as NSArray, custom as NSArray)
     }
 
     private func legacyBrowserMutationSchema(_ name: String) -> [String: Any] {
@@ -588,7 +597,7 @@ final class APIModelResponseCodecTests: XCTestCase {
             ("browser_open", [#"{"url":"https://outlook.live.com/mail/"}"#], [#"{"url":""}"#]),
             ("browser_navigate", [#"{"url":"https://outlook.live.com/mail/"}"#], [#"{"url":""}"#]),
             ("browser_bind", ["{\"tab_id\":\"\(id)\"}"], [#"{"tab_id":""}"#]),
-            ("browser_tabs", ["{}"], [#"{"cursor":""}"#]),
+            ("browser_tabs", ["{}", #"{"cursor":null}"#], [#"{"cursor":""}"#, #"{"cursor":false}"#]),
             ("browser_read", ["{}", #"{"view":"content"}"#, #"{"cursor":null}"#], [#"{"cursor":""}"#, #"{"query":""}"#, #"{"view":"invalid"}"#]),
             ("browser_click", ["{\"click_ref\":\"bclick_\(id)\"}"],
                               [#"{"click_ref":""}"#, "{\"click_ref\":\"\(String(repeating: "x", count: 129))\"}"]),
@@ -1045,16 +1054,19 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
     func testBuiltinSchemaDiagnosticDistinguishesMissingNullBooleanAndNumericTypesWithoutValues() throws {
-        let read = try request(["tools": [diagnosticBrowserDefinition()]])
-        for (arguments, actual) in [(#"{"cursor":false}"#, APIModelResponseCodec.DiagnosticJSONType.boolean),
-                                    (#"{"cursor":91234567}"#, .integer), (#"{"cursor":1.25}"#, .number),
-                                    (#"{"cursor":[]}"#, .array), (#"{"cursor":{}}"#, .object)] {
-            let failure = try observedSchemaFailure(read, arguments: arguments)
-            XCTAssertEqual(failure.location?.actualType, actual)
-            XCTAssertEqual(failure.location?.schemaPath, [.cursor])
-            XCTAssertEqual(failure.location?.expectedType, .stringOrNull)
-            let text = String(decoding: try JSONEncoder().encode(failure), as: UTF8.self)
-            XCTAssertFalse(text.contains("91234567")); XCTAssertFalse(text.contains("1.25"))
+        for name in ["browser_read", "browser_tabs"] {
+            let read = try request(["tools": [diagnosticBrowserDefinition(name)]])
+            for (arguments, actual) in [(#"{"cursor":false}"#, APIModelResponseCodec.DiagnosticJSONType.boolean),
+                                        (#"{"cursor":91234567}"#, .integer), (#"{"cursor":1.25}"#, .number),
+                                        (#"{"cursor":[]}"#, .array), (#"{"cursor":{}}"#, .object)] {
+                let failure = try observedSchemaFailure(read, arguments: arguments)
+                XCTAssertEqual(failure.location?.tool.rawValue, name)
+                XCTAssertEqual(failure.location?.actualType, actual)
+                XCTAssertEqual(failure.location?.schemaPath, [.cursor])
+                XCTAssertEqual(failure.location?.expectedType, .stringOrNull)
+                let text = String(decoding: try JSONEncoder().encode(failure), as: UTF8.self)
+                XCTAssertFalse(text.contains("91234567")); XCTAssertFalse(text.contains("1.25"))
+            }
         }
         let wait = try request(["tools": [diagnosticBrowserDefinition("browser_wait")]])
         for (arguments, actual) in [(#"{"timeout_ms":"PRIVATE_ARGUMENT_VALUE"}"#, APIModelResponseCodec.DiagnosticJSONType.string),
@@ -1067,23 +1079,28 @@ final class APIModelResponseCodecTests: XCTestCase {
         let missing = try observedSchemaFailure(open, arguments: "{}")
         XCTAssertEqual(missing.constraint, .missingRequired)
         XCTAssertEqual(missing.location, .init(tool: .browserOpen, schemaPath: [.url], expectedType: .string, actualType: .missing))
+        let read = try request(["tools": [diagnosticBrowserDefinition()]])
         guard case .reply = try APIModelResponseCodec.decodeForCorrection(correctionResult(read, arguments: "{}"), request: read) else {
             return XCTFail("Omitted optional fields remain valid")
         }
     }
     func testNullableCursorDiagnosticTypeIsFiniteExpectedOnlyAndKeepsOldJournalLocationsReadable() throws {
-        let old = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.cursor],
-            expectedType: .string, actualType: .null)
-        let current = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.cursor],
-            expectedType: .stringOrNull, actualType: .boolean)
-        for location in [old, current] {
-            XCTAssertEqual(try JSONDecoder().decode(APIModelResponseCodec.BuiltinSchemaLocation.self,
-                from: JSONEncoder().encode(location)), location)
+        for tool in [APIModelResponseCodec.DiagnosticBuiltinTool.browserRead, .browserTabs] {
+            let old = APIModelResponseCodec.BuiltinSchemaLocation(tool: tool, schemaPath: [.cursor],
+                expectedType: .string, actualType: .null)
+            let current = APIModelResponseCodec.BuiltinSchemaLocation(tool: tool, schemaPath: [.cursor],
+                expectedType: .stringOrNull, actualType: .boolean)
+            for location in [old, current] {
+                XCTAssertEqual(try JSONDecoder().decode(APIModelResponseCodec.BuiltinSchemaLocation.self,
+                    from: JSONEncoder().encode(location)), location)
+            }
         }
         for location in [
-            APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserTabs, schemaPath: [.cursor], expectedType: .stringOrNull, actualType: .boolean),
-            .init(tool: .browserRead, schemaPath: [.query], expectedType: .stringOrNull, actualType: .boolean),
+            APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.query], expectedType: .stringOrNull, actualType: .boolean),
+            .init(tool: .browserTabs, schemaPath: [.query], expectedType: .stringOrNull, actualType: .boolean),
+            .init(tool: .browserOpen, schemaPath: [.url], expectedType: .stringOrNull, actualType: .boolean),
             .init(tool: .browserRead, schemaPath: [.cursor], expectedType: .stringOrNull, actualType: .stringOrNull),
+            .init(tool: .browserTabs, schemaPath: [.cursor], expectedType: .stringOrNull, actualType: .stringOrNull),
         ] {
             XCTAssertFalse(location.isConsistent)
             XCTAssertThrowsError(try JSONDecoder().decode(APIModelResponseCodec.BuiltinSchemaLocation.self,

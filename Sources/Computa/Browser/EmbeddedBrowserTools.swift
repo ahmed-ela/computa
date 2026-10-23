@@ -52,10 +52,10 @@ enum EmbeddedBrowserTools {
         let waitText: [String: Any] = ["type": "string", "minLength": 1,
             "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
             "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
-        let cursor: [String: Any] = ["type": "string", "minLength": 1,
-            "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
+        let cursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
+            "description": "Omit this field on the first page or a fresh inventory; null has the same fresh-inventory meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_tabs in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
         let readCursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
-            "description": "Omit this field on the first page or a fresh read; null has the same fresh-read meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_read in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
+            "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with only the exact nonempty next_cursor from the latest page in the current turn, without view/query. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
@@ -66,7 +66,7 @@ enum EmbeddedBrowserTools {
         return [
             specification(
                 "browser_tabs",
-                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor for the first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor or use null for a fresh first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
                 ["cursor": cursor]),
             specification(
                 "browser_open",
@@ -151,9 +151,9 @@ enum EmbeddedBrowserTools {
         }
         for key in ["url", "tab_id", "snapshot_id", "view", "query", "cursor", "text"]
         where arguments[key] != nil {
-            // Only this explicitly nullable optional field means omission.
-            // Other fields and inventory cursors keep their strict contracts.
-            if tool == "browser_read", key == "cursor", arguments[key] is NSNull { continue }
+            // Only these explicitly nullable optional cursors mean omission.
+            // All other fields keep their strict contracts.
+            if ["browser_read", "browser_tabs"].contains(tool), key == "cursor", arguments[key] is NSNull { continue }
             guard let value = arguments[key] as? String,
                 value.utf8.count <= (key == "text" && tool == "browser_fill" ? 65_536 : 2_048),
                 key == "text" || !value.isEmpty
@@ -482,6 +482,8 @@ actor EmbeddedBrowserToolController {
         try lifetime.check()
         switch tool {
         case "browser_tabs":
+            // An omitted or explicit-null cursor takes the same fresh branch;
+            // it never inherits the retained inventory's offset or authority.
             if let cursor = object["cursor"] as? String {
                 guard contexts[taskKey]?.inventoryCursor == cursor else {
                     throw BrowserTabBrokerError.staleSnapshot
@@ -667,7 +669,7 @@ actor EmbeddedBrowserToolController {
                     // any capture. Do not infer an identifier's kind or turn
                     // an unissued/replaced cursor into a fresh read.
                     throw BrowserTabBrokerError.invalidRead(
-                        "cursor must be the exact next_cursor from the current browser_read page, not a snapshot ID or tab handle. No read or input was dispatched. Omit cursor or use null for a fresh view/query; to continue, send only the page's next_cursor.")
+                        "cursor is not the latest page's exact next_cursor. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Send only the latest page's next_cursor to continue. Omit cursor or use null for a fresh view/query. No read or input was dispatched.")
                 }
                 let original = SemanticReadRequest(query: receipt.query, view: receipt.view)
                 guard read.continues(original) else {

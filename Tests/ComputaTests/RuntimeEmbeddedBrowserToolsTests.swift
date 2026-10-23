@@ -7,6 +7,36 @@ import XCTest
 /// with an inert browser backend. No provider, Chrome, UI or network is used.
 @MainActor
 final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
+    func testNullInventoryCursorReachesNativeToolAndAllowsObservedTabBindingWithoutApproval() async throws {
+        try await withHarness { harness in
+            try await harness.submit([
+                ["tool": "browser_tabs", "arguments": ["cursor": NSNull()]],
+                ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
+                ["tool": "browser_read", "arguments": [:]],
+                ["tool": "browser_tabs", "arguments": ["cursor": NSNull()]],
+                ["tool": "browser_read", "arguments": [:]],
+            ])
+            try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            for index in [2, 4] {
+                XCTAssertTrue((rows[index]["text"] as? String)?.contains("United flight fixture") == true,
+                              "A fresh inventory must preserve the current bound tab")
+            }
+            let specs = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+                harness.root.appendingPathComponent("specs.json"))) as? [[String: Any]])
+            let tabs = try XCTUnwrap(specs.first { $0["name"] as? String == "browser_tabs" })
+            let schema = try XCTUnwrap(tabs["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            XCTAssertEqual((properties["cursor"] as? [String: Any])?["type"] as? [String], ["string", "null"])
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.inventories, 2)
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0)
+            XCTAssertEqual(counts.activations, 0); XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
     func testBuiltInToolsAreOfferedOnlyWhenConfiguredAndNeedNoChromeBinding() async throws {
         for configured in [false, true] {
             try await withHarness(configured: configured) { harness in
@@ -675,30 +705,34 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     func testInvalidReadCursorDiagnosisPreservesRepeatedFailureThresholdWithoutApprovals() async throws {
         try await withHarness { harness in
             try await harness.submit([
-                ["tool": "browser_tabs", "arguments": [:]],
+                ["tool": "browser_tabs", "arguments": ["cursor": NSNull()]],
                 ["tool": "browser_bind", "arguments": ["tab_id": "@human"]],
                 ["tool": "browser_read", "arguments": ["view": "all"]],
                 ["tool": "browser_read", "arguments": ["cursor": "@snapshot", "view": "content"]],
+                ["tool": "browser_tabs", "arguments": ["cursor": NSNull()]],
                 ["tool": "browser_read", "arguments": ["cursor": UUID().uuidString, "view": "content"]],
+                ["tool": "browser_tabs", "arguments": ["cursor": NSNull()]],
                 ["tool": "browser_read", "arguments": ["cursor": "PRIVATE_UNISSUED_CURSOR", "view": "content"]],
                 ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
             ])
-            try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .waiting }
+            try await self.waitFor { harness.rowCount == 8 && harness.audit.status == .waiting }
             let rows = try harness.rows()
-            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, false, false])
-            for row in rows.suffix(3) {
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, true, false, true, false])
+            for row in rows.filter({ $0["success"] as? Bool == false }) {
                 let text = try XCTUnwrap(row["text"] as? String)
-                XCTAssertTrue(text.contains("exact next_cursor"))
+                XCTAssertTrue(text.contains("latest page's exact next_cursor"))
+                XCTAssertTrue(text.contains("replaces older cursors"))
                 XCTAssertTrue(text.contains("Omit cursor or use null"))
                 XCTAssertFalse(text.contains("PRIVATE_UNISSUED_CURSOR"))
-                XCTAssertFalse(text.contains("current_observation"), "Invalid identifiers must not create a recovery read")
+                XCTAssertFalse(text.contains("\"current_observation\":"), "Invalid identifiers must not attach a recovery observation")
             }
             XCTAssertTrue(harness.audit.entries.contains { $0.title == "Native action stopped" })
             let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
                 harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
-            XCTAssertEqual(requests.count, 6, "Changing cursor text must not evade the unchanged three-failure threshold")
+            XCTAssertEqual(requests.count, 8, "Changing cursor text or refreshing inventory must not refund the three-failure threshold")
             XCTAssertTrue(harness.audit.approvals.isEmpty)
             let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.inventories, 3)
             XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0)
             XCTAssertEqual(counts.ownedClosed, 0); XCTAssertTrue(counts.humanIntact)
         }

@@ -369,7 +369,7 @@ none of its tools executed. The finite diagnostic does not identify that rejecte
 field, so it is not attributed to a particular tool. No configuration changes or
 browser actions were observed.
 
-## Build 228 changes awaiting installed qualification
+## Build 228 changes and qualification
 
 Runtime `mactopus-10` adds one final bounded retention candidate after the existing
 candidates fail. It omits optional URL/title lines from already selected historical
@@ -405,4 +405,56 @@ including three enabled bundled-engine integration cases. The runtime receipt
 suite passed 35 tests with one intentional private diagnostic-export skip, and
 version/product-identity checks passed 20 tests. The initial native run's one
 failure remains recorded; the fixed-source rerun passed all 299 affected tests.
-Installed model-driven qualification remains separate and pending at this point.
+Controlled build 0.7.0 (228), commit `a3ffb3d`, was Developer ID signed and installed;
+the running executable and resources matched the validated build. Remote Cerebras
+GPT-OSS120b at medium effort produced these outcomes:
+
+- The unchanged adverse search task recovered from three rejected calls and found
+  the exact announcement content and attachment filename. It reached the message
+  through Inbox rather than submitting a refined search. Eighteen calls and one
+  completed compaction; zero deliveries.
+- The same-chat send recovered from two rejected calls, filled all three exact
+  fields and produced exactly one fixture POST with an observed, matching receipt.
+  Thirteen calls and one completed compaction.
+- A fresh send control recovered from one consumed-reference rejection and
+  produced exactly one new POST with all literal fields and its own matching
+  observed receipt. Ten calls, no compaction. Neither successful send attempted an
+  invalid form submission, so event-feedback coverage remains the native WebKit
+  regression rather than a live-model claim.
+- Fresh Outlook stopped before tools: both provider attempts sent
+  `browser_tabs({"cursor":null})`, rejected by its string-only optional cursor
+  schema. The finite same-turn diagnostic identifies this exact contract gap;
+  it is separate from the prior receipt-capacity stop.
+- The diagnostics retest reached browser work but made repeated continuation
+  mistakes and stopped at the unchanged 32-call bound without an answer. Cursor
+  provenance shows genuinely issued tokens reused after replacement, or combined
+  with changed filters; it does not show snapshot or tab IDs used as cursors.
+  Shell guidance was delivered but was not consistently followed, including
+  quoted-tilde path mistakes and broad scans. No configuration write was observed.
+
+Every attempt that created a tab closed its one owned tab and preserved existing
+user tabs. Failed attempts remain recorded. These recovered local successes do
+not qualify real-provider delivery, the Outlook lookup or the diagnostics task.
+
+## Nullable inventory cursor follow-up
+
+The built-in `browser_tabs.cursor` contract now matches `browser_read.cursor`:
+null or omission starts a fresh read; only an exact issued nonempty cursor
+continues a retained page. Required fields, other optional null values, foreign
+schemas, cursor ownership and all existing limits remain strict. This changes
+the explicit schema rather than silently rewriting invalid model arguments.
+
+The read-cursor property and stale-cursor error now describe the latest-page
+lifetime precisely: continuation advances the token, fresh reads and replacement
+observations supersede old tokens, and admitted input invalidates them. The prior
+"current turn" wording was too broad; the old error also suggested snapshot/tab
+ID confusion even when a genuine older cursor had expired. This changes guidance,
+not cursor admission, capture authority or the bounded recovery policy. Regression
+coverage includes genuinely issued but consumed cursors rejected without capture.
+
+Build 229's final-source regression run passed 281 selected Swift tests without
+failures or skips, including all three enabled bundled API-engine integration
+cases. An earlier run before the lifecycle wording change passed the same 281;
+the unique count is 281, not 562. Version/product-identity checks passed 20 tests.
+The runtime remains the identical pinned mactopus-10 artifact from build 228.
+Installed live qualification for this follow-up is recorded separately.

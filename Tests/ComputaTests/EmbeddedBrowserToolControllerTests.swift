@@ -2056,19 +2056,21 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
             let required = try XCTUnwrap(schema["required"] as? [String])
             let cursor = try XCTUnwrap(properties["cursor"] as? [String: Any])
-            if name == "browser_read" {
-                XCTAssertEqual(cursor["type"] as? [String], ["string", "null"])
-                XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": NSNull()]))
-            } else {
-                XCTAssertEqual(cursor["type"] as? String, "string")
-                XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": NSNull()]))
-            }
+            XCTAssertEqual(cursor["type"] as? [String], ["string", "null"])
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": NSNull()]))
             XCTAssertEqual(cursor["minLength"] as? Int, 1)
             XCTAssertFalse(required.contains("cursor"))
             let guidance = try XCTUnwrap(cursor["description"] as? String)
-            XCTAssertTrue(guidance.contains("Omit this field on the first page or a fresh read"))
+            XCTAssertTrue(guidance.contains("Omit this field on the first page or a fresh"))
+            XCTAssertTrue(guidance.contains("never resumes a previous cursor"))
             XCTAssertTrue(guidance.contains("exact nonempty next_cursor"))
             XCTAssertTrue(guidance.contains("current turn"))
+            if name == "browser_read" {
+                XCTAssertTrue(guidance.contains("latest page"))
+                XCTAssertTrue(guidance.contains("without view/query"))
+                XCTAssertTrue(guidance.contains("successful continuation, fresh read or current_observation replaces older cursors"))
+                XCTAssertTrue(guidance.contains("admitted input invalidates them"))
+            }
             XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [:]))
             XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": ""]))
             XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": UUID().uuidString]))
@@ -2082,6 +2084,59 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertTrue((query["description"] as? String)?.contains("Omit this field for an unfiltered read") == true)
         XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["query": ""]))
         XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["query": " \t\n"]))
+    }
+
+    func testNullInventoryCursorStartsFreshFirstPageAndRetiresPriorCursorAndUnpublishedTabIDs() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.addLongInventory()
+        func inventory(_ arguments: [String: Any] = [:], key: String = "turn-a") async throws -> [String: Any] {
+            let text = try await call(controller, "browser_tabs", arguments, key: key)
+            XCTAssertLessThanOrEqual(text.utf8.count, 8_192)
+            return try jsonObject(text)
+        }
+        func rows(_ inventory: [String: Any]) throws -> [[String: Any]] { try XCTUnwrap(inventory["tabs"] as? [[String: Any]]) }
+        let first = try await inventory(["cursor": NSNull()])
+        let firstCursor = try XCTUnwrap(first["next_cursor"] as? String)
+        XCTAssertEqual(first["truncated"] as? Bool, true)
+        let next = try await inventory(["cursor": firstCursor])
+        let nextCursor = try XCTUnwrap(next["next_cursor"] as? String)
+        let laterID = try XCTUnwrap(rows(next).first?["tab_id"] as? String)
+        let afterContinuation = await backend.inventoryReadCount()
+        XCTAssertEqual(afterContinuation, 1, "A valid inventory continuation retains the enumerated inventory")
+        let freshNull = try await inventory(["cursor": NSNull()])
+        XCTAssertEqual(try rows(freshNull).compactMap { $0["tab_id"] as? String },
+                       try rows(first).compactMap { $0["tab_id"] as? String }, "Null starts at offset zero, not the prior cursor")
+        XCTAssertNotEqual(freshNull["next_cursor"] as? String, nextCursor)
+        do {
+            _ = try await call(controller, "browser_bind", ["tab_id": laterID])
+            XCTFail("Fresh inventory cannot retain tab IDs from an omitted old page")
+        } catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+        let foreign = try await inventory(key: "turn-b")
+        let foreignCursor = try XCTUnwrap(foreign["next_cursor"] as? String)
+        let beforeRejections = await backend.inventoryReadCount()
+        for cursor in [firstCursor, nextCursor, foreignCursor, UUID().uuidString, ""] {
+            do { _ = try await inventory(["cursor": cursor]); XCTFail("Null support cannot admit stale, foreign or empty cursors") }
+            catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+        }
+        let afterRejections = await backend.inventoryReadCount()
+        XCTAssertEqual(afterRejections, beforeRejections, "Rejected inventory cursors cannot silently refresh")
+        let omitted = try await inventory()
+        XCTAssertEqual(try rows(omitted).compactMap { $0["tab_id"] as? String },
+                       try rows(freshNull).compactMap { $0["tab_id"] as? String })
+        _ = await backend.addInventoryTarget(title: "Newly listed", url: URL(string: "http://localhost:8123/new")!)
+        let refreshed = try await inventory(["cursor": NSNull()])
+        XCTAssertEqual(refreshed["count"] as? Int, (try XCTUnwrap(omitted["count"] as? Int)) + 1)
+        let currentCursor = try XCTUnwrap(refreshed["next_cursor"] as? String)
+        _ = await backend.addInventoryTarget(title: "After retained capture", url: URL(string: "http://localhost:8123/later")!)
+        let beforeValid = await backend.inventoryReadCount()
+        let retained = try await inventory(["cursor": currentCursor])
+        XCTAssertEqual(retained["count"] as? Int, refreshed["count"] as? Int)
+        let afterValid = await backend.inventoryReadCount()
+        XCTAssertEqual(afterValid, beforeValid)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.observes, 0)
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.navigations, 0)
+        _ = await controller.shutdown()
     }
 
     func testNullReadCursorStartsFreshOverviewInsteadOfContinuingOrRevivingOldReferences() async throws {
@@ -2133,6 +2188,12 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(try field("source_observation", in: continued), try field("source_observation", in: null),
                        "The next page retains its immutable source despite the separate freshness probe")
         XCTAssertEqual(retained.presses, 0); XCTAssertEqual(retained.fills, 0)
+        do {
+            _ = try await call(controller, "browser_read", ["cursor": field("next_cursor", in: null)])
+            XCTFail("A successfully consumed continuation cannot be reused even within the same capture")
+        } catch { assertNoncurrentReadCursor(error) }
+        let afterReplay = await backend.counts()
+        XCTAssertEqual(afterReplay, retained, "An old issued cursor neither recaptures nor consumes current references")
         let filtered = try await call(controller, "browser_read", ["cursor": NSNull(), "view": "all", "query": "updated"])
         XCTAssertEqual(try field("view", in: filtered), "all")
         XCTAssertTrue(filtered.contains("label=\"Check flight updated\""))
@@ -2194,9 +2255,13 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 
     func testNullReadCursorDoesNotRelaxOtherArgumentsOrRefundRecoveryBudget() async throws {
         for (tool, args) in [
-            ("browser_tabs", ["cursor": NSNull()]), ("browser_read", ["view": NSNull()]),
+            ("browser_tabs", ["query": NSNull()]), ("browser_read", ["view": NSNull()]),
             ("browser_read", ["query": NSNull()]), ("browser_click", ["click_ref": NSNull()]),
             ("browser_fill", ["fill_ref": NSNull(), "text": "value"]),
+            ("browser_fill", ["fill_ref": "bfill_fixture", "text": NSNull()]),
+            ("browser_open", ["url": NSNull()]), ("browser_navigate", ["url": NSNull()]),
+            ("browser_bind", ["tab_id": NSNull()]), ("browser_wait", ["text": NSNull()]),
+            ("browser_wait", ["timeout_ms": NSNull()]),
         ] as [(String, [String: Any])] {
             XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: tool, arguments: args))
         }
@@ -2227,7 +2292,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             for value: Any in ["", 17] {
                 XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: value]))
             }
-            if name == "browser_read", field == "cursor" {
+            if field == "cursor" {
                 XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: NSNull()]))
             } else {
                 XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: NSNull()]))
@@ -2272,7 +2337,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         guard let error = error as? BrowserTabBrokerError, case .invalidRead(let detail) = error else {
             return XCTFail("Expected an invalid-read cursor diagnosis, got \(error)", file: file, line: line)
         }
-        XCTAssertTrue(detail.contains("exact next_cursor"), file: file, line: line)
+        XCTAssertTrue(detail.contains("latest page's exact next_cursor"), file: file, line: line)
+        XCTAssertTrue(detail.contains("replaces older cursors"), file: file, line: line)
+        XCTAssertTrue(detail.contains("admitted input invalidates them"), file: file, line: line)
+        XCTAssertFalse(detail.contains("snapshot ID or tab handle"), "An earlier issued cursor is not necessarily an identifier of another kind", file: file, line: line)
         XCTAssertTrue(detail.contains("No read or input was dispatched"), file: file, line: line)
         XCTAssertTrue(detail.contains("Omit cursor or use null"), file: file, line: line)
         XCTAssertLessThanOrEqual(detail.utf8.count, 384, file: file, line: line)
@@ -3014,6 +3082,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     struct Counts: Equatable, Sendable { var creates=0,closes=0,closeAttempts=0,observes=0,presses=0,fills=0,navigations=0 }
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
+    private var inventoryReads = 0
     private var generation = UUID().uuidString, field = "", result = ""
     private var committedDocumentID: UUID? = UUID()
     private var committedIdentityExposed = false
@@ -3039,6 +3108,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }
+    func inventoryReadCount() -> Int { inventoryReads }
     func reportInvalidFieldOnPress() { invalidFieldOnPress = true; committedIdentityExposed = true }
     func hideCommittedDocumentIdentity() { committedIdentityExposed = false }
     func exposeCommittedDocumentIdentity() { committedIdentityExposed = true }
@@ -3066,7 +3136,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:"Oversized URL",
             url:URL(string:"http://localhost:8123/?q=" + String(repeating:"x",count:3_000))!)
     }
-    func humanTargets() async throws -> [BrowserTarget] { Array(targets.values) }
+    func humanTargets() async throws -> [BrowserTarget] { inventoryReads += 1; return Array(targets.values) }
     func createTarget(url:URL) async throws -> BrowserTarget {
         stats.creates += 1
         let id=UUID().uuidString, target=BrowserTarget(targetID:id,instanceToken:id,title:"Flight fixture",url:url)
