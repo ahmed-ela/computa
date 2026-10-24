@@ -1506,3 +1506,32 @@ also check foreign UUID rejection and original native approval/cleanup identity.
 The bundled case retains its two tasks, three compactions and cold resume.
 Independent review found no identity or lifecycle-check relaxation. Version
 validation passed for 0.7.0 (248). Live installation remains a separate check.
+
+
+Installed build248 matches source `5ff0bde` and unchanged runtime15; all eleven
+signed-build checks passed. The identical prompt that failed on247 completed on
+a new app-created task in 2.253 seconds (three calls, no failures or POSTs), with
+the observed change and exact filename. This demonstrates the native ID repair.
+The same-chat and fresh sends took 9.187 and 8.778 seconds, producing exactly one
+POST each with exact requested recipient, subject and body. They still needed
+one and two rejected stale-reference recoveries; premature empty-body submits
+produced validation feedback and no POST. The same-chat answer copied its fields
+exactly and omitted the optional receipt. The fresh answer copied the current
+receipt exactly but changed recipient/body typography. These were sequential
+model choices, not evidence of concurrent native dispatch.
+
+The real Outlook lookup took21.944 seconds, eleven calls and one rejected stale
+reference, with no compaction. The requested sender's header, recipient/date and
+attachment shared the same inner message path, and the final41-byte filename
+matched exactly. It reused an older pre-search reference once, then recovered.
+No real-mail send, forward, download or deletion was observed.
+
+The ODE follow-up failed: after initially searching the current task, the model
+returned to the previous sender and repeated a rejected fill. A navigation race
+invalidated the first current Search reference; recovery returned a partial
+current overview without any fill reference. The model reused the retired
+reference without continuing or reading the Search field. Native recovery stopped
+the attempt. No new fill authority was lost in that recovery output because none
+was published. The goal remains active: current-task adherence and consumed-
+reference selection still fail. Per-trial UI checks showed owned-tab cleanup and
+empty composers; local fixture shutdown is recorded after remaining qualification.
