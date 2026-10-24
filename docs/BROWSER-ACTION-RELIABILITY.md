@@ -2057,3 +2057,35 @@ and nonretryable projection. Counts overlap and must not be added as distinct
 tests. Signed installation and planned candidate trials remain pending at this
 source checkpoint. Private receipts: `swift254-grounding`,
 `swift254-transport` and `diagnostic254-fixture/baseline253-review`.
+
+### Installed 254: explicit provider-account blocker
+
+Signed, non-notarized Computa 0.7.0 (254), source `dd68b98`, passed all eleven
+build/source/identity/signature/resource checks and was installed with unchanged
+runtime `mactopus-16`. The running executable and every resource matched the
+validated build. Normal Quit first disposed the idle build253 app and engine;
+the new app restored its history and connected to the runtime.
+
+The single planned synthetic diagnostic candidate used the same exact prompt
+and Cerebras GPT-OSS120b medium selection as its preserved baseline. It stopped
+in 273 ms with the newly explicit `billing_required` error: the provider returned
+HTTP 402. No tool, corrective request, compaction or final answer occurred. All
+five project files retained their hashes and modes with no additions. Neither
+trial reached the configuration, documentation or assistant-attributed claim,
+so no semantic before/after comparison is established. The current HTTP status
+is verified; its underlying account/billing cause has not been inspected, and
+the older generic failures cannot retrospectively be called HTTP 402.
+
+Further Cerebras live qualification is held pending restored API account
+access. The two planned browser candidates remain unstarted: no model prompts
+were submitted and no fixture servers were launched. The app is idle with an
+empty composer and no Stop control. Goal completion and general web-task
+reliability are not claimed. Private receipts: `installed254-live`,
+`installed254-ui-blocker`, `diagnostic254-fixture/candidate254-review` and the
+two `account254-*/blocked-before-start` records.
+
+To preserve build capacity, cleanup removed only eight generated backup app
+bundles, builds241–248, after exact path, identity and running-process checks.
+It recovered approximately 2.325 GiB; installed253 (subsequently backed up during
+installation), backups240 and249–252, source and all test evidence were preserved.
+The exact inventory and deletion receipt are in private `backup-cleanup254/`.
