@@ -7,6 +7,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     enum Failure: String, Error, LocalizedError, Sendable {
         case invalidEndpoint, missingCredential, unauthorized, rateLimited, providerBusy, timeout, modelNotFound, contextLimit, invalidRequest
         case redirectRejected, unavailable, invalidResponse, responseTooLarge, cancelled
+        case billingRequired, serverError, offline, dnsFailure, cannotConnect, connectionLost, tlsFailure
         case invalidMessages, invalidTools, invalidToolChoice, invalidParallelToolCalls, invalidReasoningEffort, invalidClearThinking
         case invalidMaxCompletionTokens, invalidStreamOptions, invalidStream, invalidChoiceCount, invalidResponseFormat, invalidModel, invalidTemperature, invalidTopP
         var errorDescription: String? {
@@ -23,6 +24,13 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             case .rateLimited: "The API provider rate limit was reached. No request was replayed."
             case .providerBusy: "The API provider is busy because of high traffic. Try again shortly. No request was replayed."
             case .timeout: "The API provider request timed out. No request was replayed."
+            case .billingRequired: "The API provider returned HTTP 402 (account or billing required). No request was replayed."
+            case .serverError: "The API provider returned a server error (HTTP 5xx). No request was replayed."
+            case .offline: "The API request reported no internet connection. No request was replayed."
+            case .dnsFailure: "The API request could not resolve its host. No request was replayed."
+            case .cannotConnect: "The API request could not connect to its host. No request was replayed."
+            case .connectionLost: "The API request's network connection was lost. No request was replayed."
+            case .tlsFailure: "The API request failed TLS or certificate validation. No request was replayed."
             case .redirectRejected: "The API provider redirected its request. Credentials were not forwarded."
             case .unavailable: "The API provider request failed. No request was replayed."
             case .invalidResponse: "The API provider returned an invalid response."
@@ -213,9 +221,11 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             case 200...299: break
             case 300...399: throw Failure.redirectRejected
             case 401, 403: throw Failure.unauthorized
+            case 402: throw Failure.billingRequired
             case 429: break
             case 404: throw Failure.modelNotFound
             case 400, 413, 422: break
+            case 500...599: throw Failure.serverError
             default: throw Failure.unavailable
             }
             if http.statusCode == 429, http.expectedContentLength > 16_384 { throw Failure.rateLimited }
@@ -243,6 +253,13 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             switch error.code {
             case .timedOut: throw Failure.timeout
             case .cancelled: throw Failure.cancelled
+            case .notConnectedToInternet: throw Failure.offline
+            case .cannotFindHost, .dnsLookupFailed: throw Failure.dnsFailure
+            case .cannotConnectToHost: throw Failure.cannotConnect
+            case .networkConnectionLost: throw Failure.connectionLost
+            case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+                 .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+                 .clientCertificateRejected, .clientCertificateRequired: throw Failure.tlsFailure
             default: throw Failure.unavailable
             }
         } catch { throw Failure.unavailable }

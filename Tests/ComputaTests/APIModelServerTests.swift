@@ -161,6 +161,26 @@ private final class CerebrasStreamErrorURLProtocol: URLProtocol, @unchecked Send
     override func stopLoading() { }
 }
 
+/// All URLs are intercepted; finite URLSession errors never require a network
+/// connection, and arbitrary error userInfo must not reach the public failure.
+private final class APITransportErrorURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        private var error = NSError(domain: "unconfigured", code: 0)
+        private var requests = 0
+        func reset(_ value: NSError) { lock.lock(); defer { lock.unlock() }; error = value; requests = 0 }
+        func take() -> NSError { lock.lock(); defer { lock.unlock() }; requests += 1; return error }
+        func count() -> Int { lock.lock(); defer { lock.unlock() }; return requests }
+    }
+    private static let state = State()
+    static func reset(_ error: NSError) { state.reset(error) }
+    static func requestCount() -> Int { state.count() }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { client?.urlProtocol(self, didFailWithError: Self.state.take()) }
+    override func stopLoading() { }
+}
+
 final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     private func nativeUserProofMetadata(thread: String, turn: String, indices: [Int], texts: [String],
                                          kind: String = "turn") throws -> [String: Any] {
@@ -2789,14 +2809,100 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         do { _ = try await client.request(provider: p, key: "fixture-secret", path: "chat/completions", body: Data("{}".utf8)); XCTFail("redirect must fail") }
         catch { XCTAssertEqual(error as? APIProviderHTTPClient.Failure, .redirectRejected) }
         let sourceCount = await records.count(), targetCount = await targetRecords.count(); XCTAssertEqual(sourceCount, 1); XCTAssertEqual(targetCount, 0)
-        let codes: [(String, APIProviderHTTPClient.Failure)] = [("401 Unauthorized", .unauthorized), ("429 Too Many Requests", .rateLimited), ("404 Not Found", .modelNotFound), ("400 Bad Request", .contextLimit)]
+        let codes: [(String, APIProviderHTTPClient.Failure)] = [
+            ("401 Unauthorized", .unauthorized), ("429 Too Many Requests", .rateLimited),
+            ("404 Not Found", .modelNotFound), ("400 Bad Request", .contextLimit),
+            ("402 Payment Required", .billingRequired), ("500 Internal Server Error", .serverError),
+            ("502 Bad Gateway", .serverError), ("503 Service Unavailable", .serverError),
+            ("504 Gateway Timeout", .serverError), ("599 Unknown Server Error", .serverError),
+            ("408 Request Timeout", .unavailable), ("499 Unknown Client Error", .unavailable),
+        ]
         for (status, expected) in codes {
             let counter = APIRequestRecorder()
             let remote = try APILoopbackFixture { request in await counter.record(request); return .init(status: status, headers: ["Content-Type": "application/json"], body: Data("{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"fixture-secret\"}}".utf8)) }
             let p = provider(try await remote.start())
             do { _ = try await client.request(provider: p, key: "fixture-secret", path: "chat/completions", body: Data("{}".utf8)); XCTFail("expected finite error") }
-            catch { XCTAssertEqual(error as? APIProviderHTTPClient.Failure, expected); XCTAssertFalse(error.localizedDescription.contains("fixture-secret")) }
+            catch {
+                XCTAssertEqual(error as? APIProviderHTTPClient.Failure, expected)
+                XCTAssertFalse(error.localizedDescription.contains("fixture-secret"))
+                if [.billingRequired, .serverError, .unavailable].contains(expected) {
+                    XCTAssertEqual(APIModelServer.errorStatus(error), "400 Bad Request",
+                                   "Provider status classification must not invite an engine HTTP retry")
+                    let projected = try APIModelServer.errorBody(error, stage: .requestTransport)
+                    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: projected) as? [String: Any])
+                    let envelope = try XCTUnwrap(object["error"] as? [String: Any])
+                    let code = expected == .billingRequired ? "billing_required" : expected == .serverError ? "server_error" : "unavailable"
+                    XCTAssertEqual(envelope["code"] as? String, code)
+                    XCTAssertEqual(envelope["x-computa-retryable"] as? Bool, false)
+                    XCTAssertFalse(String(decoding: projected, as: UTF8.self).contains("fixture-secret"))
+                    XCTAssertFalse(String(decoding: projected, as: UTF8.self).contains("context_length_exceeded"),
+                                   "The HTTP status determines these classes without interpreting a conflicting response body")
+                    let record = try XCTUnwrap(APIModelServer.failureDiagnostic(error, stage: .requestTransport))
+                    let diagnostic = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+                    XCTAssertEqual(Set(diagnostic.keys), Set(["kind", "stage", "code", "retryable"]))
+                    XCTAssertEqual(diagnostic["code"] as? String, code)
+                    XCTAssertEqual(diagnostic["retryable"] as? Bool, false)
+                    XCTAssertLessThanOrEqual(record.utf8.count, 256)
+                }
+            }
             let count = await counter.count(); XCTAssertEqual(count, 1); remote.stop()
+        }
+    }
+
+    func testURLSessionFailureClassesStayFinitePrivateAndNonretryable() async throws {
+        let cases: [(URLError.Code, APIProviderHTTPClient.Failure, String)] = [
+            (.notConnectedToInternet, .offline, "offline"),
+            (.cannotFindHost, .dnsFailure, "dns_failure"), (.dnsLookupFailed, .dnsFailure, "dns_failure"),
+            (.cannotConnectToHost, .cannotConnect, "cannot_connect"),
+            (.networkConnectionLost, .connectionLost, "connection_lost"),
+            (.secureConnectionFailed, .tlsFailure, "tls_failure"),
+            (.serverCertificateHasBadDate, .tlsFailure, "tls_failure"),
+            (.serverCertificateUntrusted, .tlsFailure, "tls_failure"),
+            (.serverCertificateHasUnknownRoot, .tlsFailure, "tls_failure"),
+            (.serverCertificateNotYetValid, .tlsFailure, "tls_failure"),
+            (.clientCertificateRejected, .tlsFailure, "tls_failure"),
+            (.clientCertificateRequired, .tlsFailure, "tls_failure"),
+            (.timedOut, .timeout, "timeout"), (.cancelled, .cancelled, "cancelled"),
+            (.badServerResponse, .unavailable, "unavailable"),
+            (.unknown, .unavailable, "unavailable"),
+        ]
+        let userInfo: [String: Any] = [NSLocalizedDescriptionKey: "PRIVATE_ERROR_DESCRIPTION",
+            NSURLErrorFailingURLStringErrorKey: "https://example.invalid/PRIVATE_PATH?secret=PRIVATE_QUERY",
+            "Authorization": "Bearer PRIVATE_CREDENTIAL", "body": "PRIVATE_REQUEST_BODY"]
+        var errors = cases.map { (URLError($0.0, userInfo: userInfo) as NSError, $0.1, $0.2) }
+        errors.append((NSError(domain: "PRIVATE_FOREIGN_DOMAIN", code: URLError.Code.cannotFindHost.rawValue,
+                               userInfo: userInfo), .unavailable, "unavailable"))
+        defer { APITransportErrorURLProtocol.reset(NSError(domain: "unconfigured", code: 0)) }
+        for (injected, expected, code) in errors {
+            APITransportErrorURLProtocol.reset(injected)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [APITransportErrorURLProtocol.self]
+            let client = APIProviderHTTPClient(configuration: configuration)
+            let p = provider(try XCTUnwrap(URL(string: "https://example.invalid/v1")))
+            do {
+                _ = try await client.request(provider: p, key: "PRIVATE_CREDENTIAL", path: "chat/completions",
+                                             body: Data("PRIVATE_REQUEST_BODY".utf8))
+                XCTFail("Injected URLSession error must terminate the request")
+            } catch {
+                XCTAssertEqual(error as? APIProviderHTTPClient.Failure, expected)
+                XCTAssertFalse(error.localizedDescription.contains("PRIVATE"))
+                XCTAssertEqual(APIModelServer.errorStatus(error), "400 Bad Request")
+                let body = try APIModelServer.errorBody(error, stage: .requestTransport)
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                let envelope = try XCTUnwrap(object["error"] as? [String: Any])
+                XCTAssertEqual(envelope["code"] as? String, code)
+                XCTAssertEqual(envelope["x-computa-retryable"] as? Bool, false)
+                XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("PRIVATE"))
+                let record = try XCTUnwrap(APIModelServer.failureDiagnostic(error, stage: .requestTransport))
+                let diagnostic = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+                XCTAssertEqual(Set(diagnostic.keys), Set(["kind", "stage", "code", "retryable"]))
+                XCTAssertEqual(diagnostic["stage"] as? String, "request_transport")
+                XCTAssertEqual(diagnostic["code"] as? String, code)
+                XCTAssertEqual(diagnostic["retryable"] as? Bool, false)
+                XCTAssertLessThanOrEqual(record.utf8.count, 256)
+                XCTAssertFalse(record.contains("PRIVATE"))
+            }
+            XCTAssertEqual(APITransportErrorURLProtocol.requestCount(), 1, "No client replay follows a transport failure")
         }
     }
     func testEndpointPolicyAndNativeModelDiscovery() async throws {

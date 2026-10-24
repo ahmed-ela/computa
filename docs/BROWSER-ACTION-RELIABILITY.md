@@ -1925,3 +1925,135 @@ receipts: `account253-baseline-review`, `native-summary253`,
 `swift253-document-wait`, `swift253-final-contracts` and
 `swift253-qualified-union`. Live semantic acceptance remains pending at this
 source checkpoint; the prior failed runs are retained.
+
+### Installed 253: navigation waits qualify; attachment selection still fails
+
+Signed build 253, source `0549b71`, was installed and verified with runtime
+`mactopus-16`. The immediate and delayed account-picker controls reused the exact
+baseline prompts, fixture and loopback origin on Cerebras `gpt-oss-120b`, medium.
+Each case started a fresh fixture instance. Neither attachment run compacted.
+
+| Case | Attachment duration / native calls | Native errors | API corrections | Requested attachment |
+| --- | ---: | ---: | ---: | --- |
+| Immediate navigation | 9.251 s / 10 | 1 stale cursor | 0 | Wrong-topic attachment returned |
+| Navigation delayed 2.5 s | 6.900 s / 7 | 0 | 1 corrected schema rejection | Wrong-topic attachment returned |
+
+Both `after_snapshot` waits matched the native transition without replaying
+input. The immediate wait returned in 9 ms after navigation was already ready.
+The delayed wait remained pending for 2.107 seconds: it began 417 ms after account
+selection and returned about 11 ms after the mailbox DOM-ready event. The
+selection-to-mailbox-response interval was 2.507 seconds. No model/tool cycle ran
+inside that pending wait. Both results reported `changed`, `navigation_ready`
+and `matched` true, with `no_replay:true` and `result_verified:false`. These are
+two qualified predicate cases, not a general latency or reliability benchmark.
+
+Both attachment answers substituted a real, exactly copied course-announcement
+filename for the requested evidence-packet attachment. In the immediate case,
+the evidence-topic label was visible but its actionable link was on the next
+page; the model selected the other topic and later reused a cursor invalidated
+by input and a fresh read. Native admission rejected that cursor without a read
+or input. In the delayed case, the correct evidence-topic link was explicitly
+actionable on the same page, yet the model again selected the other topic. The
+single API correction is recorded separately from native errors; its finite
+schema rejection does not identify the rejected field or argument values.
+Neither attachment task passed, and the samples establish no host rewrite of
+topic association or semantic cure from the new wait or summary attribution.
+
+The two same-chat presence follow-ups completed in 0.747 and 0.621 seconds with
+zero tools, errors, corrections or compactions. Their answers were grounded in
+the previously observed course announcement and did not claim a fresh search,
+repeat the filename or provide new coverage evidence. One task-created tab was
+closed after each attachment turn; the follow-ups created none. UI checks
+confirmed preserved user tabs, empty composers and no Stop control. Both exact
+fixture processes were identity-checked, stopped and confirmed absent. No mail
+POST occurred in either case.
+
+The private `account253-post-review` and per-case directories preserve the
+canonical indexes, semantic reviews, correction journals and cleanup receipts,
+including the pagination-index correction. The wait mechanism passed these two
+controls; requested attachment selection and broader acceptance remain open.
+
+
+### Installed 253: real-task attribution and search limits
+
+The unchanged real Outlook attachment task and its natural ODE follow-up ran on
+Cerebras `gpt-oss-120b`, medium. Shared sign-in state had been refreshed during a
+prior human diagnostic, so this was not a cold sign-in qualification.
+
+| Task | Duration / native calls | Native errors | API corrections | Compactions | Outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Requested-sender attachment | 33.891 s / 22 | 1 stale snapshot | 0 | 1 | Filename observed; message attribution unqualified |
+| ODE announcement follow-up | 29.531 s / 17 | 0 | 0 | 2 | Unsupported absence claim |
+| Read-only settings diagnostic | 0.198 s / 0 | 0 | 0 | 0 | Provider transport failure before tools |
+
+The attachment answer copied a published filename exactly. Its evidence was a
+filtered result-card row, however, while the requested sender's opened-message
+headings belonged to different records. A later sender filter created another
+capture; matching record suffixes across captures do not establish ownership by
+one individual message. Attribution remains unqualified, not conclusively
+assigned to a wrong owner. The selected conversation option and resulting
+heading agree, with matching bounded dispatch-label prefixes; no native target
+substitution was demonstrated. The failed `after_snapshot` wait reused a page
+from the earlier tab after a second open and several reads. Rejecting that stale
+baseline was expected, not a failure of the delayed-navigation predicate.
+
+The ODE follow-up filled and clicked distinct observed Search controls for two
+queries. It exposed result options without establishing complete result coverage.
+After filling its third query, it clicked **Search filters**, not **Search**; the
+final read showed the filter form. No explicit site no-results message was
+observed. Reading-pane placeholders such as “Nothing is selected” and a Message
+list container do not establish search absence. The trace also does not establish
+when asynchronous search results settled. Current human text and the latest
+complete observation survived all three real-task compactions byte-for-byte;
+these failures do not demonstrate loss of that evidence during compaction.
+
+No send, forward, delete, attachment download/open, or shell mutation was observed
+in the Outlook trials. UI checks confirmed cleanup of two task-created tabs for
+the attachment turn and one for the follow-up, preserved user tabs, empty composers
+and no Stop control. The diagnostic attempt produced no tool calls, commands or
+model answer. Its existing finite log records `request_transport`, `unavailable`
+and `retryable:false`; it contains no HTTP status. No retry was performed, and
+this attempt supplies no semantic diagnostic qualification.
+
+Private, local evidence: [attachment review](</Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/action-reliability-20261023/audits253/outlook-review.json>),
+[ODE review](</Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/action-reliability-20261023/audits253/ode-review.json>),
+and [diagnostic failure review](</Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/action-reliability-20261023/audits253/diagnostics-review.json>).
+The adjacent indexes and correction journals retain finite counts, ordinals,
+hashes and match booleans; these reports do not reproduce private addresses,
+message bodies or filename literals. These samples do not qualify overall task
+reliability.
+
+### Build 254 source checkpoint: source grounding and finite transport errors
+
+Four existing instruction passages now distinguish quoted claims from current
+configuration evidence, preserve that distinction in compaction notes, attribute
+attachment names to the requested sender and topic within one message, and
+check every requested outcome against its source and all user constraints.
+The replacements remove 59 instruction bytes in total. Existing tools,
+permissions, history, user input, reference lifetimes and all execution/retry,
+receipt and instruction limits remain unchanged. These are interpretation
+guidelines, not a semantic verifier or a claim that model behavior is repaired.
+
+The original diagnostic retest and a separate frozen synthetic provenance
+baseline both failed at request transport before any tool call. The latter
+terminated in 255 ms with its project unchanged; neither its true configuration
+nor its conflicting assistant-attributed log was read. It supplies no semantic
+baseline. The two prior errors cannot be retrospectively classified beyond
+`unavailable`: existing finite logs contained no HTTP status or URL error code.
+
+The HTTP client now distinguishes observed HTTP 402/5xx failures and known
+offline, DNS, connection, connection-loss and TLS/certificate errors. Unknown
+errors retain the generic fallback. Existing error envelopes and finite stage
+logs carry the new codes without request/response contents, URLs, credentials,
+or arbitrary error metadata. Local HTTP 400 and nonretryable behavior are
+preserved; provider failures do not introduce an engine retry or replay.
+
+Validation: 287 targeted instruction/projection/history tests passed, followed
+by 73 transport/server/runtime-contract/settings tests after the error
+classification change. Both runs had stable source hashes and no failures or
+skips. The latter includes 17 injected URLSession/error cases and 12 loopback
+HTTP statuses, checking one request, private-data exclusion, unknown fallback
+and nonretryable projection. Counts overlap and must not be added as distinct
+tests. Signed installation and planned candidate trials remain pending at this
+source checkpoint. Private receipts: `swift254-grounding`,
+`swift254-transport` and `diagnostic254-fixture/baseline253-review`.
