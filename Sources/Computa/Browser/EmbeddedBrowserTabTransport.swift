@@ -46,7 +46,20 @@ protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
     func humanTargets() async throws -> [BrowserTarget]
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws
     func wait(target: BrowserTarget, text: String?, timeoutMS: Int) async throws -> Bool
+    func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
+                               timeoutMS: Int, authorization: @escaping BrowserReadAuthorization) async throws
+        -> BrowserDocumentChangeResult
     func closeOwnedTargets() async -> [String]
+}
+
+extension EmbeddedBrowserControlBackend {
+    /// Backends must implement the native predicate or explicitly reject it;
+    /// an ordinary readiness check cannot stand in for document change.
+    func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
+                               timeoutMS: Int, authorization: @escaping BrowserReadAuthorization) async throws
+        -> BrowserDocumentChangeResult {
+        throw BrowserTabBrokerError.browserUnavailable("This browser backend does not support document-change waits.")
+    }
 }
 
 /// Uses only Computa's human WebViews. Inference pages and the privileged app UI
@@ -377,6 +390,23 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 "The built-in wait returned an invalid result.")
         }
         return matched
+    }
+
+    func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
+                               timeoutMS: Int, authorization: @escaping BrowserReadAuthorization) async throws
+        -> BrowserDocumentChangeResult {
+        try Task.checkCancellation()
+        guard (1...10_000).contains(timeoutMS), checkpoint.targetID == target.targetID,
+              checkpoint.targetInstanceToken == target.instanceToken,
+              ContinuousClock.now < checkpoint.expiresAt else { throw BrowserTabBrokerError.staleSnapshot }
+        let id = try exactID(target)
+        let deadline = min(ContinuousClock.now + .milliseconds(timeoutMS), checkpoint.expiresAt)
+        return try await session.waitForHumanTabDocumentChange(id: id, loaderID: checkpoint.loaderID,
+            url: checkpoint.documentURL, until: deadline) { [self] in
+                _ = try exactID(target)
+                guard let current = self.target(for: id) else { throw BrowserTabBrokerError.targetClosed }
+                try authorization(current)
+            }
     }
 
     private func exactID(_ target: BrowserTarget) throws -> UUID {

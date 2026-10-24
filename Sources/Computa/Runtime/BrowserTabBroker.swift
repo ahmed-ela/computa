@@ -123,7 +123,7 @@ enum BrowserCompleteObservation {
             guard case let .input(wasFill, _, feedback) = self else { return text }
             let effect = wasFill
                 ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
-                : "Click dispatched; outcome unverified. If unchanged, wait/read; never replay."
+                : "Click unverified. For pending navigation: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); then read. Never replay."
             var result: [String: Any] = [
                 "dispatched": true, "no_replay": true, "result_verified": false,
                 "input_kind": wasFill ? "fill" : "click",
@@ -382,6 +382,30 @@ enum BrowserReadReadiness: String, Equatable, Sendable {
 /// A fresh read may settle native navigation before checking site scope. The
 /// backend must invoke this gate after that wait and before reading page data.
 typealias BrowserReadAuthorization = @Sendable (BrowserTarget) throws -> Void
+
+/// A native checkpoint from the current published capture. Model arguments
+/// select its snapshot ID; they never supply its URL, loader or lifetime.
+struct BrowserDocumentChangeCheckpoint: Sendable {
+    let snapshotID: UUID
+    let targetID: String
+    let targetInstanceToken: String
+    let loaderID: String
+    let documentURL: URL
+    let expiresAt: ContinuousClock.Instant
+
+    fileprivate init(snapshot: BrowserTabSnapshot, binding: BrowserTabBinding,
+                     expiresAt: ContinuousClock.Instant) {
+        snapshotID = snapshot.id; targetID = binding.targetID
+        targetInstanceToken = binding.targetInstanceToken
+        loaderID = snapshot.loaderID; documentURL = snapshot.documentURL
+        self.expiresAt = expiresAt
+    }
+}
+
+struct BrowserDocumentChangeResult: Equatable, Sendable {
+    let changed: Bool
+    let navigationReady: Bool
+}
 
 protocol BrowserTabTransport: Sendable {
     func createTarget(url: URL) async throws -> BrowserTarget
@@ -972,6 +996,34 @@ actor BrowserTabSessionBroker {
             taskKey: taskKey, binding: suppliedBinding, bundleIdentifier: bundleIdentifier,
             read: SemanticReadRequest(query: query)
         )
+    }
+
+    /// No transport read or authority renewal. Only the last successfully
+    /// published, unexpired page can establish a document-change baseline.
+    func documentChangeCheckpoint(taskKey: String, binding: BrowserTabBinding,
+                                  snapshotID: UUID) throws -> BrowserDocumentChangeCheckpoint {
+        try beginOperation(taskKey: taskKey)
+        defer { tasksInFlight.remove(taskKey) }
+        let current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        guard let snapshot = current.activeSnapshot, let read = current.readState,
+              snapshot.id == snapshotID, read.snapshotID == snapshotID,
+              snapshot.loaderID == current.loaderID, snapshot.documentURL == current.documentURL,
+              readClock.now < read.capturedAt + readLifetime else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        return BrowserDocumentChangeCheckpoint(snapshot: snapshot, binding: binding,
+            expiresAt: read.capturedAt + readLifetime)
+    }
+
+    /// A changed document cannot leave old cursors or action witnesses usable.
+    /// The exact publication guard prevents retiring a different new capture.
+    func retireObservation(taskKey: String, binding: BrowserTabBinding, snapshotID: UUID) throws {
+        var current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        guard current.activeSnapshot?.id == snapshotID, current.readState?.snapshotID == snapshotID else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        current.activeSnapshot = nil; current.readState = nil
+        entries[binding.handle] = current
     }
 
     func snapshot(

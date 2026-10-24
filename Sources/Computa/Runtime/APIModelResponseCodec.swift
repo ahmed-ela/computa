@@ -105,6 +105,7 @@ enum APIModelResponseCodec {
         let custom: Bool
         let schema: [String: Any]
         let description: String
+        var browserWaitHistoricalSchemas: [[String: Any]]? = nil
         var identity: String { (namespace ?? "") + "\u{0}" + name }
     }
     struct Request: @unchecked Sendable {
@@ -628,7 +629,9 @@ enum APIModelResponseCodec {
             let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
             let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
-                            schema: schema, description: description)
+                            schema: schema, description: description,
+                            browserWaitHistoricalSchemas: ComputaModelToolCatalog.browserWaitDefinitionVariants(
+                                definition, namespace: namespace)?.historical)
             // Validate the complete catalog before filtering, so a collision
             // cannot be hidden or resolved by changing declaration order.
             guard identities.insert(tool.identity).inserted, wireNames.insert(wireName).inserted,
@@ -1429,8 +1432,11 @@ enum APIModelResponseCodec {
               let required = tool.schema["required"] as? [String], let expectedRequired = canonical["required"] as? [String],
               Set(required) == Set(expectedRequired), Set(required).count == required.count else { return nil }
         if tool.schema["oneOf"] != nil {
-            guard known == .browserRead, ComputaModelToolCatalog.browserCursorSchemaVariants(
-                name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil else { return nil }
+            let recognizedRead = known == .browserRead && ComputaModelToolCatalog.browserCursorSchemaVariants(
+                name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil
+            let recognizedWait = known == .browserWait && ComputaModelToolCatalog.browserWaitSchemaVariants(
+                name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil
+            guard recognizedRead || recognizedWait else { return nil }
         }
         // The engine may omit these constraints when projecting dynamic tools.
         // Types, enums, fields and required membership must still match exactly;
@@ -1486,7 +1492,15 @@ enum APIModelResponseCodec {
         guard matches(object, schema: tool.schema, root: tool.schema, depth: 0) else {
             if let onSchemaMismatch {
                 var nodes = 0
-                var violation = localizeSchemaFailure(object, schema: tool.schema, depth: 0, path: [], nodes: &nodes)
+                var diagnosticSchema = tool.schema
+                if ComputaModelToolCatalog.browserWaitSchemaVariants(
+                    name: tool.name, namespace: tool.namespace, schema: tool.schema) != nil {
+                    // Admission already rejected the complete schema. This only
+                    // preserves finite old-field diagnostics; a mode conflict
+                    // remains a generic root mismatch, never accepted input.
+                    diagnosticSchema.removeValue(forKey: "oneOf")
+                }
+                var violation = localizeSchemaFailure(object, schema: diagnosticSchema, depth: 0, path: [], nodes: &nodes)
                     ?? .init(constraint: .schemaMismatch, path: [])
                 // The parsed root is known even when the failing constraint
                 // is not localized. Exact native-schema checks still decide
@@ -1506,6 +1520,12 @@ enum APIModelResponseCodec {
     /// upgrade under any saved catalog. Only history accepts these exact shapes; new replies
     /// still use validatedArguments with the strict current callable schema.
     private static func validateHistoricalArguments(_ text: String, tool: Tool) throws {
+        if let schemas = tool.browserWaitHistoricalSchemas {
+            let historical = Tool(name: tool.name, namespace: tool.namespace, wireName: tool.wireName,
+                custom: false, schema: ["anyOf": schemas], description: tool.description)
+            _ = try validatedArguments(text, tool: historical)
+            return
+        }
         if !tool.custom, let variants = ComputaModelToolCatalog.browserCursorSchemaVariants(
             name: tool.name, namespace: tool.namespace, schema: tool.schema) {
             let historyTool = Tool(name: tool.name, namespace: tool.namespace, wireName: tool.wireName,

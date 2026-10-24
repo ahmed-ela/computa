@@ -1875,3 +1875,53 @@ failed-turn cleanup control. The app was reopened idle. Finite call ordinals,
 correction counts and before/after process receipts are preserved in the private
 `audits252/diagnostics-review` and cleanup artifacts. No runtime fix or broader
 reliability claim follows from this failed diagnostic sample.
+
+### Document-change wait and summary attribution (candidate 253)
+
+A fresh installed build 252 control used the same plain attachment prompt and remote
+Cerebras `gpt-oss-120b`, medium, against identical account pickers on one loopback
+origin. The immediate redirect selected the matching account, but the model
+returned the ODE message's attachment instead of the requested evidence packet.
+The delayed case scheduled navigation 2.5 seconds after one account click. Its
+`browser_wait(timeout_ms=10000)` returned `matched:true` in 9ms on the old readable
+picker. After another unchanged read, two invalid wait-argument responses ended
+the turn 2.288 seconds after account selection, before navigation started. The
+finite journal records a schema mismatch, not the rejected argument values.
+The same-chat follow-up recovered through an observed Inbox control and read the
+correct ODE announcement. No mail POSTs occurred; both fixture servers and owned
+tabs were cleaned up. These controls isolate readiness from future navigation;
+they do not establish that every real account selector follows the same path.
+
+`browser_wait(after_snapshot=...)` now takes the exact latest published page as
+its native baseline. It waits on navigation events for document/URL change and
+readiness under one existing deadline. It captures no page, refreshes no action
+reference, replays no input, and does not claim task success. Expired, foreign or
+superseded snapshots reject; changed observations retire old references; Stop,
+release and shutdown cancel the owned wait, including borrowed tabs. Saved
+native catalogs gain the optional mode; custom/narrowed/foreign contracts remain
+unchanged. The post-click receipt suggests this concrete predicate. Existing
+text/no-argument readiness and all call, byte, reference and timeout bounds stay
+unchanged.
+
+Runtime16 also replaces the known native compaction preamble on the external
+provider wire with an explicit historical-assistant-claims label. The old
+preamble claimed tool state was available even when pre-turn compaction retained
+no receipts. The role was already assistant: this corrects source attribution,
+not a role escalation. Canonical history, generated UTF-8 body, genuine receipts,
+IDs and ordering remain unchanged. It saves 270 bytes for ordinary native
+summaries and is not a semantic truth validator. In particular, it cannot by
+itself fix a model mistaking an old assistant answer inside shell-search output
+for official settings documentation.
+
+Validation before installation: seven isolated actual-source Rust projection
+checks, 29 Bun identity/version/runtime-source checks, and 625 distinct Swift
+cases have passing latest results with no skips. The initial 580-case run had
+579 passes and one stale pre-existing Chrome-catalog assertion. After correcting
+that assertion and strengthening the bundled summary check to UTF-8 bytes,
+53 targeted cases passed; production sources did not change between runs. The
+suite includes 15 new wait/catalog/codec cases, real isolated WebKit navigation,
+and actual bundled-engine compaction/cold-resume wire checks. Preserved private
+receipts: `account253-baseline-review`, `native-summary253`,
+`swift253-document-wait`, `swift253-final-contracts` and
+`swift253-qualified-union`. Live semantic acceptance remains pending at this
+source checkpoint; the prior failed runs are retained.

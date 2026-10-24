@@ -989,6 +989,112 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testWaitDocumentChangeUpgradePreservesCompletedCallsAndStrictCurrentModesOnBothWires() throws {
+        let legacy = try XCTUnwrap(EmbeddedBrowserTools.legacyWaitDefinition["inputSchema"] as? [String: Any])
+        let current = try XCTUnwrap(EmbeddedBrowserTools.waitDefinition["inputSchema"] as? [String: Any])
+        let dropped: Set<String> = ["description", "minimum", "maximum", "minLength", "maxLength", "pattern"]
+        func projected(_ value: Any) -> Any {
+            if let object = value as? [String: Any] { return object.filter { !dropped.contains($0.key) }.mapValues(projected) }
+            if let array = value as? [Any] { return array.map(projected) }
+            return value
+        }
+        let snapshot = "11111111-1111-4111-8111-111111111111"
+        let oldArguments = #"{ "timeout_ms": 50, "text": "Cafe\u0301 \\\"ready\\\"" }"#
+        let newArguments = "{ \"after_snapshot\" : \"\(snapshot)\", \"timeout_ms\": 200 }"
+        let arguments = [oldArguments, newArguments]
+        func pair(_ id: String, _ arguments: String) -> [[String: Any]] {
+            [["type": "function_call", "call_id": id, "name": "browser_wait", "namespace": "functions", "arguments": arguments],
+             ["type": "function_call_output", "call_id": id, "output": "Read-only wait completed; outcome unverified."]]
+        }
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wire, models: provider.models)
+            for savedSchema in [legacy, current, projected(legacy) as! [String: Any], projected(current) as! [String: Any]] {
+                let saved: [String: Any] = ["type": "function", "name": "browser_wait", "parameters": savedSchema]
+                let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [saved]]]
+                let history = pair("old-wait", oldArguments) + pair("change-wait", newArguments)
+                let prepared = try request(["tools": catalog, "input": history], provider: p, toolNaming: .semantic)
+                XCTAssertEqual(prepared.tools.first?.schema as NSDictionary?, current as NSDictionary)
+                func historyArguments(_ prepared: APIModelResponseCodec.Request) throws -> [String] {
+                    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+                    if wire == .responses {
+                        return try XCTUnwrap(body["input"] as? [[String: Any]])
+                            .filter { $0["type"] as? String == "function_call" }.compactMap { $0["arguments"] as? String }
+                    }
+                    return try XCTUnwrap(body["messages"] as? [[String: Any]])
+                        .flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                        .compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
+                }
+                XCTAssertEqual(try historyArguments(prepared).map { Data($0.utf8) }, arguments.map { Data($0.utf8) })
+                XCTAssertEqual(prepared.historyCallIDs, ["old-wait", "change-wait"])
+                for valid in ["{}", oldArguments, newArguments, #"{"timeout_ms":10000}"#] {
+                    let reply = try browserMutationReply(valid, request: prepared, callID: "next-wait")
+                    let call = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first { $0["type"] as? String == "function_call" })
+                    XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(valid.utf8))
+                }
+                for invalid in ["{\"after_snapshot\":\"\(snapshot)\",\"text\":\"ready\"}",
+                                #"{"after_snapshot":null}"#, #"{"after_snapshot":""}"#,
+                                "{\"after_snapshot\":\"\(String(repeating: "a", count: 37))\"}",
+                                #"{"text":""}"#, #"{"timeout_ms":10001}"#, #"{"after_snapshot":"x","extra":true}"#] {
+                    XCTAssertThrowsError(try browserMutationReply(invalid, request: prepared)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    }
+                }
+                let next = try request(["tools": catalog, "input": history + pair("next-wait", newArguments)], provider: p, toolNaming: .semantic)
+                XCTAssertEqual(try historyArguments(next).map { Data($0.utf8) }, (arguments + [newArguments]).map { Data($0.utf8) })
+                XCTAssertThrowsError(try request(["tools": catalog, "input": [pair("incomplete", newArguments)[0]]], provider: p))
+            }
+        }
+    }
+
+    func testWaitHistoryEvolutionDoesNotWidenForeignNarrowedOrConflictingSchemas() throws {
+        let legacy = try XCTUnwrap(EmbeddedBrowserTools.legacyWaitDefinition["inputSchema"] as? [String: Any])
+        let current = try XCTUnwrap(EmbeddedBrowserTools.waitDefinition["inputSchema"] as? [String: Any])
+        var required = legacy; required["required"] = ["text"]
+        let args = #"{"after_snapshot":"11111111-1111-4111-8111-111111111111"}"#
+        let cases: [([String: Any], String)] = [
+            (["type": "function", "name": "browser_wait", "parameters": legacy], "foreign"),
+            (["type": "function", "name": "browser_wait", "parameters": required], "functions"),
+            (["type": "function", "name": "browser_wait", "parameters": legacy, "inputSchema": current], "functions"),
+            (["type": "function", "name": "browser_wait", "parameters": legacy, "inputSchema": required], "functions"),
+        ]
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wire, models: provider.models)
+            for (saved, namespace) in cases {
+                let catalog: [[String: Any]] = [["type": "namespace", "name": namespace, "tools": [saved]]]
+                let prepared = try request(["tools": catalog], provider: p)
+                XCTAssertEqual(prepared.tools.first?.schema as NSDictionary?, saved["parameters"] as? NSDictionary)
+                let history: [[String: Any]] = [
+                    ["type": "function_call", "name": "browser_wait", "namespace": namespace, "call_id": "foreign-wait", "arguments": args],
+                    ["type": "function_call_output", "call_id": "foreign-wait", "output": "Saved outcome"],
+                ]
+                XCTAssertThrowsError(try request(["tools": catalog, "input": history], provider: p)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+            let saved: [String: Any] = ["type": "function", "name": "browser_wait", "parameters": legacy]
+            for invalid in [#"{"text":""}"#, #"{"timeout_ms":10001}"#,
+                            #"{"text":"ready","after_snapshot":"11111111-1111-4111-8111-111111111111"}"#] {
+                let history: [[String: Any]] = [
+                    ["type": "function_call", "name": "browser_wait", "call_id": "invalid-wait", "arguments": invalid],
+                    ["type": "function_call_output", "call_id": "invalid-wait", "output": "Saved outcome"],
+                ]
+                XCTAssertThrowsError(try request(["tools": [saved], "input": history], provider: p))
+            }
+        }
+    }
+
+    func testWaitModeConflictUsesGenericRootDiagnosticAndPreservesOldFieldLocations() throws {
+        let schema = try XCTUnwrap(EmbeddedBrowserTools.waitDefinition["inputSchema"] as? [String: Any])
+        let prepared = try request(["tools": [["type": "function", "name": "browser_wait", "parameters": schema]]])
+        let conflict = try observedSchemaFailure(prepared, arguments: #"{"text":"ready","after_snapshot":"11111111-1111-4111-8111-111111111111"}"#)
+        XCTAssertEqual(conflict.constraint, .schemaMismatch)
+        XCTAssertEqual(conflict.location, .init(tool: .browserWait, schemaPath: [], expectedType: .object, actualType: .object))
+        let timeout = try observedSchemaFailure(prepared, arguments: #"{"timeout_ms":true}"#)
+        XCTAssertEqual(timeout.location, .init(tool: .browserWait, schemaPath: [.timeoutMS], expectedType: .integer, actualType: .boolean))
+        let text = try observedSchemaFailure(prepared, arguments: #"{"text":false}"#)
+        XCTAssertEqual(text.location, .init(tool: .browserWait, schemaPath: [.text], expectedType: .string, actualType: .boolean))
+    }
+
     func testEngineProjectedBrowserWaitBoundsAreRestoredBeforeCerebrasValidationAndCorrection() throws {
         let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
             baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,

@@ -18,6 +18,147 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                        expected, file: file, line: line)
     }
 
+    func testDocumentChangeWaitKeepsUnchangedTimeoutReferencesAndRetiresChangedOnes() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let page = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(page)
+        let reference = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+        let before = await backend.counts()
+        let timeout = try jsonObject(try await call(controller, "browser_wait", ["after_snapshot": id, "timeout_ms": 7]))
+        XCTAssertEqual(timeout["matched"] as? Bool, false)
+        XCTAssertEqual(timeout["changed"] as? Bool, false)
+        XCTAssertEqual(timeout["navigation_ready"] as? Bool, false)
+        XCTAssertEqual(timeout["deadline_reached"] as? Bool, true)
+        try await assertProjectedReference(reference, controller: controller)
+        await backend.prepareDocumentChangeWait(changed: true, ready: false)
+        let changed = try jsonObject(try await call(controller, "browser_wait", ["after_snapshot": id, "timeout_ms": 7]))
+        XCTAssertEqual(changed["changed"] as? Bool, true)
+        XCTAssertEqual(changed["matched"] as? Bool, false, "Change without navigation readiness is unresolved")
+        XCTAssertEqual(changed["result_verified"] as? Bool, false)
+        XCTAssertNil(changed["current_observation"])
+        try await assertProjectedReference(reference, controller: controller, expected: false)
+        do { _ = try await call(controller, "browser_wait", ["after_snapshot": id]); XCTFail("Retired page cannot be reused") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let after = await backend.counts(), waits = await backend.documentWaitCount()
+        XCTAssertEqual(after, before, "The metadata wait does not capture, input, navigate or create tabs")
+        XCTAssertEqual(waits, 2)
+        _ = try await call(controller, "browser_read", ["view": "all"])
+        let fresh = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertFalse(fresh.references.clickReferences.isEmpty)
+        _ = await controller.shutdown()
+    }
+
+    func testDocumentChangeWaitRejectsUnknownOldForeignExpiredAndFailedPublicationWithoutWaiting() async throws {
+        for scenario in ["unknown", "older", "foreign", "expired", "failed", "input"] {
+            let backend = EmbeddedBrowserFixtureBackend()
+            let controller = EmbeddedBrowserToolController(transport: backend,
+                readLifetime: scenario == "expired" ? .zero : .seconds(120))
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let page = try await call(controller, "browser_read", ["view": "all"])
+            var id = try snapshotID(page)
+            if scenario == "unknown" { id = UUID().uuidString }
+            if scenario == "older" { _ = try await call(controller, "browser_read") }
+            if scenario == "foreign" { _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], key: "turn-b") }
+            if scenario == "input" {
+                let reference = try XCTUnwrap(publishedTargets[id]?[0]?.fillRef)
+                _ = try await call(controller, "browser_fill", ["fill_ref": reference, "text": "Changed"])
+            }
+            if scenario == "failed" {
+                await backend.failFreshReads([.browserUnavailable("fixture unavailable")])
+                do { _ = try await call(controller, "browser_read"); XCTFail("Expected failed read") } catch { }
+            }
+            let before = await backend.counts()
+            do {
+                _ = try await call(controller, "browser_wait", ["after_snapshot": id], key: scenario == "foreign" ? "turn-b" : "turn-a")
+                XCTFail("Invalid baseline admitted: \(scenario)")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot, scenario) }
+            let after = await backend.counts(), waits = await backend.documentWaitCount()
+            XCTAssertEqual(after, before); XCTAssertEqual(waits, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testDocumentChangeWaitAcceptsAlreadyChangedBaselineButChecksSettledScope() async throws {
+        let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+        for allowed in [true, false] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let page = try await call(controller, "browser_read", ["view": "all"], scope: scope)
+            let id = try snapshotID(page)
+            await backend.reloadDocument()
+            await backend.redirectOwnedTarget(to: URL(string: "https://transient.example/pending")!)
+            await backend.prepareDocumentChangeWait(changed: true, ready: true,
+                destination: URL(string: allowed ? "http://localhost:8123/result" : "https://forbidden.example/result")!)
+            let before = await backend.counts()
+            do {
+                let output = try jsonObject(try await call(controller, "browser_wait", ["after_snapshot": id], scope: scope))
+                XCTAssertTrue(allowed)
+                XCTAssertEqual(output["changed"] as? Bool, true); XCTAssertEqual(output["navigation_ready"] as? Bool, true)
+                XCTAssertEqual(output["matched"] as? Bool, true); XCTAssertEqual(output["result_verified"] as? Bool, false)
+            } catch {
+                XCTAssertFalse(allowed)
+                guard let failure = error as? BrowserTabBrokerError, case .scopeDenied = failure else { return XCTFail("Unexpected \(error)") }
+            }
+            let after = await backend.counts(), waits = await backend.documentWaitCount()
+            XCTAssertEqual(after, before); XCTAssertEqual(waits, 1)
+            let state = try await controller.apiToolState(taskKey: "turn-a")
+            XCTAssertEqual(state.references, .empty)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testDocumentChangeWaitRejectsStopCancellationAndReplacedPhysicalTargetAfterSuspension() async throws {
+        for scenario in ["stop", "cancel", "replacement"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            if scenario == "stop" {
+                _ = try await call(controller, "browser_tabs")
+                let humanID = await backend.humanID
+                _ = try await call(controller, "browser_bind", ["tab_id": humanID])
+            } else { _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
+            let page = try await call(controller, "browser_read", ["view": "all"])
+            let arguments = try argumentData(["after_snapshot": snapshotID(page), "timeout_ms": 10_000])
+            await backend.prepareDocumentChangeWait(changed: true, ready: true, hold: true)
+            let pending = Task { try await controller.executeResult(taskKey: "turn-a", tool: "browser_wait", arguments: arguments) }
+            await backend.waitUntilDocumentChangeHeld()
+            if scenario == "stop" { _ = await controller.release(taskKey: "turn-a") }
+            if scenario == "cancel" { pending.cancel() }
+            if scenario == "replacement" { await backend.replaceOwnedTarget() }
+            if scenario == "replacement" { await backend.resumeDocumentChangeWait() }
+            do { _ = try await pending.value; XCTFail("Retired wait published after \(scenario)") } catch { }
+            let counts = await backend.counts()
+            if scenario == "stop" { XCTAssertEqual(counts.closes, 0, "Borrowed-tab cancellation cannot depend on a close event") }
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.navigations, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testDocumentChangeWaitArgumentsAreExclusiveAndPostClickNamesExactCurrentSnapshot() async throws {
+        let invalidArguments: [[String: Any]] = [
+            ["after_snapshot": NSNull()], ["after_snapshot": "invented"],
+            ["after_snapshot": UUID().uuidString, "text": "Ready"],
+            ["after_snapshot": UUID().uuidString, "timeout_ms": true],
+            ["after_snapshot": UUID().uuidString, "timeout_ms": 10_001]
+        ]
+        for invalid in invalidArguments { XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: "browser_wait", arguments: invalid)) }
+        try EmbeddedBrowserTools.validate(tool: "browser_wait", arguments: [:])
+        try EmbeddedBrowserTools.validate(tool: "browser_wait", arguments: ["text": "Ready", "timeout_ms": 1])
+        try EmbeddedBrowserTools.validate(tool: "browser_wait", arguments: ["after_snapshot": UUID().uuidString, "timeout_ms": 10_000])
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let page = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(page)
+        let reference = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+        let execution = try await controller.executeResult(taskKey: "turn-a", tool: "browser_click",
+            arguments: argumentData(["click_ref": reference]))
+        let output = try jsonObject(execution.response)
+        let observation = try XCTUnwrap(output["current_observation"] as? [String: Any])
+        let current = try XCTUnwrap(observation["snapshot_id"] as? String)
+        XCTAssertTrue((output["next"] as? String)?.contains("after_snapshot=\"\(current)\"") == true)
+        XCTAssertNotEqual(current, id)
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(execution.response, actionReceipt: execution.actionReceipt?.compactText), 0)
+        let counts = await backend.counts(); XCTAssertEqual(counts.presses, 1)
+        _ = await controller.shutdown()
+    }
+
     func testAPIToolStateExportsPublishedKindsAndConsumesNoAuthority() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         let initial = try await controller.apiToolState(taskKey: "turn-a")
@@ -1829,7 +1970,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(clickReceipt["result_verified"] as? Bool, false)
         XCTAssertEqual(clickReceipt["no_replay"] as? Bool, true)
         let clickNext = try XCTUnwrap(clickReceipt["next"] as? String)
-        XCTAssertTrue(clickNext.contains("If unchanged, wait/read"))
+        XCTAssertTrue(clickNext.contains("For pending navigation: browser_wait(after_snapshot="))
         try assertCompleteActionObservation(clicked)
         XCTAssertFalse(clickNext.contains("no Enter key or submit-control click was sent"))
         let final = try availableObservation(click)
@@ -2126,10 +2267,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     func testReadyObservationPublishesOnlyTheFiniteReadinessMarker() async throws {
         let wait = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_wait" })
         let description = try XCTUnwrap(wait["description"] as? String)
-        XCTAssertTrue(description.contains("When text is omitted, wait for readable text or controls outside the footer after document readiness"))
-        XCTAssertTrue(description.contains("a title-only, empty or footer-only shell is not ready"))
-        XCTAssertTrue(description.contains("This readiness is not proof that requested content exists"))
-        XCTAssertTrue(description.contains("Does not refresh or replay actions"))
+        XCTAssertTrue(description.contains("With neither, wait for readable content after readiness"))
+        XCTAssertTrue(description.contains("an already-ready page matches immediately"))
+        XCTAssertTrue(description.contains("Timeout is unresolved, not denied access"))
+        XCTAssertTrue(description.contains("No capture, new references, input replay or verified outcome from after_snapshot"))
         let schema = try XCTUnwrap(wait["inputSchema"] as? [String: Any])
         XCTAssertFalse((schema["required"] as? [String] ?? []).contains("text"))
         let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
@@ -4194,6 +4335,41 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var holdFreshRead = false, freshReadHeld = false
     private var freshReadContinuation: CheckedContinuation<Void, Never>?
     private var freshReadWaiters = [CheckedContinuation<Void, Never>]()
+
+    private var changeResult = BrowserDocumentChangeResult(changed: false, navigationReady: false)
+    private var changeDestination: URL?, changeHold = false, changeHeld = false, changeWaits = 0
+    private var changeContinuation: CheckedContinuation<Void, Never>?
+    private var changeWaiters = [CheckedContinuation<Void, Never>]()
+    func documentWaitCount() -> Int { changeWaits }
+    func prepareDocumentChangeWait(changed: Bool, ready: Bool, destination: URL? = nil, hold: Bool = false) {
+        changeResult = .init(changed: changed, navigationReady: ready)
+        changeDestination = destination; changeHold = hold; changeHeld = false
+    }
+    func waitUntilDocumentChangeHeld() async {
+        if !changeHeld { await withCheckedContinuation { changeWaiters.append($0) } }
+    }
+    func resumeDocumentChangeWait() { changeContinuation?.resume(); changeContinuation = nil }
+    func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
+                               timeoutMS: Int, authorization: @escaping BrowserReadAuthorization) async throws
+        -> BrowserDocumentChangeResult {
+        changeWaits += 1
+        guard let current = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
+        try authorization(current)
+        if changeHold {
+            changeHeld = true; changeWaiters.forEach { $0.resume() }; changeWaiters.removeAll()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    if Task.isCancelled { continuation.resume() }
+                    else { changeContinuation = continuation }
+                }
+            } onCancel: { Task { await self.resumeDocumentChangeWait() } }
+        }
+        try Task.checkCancellation()
+        if let destination = changeDestination { redirectOwnedTarget(to: destination) }
+        guard let settled = targets[target.targetID] else { throw BrowserTabBrokerError.targetClosed }
+        try authorization(settled)
+        return changeResult
+    }
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!) }
     func counts() -> Counts { stats }

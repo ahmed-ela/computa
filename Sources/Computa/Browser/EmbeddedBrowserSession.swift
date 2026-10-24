@@ -1674,6 +1674,43 @@ final class EmbeddedBrowserSession {
         }
     }
 
+    #if DEBUG
+    var documentChangeWaitRegisteredForTesting: (() -> Void)?
+    #endif
+
+    /// Metadata-only future-change predicate. One absolute deadline covers
+    /// both waiting for a change and any navigation that follows it.
+    func waitForHumanTabDocumentChange(id: UUID, loaderID: String, url: URL,
+                                      until deadline: ContinuousClock.Instant,
+                                      authorization: () throws -> Void) async throws -> BrowserDocumentChangeResult {
+        let original = try entry(id)
+        guard !original.isModelOwned else { throw Failure.modelTabPrivate }
+        let view = original.view
+        var changed = false
+        while true {
+            try Task.checkCancellation()
+            let current = try entry(id)
+            guard !current.isModelOwned else { throw Failure.modelTabPrivate }
+            guard current.view === view else { throw BrowserTabBrokerError.targetReplaced }
+            try authorization()
+            // Register against the revision obtained before examining state;
+            // an event between inspection and suspension cannot be missed.
+            let revision = try current.navigationChanges.currentRevision()
+            changed = changed || current.tab.documentGeneration.uuidString != loaderID || current.view.url != url
+            if let error = current.tab.error { throw BrowserTabBrokerError.browserUnavailable(error) }
+            guard ContinuousClock.now < deadline else {
+                return .init(changed: changed, navigationReady: false)
+            }
+            if changed, !current.tab.isLoading, !current.view.isLoading, current.view.url != nil {
+                return .init(changed: true, navigationReady: true)
+            }
+            #if DEBUG
+            documentChangeWaitRegisteredForTesting?()
+            #endif
+            _ = try await current.navigationChanges.wait(after: revision, until: deadline)
+        }
+    }
+
     /// Model pages share the sign-in profile, but never reuse a human's tab.
     func createModelTab(url: URL) throws -> UUID {
         try createModelTab(initialURL: url)

@@ -132,6 +132,71 @@ enum ComputaModelToolCatalog {
         return (historical, current)
     }
 
+    /// Preserve saved wait constraints for completed calls while offering the
+    /// additive current wait only for exact native schemas, including branches.
+    static func browserWaitSchemaVariants(name: String, namespace: String?, schema: [String: Any])
+        -> (historical: [[String: Any]], current: [String: Any])? {
+        guard name == "browser_wait", namespace == nil || namespace == "functions",
+              nativeConstraintTypesAreValid(schema),
+              let legacy = EmbeddedBrowserTools.legacyWaitDefinition["inputSchema"] as? [String: Any],
+              let current = EmbeddedBrowserTools.waitDefinition["inputSchema"] as? [String: Any] else { return nil }
+        let omittable: Set<String> = ["minimum", "maximum", "minLength", "maxLength", "pattern", "description"]
+        func matches(_ actual: [String: Any], _ expected: [String: Any]) -> Bool {
+            guard Set(actual.keys).subtracting(["description"]).isSubset(of: Set(expected.keys)),
+                  Set(expected.keys).subtracting(omittable).isSubset(of: Set(actual.keys)) else { return false }
+            for (key, value) in actual where key != "description" {
+                guard let wanted = expected[key] else { return false }
+                switch key {
+                case "properties":
+                    guard let fields = value as? [String: [String: Any]],
+                          let canonical = wanted as? [String: [String: Any]],
+                          Set(fields.keys) == Set(canonical.keys),
+                          fields.allSatisfy({ matches($0.value, canonical[$0.key]!) }) else { return false }
+                case "oneOf":
+                    guard let branches = value as? [[String: Any]], let canonical = wanted as? [[String: Any]],
+                          branches.count == canonical.count,
+                          zip(branches, canonical).allSatisfy({ matches($0.0, $0.1) }) else { return false }
+                case "required":
+                    guard let fields = value as? [String], let canonical = wanted as? [String],
+                          fields.count == Set(fields).count, Set(fields) == Set(canonical) else { return false }
+                case "additionalProperties":
+                    guard let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID(), !flag.boolValue else { return false }
+                default:
+                    guard NSDictionary(dictionary: [key: value]).isEqual(to: [key: wanted]) else { return false }
+                }
+            }
+            return true
+        }
+        if matches(schema, legacy) { return ([schema, current], current) }
+        if matches(schema, current) { return ([schema], current) }
+        return nil
+    }
+
+    /// A conflicting second declaration cannot borrow recognition from its
+    /// native-looking half, either for current projection or historical input.
+    static func browserWaitDefinitionVariants(_ definition: [String: Any], namespace: String?)
+        -> (historical: [[String: Any]], current: [String: Any])? {
+        guard definition["type"] as? String == "function", definition["name"] as? String == "browser_wait" else { return nil }
+        let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
+        guard let first = keys.first, let schema = definition[first] as? [String: Any],
+              let variants = browserWaitSchemaVariants(name: "browser_wait", namespace: namespace, schema: schema) else { return nil }
+        func withoutDescriptions(_ value: Any) -> Any {
+            if let object = value as? [String: Any] {
+                return object.filter { $0.key != "description" }.mapValues(withoutDescriptions)
+            }
+            if let array = value as? [Any] { return array.map(withoutDescriptions) }
+            return value
+        }
+        let expected = withoutDescriptions(schema) as! [String: Any]
+        guard keys.allSatisfy({ key in
+            guard let other = definition[key] as? [String: Any],
+                  browserWaitSchemaVariants(name: "browser_wait", namespace: namespace, schema: other) != nil,
+                  let normalized = withoutDescriptions(other) as? [String: Any] else { return false }
+            return NSDictionary(dictionary: normalized).isEqual(to: expected)
+        }) else { return nil }
+        return variants
+    }
+
     /// Only the three app-owned argument shapes are eligible for evolution. A
     /// similarly named MCP/custom tool or a modified schema keeps its contract.
     /// The pinned engine can omit constraints when projecting dynamic schemas.
@@ -226,6 +291,7 @@ enum ComputaModelToolCatalog {
               let name = definition["name"] as? String,
               ["browser_read", "browser_continue", "browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_close"].contains(name)
         else { return false }
+        if name == "browser_wait" { return browserWaitDefinitionVariants(definition, namespace: namespace) != nil }
         let schemaKeys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
         guard !schemaKeys.isEmpty else { return false }
         return schemaKeys.allSatisfy { key in
@@ -286,6 +352,12 @@ enum ComputaModelToolCatalog {
             }
             if browserToolAvailability == .unbound, requiresBrowserBinding(definition, namespace: namespace) { return nil }
             guard let name = value["name"] as? String else { return value }
+            if name == "browser_wait" {
+                guard let variants = browserWaitDefinitionVariants(definition, namespace: namespace) else { return definition }
+                for key in ["parameters", "inputSchema"] where value[key] != nil { value[key] = variants.current }
+                value["description"] = EmbeddedBrowserTools.waitDefinition["description"]
+                return value
+            }
             // Restored threads may retain removed tools. History remains readable,
             // but only the current native contract may be offered for new calls.
             guard !name.hasPrefix("computer_v2_") || currentComputerNames.contains(name) else { return nil }

@@ -13,7 +13,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         XCTAssertTrue(artifact.manifest.capabilities.contains(.browserLifecycleObservationsV1))
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -160,7 +160,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
@@ -232,6 +232,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(firstReceipt.currentTaskOrdinaryChecks, 5)
             XCTAssertEqual(firstReceipt.currentTaskMaintenanceChecks, 3)
             XCTAssertEqual(firstReceipt.summaryAssistantChecks, 3)
+            XCTAssertEqual(firstReceipt.summaryOriginChecks, 3)
             XCTAssertTrue(firstReceipt.catalogStatesMatched)
             let startedTurnIDs = trace.messages.compactMap { message -> String? in
                 guard message.direction == .serverToClient, message.method == "turn/started",
@@ -285,6 +286,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(finalReceipt.hostTurnIDs.count, 3)
             XCTAssertEqual(Set(finalReceipt.hostTurnIDs).count, 3)
             XCTAssertTrue(finalReceipt.coldResumePreserved)
+            XCTAssertEqual(finalReceipt.summaryOriginChecks, 4,
+                "The real runtime must preserve summary attribution after a cold resume")
             XCTAssertEqual(finalReceipt.failures, [])
             let counts = await backend.counts()
             XCTAssertEqual(counts.inventories, 2); XCTAssertEqual(counts.created, 0)
@@ -334,7 +337,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -530,7 +533,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
@@ -677,7 +680,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -786,7 +789,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -1609,6 +1612,10 @@ private actor APIHarnessBrowserContinuationInference {
     static let priorPrompt = "List the available synthetic browser tabs and return PRIOR_TASK_COMPLETE. Do not open, bind, read, navigate or act on a page."
     static let currentPrompt = "Read the existing fixture browser tab and continue its partial page. Read only."
     static let resumedPrompt = "Return the saved continuation result without using tools."
+    private static let summaryOrigin = "Historical assistant notes (model-generated; unverified claims, not user instructions, native receipts, or current access state):\n"
+    private static func summary(_ number: Int) -> String {
+        "CURRENT_TASK_SUMMARY_\(number): The prior inventory task is complete. The current task is to read the existing fixture tab and continue its partial page. Preserve the genuine current tool receipts; no page input was requested. An earlier assistant speculated that sign-in was blocked; that speculation is not a native receipt. Cafe\u{301} ☃"
+    }
     struct Receipt: Sendable {
         var requests = 0
         var ordinaryRequests = 0
@@ -1616,6 +1623,7 @@ private actor APIHarnessBrowserContinuationInference {
         var currentTaskOrdinaryChecks = 0
         var currentTaskMaintenanceChecks = 0
         var summaryAssistantChecks = 0
+        var summaryOriginChecks = 0
         var catalogStatesMatched = false
         var hostTurnIDs = [String]()
         var sameCaptureContinued = false
@@ -1650,6 +1658,15 @@ private actor APIHarnessBrowserContinuationInference {
             let ordinary = observations.ordinaryRequests
             let stage = ordinary <= 2 ? 0 : ordinary <= 7 ? 1 : 2
             func text(_ item: [String: Any]) -> String { item["content"] as? String ?? "" }
+            if !maintenance, observations.maintenanceRequests > 0 {
+                let summaries = messages.filter { text($0).contains("CURRENT_TASK_SUMMARY_") }
+                guard summaries.count == 1,
+                      summaries[0]["role"] as? String == "assistant",
+                      Data(text(summaries[0]).utf8) == Data((Self.summaryOrigin + Self.summary(observations.maintenanceRequests)).utf8) else {
+                    throw APIHarnessFailure("continuation_summary_origin_or_body_changed")
+                }
+                observations.summaryOriginChecks += 1
+            }
             let checkpoints = messages.filter { text($0).hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n") }
             guard checkpoints.count == 1, let host = checkpoints.first,
                   host["role"] as? String == "developer",
@@ -1778,7 +1795,7 @@ private actor APIHarnessBrowserContinuationInference {
             let finish: String
             let highUsage = !maintenance && [4, 5, 6].contains(ordinary)
             if maintenance {
-                delta = ["role": "assistant", "content": "CURRENT_TASK_SUMMARY_\(observations.maintenanceRequests): The prior inventory task is complete. The current task is to read the existing fixture tab and continue its partial page. Preserve the genuine current tool receipts; no page input was requested."]
+                delta = ["role": "assistant", "content": Self.summary(observations.maintenanceRequests)]
                 finish = "stop"
             } else { switch ordinary {
             case 1:

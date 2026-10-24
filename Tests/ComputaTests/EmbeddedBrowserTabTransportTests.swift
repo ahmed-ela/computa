@@ -10,6 +10,214 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testDocumentChangeWaitIgnoresLoadedChooserThenSettlesOneDelayedClickNavigation() async throws {
+        let destination = try HeldBrowserNavigationFixture(body: "<!doctype html><main><h1>Mailbox ready</h1></main>")
+        let destinationURL = try await destination.start()
+        let chooserBody = """
+        <!doctype html><main><h1>Pick an account</h1>
+        <button onclick="window.clicks++;fetch('/release').then(()=>location.assign('\(destinationURL.absoluteString)'))">Use fixture account</button>
+        </main><script>window.clicks=0;</script>
+        """
+        let chooser = try HeldBrowserNavigationFixture(body: "release", immediateBody: chooserBody)
+        let chooserURL = try await chooser.start()
+        defer { chooser.stop(); destination.stop() }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let target = try await transport.createTarget(url: chooserURL)
+        let id = try XCTUnwrap(UUID(uuidString: target.targetID))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "delayed-change", processIdentifier: 42, target: target)
+        let before = try await broker.snapshot(taskKey: "delayed-change", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let button = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Use fixture account" })
+        try await broker.perform(taskKey: "delayed-change", binding: before.binding,
+            snapshot: before.snapshot, elementIndex: button.index, action: "AXPress")
+        await fulfillment(of: [chooser.received], timeout: 5)
+        let clicks = try await script(view, "return window.clicks;")
+        XCTAssertEqual(clicks, Data("1".utf8))
+        XCTAssertFalse(view.isLoading, "A held fetch has not started document navigation")
+        let afterClick = try await broker.snapshot(taskKey: "delayed-change", binding: before.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .overview))
+        let checkpoint = try await broker.documentChangeCheckpoint(taskKey: "delayed-change",
+            binding: afterClick.binding, snapshotID: afterClick.snapshot.id)
+        XCTAssertEqual(checkpoint.documentURL, chooserURL)
+        let legacyMatched = try await transport.wait(target: target, text: nil, timeoutMS: 1_000)
+        XCTAssertTrue(legacyMatched, "Existing readiness wait legitimately matches the loaded chooser before any navigation")
+        let registered = expectation(description: "Wait registered on unchanged loaded chooser")
+        let navigationPending = expectation(description: "Changed document is still loading")
+        var sawRegistration = false, sawNavigation = false, completed = false
+        session.documentChangeWaitRegisteredForTesting = {
+            if !sawRegistration { sawRegistration = true; registered.fulfill() }
+            if view.isLoading, !sawNavigation { sawNavigation = true; navigationPending.fulfill() }
+        }
+        let pending = Task { @MainActor in
+            defer { completed = true }
+            return try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                timeoutMS: 5_000, authorization: { _ in })
+        }
+        defer { pending.cancel(); session.documentChangeWaitRegisteredForTesting = nil }
+        await fulfillment(of: [registered], timeout: 5)
+        XCTAssertFalse(completed, "Already-loaded chooser is not a future document change")
+        chooser.release()
+        await fulfillment(of: [destination.received, navigationPending], timeout: 5)
+        XCTAssertFalse(completed, "A changed loader alone does not establish navigation readiness")
+        destination.release()
+        let result = try await pending.value
+        XCTAssertEqual(result, .init(changed: true, navigationReady: true))
+        let fresh = try await transport.observeForRead(target: target, readiness: .content)
+        XCTAssertEqual(fresh.url, destinationURL)
+        XCTAssertNotEqual(fresh.loaderID, checkpoint.loaderID)
+        XCTAssertTrue(fresh.nodes.contains { $0.name == "Mailbox ready" })
+        XCTAssertEqual(chooser.requestPaths.filter { $0 == "/release" }.count, 1, "No click or fetch replay")
+        XCTAssertEqual(destination.requestPaths, ["/"])
+        XCTAssertTrue(session.webView(for: id) === view, "The wait preserves the original tab identity")
+    }
+
+    func testDocumentChangeWaitMatchesURLOnlyChangeAndSameURLReload() async throws {
+        for reload in [false, true] {
+            let fixture = try HeldBrowserNavigationFixture(body: "<!doctype html><main><h1>Ready document</h1></main>")
+            let url = try await fixture.start()
+            fixture.release()
+            defer { fixture.stop() }
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let transport = EmbeddedBrowserTabTransport(session: session)
+            let target = try await transport.createTarget(url: url)
+            let id = try XCTUnwrap(UUID(uuidString: target.targetID)), view = try XCTUnwrap(session.webView(for: id))
+            let (_, checkpoint) = try await documentChangeCheckpoint(transport: transport, target: target)
+            let registered = expectation(description: "Future-change wait registered before trigger")
+            var armed = false, completed = false
+            session.documentChangeWaitRegisteredForTesting = {
+                if !armed { armed = true; registered.fulfill() }
+            }
+            let pending = Task { @MainActor in
+                defer { completed = true }
+                return try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                    timeoutMS: 5_000, authorization: { _ in })
+            }
+            defer { pending.cancel(); session.documentChangeWaitRegisteredForTesting = nil }
+            await fulfillment(of: [registered], timeout: 5)
+            XCTAssertFalse(completed)
+            if reload { view.reload() }
+            else { _ = try await script(view, "history.pushState({},'', '/next');return true;") }
+            let result = try await pending.value
+            XCTAssertEqual(result, .init(changed: true, navigationReady: true))
+            let fresh = try await transport.observeForRead(target: target, readiness: .content)
+            if reload {
+                XCTAssertEqual(fresh.url, url)
+                XCTAssertNotEqual(fresh.loaderID, checkpoint.loaderID)
+                XCTAssertEqual(fixture.requestPaths, ["/", "/"])
+            } else {
+                XCTAssertEqual(fresh.url, url.appendingPathComponent("next"))
+                XCTAssertEqual(fresh.loaderID, checkpoint.loaderID)
+                XCTAssertEqual(fixture.requestPaths, ["/"], "History API change does not fetch another document")
+            }
+        }
+    }
+
+    func testDocumentChangeWaitIgnoresDOMMutationAndKeepsOriginalCheckpointDeadline() async throws {
+        let (session, transport, view, target) = try await semanticReadinessFixture(
+            body: "<main><h1>Ready chooser</h1></main>")
+        defer { session.shutdown() }
+        let (_, checkpoint) = try await documentChangeCheckpoint(transport: transport, target: target,
+            readLifetime: .milliseconds(300))
+        let registered = expectation(description: "Unchanged-document wait registered")
+        var armed = false, completed = false
+        session.documentChangeWaitRegisteredForTesting = {
+            if !armed { armed = true; registered.fulfill() }
+        }
+        let started = ContinuousClock.now
+        let pending = Task { @MainActor in
+            defer { completed = true }
+            return try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                timeoutMS: 10_000, authorization: { _ in })
+        }
+        defer { pending.cancel(); session.documentChangeWaitRegisteredForTesting = nil }
+        await fulfillment(of: [registered], timeout: 5)
+        _ = try await script(view, "document.querySelector('h1').textContent='Changed visible text';return true;")
+        XCTAssertFalse(completed, "DOM/text changes do not imply document or URL transition")
+        let result = try await pending.value
+        XCTAssertEqual(result, .init(changed: false, navigationReady: false))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now, checkpoint.expiresAt)
+        XCTAssertLessThan(started.duration(to: .now), .seconds(2), "The requested ten seconds cannot renew the shorter checkpoint lifetime")
+    }
+
+    func testDocumentChangeWaitCancellationAndClosureCannotReturnLateMatch() async throws {
+        for closesTab in [false, true] {
+            let (session, transport, _, target) = try await semanticReadinessFixture(
+                body: "<main><h1>Ready chooser</h1></main>")
+            defer { session.shutdown() }
+            let (_, checkpoint) = try await documentChangeCheckpoint(transport: transport, target: target)
+            let registered = expectation(description: "Wait registered before retirement")
+            var armed = false
+            session.documentChangeWaitRegisteredForTesting = {
+                if !armed { armed = true; registered.fulfill() }
+            }
+            let pending = Task { @MainActor in
+                try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                    timeoutMS: 5_000, authorization: { _ in })
+            }
+            defer { pending.cancel(); session.documentChangeWaitRegisteredForTesting = nil }
+            await fulfillment(of: [registered], timeout: 5)
+            if closesTab { session.closeTab(try XCTUnwrap(UUID(uuidString: target.targetID))) }
+            else { pending.cancel() }
+            do { _ = try await pending.value; XCTFail("A retired wait cannot report a ready changed document") }
+            catch {
+                if closesTab { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
+                else { XCTAssertTrue(error is CancellationError) }
+            }
+        }
+    }
+
+    func testDocumentChangeWaitDoesNotExtendDeadlineWhileChangedNavigationIsHeld() async throws {
+        let destination = try HeldBrowserNavigationFixture()
+        let destinationURL = try await destination.start()
+        defer { destination.stop() }
+        let (session, transport, view, target) = try await semanticReadinessFixture(
+            body: "<main><h1>Ready chooser</h1></main>")
+        defer { session.shutdown() }
+        let (_, checkpoint) = try await documentChangeCheckpoint(transport: transport, target: target,
+            readLifetime: .milliseconds(300))
+        let registered = expectation(description: "Wait registered before held navigation")
+        var armed = false
+        session.documentChangeWaitRegisteredForTesting = {
+            if !armed { armed = true; registered.fulfill() }
+        }
+        let started = ContinuousClock.now
+        let pending = Task { @MainActor in
+            try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                timeoutMS: 10_000, authorization: { _ in })
+        }
+        defer { pending.cancel(); session.documentChangeWaitRegisteredForTesting = nil }
+        await fulfillment(of: [registered], timeout: 5)
+        let id = try XCTUnwrap(UUID(uuidString: target.targetID))
+        try session.navigate(tabID: id, to: destinationURL)
+        await fulfillment(of: [destination.received], timeout: 5)
+        XCTAssertTrue(view.isLoading)
+        let result = try await pending.value
+        XCTAssertEqual(result, .init(changed: true, navigationReady: false))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now, checkpoint.expiresAt)
+        XCTAssertLessThan(started.duration(to: .now), .seconds(2), "Readiness cannot start a second ten-second budget")
+        destination.release()
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(5))
+        XCTAssertEqual(result, .init(changed: true, navigationReady: false), "Late navigation does not rewrite the completed wait receipt")
+    }
+
+    private func documentChangeCheckpoint(transport: EmbeddedBrowserTabTransport, target: BrowserTarget,
+                                          readLifetime: Duration = .seconds(120)) async throws
+        -> (BrowserTabSessionBroker, BrowserDocumentChangeCheckpoint) {
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(),
+            ownership: .borrowed, readLifetime: readLifetime)
+        let binding = try await broker.bindBorrowed(taskKey: "change-checkpoint", processIdentifier: 42, target: target)
+        let observed = try await broker.snapshot(taskKey: "change-checkpoint", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let checkpoint = try await broker.documentChangeCheckpoint(taskKey: "change-checkpoint",
+            binding: observed.binding, snapshotID: observed.snapshot.id)
+        return (broker, checkpoint)
+    }
+
     func testLifecycleOpenNavigateAndBorrowedBindExposeRealWebKitRefsWithoutSeparateReads() async throws {
         let body = "<!doctype html><main><h1>Settled lifecycle page</h1><button onclick='window.clicks++'>Inspect current page</button></main><script>window.clicks=0</script>"
         let firstServer = try HeldBrowserNavigationFixture(body: body), firstURL = try await firstServer.start()
@@ -1669,8 +1877,14 @@ private final class HeldBrowserNavigationFixture: @unchecked Sendable {
     private var held: [NWConnection] = []
     private var released = false
     private let responseBody: Data
-    init(body: String = "<!doctype html><main><h1>Settled authorized page</h1></main>") throws {
+    private let immediateBody: Data?
+    private var paths: [String] = []
+    private var didReceiveHeldRequest = false
+    var requestPaths: [String] { lock.lock(); defer { lock.unlock() }; return paths }
+    init(body: String = "<!doctype html><main><h1>Settled authorized page</h1></main>",
+         immediateBody: String? = nil) throws {
         responseBody = Data(body.utf8)
+        self.immediateBody = immediateBody.map { Data($0.utf8) }
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -1690,11 +1904,21 @@ private final class HeldBrowserNavigationFixture: @unchecked Sendable {
                 if complete { connection.cancel() } else { self.receive(connection, bytes: combined) }
                 return
             }
+            let requestLine = String(decoding: combined, as: UTF8.self).components(separatedBy: "\r\n")[0]
+            let path = requestLine.components(separatedBy: " ").dropFirst().first ?? ""
             self.lock.lock()
+            self.paths.append(path)
+            if path == "/", let body = self.immediateBody {
+                self.lock.unlock()
+                self.send(connection, body: body)
+                return
+            }
             let released = self.released
             if !released { self.held.append(connection) }
+            let firstHeldRequest = !self.didReceiveHeldRequest
+            self.didReceiveHeldRequest = true
             self.lock.unlock()
-            self.received.fulfill()
+            if firstHeldRequest { self.received.fulfill() }
             if released { self.send(connection) }
         }
     }
@@ -1719,7 +1943,9 @@ private final class HeldBrowserNavigationFixture: @unchecked Sendable {
         pending.forEach(send)
     }
     private func send(_ connection: NWConnection) {
-        let body = responseBody
+        send(connection, body: responseBody)
+    }
+    private func send(_ connection: NWConnection, body: Data) {
         var output = Data("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
         output.append(body)
         connection.send(content: output, completion: .contentProcessed { _ in connection.cancel() })

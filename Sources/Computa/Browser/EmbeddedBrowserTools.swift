@@ -59,10 +59,32 @@ enum EmbeddedBrowserTools {
             ["view": readView, "query": query, "cursor": readCursor])
     }
 
-    static func definitions() -> [[String: Any]] {
+    /// Frozen pre-document-change wait contract for saved native catalogs.
+    static var legacyWaitDefinition: [String: Any] {
         let waitText: [String: Any] = ["type": "string", "minLength": 1,
             "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
             "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
+        return specification("browser_wait",
+            "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
+            ["text": waitText, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]])
+    }
+
+    static var waitDefinition: [String: Any] {
+        let old = legacyWaitDefinition["inputSchema"] as! [String: Any]
+        let oldProperties = old["properties"] as! [String: Any]
+        let after: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 36,
+            "description": "Exact snapshot_id from the latest published page in this turn. Wait for native document identity or URL to change, then navigation readiness within one deadline. Not a DOM-change or task-success test. Cannot be combined with text."]
+        var result = specification("browser_wait",
+            "Bounded event-driven wait. after_snapshot waits for a native document or URL change from the latest page, then navigation readiness; use it after dispatched input when navigation is pending. text waits for visible semantic text. With neither, wait for readable content after readiness; an already-ready page matches immediately. text and after_snapshot are exclusive. Timeout is unresolved, not denied access. No capture, new references, input replay or verified outcome from after_snapshot.",
+            oldProperties.merging(["after_snapshot": after], uniquingKeysWith: { _, right in right }))
+        var schema = result["inputSchema"] as! [String: Any]
+        schema["oneOf"] = [old, ["type": "object", "properties": ["after_snapshot": after,
+            "timeout_ms": oldProperties["timeout_ms"]!], "required": ["after_snapshot"], "additionalProperties": false]]
+        result["inputSchema"] = schema
+        return result
+    }
+
+    static func definitions() -> [[String: Any]] {
         let cursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
             "description": "Omit this field on the first page or a fresh inventory; null has the same fresh-inventory meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_tabs in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
@@ -107,10 +129,7 @@ enum EmbeddedBrowserTools {
                 "Replace one observed field with enabled=true and settable=true and dispatch input/change events; no Enter key or submit-control click is sent. Page handlers may react to these events. Use that field's current fill_ref, never a label or parent. Uses one current observed capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting. A distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Use only new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
                 ["fill_ref": fillRef].merging(["text": ["type": "string", "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it."]], uniquingKeysWith: { _, right in right }),
                 ["fill_ref", "text"]),
-            specification(
-                "browser_wait",
-                "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
-                ["text": waitText, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]]),
+            waitDefinition,
             specification(
                 "browser_close",
                 "Release the bound built-in tab. Closes only this task's created tab; a bound existing user tab stays open."
@@ -150,7 +169,7 @@ enum EmbeddedBrowserTools {
             allowed = required
         case "browser_wait":
             required = []
-            allowed = ["text", "timeout_ms"]
+            allowed = ["text", "timeout_ms", "after_snapshot"]
         default:
             required = []
             allowed = []
@@ -165,7 +184,7 @@ enum EmbeddedBrowserTools {
                 throw EmbeddedBrowserActionReferences.Failure.invalidReference
             }
         }
-        for key in ["url", "tab_id", "snapshot_id", "view", "query", "cursor", "text"]
+        for key in ["url", "tab_id", "snapshot_id", "view", "query", "cursor", "text", "after_snapshot"]
         where arguments[key] != nil {
             // Only these explicitly nullable optional cursors mean omission.
             // All other fields keep their strict contracts.
@@ -175,7 +194,7 @@ enum EmbeddedBrowserTools {
                 key == "text" || !value.isEmpty
             else { throw BrowserTabBrokerError.invalidRead("Invalid built-in browser string argument.") }
         }
-        for key in ["tab_id", "snapshot_id"] where arguments[key] != nil {
+        for key in ["tab_id", "snapshot_id", "after_snapshot"] where arguments[key] != nil {
             guard UUID(uuidString: arguments[key] as! String) != nil else {
                 throw BrowserTabBrokerError.invalidRead("Use an exact observed browser identifier.")
             }
@@ -201,6 +220,9 @@ enum EmbeddedBrowserTools {
                 throw BrowserTabBrokerError.invalidRead(
                     "The browser wait deadline must be from 1 to 10000 milliseconds.")
             }
+        }
+        if tool == "browser_wait", arguments["after_snapshot"] != nil, arguments["text"] != nil {
+            throw BrowserTabBrokerError.invalidRead("Use after_snapshot or text, never both in one wait.")
         }
         if tool == "browser_wait", let text = arguments["text"] as? String,
             text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text.utf8.count > 512
@@ -450,6 +472,9 @@ actor EmbeddedBrowserToolController {
     // unconfirmed target incarnation as a borrowable user tab.
     private var quarantinedTargets = Set<TargetIdentity>()
     private var inFlight = Set<String>()
+    /// At most one wait per admitted task operation. Cleanup cancels it before
+    /// any await, including borrowed tabs that will not emit a close event.
+    private var documentChangeWaits = [String: Task<BrowserDocumentChangeResult, Error>]()
     // A repeated release cannot turn a failed or pending disposal into an
     // empty successful result. Retired keys never grant browser authority.
     private var releasedReports = [String: EmbeddedBrowserCleanupReport]()
@@ -847,6 +872,11 @@ actor EmbeddedBrowserToolController {
             ]))
         case "browser_wait":
             let binding = try bound(taskKey, contextID)
+            if let raw = object["after_snapshot"] as? String, let snapshotID = UUID(uuidString: raw) {
+                return try await waitForDocumentChange(taskKey: taskKey, contextID: contextID,
+                    binding: binding, snapshotID: snapshotID, scope: scope,
+                    timeoutMS: (object["timeout_ms"] as? NSNumber)?.intValue ?? 5_000)
+            }
             let target = try await currentTarget(binding: binding, scope: scope)
             try check(taskKey, contextID)
             let matched = try await transport.wait(
@@ -873,6 +903,67 @@ actor EmbeddedBrowserToolController {
         }
     }
 
+    private func waitForDocumentChange(taskKey: String, contextID: UUID, binding: BrowserTabBinding,
+                                       snapshotID: UUID, scope: ComputerTaskScope?, timeoutMS: Int) async throws
+        -> EmbeddedBrowserToolExecution {
+        try check(taskKey, contextID)
+        guard contexts[taskKey]?.snapshot?.id == snapshotID,
+              let lifetime = contexts[taskKey]?.lifetime else { throw BrowserTabBrokerError.staleSnapshot }
+        let checkpoint = try await broker.documentChangeCheckpoint(
+            taskKey: taskKey, binding: binding, snapshotID: snapshotID)
+        try check(taskKey, contextID)
+        let bindingLifetime = binding.lifetime
+        let authorization: BrowserReadAuthorization = { current in
+            try Task.checkCancellation(); try lifetime.check(); try bindingLifetime.check()
+            guard current.targetID == binding.targetID,
+                  current.instanceToken == binding.targetInstanceToken else {
+                throw BrowserTabBrokerError.targetReplaced
+            }
+        }
+        do {
+            // Navigation may already have started. This phase checks only physical
+            // ownership; settled site scope is checked before publishing readiness.
+            let target = try await currentTarget(binding: binding, scope: nil)
+            try check(taskKey, contextID)
+            let transport = self.transport
+            let operation = Task {
+                try await transport.waitForDocumentChange(target: target, checkpoint: checkpoint,
+                    timeoutMS: timeoutMS, authorization: authorization)
+            }
+            documentChangeWaits[taskKey] = operation
+            defer { documentChangeWaits.removeValue(forKey: taskKey); operation.cancel() }
+            let result = try await withTaskCancellationHandler {
+                try await operation.value
+            } onCancel: { operation.cancel() }
+            try check(taskKey, contextID)
+            try bindingLifetime.check()
+            guard contexts[taskKey]?.snapshot?.id == snapshotID else { throw BrowserTabBrokerError.staleSnapshot }
+            if result.changed {
+                try await broker.retireObservation(taskKey: taskKey, binding: binding, snapshotID: snapshotID)
+                try check(taskKey, contextID)
+                contexts[taskKey]?.snapshot = nil
+                contexts[taskKey]?.actionReferences.retireCurrent()
+            }
+            _ = try await currentTarget(binding: binding, scope: result.navigationReady ? scope : nil)
+            try check(taskKey, contextID)
+            return try .init(response: json([
+                "matched": result.changed && result.navigationReady, "changed": result.changed,
+                "navigation_ready": result.navigationReady, "deadline_reached": !result.navigationReady,
+                "event_driven": true, "no_replay": true, "result_verified": false,
+                "next": "Read the current page for evidence. A document change is not task success; an unresolved deadline is not an access denial. No input was replayed."
+            ]))
+        } catch {
+            // Failures after admission cannot leave an old menu advertised.
+            // Invalid/foreign snapshot IDs were rejected before entering here.
+            if contexts[taskKey]?.id == contextID, contexts[taskKey]?.snapshot?.id == snapshotID {
+                contexts[taskKey]?.snapshot = nil
+                contexts[taskKey]?.actionReferences.retireCurrent()
+                try? await broker.retireObservation(taskKey: taskKey, binding: binding, snapshotID: snapshotID)
+            }
+            throw error
+        }
+    }
+
     /// Revocation precedes every cleanup await. An opening operation retains the
     /// same revoked lifetime and closes any target it receives late.
     func release(taskKey: String) async -> [String] {
@@ -890,6 +981,7 @@ actor EmbeddedBrowserToolController {
         }
         contexts[taskKey]?.lifetime.revoke()
         contexts[taskKey]?.bindingLifetime?.revoke()
+        documentChangeWaits[taskKey]?.cancel()
         let operation = Task { await self.unbind(taskKey: taskKey, trigger: trigger, removeContext: true) }
         releasing[taskKey] = operation
         let report = await operation.value
@@ -903,6 +995,7 @@ actor EmbeddedBrowserToolController {
 
     func shutdown() async -> [String] {
         closed = true
+        for operation in documentChangeWaits.values { operation.cancel() }
         for context in contexts.values {
             context.lifetime.revoke()
             context.bindingLifetime?.revoke()
@@ -915,6 +1008,7 @@ actor EmbeddedBrowserToolController {
     }
 
     private func unbind(taskKey: String, trigger: EmbeddedBrowserCleanupReport.Trigger, removeContext: Bool = false) async -> EmbeddedBrowserCleanupReport {
+        documentChangeWaits[taskKey]?.cancel()
         let pending = removeContext && inFlight.contains(taskKey)
         guard let context = contexts[taskKey] else {
             return EmbeddedBrowserCleanupReport(targets: [], userBindingReleased: false,
