@@ -60,6 +60,80 @@ final class WebsiteTurnContinuationTests: XCTestCase {
         try barrier.validate(next: followUp)
     }
 
+    func testExternalFunctionCallIDOmissionPreservesMultipleRoundsAndExactAcceptedPrefix() throws {
+        for stream in [false, true] {
+            let first = try request(input: initialInput, stream: stream)
+            let state = try WebsiteTurnContinuation(request: first, encodedResponse: encoded(mixedReply, request: first))
+            let original = try nativeItems(mixedReply, request: first)
+            var projected = original
+            projected[1].removeValue(forKey: "id")
+            let acceptedInput = initialInput + projected + outputs(for: projected)
+            let second = try request(input: acceptedInput, stream: stream)
+            try state.validate(next: second)
+
+            let reply: WebModelResponseCodec.Reply = .toolCalls([
+                .init(name: "exec_command", argumentsJSON: #"{"cmd":"git diff"}"#, namespace: "functions"),
+            ])
+            let nextState = try WebsiteTurnContinuation(request: second, encodedResponse: encoded(reply, request: second, id: "resp_second"))
+            var nextItems = try nativeItems(reply, request: second, id: "resp_second")
+            nextItems[0].removeValue(forKey: "id")
+            let tail = nextItems + outputs(for: nextItems)
+            let third = try request(input: acceptedInput + tail, stream: stream)
+            try nextState.validate(next: third)
+
+            // Once admitted, the wire prefix stays exact: even restoring the
+            // original local ID is a history change, not another projection.
+            var restoredID = acceptedInput
+            restoredID[initialInput.count + 1]["id"] = original[1]["id"]
+            var changedResult = acceptedInput
+            changedResult[initialInput.count + projected.count]["output"] = "Changed native result"
+            var addedResultID = acceptedInput
+            addedResultID[initialInput.count + projected.count]["id"] = "fco_00000000-0000-7000-8000-000000000001"
+            for changed in [restoredID, changedResult, addedResultID] {
+                XCTAssertThrowsError(try nextState.validate(next: request(input: changed + tail, stream: stream))) {
+                    XCTAssertEqual($0 as? WebsiteTurnContinuation.Failure, .changedHistory)
+                }
+            }
+
+            let final: WebModelResponseCodec.Reply = .message("Both native commands completed.")
+            let barrier = try WebsiteTurnContinuation(request: third, encodedResponse: encoded(final, request: third, id: "resp_final"))
+            let finalItems = try nativeItems(final, request: third, id: "resp_final")
+            try barrier.validate(next: request(input: acceptedInput + tail + finalItems + user("Inspect the result."), stream: stream))
+        }
+    }
+
+    func testOmittedFunctionCallIDDoesNotRelaxAuthorityOrOtherItemIdentities() throws {
+        for stream in [false, true] {
+            let first = try request(input: initialInput, stream: stream)
+            let state = try WebsiteTurnContinuation(request: first, encodedResponse: encoded(mixedReply, request: first))
+            var projected = try nativeItems(mixedReply, request: first)
+            projected[1].removeValue(forKey: "id")
+            let results = outputs(for: projected)
+            try state.validate(next: request(input: initialInput + projected + results, stream: stream))
+            let changes: [(Int, String, Any)] = [
+                (1, "id", "fc_forged"), (1, "id", NSNull()),
+                (1, "call_id", "call_forged"), (1, "name", "other"),
+                (1, "namespace", "other"), (1, "namespace", NSNull()),
+                (1, "arguments", #"{ "cmd":"python3 -m unittest"}"#),
+                (0, "phase", "final_answer"),
+                (0, "content", [["type": "output_text", "text": "Changed commentary"]]),
+                (0, "id", "msg_forged"), (2, "id", "ctc_forged"),
+            ]
+            for (index, key, value) in changes {
+                var changed = projected; changed[index][key] = value
+                XCTAssertThrowsError(try state.validate(next: request(input: initialInput + changed + results, stream: stream))) {
+                    XCTAssertEqual($0 as? WebsiteTurnContinuation.Failure, .changedHistory)
+                }
+            }
+            for (index, key) in [(0, "id"), (2, "id"), (1, "namespace"), (1, "name")] {
+                var changed = projected; changed[index].removeValue(forKey: key)
+                XCTAssertThrowsError(try state.validate(next: request(input: initialInput + changed + results, stream: stream))) {
+                    XCTAssertEqual($0 as? WebsiteTurnContinuation.Failure, .changedHistory)
+                }
+            }
+        }
+    }
+
     func testConfigurationIncludesHiddenOriginalToolsAndAllRequestOptions() throws {
         var firstObject = object(input: initialInput)
         var allTools = tools
@@ -94,8 +168,10 @@ final class WebsiteTurnContinuationTests: XCTestCase {
             var changed = emitted; changed[index][key] = value
             XCTAssertThrowsError(try state.validate(next: request(input: initialInput + changed + result)))
         }
-        var missingID = emitted; missingID[1].removeValue(forKey: "id")
-        XCTAssertThrowsError(try state.validate(next: request(input: initialInput + missingID + result)))
+        for index in [0, 2] {
+            var missingID = emitted; missingID[index].removeValue(forKey: "id")
+            XCTAssertThrowsError(try state.validate(next: request(input: initialInput + missingID + result)))
+        }
         var differentTextType = emitted
         differentTextType[0]["content"] = [["type": "input_text", "text": "Inspecting and editing the fixture."]]
         XCTAssertThrowsError(try state.validate(next: request(input: initialInput + differentTextType + result)))

@@ -26,7 +26,7 @@ struct WebsiteTurnContinuation: Sendable {
 
     private let configuration: Data
     private let previousInput: [Data]
-    private let emittedOutput: [Data]
+    private let emittedOutput: [JSONValue]
     private let pendingCalls: [PendingCall]
     let pendingToolCallCount: Int
 
@@ -47,7 +47,7 @@ struct WebsiteTurnContinuation: Sendable {
         }
         var calls: [PendingCall] = []
         var identities = Set<Data>()
-        var nativeOutput: [Data] = []
+        var nativeOutput: [JSONValue] = []
         for (index, item) in output.enumerated() {
             guard let fields = item.object, let type = fields["type"]?.string,
                   let id = fields["id"]?.textBytes, !id.isEmpty,
@@ -66,7 +66,7 @@ struct WebsiteTurnContinuation: Sendable {
                                    name: name, namespace: fields["namespace"]?.textBytes))
             default: throw Failure.invalidResponse
             }
-            nativeOutput.append(try Self.nativeOutputItem(item).encoded())
+            nativeOutput.append(try Self.nativeOutputItem(item))
         }
         guard endTurn ? calls.isEmpty : !calls.isEmpty else { throw Failure.invalidResponse }
         // A locally emitted call may not alias a historical call/result.
@@ -93,8 +93,16 @@ struct WebsiteTurnContinuation: Sendable {
             throw Failure.changedHistory
         }
         for (offset, expected) in emittedOutput.enumerated() {
-            let actual = try Self.nativeOutputItem(next.input[previousInput.count + offset])
-            guard actual.encoded() == expected else { throw Failure.changedHistory }
+            var actual = try Self.nativeOutputItem(next.input[previousInput.count + offset])
+            // Pinned Core omits FunctionCall.id on external requests. Restore
+            // only this locally emitted ID for comparison, never for history.
+            // A supplied ID, all authority fields, and other item types remain exact.
+            if expected["type"] == .text("function_call"), actual["type"] == .text("function_call"),
+               actual["id"] == nil, var fields = actual.object {
+                fields["id"] = expected["id"]
+                actual = .object(fields)
+            }
+            guard actual.encoded() == expected.encoded() else { throw Failure.changedHistory }
         }
         let appended = Array(next.input.dropFirst(prefixCount))
         if pendingCalls.isEmpty {
@@ -141,8 +149,9 @@ struct WebsiteTurnContinuation: Sendable {
 
     /// These are exactly the pinned Core's serde omissions: Message and
     /// FunctionCall have no status field; OutputText has no annotations.
-    /// CustomToolCall keeps status. Prefixed item IDs and raw argument strings
-    /// survive Core serialization and are intentionally NOT ignored.
+    /// CustomToolCall keeps status. Raw arguments and any supplied item IDs
+    /// remain exact; validate(next:) separately admits the external projection's
+    /// omission of a locally emitted FunctionCall.id.
     private static func nativeOutputItem(_ item: JSONValue) throws -> JSONValue {
         guard var fields = item.object, let type = fields["type"]?.string else { throw Failure.changedHistory }
         switch type {
@@ -181,7 +190,8 @@ struct WebsiteTurnContinuation: Sendable {
     }
 
     /// Core assigns these IDs when recording ResponseInputItem results into
-    /// history (session/mod.rs); the non-OpenAI HTTP projection retains them.
+    /// history (session/mod.rs). External FunctionCallOutput projection omits
+    /// its record ID; this validates an ID only when one is supplied.
     /// They do not replace call_id authority. Once accepted, the entire result
     /// including this ID remains part of the immutable prefix for later rounds.
     private static func isNativeToolOutputID(_ bytes: Data, type: String) -> Bool {

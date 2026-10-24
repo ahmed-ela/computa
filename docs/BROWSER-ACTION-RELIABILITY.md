@@ -2318,3 +2318,66 @@ response and cleanup. Private results: `bun259-model-adapters-result.json` and
 pending. Duplicate generated256/257 app copies were removed only after exact
 whole-bundle and signature equality with preserved backups; source and all
 receipts remain (`duplicate-build-output-cleanup259.json`).
+
+### Installed 259: startup verified, continuation contract still fails
+
+Installed source `2322148b` and executable `b037efa17152…` matched the recorded
+build259 artifact. The deliberately reused native thread completed a separate
+12.275-second maintenance compaction, then an 8.768-second diagnostic turn. Both
+initial website responses have matching Instant/Temporary model, submission,
+completion, release and owned-cleanup receipts. Finite diagnostics observed
+`generic_power` with ordinal 0 on the actual rendered header. This qualifies
+the startup path for these two responses, not the full diagnostic task.
+
+The diagnostic issued one `exec_command` in the exact fixture directory. `pwd`
+succeeded, but `rg` was unavailable; the pipeline's final `head` returned zero,
+so the exit wrapper did not establish a successful file listing or read. The
+next inference failed with `website_continuation_unverified/changed_history`
+before a continuation prompt was submitted or replayed. There was no final
+answer, and all five fixture files and modes remained unchanged. The earlier
+restored UI “high demand” text is not evidence of provider demand.
+
+Receipt reconciliation found that cold restoration retained the native thread
+but rebound the app task ID to that thread ID. The first audit looked under the
+original app task and found no new receipts; those lookup artifacts are retained
+alongside corrected audits. Exact new-directory/turn matching recovered both
+lifecycle proofs and the separate continuation rejection. This nonfresh run
+still consumed one new transaction directory, leaving three slots under the
+unchanged 256 limit.
+
+Source review identified a conflicting continuation identity contract:
+`client.rs::prepare_input_for_non_openai_provider` removes the optional
+`FunctionCall` and `FunctionCallOutput` record IDs, while the website bridge
+expected the emitted function-call record ID to return unchanged. The existing
+unit mock retained that ID. This source mismatch and the live rejection are
+preserved; the repair and actual native-engine regression remain pending. No
+semantic cure is claimed and no fresh browser/send case has started. Private
+receipts: `chatgpt259/startup-model-logs.json`,
+`journal-binding-reconciliation.json`, `maintenance-reconciled-finite-audit.json`,
+`diagnostic-reconciled-finite-audit.json` and `diagnostic-reconciled-review.json`.
+
+The provider-free bundled-engine regression now reproduces the same
+`website_continuation_unverified/changed_history` rejection on stable source.
+One test ran and failed (no skips); its downstream missing-completion assertions
+are part of that single failed case. The run took 32.068 seconds, with 8.907
+seconds in the test. This confirms the continuation defect without a live
+provider, not a repair or semantic qualification. The red log and source-stability
+receipt are preserved as `swift260-native-continuation-red.log` and
+`swift260-native-continuation-red-result.json`; the fix and green run remain
+pending at this checkpoint.
+
+### Build 260: native continuation projection repaired
+
+The comparison now admits only the pinned runtime's omission of a newly emitted
+function-call record ID. It restores that known ID in a temporary comparison
+value; it does not rewrite accepted history. Supplied IDs, call IDs, names,
+namespaces, raw arguments, other item types, and all prior input remain exact.
+
+All 89 focused continuation/server/native-engine tests passed with zero skips
+on stable source (`swift260-continuation-green-result.json`, 54.525 seconds).
+The previously failing malformed/stale-patch case now completes. A new actual
+bundled-runtime case executes two harmless commands exactly once, validates
+the projected requests against canonical history, verifies three closed leases,
+and cold-loads without replay. Unit cases cover both stream modes, multiple
+rounds, forged IDs/authority, and later prefix changes. Installed ChatGPT Instant
+qualification is the next gate; these provider-free tests do not establish it.
