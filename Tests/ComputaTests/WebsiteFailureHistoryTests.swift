@@ -3,6 +3,56 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testNativeBrowserFailuresSurviveStoreRecreationWithExactTaskAndTurn() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserStartupError-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let task = UUID().uuidString, thread = UUID().uuidString
+        var records: [WebsiteTurnFailureStore.Record] = []
+        for failure in WebModelServer.NativeBrowserFailure.allCases {
+            let data = try WebModelServer.errorBody(for: failure)
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: UUID().uuidString, modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: data, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            records.append(record)
+            for model in ["browser/gemini", "browser/claude"] {
+                XCTAssertEqual(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: UUID().uuidString, modelID: model, diagnosticText: String(decoding: data, as: UTF8.self)) != nil,
+                    !failure.requiresChatGPT, "Cookie preparation diagnostics belong only to ChatGPT")
+            }
+        }
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, records)
+        for record in restored {
+            XCTAssertEqual(record.taskID, task.lowercased())
+            XCTAssertEqual(record.threadID, thread.lowercased())
+            XCTAssertEqual(record.entry.turnID, record.turnID)
+            XCTAssertEqual(record.entry.title, "Agent error")
+            XCTAssertFalse(record.entry.body.contains("high demand"))
+        }
+    }
+
+    func testNativeBrowserFailureStoreRejectsUnknownReasonsPrivateDataAndCrossFamilyClaims() throws {
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        for failure in [WebModelServer.NativeBrowserFailure.profileVerificationFailed, .tabClosed] {
+            let data = try WebModelServer.errorBody(for: failure)
+            let mutations: [[String: Any]] = [["reason": "PRIVATE_COOKIE_CANARY"], ["reason": 1],
+                ["reason": failure.requiresChatGPT ? "tab_closed" : "verification_failed"],
+                ["code": failure.requiresChatGPT ? "website_browser_session_failed" : "chatgpt_profile_preparation_failed"],
+                ["message": "PRIVATE_COOKIE_CANARY"], ["retryable": 0], ["retryable": true],
+                ["cookie_name": "PRIVATE_COOKIE_CANARY"], ["url": "https://private.invalid/PRIVATE_COOKIE_CANARY"],
+                ["required_action": "retry_send"], ["cleanup": "not_created"]]
+            for mutation in mutations {
+                var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                var error = try XCTUnwrap(object["error"] as? [String: Any])
+                mutation.forEach { error[$0.key] = $0.value }; object["error"] = error
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                    modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+            }
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: "api/cerebras/model/fixture", diagnosticText: String(decoding: data, as: UTF8.self)))
+        }
+    }
+
     private func history(_ turns: [[String: Any]]) throws -> Data { try JSONSerialization.data(withJSONObject: ["result": ["thread": ["turns": turns]]]) }
     private func turn(_ id: String, status: String? = nil, error: Any = NSNull(), user: Bool = true) -> [String: Any] {
         var value: [String: Any] = ["id": id, "startedAt": 100, "completedAt": 110, "error": error,

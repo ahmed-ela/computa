@@ -2089,3 +2089,38 @@ bundles, builds241–248, after exact path, identity and running-process checks.
 It recovered approximately 2.325 GiB; installed253 (subsequently backed up during
 installation), backups240 and249–252, source and all test evidence were preserved.
 The exact inventory and deletion receipt are in private `backup-cleanup254/`.
+
+
+### ChatGPT startup failure and build 255 diagnostics
+
+The requested ChatGPT Instant continuation used the same read-only synthetic
+diagnostic prompt on installed build 254. Its native turn failed in 130 ms, before any
+tool call, website Send or verified provider response. The transaction journal
+records `start_requested` then `internal_error`; native logs show a cold browser
+start immediately before the failure. The generic high-demand message is not
+evidence of ChatGPT overload. Startup ownership and website cleanup remain
+unconfirmed. Project files are unchanged. Private evidence:
+`chatgpt254/diagnostic-review.json`.
+
+Two concrete local error families were missing from the website error boundary:
+ChatGPT cookie-profile preparation and native browser-session failures. Build 255
+projects those types into closed HTTP 400/nonretryable diagnostics and preserves
+only exact canonical envelopes in failure history. It does not infer tab closure,
+retry a prompt, relax ownership, or change the shared action instructions.
+Cookie preparation now emits one bounded failure diagnostic with phase, reason,
+counts and an optional 11-bit attribute mismatch mask. Cookie names, values,
+identities, URLs and arbitrary error descriptions are excluded; selection,
+readback equality, original profile contents and all limits are unchanged.
+
+This checkpoint improves failure attribution; the concrete live preparation
+failure and end-to-end ChatGPT task outcomes still require installed validation.
+Cerebras remains separately blocked by its observed HTTP 402.
+
+Validation: the initial targeted run passed 154 of 155 tests, including the
+actual bundled-engine startup and cold-restoration regression. One new synthetic
+cookie fixture exceeded Foundation's constructor limit before reaching the
+subject. After a test-only correction, all 42 cookie tests passed; production
+sources were unchanged. The 155 distinct tests have passing latest results, not
+a full rerun after the fixture correction. Independent production review found
+no blocker. Private receipts: `swift255-startup`, `swift255-cookie-refinement`
+and `swift255-latest-results`.

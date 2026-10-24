@@ -50,6 +50,93 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         XCTAssertThrowsError(try ChatGPTInferenceCookieSeed.select([], now: Date(timeIntervalSince1970: .nan)))
     }
 
+    func testSelectionFailureDiagnosticsDistinguishFiniteReasonsWithoutCookieIdentity() throws {
+        typealias Seed = ChatGPTInferenceCookieSeed
+        let now = Date(), original = try cookie("PRIVATE_NAME", value: "PRIVATE_VALUE")
+        func changed(_ edit: (DiagnosticCookie) -> Void) throws -> HTTPCookie {
+            let value = try XCTUnwrap(DiagnosticCookie(properties: original.properties!))
+            edit(value); return value
+        }
+        let cases: [([HTTPCookie], Date, Seed.Failure, Seed.FailureDiagnostic.Reason)] = [
+            (Array(repeating: original, count: 4_097), now, .bounds, .sourceCount),
+            ([], Date(timeIntervalSince1970: .nan), .bounds, .clock),
+            ([try changed { $0.replacementValue = String(repeating: "x", count: 65_537) }], now, .bounds, .fieldBytes),
+            (try (0..<17).map { index in try changed {
+                $0.replacementName = "PRIVATE_NAME_\(index)"
+                $0.replacementValue = String(repeating: "x", count: 65_536)
+            } }, now, .bounds, .totalBytes),
+            ([try changed { $0.replacementName = "PRIVATE_NAME\0" }], now, .invalidSource, .invalidFields),
+            ([try changed { $0.missingProperties = true }], now, .invalidSource, .invalidFields),
+            ([original, original], now, .invalidSource, .duplicateIdentity),
+            ([try changed { $0.replacementExpiry = Date(timeIntervalSince1970: .infinity) }], now, .invalidSource, .nonfiniteExpiry),
+            ([try changed { $0.replacementDomain = "PRIVATE_DOMAIN.chatgpt.com" }], now, .invalidSource, .invalidScopeFields),
+            ([try changed { $0.replacementPath = "PRIVATE_PATH" }], now, .invalidSource, .invalidScopeFields),
+            (try (0..<513).map { try cookie("PRIVATE_NAME_\($0)") }, now, .bounds, .selectedCount),
+        ]
+        for (cookies, date, failure, reason) in cases {
+            var records: [Seed.FailureDiagnostic] = []
+            XCTAssertThrowsError(try Seed.select(cookies, now: date, onFailure: { records.append($0) })) {
+                XCTAssertEqual($0 as? Seed.Failure, failure, "Diagnostics must preserve the public failure")
+            }
+            XCTAssertEqual(records.count, 1)
+            let record = try XCTUnwrap(records.first)
+            XCTAssertEqual(record.phase, .sourceSelection); XCTAssertEqual(record.reason, reason)
+            XCTAssertEqual(record.code, Seed.FailureDiagnostic.code(for: failure))
+            XCTAssertEqual(record.sourceCount, min(cookies.count, 4_097))
+            XCTAssertLessThan(record.record.utf8.count, 512)
+            for forbidden in ["PRIVATE", "chatgpt.com", "https://", "name=", "domain=", "path=", "value=", "index="] {
+                XCTAssertFalse(record.record.contains(forbidden), forbidden)
+            }
+        }
+        var successfulRecords: [Seed.FailureDiagnostic] = []
+        _ = try Seed.select([original], now: now, onFailure: { successfulRecords.append($0) })
+        XCTAssertTrue(successfulRecords.isEmpty)
+        let foreign = NSError(domain: "PRIVATE_ERROR_DOMAIN", code: 42, userInfo: [NSLocalizedDescriptionKey: "PRIVATE_ERROR_TEXT"])
+        XCTAssertEqual(Seed.FailureDiagnostic.code(for: foreign), .unknown)
+        let capped = Seed.FailureDiagnostic(phase: .admission, code: .unknown, reason: .unknown,
+            sourceCount: .max, eligibleCount: .max, selectedCount: .max, destinationCount: .max,
+            completedWrites: .max, measuredFieldBytes: .max, attributeMismatchMask: .max)
+        XCTAssertEqual(capped.sourceCount, 4_097); XCTAssertEqual(capped.eligibleCount, 4_097)
+        XCTAssertEqual(capped.selectedCount, 513); XCTAssertEqual(capped.destinationCount, 4_097)
+        XCTAssertEqual(capped.completedWrites, 512); XCTAssertEqual(capped.measuredFieldBytes, 1_048_577)
+        XCTAssertEqual(capped.attributeMismatchMask, 2_047)
+        XCTAssertLessThan(capped.record.utf8.count, 512)
+    }
+
+    func testSeedEmitsOneSelectionDiagnosticBeforeDrainWithoutAnySourceMutation() async throws {
+        let original = try cookie("PRIVATE_NAME"), source = CookieSeedStore([original, original]), destination = CookieSeedStore()
+        let seed = ChatGPTInferenceCookieSeed(source: source, destination: destination)
+        source.holdReads = true
+        var records: [ChatGPTInferenceCookieSeed.FailureDiagnostic] = []
+        seed.failureDiagnosticObserverForTesting = { records.append($0) }
+        let task = Task { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}) }
+        await yieldUntil { source.pendingReads.count == 1 }
+        source.releaseRead(twice: true)
+        do { try await task.value; XCTFail("Expected duplicate rejection") }
+        catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .invalidSource) }
+        seed.cancel()
+        XCTAssertEqual(records.count, 1); XCTAssertEqual(records.first, seed.failureDiagnostic)
+        XCTAssertEqual(records.first?.phase, .sourceSelection); XCTAssertEqual(records.first?.reason, .duplicateIdentity)
+        XCTAssertEqual(records.first?.sourceCount, 2); XCTAssertEqual(records.first?.selectedCount, 1)
+        XCTAssertEqual(destination.reads, 0); XCTAssertTrue(destination.sets.isEmpty); XCTAssertTrue(source.sets.isEmpty)
+        XCTAssertNil(seed.verifiedSummary)
+    }
+
+    func testVerificationDiagnosticDoesNotInventAttributePairingForAmbiguousReadback() async throws {
+        let source = CookieSeedStore([try cookie("first"), try cookie("second")]), destination = CookieSeedStore()
+        destination.writeTransform = { value in
+            var properties = value.properties!; properties[.name] = "PRIVATE_CHANGED_" + value.name
+            return HTTPCookie(properties: properties)!
+        }
+        let seed = ChatGPTInferenceCookieSeed(source: source, destination: destination)
+        do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected rejection") }
+        catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .verificationFailed) }
+        let diagnostic = try XCTUnwrap(seed.failureDiagnostic)
+        XCTAssertEqual(diagnostic.reason, .verificationAttributes); XCTAssertEqual(diagnostic.destinationCount, 2)
+        XCTAssertNil(diagnostic.attributeMismatchMask); XCTAssertNil(diagnostic.comparison)
+        XCTAssertFalse(diagnostic.record.contains("PRIVATE")); XCTAssertNil(seed.verifiedSummary)
+    }
+
     func testSeedCopiesOriginalObjectsVerifiesDestinationAndNeverWritesSource() async throws {
         let auth = try cookie(), key = try cookie("conv_key_" + conversation), marker = try cookie("history_off_" + conversation)
         let source = CookieSeedStore([auth, key, marker, try cookie(domain: "google.com")])
@@ -58,6 +145,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         var drained = false
         try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: { drained = true })
         XCTAssertTrue(drained)
+        XCTAssertNil(seed.failureDiagnostic)
         XCTAssertEqual(source.cookies.count, 4); XCTAssertTrue(source.sets.isEmpty)
         XCTAssertEqual(destination.sets.count, 1); XCTAssertTrue(destination.sets.first === auth)
         XCTAssertEqual(seed.verifiedSummary, .init(sourceCookieCount: 4, eligibleCookieCount: 3,
@@ -72,6 +160,9 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected rejection") }
         catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .destinationNotEmpty) }
         XCTAssertTrue(source.sets.isEmpty); XCTAssertTrue(destination.sets.isEmpty); XCTAssertNil(seed.verifiedSummary)
+        XCTAssertEqual(seed.failureDiagnostic?.phase, .destinationEmpty)
+        XCTAssertEqual(seed.failureDiagnostic?.reason, .destinationNotEmpty)
+        XCTAssertEqual(seed.failureDiagnostic?.destinationCount, 1); XCTAssertEqual(seed.failureDiagnostic?.completedWrites, 0)
     }
 
     func testSeedFailureAndWrongViewStoreCannotPublishOrFallBackToTheHumanProfile() async throws {
@@ -108,6 +199,8 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected rejection") }
         catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .verificationFailed) }
         XCTAssertNil(seed.verifiedSummary); XCTAssertTrue(source.sets.isEmpty)
+        XCTAssertEqual(seed.failureDiagnostic?.phase, .verify); XCTAssertEqual(seed.failureDiagnostic?.reason, .verificationCount)
+        XCTAssertEqual(seed.failureDiagnostic?.destinationCount, 0); XCTAssertEqual(seed.failureDiagnostic?.completedWrites, 1)
     }
 
     func testReadbackRejectsChangedAuthenticationAndPolicyAttributes() async throws {
@@ -125,6 +218,15 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
             do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Accepted changed cookie attribute") }
             catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .verificationFailed) }
             XCTAssertNil(seed.verifiedSummary); XCTAssertTrue(source.sets.isEmpty)
+            XCTAssertEqual(seed.failureDiagnostic?.phase, .verify); XCTAssertEqual(seed.failureDiagnostic?.reason, .verificationAttributes)
+            XCTAssertEqual(seed.failureDiagnostic?.destinationCount, 1); XCTAssertEqual(seed.failureDiagnostic?.completedWrites, 1)
+            let bits: [HTTPCookiePropertyKey: Int] = [.domain: 0, .path: 1, .name: 2, .value: 3,
+                .secure: 4, .init(rawValue: "HttpOnly"): 5, .expires: 7, .sameSitePolicy: 10]
+            let bit = try XCTUnwrap(bits[key])
+            let mask = try XCTUnwrap(seed.failureDiagnostic?.attributeMismatchMask)
+            XCTAssertNotEqual(mask & (1 << bit), 0)
+            XCTAssertEqual(seed.failureDiagnostic?.comparison, [.domain, .path, .name].contains(key) ? .singleRemaining : .uniqueIdentity)
+            XCTAssertFalse(seed.failureDiagnostic?.record.contains("changed") == true)
         }
     }
 
@@ -227,8 +329,12 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         do { try await seed.run(until: .now + .milliseconds(20), isCurrent: { true }, onDrained: { drained = true }); XCTFail("Expected deadline") }
         catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .deadline) }
         XCTAssertFalse(drained); XCTAssertEqual(source.pendingReads.count, 1)
+        let diagnostic = seed.failureDiagnostic
+        XCTAssertEqual(diagnostic?.phase, .sourceRead); XCTAssertEqual(diagnostic?.code, .deadline)
+        XCTAssertNil(diagnostic?.sourceCount)
         source.releaseRead(twice: true)
         XCTAssertTrue(drained); XCTAssertEqual(destination.reads, 0); XCTAssertTrue(destination.sets.isEmpty)
+        XCTAssertEqual(seed.failureDiagnostic, diagnostic, "Late callbacks cannot replace the original failure")
     }
 
     func testDeadlineCrossingDuringSourceSelectionCannotIssueDestinationRead() async throws {
@@ -263,9 +369,13 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         task.cancel()
         do { try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(drained); XCTAssertEqual(destination.sets.count, 1)
+        let diagnostic = seed.failureDiagnostic
+        XCTAssertEqual(diagnostic?.phase, .write); XCTAssertEqual(diagnostic?.code, .cancelled)
+        XCTAssertEqual(diagnostic?.completedWrites, 0)
         destination.releaseSet(twice: true)
         XCTAssertTrue(drained); XCTAssertEqual(destination.sets.count, 1)
         XCTAssertTrue(source.sets.isEmpty); XCTAssertNil(seed.verifiedSummary)
+        XCTAssertEqual(seed.failureDiagnostic, diagnostic)
     }
 
     func testInvalidContextAndDuplicateCallbacksCannotDispatchAnotherOperation() async throws {
@@ -916,6 +1026,18 @@ private final class CookieSeedNoNavigationView: WKWebView {
         }
         return localNavigation
     }
+}
+
+private final class DiagnosticCookie: HTTPCookie, @unchecked Sendable {
+    var replacementDomain: String?, replacementPath: String?, replacementName: String?, replacementValue: String?
+    var replacementExpiry: Date?
+    var missingProperties = false
+    override var domain: String { replacementDomain ?? super.domain }
+    override var path: String { replacementPath ?? super.path }
+    override var name: String { replacementName ?? super.name }
+    override var value: String { replacementValue ?? super.value }
+    override var expiresDate: Date? { replacementExpiry ?? super.expiresDate }
+    override var properties: [HTTPCookiePropertyKey: Any]? { missingProperties ? nil : super.properties }
 }
 
 private final class DeadlineCookie: HTTPCookie, @unchecked Sendable {

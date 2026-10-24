@@ -3,6 +3,77 @@ import XCTest
 @testable import Computa
 
 final class WebModelFailureDiagnosticTests: XCTestCase {
+    func testNativeBrowserFailuresHaveClosedNonretryableDiagnostics() throws {
+        let cases: [(any Error, WebModelServer.NativeBrowserFailure)] = [
+            (ChatGPTInferenceCookieSeed.Failure.unavailable, .profileUnavailable),
+            (ChatGPTInferenceCookieSeed.Failure.bounds, .profileBounds),
+            (ChatGPTInferenceCookieSeed.Failure.invalidSource, .profileInvalidSource),
+            (ChatGPTInferenceCookieSeed.Failure.destinationNotEmpty, .profileDestinationNotEmpty),
+            (ChatGPTInferenceCookieSeed.Failure.verificationFailed, .profileVerificationFailed),
+            (ChatGPTInferenceCookieSeed.Failure.deadline, .profileDeadline),
+            (EmbeddedBrowserSession.Failure.tabLimit(Int.max), .tabLimit),
+            (EmbeddedBrowserSession.Failure.tabClosed, .tabClosed),
+            (EmbeddedBrowserSession.Failure.sessionClosed, .sessionClosed),
+            (EmbeddedBrowserSession.Failure.modelTabPrivate, .modelTabPrivate),
+            (EmbeddedBrowserSession.Failure.modelPopupUnsupported, .modelPopupUnsupported),
+            (EmbeddedBrowserSession.Failure.toolPopupUnsupported, .toolPopupUnsupported),
+            (EmbeddedBrowserSession.Failure.popupProfileMismatch, .popupProfileMismatch),
+            (EmbeddedBrowserSession.Failure.inspectionUnavailable, .inspectionUnavailable),
+            (EmbeddedBrowserSession.Failure.cookieMaintenancePending, .cookieMaintenancePending),
+        ]
+        XCTAssertEqual(Set(cases.map { $0.1 }), Set(WebModelServer.NativeBrowserFailure.allCases))
+        for (native, expected) in cases {
+            XCTAssertEqual(WebModelServer.NativeBrowserFailure(native), expected)
+            XCTAssertEqual(WebModelServer.errorPresentation(for: native).status, "400 Bad Request",
+                "Known local failures must not invite the engine's HTTP 5xx retry/high-demand path")
+            let data = try WebModelServer.errorBody(for: native)
+            let fields = try XCTUnwrap((JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? [String: Any])
+            XCTAssertEqual(Set(fields.keys), ["type", "message", "code", "param", "reason", "retryable"])
+            XCTAssertEqual(fields["type"] as? String, "model_error")
+            XCTAssertEqual(fields["code"] as? String, expected.code)
+            XCTAssertEqual(fields["reason"] as? String, expected.rawValue)
+            XCTAssertEqual(fields["message"] as? String, expected.localizedDescription)
+            XCTAssertEqual(fields["retryable"] as? Bool, false)
+            XCTAssertTrue(fields["param"] is NSNull)
+            XCTAssertLessThan(data.count, 512)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(String(Int.max)))
+        }
+        let arbitrary = NSError(domain: "PRIVATE_COOKIE_DOMAIN", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "chatgpt_profile_preparation_failed verification_failed PRIVATE_COOKIE_VALUE"])
+        XCTAssertNil(WebModelServer.NativeBrowserFailure(arbitrary), "Matching prose never creates native provenance")
+        XCTAssertEqual(WebModelServer.errorPresentation(for: arbitrary).code, "internal_error")
+    }
+
+    func testNativeStartupFailureIsRecordedWithoutSubmissionOrAssumedCleanup() async throws {
+        let failures: [any Error] = [ChatGPTInferenceCookieSeed.Failure.verificationFailed,
+                                   EmbeddedBrowserSession.Failure.cookieMaintenancePending]
+        for failure in failures {
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            let transport = StartupFailureReceiptTransport(failure: failure)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+            do {
+                let base = try await server.start()
+                let (body, status) = try await Self.post(base, server: server, taskID: "native-startup")
+                XCTAssertEqual(status, 400)
+                let taskID = websiteInferenceFixtureTaskID("native-startup")
+                let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: taskID))
+                XCTAssertEqual(Data(diagnostic.utf8), body)
+                XCTAssertNil(server.takeFailureDiagnostic(taskID: taskID))
+                let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: failure)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: expected))
+                let operations = await transport.operations()
+                XCTAssertEqual(operations, ["webProviderStart"], "No Send, poll, or retried startup follows the native failure")
+                let issues = await server.fixtureFinish(taskID: "native-startup")
+                XCTAssertTrue(issues.contains(WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription),
+                    "A finite diagnostic cannot certify no owned tab when startup returned no token")
+                let afterCleanup = await transport.operations()
+                XCTAssertEqual(afterCleanup, operations, "Cleanup cannot invent a session token or replay startup")
+                _ = await server.shutdown()
+            } catch { _ = await server.shutdown(); throw error }
+        }
+    }
+
     func testAuthenticatedHTTPFailureRetainsTheExactFiniteGateDiagnosticForItsOwnTaskOnce() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .quota), defaultChatChoice: syntheticChatGPTChoice))
@@ -129,6 +200,18 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
         ])
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, try XCTUnwrap(response as? HTTPURLResponse).statusCode)
+    }
+}
+
+private actor StartupFailureReceiptTransport: WebModelTransport {
+    let failure: any Error
+    private var ledger: [String] = []
+    init(failure: any Error) { self.failure = failure }
+    func operations() -> [String] { ledger }
+    func request(operation: String, params: Data) async throws -> Data {
+        ledger.append(operation)
+        guard operation == "webProviderStart" else { throw WebModelServer.Failure.invalidRequest }
+        throw failure
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 @preconcurrency import WebKit
 
 /// The source interface deliberately has no mutation operation. Cookie objects
@@ -46,6 +47,64 @@ import Foundation
             "The private ChatGPT browser profile could not be prepared. No website prompt was submitted."
         }
     }
+    /// Closed diagnostic data only. Counts saturate at the existing limit plus
+    /// one; no cookie string, identity, source index or arbitrary error is kept.
+    struct FailureDiagnostic: Equatable, Sendable {
+        enum Phase: String, Sendable { case admission, sourceRead = "source_read", sourceSelection = "source_selection", destinationEmpty = "destination_empty", write, verify }
+        enum Code: String, Sendable { case unavailable, bounds, invalidSource = "invalid_source", destinationNotEmpty = "destination_not_empty", verificationFailed = "verification_failed", deadline, cancelled, unknown }
+        enum Reason: String, Sendable {
+            case unavailable, deadline, cancelled, unknown
+            case sourceCount = "source_count_bound", clock = "nonfinite_clock", fieldBytes = "field_byte_bound", totalBytes = "total_byte_bound"
+            case invalidFields = "invalid_fields", duplicateIdentity = "duplicate_identity", nonfiniteExpiry = "nonfinite_expiry"
+            case invalidScopeFields = "invalid_scope_fields", selectedCount = "selected_count_bound"
+            case destinationNotEmpty = "destination_not_empty", verificationCount = "verification_count_mismatch", verificationAttributes = "verification_attributes_mismatch"
+        }
+        enum Comparison: String, Sendable { case uniqueIdentity = "unique_identity", singleRemaining = "single_remaining" }
+        // Bit positions: domain, path, name, value, secure, HTTPOnly, session,
+        // expiry, version, ports, SameSite. The mask carries no attribute value.
+        let phase: Phase
+        let code: Code
+        let reason: Reason
+        let sourceCount: Int?
+        let eligibleCount: Int?
+        let selectedCount: Int?
+        let destinationCount: Int?
+        let completedWrites: Int
+        let measuredFieldBytes: Int?
+        let attributeMismatchMask: Int?
+        let comparison: Comparison?
+
+        init(phase: Phase, code: Code, reason: Reason, sourceCount: Int? = nil, eligibleCount: Int? = nil,
+             selectedCount: Int? = nil, destinationCount: Int? = nil, completedWrites: Int = 0, measuredFieldBytes: Int? = nil,
+             attributeMismatchMask: Int? = nil, comparison: Comparison? = nil) {
+            self.phase = phase; self.code = code; self.reason = reason
+            self.sourceCount = sourceCount.map { min(max($0, 0), 4_097) }
+            self.eligibleCount = eligibleCount.map { min(max($0, 0), 4_097) }
+            self.selectedCount = selectedCount.map { min(max($0, 0), 513) }
+            self.destinationCount = destinationCount.map { min(max($0, 0), 4_097) }
+            self.completedWrites = min(max(completedWrites, 0), 512)
+            self.measuredFieldBytes = measuredFieldBytes.map { min(max($0, 0), 1_048_577) }
+            self.attributeMismatchMask = attributeMismatchMask.map { $0 & 2_047 }
+            self.comparison = comparison
+        }
+
+        var record: String {
+            "cookieSeedFailure version=1 phase=\(phase.rawValue) code=\(code.rawValue) reason=\(reason.rawValue) sourceCount=\(sourceCount ?? -1) eligibleCount=\(eligibleCount ?? -1) selectedCount=\(selectedCount ?? -1) destinationCount=\(destinationCount ?? -1) completedWrites=\(completedWrites) measuredFieldBytes=\(measuredFieldBytes ?? -1) attributeMismatchMask=\(attributeMismatchMask ?? -1) comparison=\(comparison?.rawValue ?? "unavailable")"
+        }
+        static func code(for error: any Error) -> Code {
+            if error is CancellationError { return .cancelled }
+            switch error as? Failure {
+            case .unavailable: return .unavailable
+            case .bounds: return .bounds
+            case .invalidSource: return .invalidSource
+            case .destinationNotEmpty: return .destinationNotEmpty
+            case .verificationFailed: return .verificationFailed
+            case .deadline: return .deadline
+            case nil: return .unknown
+            }
+        }
+    }
+    private static let failureLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "InferenceCookieSeed")
 
     private let source: any ChatGPTInferenceCookieSource
     private let destination: any ChatGPTInferenceCookieDestination
@@ -61,6 +120,17 @@ import Foundation
     private var selected: [HTTPCookie] = []
     private let cancellation = CookieSeedCancellation()
     private var selectionCounts: Summary?
+    private var diagnosticPhase: FailureDiagnostic.Phase = .admission
+    private var diagnosticReason: FailureDiagnostic.Reason?
+    private var sourceCount: Int?
+    private var destinationCount: Int?
+    private var completedWrites = 0
+    private var selectionFailure: FailureDiagnostic?
+    private var verificationMismatch: (mask: Int, comparison: FailureDiagnostic.Comparison)?
+    private(set) var failureDiagnostic: FailureDiagnostic?
+    #if DEBUG
+    var failureDiagnosticObserverForTesting: ((FailureDiagnostic) -> Void)?
+    #endif
     private(set) var verifiedSummary: Summary?
     /// Retained only in memory for an optional consume-once preloaded page.
     private(set) var verifiedSourceCookies: [HTTPCookie]?
@@ -102,6 +172,17 @@ import Foundation
     private func fail(_ error: any Error) {
         guard terminal == nil, !drained else { return }
         terminal = error
+        let code = FailureDiagnostic.code(for: error)
+        let reason: FailureDiagnostic.Reason = diagnosticReason ?? (code == .cancelled ? .cancelled : code == .deadline ? .deadline : code == .unavailable ? .unavailable : .unknown)
+        let diagnostic = selectionFailure ?? FailureDiagnostic(phase: diagnosticPhase, code: code, reason: reason,
+            sourceCount: sourceCount, eligibleCount: selectionCounts?.eligibleCookieCount,
+            selectedCount: selectionCounts?.seededCookieCount, destinationCount: destinationCount, completedWrites: completedWrites,
+            attributeMismatchMask: verificationMismatch?.mask, comparison: verificationMismatch?.comparison)
+        failureDiagnostic = diagnostic
+        Self.failureLog.error("\(diagnostic.record, privacy: .public)")
+        #if DEBUG
+        failureDiagnosticObserverForTesting?(diagnostic)
+        #endif
         timer?.cancel(); timer = nil
         let waiter = continuation; continuation = nil
         waiter?.resume(throwing: error)
@@ -125,10 +206,12 @@ import Foundation
     }
 
     private func readSource() {
+        diagnosticPhase = .sourceRead
         let ticket = UUID(); pending = ticket
         source.read { [self] cookies in
             receive(ticket) {
-                let selection = try Self.select(cookies, now: Date())
+                diagnosticPhase = .sourceSelection; sourceCount = cookies.count
+                let selection = try Self.select(cookies, now: Date(), onFailure: { self.selectionFailure = $0 })
                 selected = selection.cookies
                 selectionCounts = Summary(sourceCookieCount: cookies.count, eligibleCookieCount: selection.eligibleCookieCount,
                     excludedConversationCookieCount: selection.excludedConversationCookieCount, seededCookieCount: selected.count,
@@ -140,10 +223,12 @@ import Foundation
 
     private func readEmptyDestination() {
         do { try check() } catch { fail(error); return }
+        diagnosticPhase = .destinationEmpty
         let ticket = UUID(); pending = ticket
         destination.read { [self] cookies in
             receive(ticket) {
-                guard cookies.isEmpty else { throw Failure.destinationNotEmpty }
+                destinationCount = cookies.count
+                guard cookies.isEmpty else { diagnosticReason = .destinationNotEmpty; throw Failure.destinationNotEmpty }
                 write(index: 0)
             }
         }
@@ -152,20 +237,26 @@ import Foundation
     private func write(index: Int) {
         do { try check() } catch { fail(error); return }
         guard index < selected.count else { verify(); return }
+        diagnosticPhase = .write
         let ticket = UUID(); pending = ticket
         // Preserve the original native object and every attribute. There is no
         // reconstruction from name/value strings and no mutation of the source.
-        destination.set(selected[index]) { [self] in receive(ticket) { write(index: index + 1) } }
+        destination.set(selected[index]) { [self] in receive(ticket) { completedWrites += 1; write(index: index + 1) } }
     }
 
     private func verify() {
+        diagnosticPhase = .verify
         let ticket = UUID(); pending = ticket
         destination.read { [self] cookies in
             receive(ticket) {
-                guard cookies.count == selected.count else { throw Failure.verificationFailed }
+                destinationCount = cookies.count
+                guard cookies.count == selected.count else { diagnosticReason = .verificationCount; throw Failure.verificationFailed }
                 var remaining = cookies
                 for expected in selected {
-                    guard let index = remaining.firstIndex(where: { Self.sameCookie(expected, $0) }) else { throw Failure.verificationFailed }
+                    guard let index = remaining.firstIndex(where: { Self.sameCookie(expected, $0) }) else {
+                        verificationMismatch = Self.attributeMismatch(expected, remaining: remaining)
+                        diagnosticReason = .verificationAttributes; throw Failure.verificationFailed
+                    }
                     remaining.remove(at: index)
                 }
                 try check()
@@ -189,25 +280,48 @@ import Foundation
             && left.version == right.version && left.portList == right.portList && left.sameSitePolicy == right.sameSitePolicy
     }
 
+    private static func attributeMismatch(_ expected: HTTPCookie, remaining: [HTTPCookie]) -> (mask: Int, comparison: FailureDiagnostic.Comparison)? {
+        func equal(_ a: String, _ b: String) -> Bool { Data(a.utf8) == Data(b.utf8) }
+        let matches = remaining.filter { equal(expected.domain, $0.domain) && equal(expected.path, $0.path) && equal(expected.name, $0.name) }
+        let actual: HTTPCookie, comparison: FailureDiagnostic.Comparison
+        if matches.count == 1 { actual = matches[0]; comparison = .uniqueIdentity }
+        else if remaining.count == 1 { actual = remaining[0]; comparison = .singleRemaining }
+        else { return nil }
+        let differences = [!equal(expected.domain, actual.domain), !equal(expected.path, actual.path),
+            !equal(expected.name, actual.name), !equal(expected.value, actual.value), expected.isSecure != actual.isSecure,
+            expected.isHTTPOnly != actual.isHTTPOnly, expected.isSessionOnly != actual.isSessionOnly,
+            expected.expiresDate != actual.expiresDate, expected.version != actual.version,
+            expected.portList != actual.portList, expected.sameSitePolicy != actual.sameSitePolicy]
+        let mask = differences.enumerated().reduce(0) { $0 | ($1.element ? 1 << $1.offset : 0) }
+        return (mask, comparison)
+    }
+
     /// Fixed ChatGPT DNS scope only. Unknown conversation-like names or paths
     /// are not classified as conversation cookies. No auth-name allowlist is
     /// guessed: all other eligible ChatGPT cookies retain their exact objects.
-    static func select(_ cookies: [HTTPCookie], now: Date) throws -> Selection {
-        guard cookies.count <= 4_096, now.timeIntervalSince1970.isFinite else { throw Failure.bounds }
+    static func select(_ cookies: [HTTPCookie], now: Date, onFailure: ((FailureDiagnostic) -> Void)? = nil) throws -> Selection {
         var bytes = 0, identities = Set<Data>(), selected: [HTTPCookie] = []
         var eligible = 0, excluded = 0
+        func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason) -> Failure {
+            onFailure?(FailureDiagnostic(phase: .sourceSelection, code: FailureDiagnostic.code(for: failure), reason: reason,
+                sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes))
+            return failure
+        }
+        guard cookies.count <= 4_096 else { throw reject(.bounds, .sourceCount) }
+        guard now.timeIntervalSince1970.isFinite else { throw reject(.bounds, .clock) }
         for cookie in cookies {
             for field in [cookie.domain, cookie.path, cookie.name, cookie.value] {
                 let count = field.utf8.prefix(65_537).count
-                guard count <= 65_536, bytes <= 1_048_576 - count else { throw Failure.bounds }
+                guard count <= 65_536 else { throw reject(.bounds, .fieldBytes) }
+                guard bytes <= 1_048_576 - count else { throw reject(.bounds, .totalBytes) }
                 bytes += count
             }
             guard !cookie.domain.contains("\0"), !cookie.path.contains("\0"), !cookie.name.contains("\0"),
-                  cookie.properties != nil else { throw Failure.invalidSource }
+                  cookie.properties != nil else { throw reject(.invalidSource, .invalidFields) }
             let identity = Data((cookie.domain + "\0" + cookie.path + "\0" + cookie.name).utf8)
-            guard identities.insert(identity).inserted else { throw Failure.invalidSource }
+            guard identities.insert(identity).inserted else { throw reject(.invalidSource, .duplicateIdentity) }
             if let expiry = cookie.expiresDate {
-                guard expiry.timeIntervalSince1970.isFinite else { throw Failure.invalidSource }
+                guard expiry.timeIntervalSince1970.isFinite else { throw reject(.invalidSource, .nonfiniteExpiry) }
                 if expiry <= now { continue }
             }
             var host = cookie.domain.lowercased()
@@ -217,7 +331,7 @@ import Foundation
             guard host.utf8.count <= 253, labels.allSatisfy({ label in
                 !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
                     && label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
-            }), cookie.path.hasPrefix("/") else { throw Failure.invalidSource }
+            }), cookie.path.hasPrefix("/") else { throw reject(.invalidSource, .invalidScopeFields) }
             eligible += 1
             let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
                 || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
@@ -225,7 +339,7 @@ import Foundation
                 excluded += 1
                 continue
             }
-            guard selected.count < 512 else { throw Failure.bounds }
+            guard selected.count < 512 else { throw reject(.bounds, .selectedCount) }
             selected.append(cookie)
         }
         return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded)

@@ -884,6 +884,99 @@ private actor CleanupReceiptAudit {
 /// recovery must not issue another turn, model prompt, tool call or engine start.
 @MainActor
 final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
+    func testActualBundledEngineRestartPreservesCookieStartupFailureWithoutSendingOrClaimingCleanup() async throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ComputaCookieStartupRestart-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let modelID = choice.modelID
+        XCTAssertEqual(WebsiteModelCatalog.choice(for: modelID), choice)
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = modelID
+        config.codexHomePath = root.appendingPathComponent("PrivateHome").path
+        config.workspacePath = root.appendingPathComponent("Workspace").path
+        config.protocolTracePath = root.appendingPathComponent("first-protocol.jsonl").path
+        let prompt = "Synthetic local ChatGPT profile startup failure. Do not use tools."
+        let taskID = UUID().uuidString, first = CodexAppServerRuntime(configuration: config)
+        let transport = CleanupCookieStartupFailureTransport(), audit = CleanupRuntimeAudit(taskID: taskID)
+        let observer = Task { for await event in first.events() { audit.receive(event) } }
+        defer { observer.cancel() }
+        await first.configureEmbeddedWebModelTransport(transport)
+        do {
+            _ = try await first.loadTasks()
+            try await first.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+            let deadline = ContinuousClock.now + .seconds(45)
+            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .waiting)
+            XCTAssertEqual(audit.errors.count, 1)
+            let original = try XCTUnwrap(audit.errors.first)
+            let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+            let originalError = try XCTUnwrap(originalObject["error"] as? [String: Any])
+            XCTAssertEqual(originalError["code"] as? String, "chatgpt_profile_preparation_failed")
+            XCTAssertEqual(originalError["reason"] as? String, "verification_failed")
+            XCTAssertEqual(originalError["message"] as? String,
+                "The private ChatGPT browser profile could not be verified. No prompt was replayed.")
+            XCTAssertEqual(originalError["retryable"] as? Bool, false)
+            XCTAssertEqual(originalError["type"] as? String, "model_error")
+            XCTAssertNil(originalError["required_action"])
+            XCTAssertFalse(original.contains("high demand"))
+            let pending = try XCTUnwrap(audit.receipts.first { $0.outcome == .unconfirmed })
+            XCTAssertEqual(pending.schemaVersion, 3)
+            XCTAssertTrue(pending.isStartupAttemptLinked); XCTAssertTrue(pending.receiptSaved)
+            XCTAssertEqual(pending.reason, .cleanupUnverified)
+            XCTAssertEqual(pending.provider, .chatgpt); XCTAssertEqual(pending.modelID, modelID)
+            XCTAssertNil(pending.sessionToken, "A pre-token failure cannot establish an owned website session")
+            XCTAssertFalse(audit.receipts.contains { $0.outcome == .closed })
+            let threadID = try XCTUnwrap(pending.threadID), turnID = try XCTUnwrap(pending.turnID)
+            let cleanupDirectory = URL(fileURLWithPath: config.codexHomePath).appendingPathComponent("WebsiteSessionCleanup-v1")
+            XCTAssertTrue(WebsiteSessionCleanupStore(directory: cleanupDirectory).latest().contains(pending))
+            _ = await first.shutdown()
+            let firstWire = try AppServerWireTrace.load(root.appendingPathComponent("first-protocol.jsonl"))
+            XCTAssertTrue(firstWire.parseFailures.isEmpty)
+            XCTAssertEqual(firstWire.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
+            XCTAssertFalse(firstWire.messages.contains { $0.method == "item/tool/call" })
+            let calls = await transport.calls()
+            XCTAssertEqual(calls.map(\.operation), ["webProviderStart"], "Cookie preparation cannot submit, retry, poll or manufacture cleanup")
+            XCTAssertEqual(calls.first?.parameters["provider"], "chatgpt")
+            XCTAssertEqual(calls.first?.parameters["modelChoice"], choice.canonicalJSONString)
+
+            var reloadConfig = config
+            reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
+            let reloadedRuntime = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
+            await reloadedRuntime.configureEmbeddedWebModelTransport(inert)
+            do {
+                let tasks = try await reloadedRuntime.loadTasks()
+                let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
+                XCTAssertEqual(restored.status, .waiting)
+                XCTAssertEqual(restored.model, modelID)
+                XCTAssertEqual(restored.entries.filter { $0.kind == .user }.map(\.body), [prompt])
+                XCTAssertFalse(restored.entries.contains { $0.kind == .assistant })
+                let errors = restored.entries.filter { $0.title == "Agent error" }
+                XCTAssertEqual(errors.count, 1)
+                let restoredError = try XCTUnwrap(errors.first)
+                XCTAssertEqual(restoredError.turnID, turnID)
+                let restoredObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(restoredError.body.utf8)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: restoredObject).isEqual(to: originalObject))
+                let failures = try WebsiteTurnFailureStore(directory: URL(fileURLWithPath: config.codexHomePath)
+                    .appendingPathComponent("WebsiteTurnFailureStore-v1")).load(threadID: threadID)
+                XCTAssertEqual(failures.count, 1); XCTAssertEqual(failures.first?.turnID, turnID)
+                XCTAssertEqual(failures.first?.modelID, modelID)
+                let cleanup = WebsiteSessionCleanupStore(directory: cleanupDirectory)
+                XCTAssertTrue(cleanup.latest().contains(pending), "Cold reload cannot turn unknown startup ownership into closed")
+                XCTAssertEqual(try cleanup.transactionRecords(for: pending.taskID, turnID: turnID), [pending])
+                let reloadedCalls = await inert.calls()
+                XCTAssertTrue(reloadedCalls.isEmpty, "Restoring this failure must not invoke a website operation")
+                _ = await reloadedRuntime.shutdown()
+                let reloadWire = try AppServerWireTrace.load(root.appendingPathComponent("reload-protocol.jsonl"))
+                XCTAssertTrue(reloadWire.parseFailures.isEmpty)
+                XCTAssertFalse(reloadWire.messages.contains { $0.direction == .clientToServer && $0.method == "turn/start" })
+                XCTAssertFalse(reloadWire.messages.contains { $0.method == "item/tool/call" })
+                XCTAssertTrue(cleanup.latest().contains(pending))
+            } catch { _ = await reloadedRuntime.shutdown(); throw error }
+        } catch { _ = await first.shutdown(); throw error }
+    }
+
     func testActualBundledEngineRestartPreservesPageInspectionFailureWithoutReplaying() async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaInspectionRestart-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1260,6 +1353,21 @@ private actor CleanupBlockedStartTransport: WebModelTransport {
         operations.append(operation)
         guard operation == "webProviderStart" else { throw WebModelServer.Failure.invalidRequest }
         throw EmbeddedWebModelTransport.Failure.humanVerificationRequired(.gemini)
+    }
+}
+
+private actor CleanupCookieStartupFailureTransport: WebModelTransport {
+    struct Call: Sendable {
+        let operation: String
+        let parameters: [String: String]
+    }
+    private var operations: [Call] = []
+    func calls() -> [Call] { operations }
+    func request(operation: String, params: Data) async throws -> Data {
+        let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        operations.append(Call(operation: operation, parameters: parameters))
+        guard operation == "webProviderStart" else { throw WebModelServer.Failure.invalidRequest }
+        throw ChatGPTInferenceCookieSeed.Failure.verificationFailed
     }
 }
 

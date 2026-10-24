@@ -43,6 +43,11 @@ struct WebsiteTurnFailureStore: Sendable {
             }
             let nativeError: any Error
             switch code {
+            case "chatgpt_profile_preparation_failed", "website_browser_session_failed":
+                guard let rawReason = error["reason"] as? String,
+                      let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,
+                      !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
+                nativeError = reason
             case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,

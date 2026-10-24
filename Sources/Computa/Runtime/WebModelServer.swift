@@ -1746,7 +1746,77 @@ actor WebModelServer {
         var param: String? = nil
     }
 
+    /// A closed projection of native browser failures, never page/cookie data
+    /// or an arbitrary NSError description. This describes the failure only;
+    /// it does not establish whether an unresolved startup owns a browser tab.
+    enum NativeBrowserFailure: String, Error, LocalizedError, CaseIterable {
+        case profileUnavailable = "unavailable", profileBounds = "bounds", profileInvalidSource = "invalid_source"
+        case profileDestinationNotEmpty = "destination_not_empty", profileVerificationFailed = "verification_failed"
+        case profileDeadline = "deadline"
+        case tabLimit = "tab_limit", tabClosed = "tab_closed", sessionClosed = "session_closed"
+        case modelTabPrivate = "model_tab_private", modelPopupUnsupported = "model_popup_unsupported"
+        case toolPopupUnsupported = "tool_popup_unsupported", popupProfileMismatch = "popup_profile_mismatch"
+        case inspectionUnavailable = "inspection_unavailable", cookieMaintenancePending = "cookie_maintenance_pending"
+
+        init?(_ error: any Error) {
+            if let failure = error as? Self { self = failure; return }
+            if let failure = error as? ChatGPTInferenceCookieSeed.Failure {
+                switch failure {
+                case .unavailable: self = .profileUnavailable
+                case .bounds: self = .profileBounds
+                case .invalidSource: self = .profileInvalidSource
+                case .destinationNotEmpty: self = .profileDestinationNotEmpty
+                case .verificationFailed: self = .profileVerificationFailed
+                case .deadline: self = .profileDeadline
+                }
+            } else if let failure = error as? EmbeddedBrowserSession.Failure {
+                switch failure {
+                case .tabLimit: self = .tabLimit
+                case .tabClosed: self = .tabClosed
+                case .sessionClosed: self = .sessionClosed
+                case .modelTabPrivate: self = .modelTabPrivate
+                case .modelPopupUnsupported: self = .modelPopupUnsupported
+                case .toolPopupUnsupported: self = .toolPopupUnsupported
+                case .popupProfileMismatch: self = .popupProfileMismatch
+                case .inspectionUnavailable: self = .inspectionUnavailable
+                case .cookieMaintenancePending: self = .cookieMaintenancePending
+                }
+            } else { return nil }
+        }
+
+        var requiresChatGPT: Bool {
+            switch self {
+            case .profileUnavailable, .profileBounds, .profileInvalidSource, .profileDestinationNotEmpty,
+                 .profileVerificationFailed, .profileDeadline: true
+            default: false
+            }
+        }
+        var code: String { requiresChatGPT ? "chatgpt_profile_preparation_failed" : "website_browser_session_failed" }
+        var errorDescription: String? {
+            switch self {
+            case .profileUnavailable: "Private ChatGPT browser profile preparation is unavailable. No prompt was replayed."
+            case .profileBounds: "Private ChatGPT browser profile preparation exceeded its fixed local bounds. No prompt was replayed."
+            case .profileInvalidSource: "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed."
+            case .profileDestinationNotEmpty: "Private ChatGPT browser profile preparation found a nonempty destination. No prompt was replayed."
+            case .profileVerificationFailed: "The private ChatGPT browser profile could not be verified. No prompt was replayed."
+            case .profileDeadline: "Private ChatGPT browser profile preparation reached its deadline. No prompt was replayed."
+            case .tabLimit: "The browser tab limit was reached, including background model sessions."
+            case .tabClosed: "The browser tab is no longer open."
+            case .sessionClosed: "The browser session has ended."
+            case .modelTabPrivate: "A private model browser tab cannot be used as a regular browser tab."
+            case .modelPopupUnsupported: "Pop-up windows are not supported for model inference pages."
+            case .toolPopupUnsupported: "The task browser tab cannot open an unowned pop-up."
+            case .popupProfileMismatch: "The browser pop-up did not preserve the required sign-in profile."
+            case .inspectionUnavailable: "Browser inspection is unavailable while the tab is owned or in use."
+            case .cookieMaintenancePending: "The browser profile is completing a local maintenance operation."
+            }
+        }
+    }
+
     static func errorPresentation(for error: any Error) -> ErrorPresentation {
+        if let failure = NativeBrowserFailure(error) {
+            return .init(status: "400 Bad Request", type: "model_error", code: failure.code)
+        }
         if let failure = error as? HTTPFailure {
             switch failure {
             case .unauthorized: return .init(status: "401 Unauthorized", type: "invalid_request", code: "authentication_required")
@@ -1820,15 +1890,20 @@ actor WebModelServer {
         // Arbitrary NSError descriptions and other transport prose cannot be
         // promoted into an authoritative local model diagnostic.
         error is Failure || error is WebModelResponseCodec.Failure || error is WebsiteTurnContinuation.Failure
-            || error is EmbeddedWebModelTransport.Failure || error is WebsiteProviderFailure
+            || error is EmbeddedWebModelTransport.Failure || error is WebsiteProviderFailure || NativeBrowserFailure(error) != nil
     }
 
     /// Only native finite classifications can add recovery metadata. Website
     /// copy, URLs and response prose cannot populate these protocol fields.
     static func errorBody(for error: any Error) throws -> Data {
         let presentation = errorPresentation(for: error)
-        var fields: [String: Any] = ["type": presentation.type, "message": error.localizedDescription,
+        let nativeBrowserFailure = NativeBrowserFailure(error)
+        var fields: [String: Any] = ["type": presentation.type, "message": nativeBrowserFailure?.localizedDescription ?? error.localizedDescription,
             "code": presentation.code, "param": presentation.param.map { $0 as Any } ?? NSNull()]
+        if let nativeBrowserFailure {
+            fields["reason"] = nativeBrowserFailure.rawValue
+            fields["retryable"] = false
+        }
         if let failure = error as? WebsiteTurnContinuation.Failure {
             fields["reason"] = failure.rawValue
             fields["retryable"] = false
