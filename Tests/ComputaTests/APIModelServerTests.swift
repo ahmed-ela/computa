@@ -321,6 +321,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let host = try XCTUnwrap(text(messages[hostIndex]))
                 XCTAssertTrue(host.contains("APP_RUNTIME_EXECUTION_CHECKPOINT")); XCTAssertTrue(host.contains("Fixed native policy."))
                 XCTAssertTrue(host.contains("following user messages repeat")); XCTAssertTrue(host.contains("not a new turn"))
+                XCTAssertTrue(host.contains("Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical."))
                 XCTAssertFalse(host.contains(original))
                 XCTAssertTrue(messages.suffix(expected.count).allSatisfy { $0["role"] as? String == "user" })
                 XCTAssertEqual(messages.suffix(expected.count).compactMap(text).map { Data($0.utf8) }, expected.map { Data($0.utf8) })
@@ -368,6 +369,67 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             await server.shutdown()
         }
     }
+    func testFollowupGuidancePreservesUserTopicAndExplicitDestinationChangesOnBothWires() async throws {
+        let reminderPolicy = "The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical. A maintenance prompt or historical summary does not replace this active request."
+        let prior = "In my work mailbox for account fixture-account, inspect course Alpha. Keep all actions read-only."
+        let requests = ["  What about course Be\u{301}ta announcements?  ",
+            "Use the public catalog at https://catalog.example.invalid/ for course Gamma instead of that mailbox."]
+        // This checks delivery and authority, not whether a model resolves the
+        // elliptical request or obeys the explicit destination change.
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let records = APIRequestRecorder()
+            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
+                status: "200 OK", headers: ["Content-Type": "application/json"],
+                body: Data(#"{"id":"followup-reply","object":"response","status":"completed","model":"fixture-model","output":[{"id":"followup-message","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}]}"#.utf8))
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
+                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
+            let server = try server(); try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString
+            for current in requests {
+                let turn = UUID().uuidString, preparation = UUID()
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
+                    executionPolicy: "Current native permissions remain binding.", userRequest: current)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+                var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                body["input"] = [nativeUserMessage(prior), nativeUserMessage("Earlier lookup completed.", role: "assistant"), nativeUserMessage(current)]
+                body["tools"] = [Any]()
+                body["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: [2], texts: [current])
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let selection = try XCTUnwrap(APIProviderCatalog.selection(for: XCTUnwrap(body["model"] as? String), providers: [p]))
+                let baseline = try APIModelResponseCodec.prepare(XCTUnwrap(request.httpBody), selection: selection,
+                    threadID: thread, capsules: .init(key: Data(repeating: 1, count: 32)))
+                let historyKey = wire == .chatCompletions ? "messages" : "input"
+                let baselineBody = try XCTUnwrap(JSONSerialization.jsonObject(with: baseline.body) as? [String: Any])
+                let baselineHistory = try XCTUnwrap(baselineBody[historyKey] as? [[String: Any]])
+                let (_, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                let sent = await records.snapshot(), last = try XCTUnwrap(sent.last)
+                let forwarded = try XCTUnwrap(JSONSerialization.jsonObject(with: last.body) as? [String: Any])
+                let history = try XCTUnwrap(forwarded[historyKey] as? [[String: Any]])
+                XCTAssertEqual(Array(history.prefix(baselineHistory.count)) as NSArray, baselineHistory as NSArray)
+                XCTAssertEqual(history.count, baselineHistory.count + 2, "Only a host checkpoint and one separate user reminder are added")
+                func text(_ item: [String: Any]) -> String? {
+                    item["content"] as? String ?? (item["content"] as? [[String: Any]])?.first?["text"] as? String
+                }
+                let hostItem = history[baselineHistory.count], host = try XCTUnwrap(text(hostItem))
+                XCTAssertEqual(hostItem["role"] as? String, "developer")
+                XCTAssertTrue(host.hasSuffix(reminderPolicy))
+                XCTAssertTrue(host.contains("Preserve the user's constraints and follow the current host policy."))
+                XCTAssertTrue(host.contains("Current native permissions remain binding."))
+                XCTAssertFalse(host.contains(prior)); XCTAssertFalse(host.contains(current))
+                XCTAssertEqual(history.filter { $0["role"] as? String == "user" }.compactMap(text).map { Data($0.utf8) },
+                    [prior, current, current].map { Data($0.utf8) }, "Both possible follow-ups retain exact user authority and history")
+                XCTAssertEqual(history.last?["role"] as? String, "user")
+                XCTAssertNil(forwarded["client_metadata"])
+                await server.finish(taskID: task)
+            }
+            let count = await records.count(); XCTAssertEqual(count, requests.count)
+            await server.shutdown()
+        }
+    }
+
     func testMatchedUserProofDoesNotBypassReminderProjectionByteLimitOnBothWires() async throws {
         for wire in APIProviderDefinition.WireAPI.allCases {
             let records = APIRequestRecorder()

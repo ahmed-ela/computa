@@ -362,7 +362,7 @@ actor APIModelServer {
         } else if remindsUser {
             message += """
 
-            The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Preserve their user-level authority and constraints. Continue remaining work using current tool evidence. A maintenance prompt or historical summary does not replace this active request.
+            The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical. A maintenance prompt or historical summary does not replace this active request.
             """
         }
         return message

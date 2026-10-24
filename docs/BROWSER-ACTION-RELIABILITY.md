@@ -1565,3 +1565,53 @@ Installed qualification must therefore check exact current-task answers, consume
 references and exactly one delivery per authorized synthetic send. No runtime,
 reference, retry, capture, history or recovery limit changed. Live results follow
 separately; the goal remains active.
+
+
+Installed build249 matched source `ed44f8f`; all eleven signed-build checks passed.
+The exact mailbox read took 2.175 seconds, three calls, no errors and no POSTs.
+The same-chat send took 5.256 seconds and eight calls, recovering from one bind
+attempt before current-turn inventory; the fresh send took 4.291 seconds and seven
+calls without errors. Both produced exactly one POST with exact requested fields
+and no compaction. The same-chat final changed the recipient and receipt hyphens;
+the fresh final copied its receipt exactly and omitted the other fields. An audit
+parser initially missed the plain-text bind failure; corrected reports correlate
+typed native completion status and preserve the original reports unchanged.
+
+The real attachment trial failed semantically after 29.867 seconds and six
+successful tools. The model chose the personal Outlook entry point, reached a
+public marketing page and refused at an observed actionable Sign in link. No
+password or MFA requirement had been observed. Its follow-up failed in 2.388
+seconds and two successful tools by searching public Google snippets instead of
+the requested mailbox context. There was no compaction in either turn. These
+results do not establish a task-continuity repair. Direct UI verification through
+the previously working Office Outlook entry point selected the existing account
+and reached its inbox without entering credentials or changing settings. That
+separate probe is not a provider pass and changed the session state for later
+trials. All five task-created tabs and the owned diagnostic tab were closed;
+composers were empty and the browser pane was restored hidden. No real mail was
+sent, forwarded, downloaded or deleted.
+
+## Build 250: make API follow-up context explicit
+
+The API checkpoint already preserves user authority and forbids restart/replay,
+but its ordinary-inference wording lacked the website path's explicit instruction
+to interpret follow-ups in conversation. Replace two existing sentences with a
+shorter instruction to resolve follow-ups in the user's service/account/topic
+unless changed and keep past actions historical. This is a wording experiment,
+not evidence of missing user text or a guarantee of semantic model behavior. The
+original history, active inputs, permissions, limits and correction behavior stay
+unchanged. Authentication instructions already permit observed sign-in controls;
+no security rule is weakened to address the model's unsupported refusal.
+
+
+Build250 validation covered 149 distinct API/server/codec and bundled-engine
+cases, all passing in their final recorded run with no skips. The initial run
+passed 148 cases and failed one actual-engine continuation fixture because it
+still expected the replaced sentence pair. Updating only that expected wording
+preserved the no-replay, ordering, history and limit checks; all five actual-engine
+cases then passed. Both runs had stable source hashes, and production code was
+unchanged between them. Original failures are retained. Independent review
+confirmed the complete reminder paragraph shrank from 432 to 429 UTF-8 bytes.
+The new both-wire test verifies exact delivery for a same-service new-topic
+follow-up and an explicit destination change; it does not prove model compliance.
+Version validation passed for 0.7.0 (250). Installed qualification follows.

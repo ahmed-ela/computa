@@ -1356,7 +1356,8 @@ private actor APIHarnessBrowserContinuationInference {
             }
             if !maintenance {
                 guard text(host).contains("not a new turn or a request to restart, repeat completed actions or replay uncertain input"),
-                      text(host).contains("Preserve their user-level authority and constraints.") else {
+                      text(host).contains("Resolve follow-ups in the user's service/account/topic unless changed."),
+                      text(host).contains("Past actions remain historical.") else {
                     throw APIHarnessFailure("continuation_reminder_no_replay_guidance")
                 }
             }
