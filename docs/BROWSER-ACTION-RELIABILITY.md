@@ -1690,3 +1690,27 @@ skips and stable source hashes: 56 API-server, six actual-engine, 40 context,
 two shutdown and 25 streaming tests. Both red reproductions and intermediate green
 runs are preserved. This cohort covers the final rollback plus cleanup source.
 Installed build validation follows separately.
+
+
+Installed signed-test build251 matches `80c5933` and unchanged runtime15; all
+11 build, signing and exact source/resource checks passed. A bounded loopback
+provider drove two real UI turns with four scripted inference requests. The first
+left a finite background child running; the second started a shell pipeline with
+two children, then returned HTTP429. When Waiting was observed, the failed shell
+and both children were gone, the earlier child remained alive, and the UI reported
+one confirmed failed-turn cleanup. Normal Quit then disposed the earlier child.
+All exact test PIDs and the loopback listener were absent afterward, and both
+temporary provider configurations were removed through the UI.
+
+The first fixture attempt rejected the native environment-context user message
+before issuing any command. The human prompt was byte-exact. A new fixture instance
+accepted that separately observed envelope by exact hash and byte length; the
+failed instance and its evidence were preserved. No real provider was called.
+The installed observation proves absence when Waiting was inspected; the direct
+actual-engine test establishes ordering before status publication.
+
+The live test also found a presentation defect: the later failure relabeled the
+still-running earlier successful command as Failed. Process ownership was correct,
+but task-wide transcript retirement was not. This remains open for build252;
+source251 does not claim the row-labeling issue is repaired. Model adherence,
+message association, literal copying and useful diagnostics also remain unresolved.
