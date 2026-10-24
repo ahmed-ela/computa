@@ -1771,3 +1771,107 @@ Responses 2,941 to 8,419 bytes for the controlled identical payload/catalog.
 The worst-case 128-byte token shapes and exact two-million-byte/+1 boundary also
 passed. These are payload measurements, not live model latency or semantic success.
 No provider capture was rearmed. Installed qualification is recorded separately.
+
+### Installed 252 command and mailbox controls
+
+The signed build from `8ea2e01710d9c516e1d4faacabb70d9b54c8f1b5` passed all
+11 build checks. The installed executable SHA-256 was
+`cfc283dfd39c0f63c8c857349206ad2e45805f5e32464c0f3bad0632cf070458`.
+The deterministic loopback command control completed four provider requests and
+two native commands, with one start per child and no replay or API correction.
+The prior turn completed in 1.350 seconds; the second reached the intentional
+HTTP 429 in 1.307 seconds. The failed shell and both pipeline children were first
+sampled absent 54.488 ms after the 429, while the earlier child remained alive.
+When Waiting was inspected 4.582 seconds after that sample, the UI reported one
+session cleaned and correctly kept the earlier row Running while the failed row
+was Failed. Normal Quit disposed the earlier child; all exact PIDs and the
+listener were absent afterward and the synthetic provider was removed. This
+installed observation proves absence when Waiting was inspected, not its exact
+publication instant. The earlier fixture-admission and build 251 presentation
+failures remain preserved.
+
+The three unchanged mailbox prompts ran on Cerebras `gpt-oss-120b`, medium, using
+the same loopback origin with a fresh empty fixture store:
+
+| Case | Duration | Native calls | Native errors | API corrections | Compactions | Observed result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Read | 2.266 s | 3 | 0 | 0 | 0 | Correct exam change and exact attachment filename; no POST |
+| Same-chat send | 5.208 s | 7 | 0 | 0 | 0 | One exact POST and current receipt; final recipient copied with U+2011 instead of ASCII hyphen |
+| Fresh send | 4.467 s | 6 | 0 | 0 | 0 | One exact POST; requested fields and current receipt copied exactly |
+
+Both sends filled the three requested fields before pressing Send once. Every
+input reference appeared in the immediately preceding published observation.
+Delivery passed in 2/2 send controls; strict quoted-recipient copying passed in
+1/2. API correction journals were checked separately, so zero native errors does
+not conceal a corrected enum rejection in these samples. Each turn closed one
+task-created tab, preserved user tabs and left an empty composer with no Stop
+control. The fixture listener was then stopped.
+
+Builds 248–250 also delivered both messages. Their same/fresh send native error
+counts were 1/2, 1/0 and 0/0, compared with 0/0 here. These single samples are not
+a latency benchmark or a causal reliability result: the earlier fixture retained
+prior deliveries, and the reminder experiments in 249/250 were later reverted.
+The same-chat literal-copy failure remains. Real mailbox and diagnostics
+qualification are separate from these controls.
+
+### Real Outlook 252: authentication claims remain unsupported
+
+The unchanged attachment request used Cerebras `gpt-oss-120b`, medium, and ended
+after 65.496 seconds with 14 native calls, no native errors, no API corrections
+and no compaction. It did not reach message or attachment evidence and returned
+no filename. The model followed a published Sign in link and then pressed the
+published matching account selector. The account click dispatched once. Its
+post-input observation arrived 48 ms later, still showing the account chooser;
+it reported `result_verified:false` and directed waiting or reading again without
+replaying the input. No password or MFA challenge was observed. The model took
+no further observation and finalized about 1.3 seconds later, incorrectly treating
+credentials as an established prerequisite. Current account-selection guidance
+was present in the canonical developer instructions and click description.
+
+The unchanged course-announcement follow-up completed in 0.725 seconds with
+zero tools, errors or API corrections, repeating the unsupported authentication
+claim. A separate maintenance compaction immediately before that user turn
+preserved the original request and summarized the prior refusal as an access
+block. The new follow-up text then entered history exactly. This is a failed
+follow-up with inherited unsupported context; it is not evidence that the new
+human request was lost. Neither turn performed a mail send, forward, deletion,
+download or credential entry. Attachment association, exact filename copying
+and announcement coverage were not established. UI cleanup closed the one
+task-created tab, preserved user tabs and left the composer empty.
+
+A separate controlled CUA diagnostic subsequently selected the matching account
+and observed Outlook loading at 0.890 seconds and the mailbox at 25.449 seconds,
+without a password/MFA prompt or credential entry. It opened no messages and
+closed both diagnostic tabs. That different session and input route demonstrate
+an available credential-free flow, not a model pass or proof that latency caused
+the refusal. The observation times are sampling bounds, and the diagnostic may
+have changed shared sign-in state. No wait, retry or permission change is
+justified by this comparison alone. The real-mailbox acceptance failure remains
+open despite the qualified host changes and synthetic delivery controls.
+
+
+### Diagnostics 252: historical assistant text is not settings evidence
+
+The unchanged read-only diagnostics request completed on Cerebras `gpt-oss-120b`,
+medium, in 47.436 seconds with 29 calls (28 shell commands and one browser
+inventory), one compaction, no browser errors and no API correction journals.
+Shell receipts showed 18 exit-zero results, eight exit-one results and two
+running sessions. Two exit-one results were normal empty grep searches; none
+was a command-not-found exit 127. No mutating command was executed.
+
+The answer nevertheless asserted an MDM `allowLocalBrowser` cause and advised
+an unsupported `defaults write` remedy. The key appeared only in two repeated
+recursive searches of saved session history, which quoted a prior assistant
+answer. Current defaults, profile and plist outputs did not establish that key
+or cause, and no official documentation was retrieved. The task therefore
+failed its supported-settings requirement despite native completion; this is
+not a claim that no such setting can exist. Private historical text is omitted.
+
+The two broad filesystem searches remained alive after successful completion,
+which preserves background commands. Normal UI Quit then disposed both exact
+shell/find/head process groups and the native engine; all seven recorded PIDs
+were absent afterward, with no manual signals. This is separate from the
+failed-turn cleanup control. The app was reopened idle. Finite call ordinals,
+correction counts and before/after process receipts are preserved in the private
+`audits252/diagnostics-review` and cleanup artifacts. No runtime fix or broader
+reliability claim follows from this failed diagnostic sample.
