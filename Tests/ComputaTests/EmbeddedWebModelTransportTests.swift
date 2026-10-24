@@ -6731,7 +6731,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, """
                 window.fixtureContradictoryPowerOpens = 0;
                 if ('\(condition)' === 'unknown_header')
-                  document.getElementById('fixture-model-header').textContent = 'Thinking effort';
+                  document.getElementById('fixture-model-header').textContent = 'Unknown effort';
                 else document.getElementById('fixture-model-trigger').addEventListener('click', () => {
                   window.fixtureContradictoryPowerOpens++;
                   window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '4');
@@ -6750,6 +6750,66 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
             try await assertHumanTabIntact(fixture)
         }
+    }
+
+    func testChatGPTGenericClosedHeaderRequiresFreshMenusThroughSelectionSendAndResponse() async throws {
+        for (key, label) in [("instant", "Instant"), ("medium", "Medium")] {
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/" + key, label: label)
+            let fixture = try Fixture(page: Self.genericClosedChatPowerPage())
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            let ready = try await waitForState("ready", fixture.transport, token: token)
+            try assertChoiceEvidence(ready, choice: choice)
+            let beforeSend = try await evaluate(view, """
+                return {header: document.getElementById('fixture-model-header').textContent,
+                  powerViews: window.fixtureModelPowerOpenCount, familyViews: window.fixtureModelFamilyOpenCount,
+                  selected: document.querySelector('[data-fixture-model][aria-checked="true"]')?.dataset.fixtureModel ?? null};
+                """) as? [String: Any]
+            XCTAssertEqual(beforeSend?["header"] as? String, "Thinking effort")
+            XCTAssertGreaterThanOrEqual(beforeSend?["powerViews"] as? Int ?? 0, 2,
+                "Every generic proof must read Power again after the family panel")
+            var actions: [String] = []
+            fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+            let prompt = "Synthetic generic closed-header " + key + " request"
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            try assertChoiceEvidence(complete, choice: choice)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+            if key == "medium" { XCTAssertTrue(actions.contains("prepare")) }
+            let prompts = try await capturedUserPrompts(view)
+            // WK contenteditable readback may preserve its one terminal line
+            // break; every other source byte and the single-message count stay exact.
+            XCTAssertTrue(prompts == [prompt] || prompts == [prompt + "\n"])
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testChatGPTGenericClosedHeaderRejectsPostFamilyPowerResetWithoutRepairOrSend() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.genericClosedChatPowerPage(resetAfterFamily: true))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        do {
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            XCTFail("A generic label cannot hide a family-induced power reset")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch) }
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+        let effects = try await evaluate(view, "return {events: window.fixturePowerKeyEvents, value: Number(window.fixtureChatPowerThumb.getAttribute('aria-valuenow'))};") as? [String: Int]
+        XCTAssertEqual(effects?["events"], 1, "Only the originally requested Medium-to-Instant input may run")
+        XCTAssertEqual(effects?["value"], 4, "A mismatched final Power must not be repaired")
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testChatGPTClosedPowerDriftIncludingRestoreCannotAdmitReadOnlySend() async throws {
@@ -11399,6 +11459,29 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     private static let fixtureToolReply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf fixture"}}]}"#
+
+    /// Mirrors the separately observed generic closed label and Escape/reopen
+    /// returning to Power. Neither fixture state nor labels supply model proof.
+    private static func genericClosedChatPowerPage(resetAfterFamily: Bool = false) -> String {
+        let page = modelChoicePage(.chatgpt, initiallySelectTarget: !resetAfterFamily)
+            .replacingOccurrences(of: """
+              document.getElementById('fixture-model-header').textContent = open ? 'Thinking effort'
+                : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'][Number(powerThumb.getAttribute('aria-valuenow'))];
+            """, with: """
+              document.getElementById('fixture-model-header').textContent = 'Thinking effort';
+              if (!open) window.fixtureModelRememberedView = 'power';
+            """)
+        guard resetAfterFamily else { return page }
+        return page.replacingOccurrences(of: "</body>", with: """
+            <script>
+            // Start at Medium independently of the initially checked family.
+            window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '1');
+            document.querySelectorAll('[data-fixture-model]').forEach(node => node.addEventListener('click', () => {
+              window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '4');
+            }));
+            </script></body>
+            """)
+    }
 
     private static func familyClosingTransitionPage() -> String {
         modelChoicePage(.chatgpt, genericHeader: true, unmountClosedMenu: true)

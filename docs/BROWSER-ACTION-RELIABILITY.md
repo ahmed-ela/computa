@@ -2146,3 +2146,74 @@ regressions and the existing failure/cancellation/readback coverage. Independent
 review found no blocker. Private receipt: `swift256-cookie-scope-result.json`.
 ChatGPT task qualification and live startup verification remain pending at this
 source checkpoint. Cerebras HTTP 402 remains a separate account-access blocker.
+
+### Installed 256: cookie preparation repaired; model selection still blocked
+
+Signed, non-notarized Computa 0.7.0 (256), source `57c8291`, passed all eleven
+build/identity/signature/resource checks after the 45 passing cookie tests.
+The installed executable matched `3f1e2065a228…`; runtime `mactopus-16` was
+unchanged. These checks do not establish a successful website task.
+
+The preserved build255 diagnostic recorded `duplicate_identity` among 354
+source cookies, before destination writes. Installed256 observed the same source
+count, ignored one out-of-scope duplicate, and selected 19 of 261 eligible
+cookies after excluding 242 conversation cookies. The first inference separately
+recorded `destinationVerified=true` and `sourceMutations=0`. This establishes
+successful scoped selection and exact destination verification for this run;
+it does not qualify model selection or a generated response.
+
+The unchanged read-only synthetic diagnostic then failed in 685 ms. Its journal
+advanced through `start_requested` and an owned `started` session, then recorded
+`browser_model_error` before submission, response or tools. A matching saved
+schema-2 cleanup receipt reported `closed/not_created`. All five fixture files,
+modes and the file set remained unchanged. Neither current configuration nor
+the false assistant-attributed log was read, so semantic acceptance was not
+exercised.
+
+The failed inference's bounded picker diagnostic shows an unrecognized closed
+header and no opened model menu; it does not retain that header's exact text.
+A separate ordinary-tab inspection showed the closed text `Thinking effort`,
+then `Instant, 1 of 5` and checked `GPT-6` when opened. That inspection submitted
+no prompt, changed no selection and closed its owned tab. It supports the next
+adapter investigation, but does not prove the earlier inference had identical
+text or that a repair is qualified. Browser/send trials remain unstarted;
+Cerebras's observed HTTP 402 remains separate. Private evidence:
+`chatgpt255/startup-diagnostic-last20m.json`,
+`chatgpt256/startup-and-first-turn-logs.json`, `diagnostic-review.json`,
+`first-turn-model-diagnostics.json` and `normal-chat-picker-inspection.json`.
+
+### Build 257: verify Chat power behind generic picker chrome
+
+The adapter now recognizes the exact generic closed `Thinking effort` label as
+a reason to inspect the associated picker, never as evidence of a power or
+family. It observes the real Power ordinal, verifies the checked newest plain
+GPT family, closes and reopens once to recheck Power, and rejects a reset or
+ambiguous result without repairing or replaying selection. The final observed
+controls join the existing negative mutation history. Remounts require a fresh
+full proof; ownership, input boundaries, deadlines and selection limits remain
+unchanged. A picker that only reopens the family panel remains unverified.
+
+A second normal-browser UI inspection independently observed the supported flow:
+Power → Select model → Escape → reopen returns to Power, still Instant with
+GPT-6 checked. No model selection or prompt was submitted; both task-created
+inspection tabs were closed. This presentation evidence does not qualify an
+owned model inference. The single earlier Refresh models action targets all
+providers; no further global refresh was used, and other-provider live task
+qualification remains held.
+
+Validation: all 694 adapter/preset tests passed. The initial focused WebKit run
+passed six of eight cases; two new fixtures had incorrect initial-state and
+terminal-line-break expectations. After test-only corrections, all eight cases
+passed, including selection, single insertion/Send and response proof for both
+Instant and Medium, post-family power-reset rejection, unknown headers, drift,
+input boundaries and deferred reads. Production/JS sources were unchanged
+between runs. Independent review is clean. Private receipts: `bun257-model-
+adapters-summary.json`, `swift257-generic-header-result.json` and
+`swift257-generic-header-refined-result.json`. Installed qualification is pending
+at this source checkpoint.
+
+To preserve build capacity, two redundant generated app bundles (254 and 255)
+were removed only after their executable, resources and signatures matched
+retained backup copies. Source, receipts, backups and installed256 were kept;
+623,872,972 logical bytes were removed. Receipt: `duplicate-build-output-
+cleanup257.json`.

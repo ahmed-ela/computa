@@ -53,7 +53,7 @@ export class Element {
 // Selector fixtures mirror the observed native picker semantics. They qualify
 // selection/ownership behavior; live DOM diagnostics separately qualify shape.
 export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini' | 'claude', Node: any = Element,
-  behavior: { genericHeader?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
+  behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
     escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) {
   if (provider === 'chatgpt') return installObservedChatPowerPicker(f, Node, behavior);
   const initial = provider === 'chatgpt' ? 'GPT-5.6 Sol' : provider === 'gemini' ? '3.1 Pro' : 'Sonnet 5.5';
@@ -176,7 +176,8 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
 function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   const labels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
   let powerIndex = 1, selectedFamily = 'GPT-6';
-  let primary = new Node('SPAN', {}, labels[powerIndex]);
+  const closedLabel = () => behavior.closedGenericHeader ? 'Thinking effort' : labels[powerIndex];
+  let primary = new Node('SPAN', {}, closedLabel());
   let trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
     'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'model-picker-menu' });
   trigger.append(primary);
@@ -226,7 +227,8 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   const showPower = () => mount(false);
   const close = () => {
     menu.values.hidden = ''; menu.values['data-state'] = 'closed'; trigger.values['aria-expanded'] = 'false';
-    menu.connected = false; primary.text = labels[powerIndex];
+    menu.connected = false; primary.text = closedLabel();
+    if (behavior.resetToPowerOnClose) rememberedFamily = false;
   };
   trigger.onClick = () => {
     if (menu.values.hidden === undefined) { if (!behavior.escapeOnlyClose) close(); }
@@ -242,7 +244,7 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   function selected(label: string) {
     const index = labels.indexOf(label === 'GPT-6 Pro' ? 'Pro' : label);
     if (index >= 0) { powerIndex = index; slider.values['aria-valuenow'] = String(index);
-      if (menu.values.hidden !== undefined) primary.text = labels[index]; }
+      if (menu.values.hidden !== undefined) primary.text = closedLabel(); }
     else {
       selectedFamily = label;
       familyOptions.forEach(node => { node.values['aria-checked'] = node.children[0].text.split('\n')[0] === label ? 'true' : 'false'; });
@@ -277,7 +279,7 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
       const previous = trigger;
       trigger = new Node('BUTTON', { ...previous.values });
       trigger.onClick = previous.onClick;
-      primary = new Node('SPAN', {}, labels[powerIndex]); trigger.append(primary);
+      primary = new Node('SPAN', {}, closedLabel()); trigger.append(primary);
       if (disconnect) {
         f.body.children = f.body.children.filter((node: any) => node !== previous);
         previous.parentElement = null; previous.connected = false;

@@ -9,7 +9,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     ? { key: 'chat/latest/' + (label === 'GPT-6 Pro' ? 'pro' : label.toLowerCase().replace(' ', '-')), label }
     : { key: label, label };
   const selectionSource = provider === 'chatgpt' ? 'selected_model_indicator' : 'checked_model_option';
-  const setup = (owned = false, behavior: { genericHeader?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
+  const setup = (owned = false, behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
     geminiMenuitemMarkers?: boolean; escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) => {
     const f = make(owned);
     if (provider === 'chatgpt') f.composer.focus = () => { f.document.activeElement = f.composer; };
@@ -2788,12 +2788,83 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         }
       });
       test('unknown closed headers cannot bootstrap input or model selection', async () => {
-        for (const label of ['', 'Thinking effort', 'GPT-6', 'GPT-6 Pro', 'High Work', 'PRIVATE_HEADER']) {
+        for (const label of ['', 'Thinking harder', 'GPT-6', 'GPT-6 Pro', 'High Work', 'PRIVATE_HEADER']) {
           const { f, picker } = setup(); picker.primary.text = label;
           const result = await f.run('selectModel', { modelChoice: choice(target) });
           expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
           expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
           expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+        }
+      });
+      test('generic closed chrome discovers actual power and verifies fresh family then Power before pinning', async () => {
+        const behavior = { closedGenericHeader: true, resetToPowerOnClose: true };
+        const discovery = setup(false, behavior); discovery.picker.selected('High');
+        const found = await discovery.f.run('discoverModels');
+        expect(found.modelEvidence.chatSelection.power).toEqual({ key: 'high', label: 'High' });
+        expect(found.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(found.modelChoices).toHaveLength(5); noSelection(discovery.f, discovery.picker);
+        expect(discovery.picker.trigger.clicks).toBe(2);
+        const { f, picker } = setup(false, behavior);
+        expect((await f.run('modelDiagnostic')).modelDiagnostic.chatHeader).toMatchObject({
+          canonicalRecognized: false, openPresentationRecognized: true, closed: true, ordinal: null });
+        const selected = await f.run('selectModel', { modelChoice: choice(target) });
+        expect(selected.selected).toBe(true); expect(selected.modelEvidence.selected).toEqual(choice(target));
+        expect(selected.modelEvidence.chatSelection.power.key).toBe('high');
+        expect(arrows(picker)).toHaveLength(1); expect(picker.trigger.clicks).toBe(2);
+        const pin = f.world.__computaChatPresetPin;
+        expect(pin.genericHeaderVerified).toBe(picker.trigger); expect(pin.controls.has(picker.slider)).toBe(true);
+        expect(picker.primary.text).toBe('Thinking effort');
+        const checked = await f.run('verifyModel', { expectedModelChoice: choice(target) });
+        expect(checked.modelEvidence.selected).toEqual(choice(target)); expect(picker.trigger.clicks).toBe(4);
+        expect(arrows(picker)).toHaveLength(1); expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+      });
+      test('generic chrome cannot replace missing ambiguous disabled or foreign Power and family proof', async () => {
+        for (const condition of ['missing_power', 'disabled_power', 'ambiguous_power', 'foreign_menu', 'ambiguous_family']) {
+          const { f, picker } = setup(false, { closedGenericHeader: true, resetToPowerOnClose: true });
+          if (condition === 'missing_power') picker.slider.values.hidden = '';
+          if (condition === 'disabled_power') picker.powerItem.values['aria-disabled'] = 'true';
+          if (condition === 'ambiguous_power') picker.powerItem.append(new Node('SPAN', { ...picker.slider.values }));
+          if (condition === 'foreign_menu') picker.trigger.values['aria-controls'] = 'unassociated';
+          if (condition === 'ambiguous_family') picker.familyOptions[2].values['aria-checked'] = 'true';
+          const result = await expire(f, f.run('selectModel', { modelChoice: choice(initial) }));
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(f.world.__computaChatPresetPin).toBeUndefined(); noSelection(f, picker);
+        }
+      });
+      test('generic closed chrome rejects a family-induced power reset without repairing or retrying', async () => {
+        const { f, picker } = setup(false, { closedGenericHeader: true, resetToPowerOnClose: true });
+        picker.selected('GPT-5.5');
+        const choose = picker.familyOptions[0].onClick;
+        picker.familyOptions[0].onClick = () => { choose(); picker.selected('Pro'); };
+        const result = await f.run('selectModel', { modelChoice: choice(initial) });
+        expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+        expect(picker.familyOptions[0].clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
+        expect(picker.trigger.clicks).toBe(2); expect(f.world.__computaChatPresetPin).toBeUndefined();
+      });
+      test('generic family-only reopening fails closed without inventing a Back action', async () => {
+        const { f, picker } = setup(false, { closedGenericHeader: true });
+        const result = await f.run('selectModel', { modelChoice: choice(initial) });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(picker.trigger.clicks).toBe(2); noSelection(f, picker);
+        expect(f.world.__computaChatPresetPin).toBeUndefined();
+      });
+      test('generic header proof catches later power drift and only transfers a remount after fresh menu proof', async () => {
+        for (const condition of ['unchanged', 'power_drift', 'family_drift', 'owner_changed']) {
+          const { f, picker } = setup(false, { closedGenericHeader: true, resetToPowerOnClose: true });
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, old = picker.replaceTrigger();
+          if (condition === 'power_drift') picker.selected('Pro');
+          if (condition === 'family_drift') picker.selected('GPT-5.5');
+          if (condition === 'owner_changed') f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER';
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          if (condition === 'unchanged') {
+            expect(result.modelEvidence.selected).toEqual(choice(initial));
+            expect(pin.headerTrigger).toBe(picker.trigger); expect(pin.genericHeaderVerified).toBe(picker.trigger);
+            expect(picker.trigger.clicks).toBe(2);
+          } else {
+            expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined(); expect(pin.headerTrigger).toBe(old);
+          }
+          noSelection(f, picker); expect(JSON.stringify(result)).not.toContain('PRIVATE_FOREIGN_OWNER');
         }
       });
       test('a disconnected header remount rebinds only after fresh readonly family and power proof', async () => {

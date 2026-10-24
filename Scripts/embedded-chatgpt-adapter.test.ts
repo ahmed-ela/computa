@@ -271,12 +271,13 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
 
-async function chatTurnFixture(modelChoice?: { key: string; label: string }, initialMarker = firstMarker) {
+async function chatTurnFixture(modelChoice?: { key: string; label: string }, initialMarker = firstMarker, closedGenericHeader = false) {
   const f = fixture({ response: false });
   await f.inspect({ expectedUserCounts: [0], expectedFirstUserMarker: initialMarker });
   let picker: ReturnType<typeof installObservedModelPicker> | undefined;
   if (modelChoice) {
-    picker = installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
+    picker = installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true, closedGenericHeader, resetToPowerOnClose: closedGenericHeader });
+    if (closedGenericHeader) expect((await f.inspect({ action: 'selectModel', modelChoice, expectedUserCounts: [0] })).selected).toBe(true);
     const model = await f.inspect({ action: 'verifyModel', expectedUserCounts: [0], expectedModelChoice: modelChoice });
     expect(model.error).toBeUndefined();
   }
@@ -1019,6 +1020,41 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
     expect(picker.trigger.clicks).toBeGreaterThan(atSend); expect(x.send.clicks).toBe(1);
   });
 
+  test('closed generic chrome retains full menu proof through first Instant input Send and response', async () => {
+    const instant = { key: 'chat/latest/instant', label: 'Instant' };
+    const x = await chatTurnFixture(instant, firstMarker, true), picker: any = x.picker;
+    const record = await x.dispatch('Synthetic generic-header request', { deferModelVerification: true });
+    expect(x.send.clicks).toBe(1); expect(picker.primary.text).toBe('Thinking effort');
+    const before = picker.trigger.clicks;
+    x.answer('Verified synthetic response');
+    const pending = await x.observe(record, { deferModelVerification: true });
+    expect(pending.error).toBeUndefined(); expect(pending.modelVerificationPending).toBe(true);
+    expect(pending).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(before);
+    const complete = await x.observe(record, { deferModelVerification: false });
+    expect(complete.error).toBeUndefined(); expect(complete.modelEvidence.selected).toEqual(instant);
+    expect(complete.modelEvidence.chatSelection).toMatchObject({ family: { key: 'GPT-6' }, power: { key: 'instant' } });
+    expect(complete.answerComplete).toBe(true); expect(complete.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect(picker.trigger.clicks).toBeGreaterThan(before); expect(x.send.clicks).toBe(1);
+  });
+
+  test('generic pending continuity never hides tracked power switch-and-restore or unknown header text', async () => {
+    for (const condition of ['power_restore', 'unknown_header', 'unproved_generic']) {
+      const instant = { key: 'chat/latest/instant', label: 'Instant' };
+      const x = await chatTurnFixture(instant, firstMarker, true), picker: any = x.picker;
+      const record = await x.dispatch('Synthetic guarded generic response', { deferModelVerification: true });
+      x.answer('Unaccepted synthetic response');
+      const pin = x.f.world.__computaChatPresetPin as any, before = picker.trigger.clicks;
+      if (condition === 'power_restore') pin.semanticObserver.callback([{ type: 'attributes', target: picker.slider,
+        attributeName: 'aria-valuenow', oldValue: '4' }]);
+      if (condition === 'unknown_header') picker.primary.text = 'Unknown effort';
+      if (condition === 'unproved_generic') delete pin.genericHeaderVerified;
+      const rejected = await x.observe(record, { deferModelVerification: true });
+      expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('modelEvidence');
+      expect(rejected).not.toHaveProperty('modelVerificationPending');
+      expect(picker.trigger.clicks).toBe(before); expect(x.send.clicks).toBe(1);
+    }
+  });
+
   test('deferred reads require an enabled closed recognized header without opening the picker', async () => {
     for (const mutation of ['disabled', 'open', 'unknown_power']) {
       const x = await chatTurnFixture(choice), picker: any = x.picker;
@@ -1029,7 +1065,7 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
       expect(healthy).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(before);
       if (mutation === 'disabled') picker.trigger.disabled = true;
       if (mutation === 'open') picker.trigger.values['aria-expanded'] = 'true';
-      if (mutation === 'unknown_power') picker.trigger.text = 'Thinking effort';
+      if (mutation === 'unknown_power') picker.trigger.text = 'Unknown effort';
       const rejected = await x.observe(record, { deferModelVerification: true });
       expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('modelVerificationPending');
       expect(rejected).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(before);
