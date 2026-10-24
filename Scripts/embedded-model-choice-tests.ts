@@ -2788,13 +2788,114 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         }
       });
       test('unknown closed headers cannot bootstrap input or model selection', async () => {
-        for (const label of ['', 'Thinking harder', 'GPT-6', 'GPT-6 Pro', 'High Work', 'PRIVATE_HEADER']) {
+        for (const label of ['Thinking harder', 'GPT-6', 'GPT-6 Pro', 'High Work', 'PRIVATE_HEADER']) {
           const { f, picker } = setup(); picker.primary.text = label;
           const result = await f.run('selectModel', { modelChoice: choice(target) });
           expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
           expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
           expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
         }
+      });
+      const pendingEmptyHeader = async (generic = false) => {
+        const { f, picker } = setup(false, { closedGenericHeader: generic, resetToPowerOnClose: true });
+        picker.selected('Instant'); picker.primary.text = '';
+        const clocks: { milliseconds: number; expire: () => void }[] = [];
+        let registered!: () => void;
+        const registration = new Promise<void>(resolve => { registered = resolve; });
+        f.window.webkit.messageHandlers.computaModelClock = { postMessage: (body: any) => new Promise(resolve => {
+          clocks.push({ milliseconds: body.milliseconds, expire: () => resolve(true) }); registered();
+        }) };
+        const pending = f.run('selectModel', { modelChoice: choice('Instant'),
+          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+        await registration;
+        expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1_800);
+        const wake = () => { for (const observer of [...f.observers]) observer.callback([
+          { type: 'childList', target: picker.primary, addedNodes: [], removedNodes: [] }]); };
+        return { f, picker, clocks, pending, wake };
+      };
+      test('an empty initial header waits without input then requires full canonical or generic menu proof', async () => {
+        for (const generic of [false, true]) {
+          const x = await pendingEmptyHeader(generic);
+          x.picker.primary.text = generic ? 'Thinking effort' : 'Instant'; x.wake();
+          const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Instant'));
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedEmpty: true, outcome: 'recognized', reason: null });
+          expect(x.picker.trigger.clicks).toBe(generic ? 2 : 1); noSelection(x.f, x.picker);
+        }
+      });
+      test('empty initial header timeout never opens the picker or renews the proof deadline', async () => {
+        const empty = await pendingEmptyHeader();
+        empty.f.advanceTime(1_801); empty.clocks[0].expire();
+        const timeout = await empty.pending;
+        expect(timeout.error).toBe('model_unverified'); expect(timeout.modelEvidence).toBeUndefined();
+        expect(timeout.modelDiagnostic.chatHeader.readiness).toEqual({ startedEmpty: true, outcome: 'rejected', reason: 'deadline' });
+        expect(empty.picker.trigger.clicks).toBe(0); noSelection(empty.f, empty.picker);
+        const late = await pendingEmptyHeader();
+        late.f.advanceTime(1_700); late.picker.trigger.onClick = () => {};
+        late.picker.primary.text = 'Instant'; late.wake(); await microtasks();
+        expect(late.clocks).toHaveLength(2); expect(late.clocks[1].milliseconds).toBeLessThanOrEqual(100);
+        late.f.advanceTime(101); late.clocks[1].expire();
+        expect((await late.pending).error).toBe('model_unverified');
+        expect(late.picker.trigger.clicks).toBe(1); noSelection(late.f, late.picker);
+      });
+      test('empty header wake rejects unknown text identity ownership ambiguity and new effects immediately', async () => {
+        for (const condition of ['unknown', 'replacement', 'owner', 'disabled', 'ambiguous', 'open', 'pin', 'action']) {
+          const x = await pendingEmptyHeader();
+          if (condition === 'unknown') x.picker.primary.text = 'PRIVATE_UNKNOWN_HEADER';
+          if (condition === 'replacement') x.picker.replaceTrigger();
+          if (condition === 'owner') x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER';
+          if (condition === 'disabled') x.picker.trigger.disabled = true;
+          if (condition === 'ambiguous') x.f.body.append(new Node('BUTTON', { ...x.picker.trigger.values }));
+          if (condition === 'open') x.picker.trigger.values['aria-expanded'] = 'true';
+          if (condition === 'pin') x.f.world.__computaChatPresetPin = {};
+          if (condition === 'action') x.f.world.__computaModelSelection.powerEvents = 1;
+          x.wake();
+          // An invalid observed wake is terminal even if a later frame restores text.
+          x.picker.primary.text = 'Instant'; x.wake();
+          const result = await x.pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.chatHeader.readiness.outcome).toBe('rejected');
+          expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe(condition === 'unknown' ? 'unknown_header'
+            : condition === 'owner' ? 'ownership_changed' : 'state_changed');
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+      });
+      test('empty readonly discovery and pinned headers never receive the initial mutable hydration wait', async () => {
+        for (const condition of ['discovery', 'readonly', 'pinned']) {
+          const { f, picker } = setup();
+          if (condition === 'pinned') expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const opens = picker.trigger.clicks; picker.primary.text = '';
+          let clocks = 0;
+          f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run(condition === 'discovery' ? 'discoverModels' : condition === 'pinned' ? 'selectModel' : 'verifyModel',
+            { ...(condition === 'discovery' ? {} : { modelChoice: choice(initial), expectedModelChoice: choice(initial) }),
+              operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic?.chatHeader?.readiness).toBeUndefined();
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
+        }
+      });
+      test('header diagnostics distinguish rendered hidden and oversized text without exporting content', async () => {
+        const { f, picker } = setup();
+        Object.defineProperty(picker.trigger, 'innerText', { configurable: true, get: () => '' });
+        picker.primary.text = 'Instant';
+        const hidden = (await f.run('modelDiagnostic')).modelDiagnostic.chatHeader.textShape;
+        expect(hidden.innerText).toMatchObject({ present: true, empty: true, length: 0, canonicalOrdinal: null });
+        expect(hidden.textContent).toMatchObject({ empty: false, canonicalOrdinal: 0 });
+        picker.primary.text = '\u0344'.repeat(512); // NFC expands this combining character.
+        expect((await f.run('modelDiagnostic')).modelDiagnostic.chatHeader.textShape.textContent.normalizedLength).toBe(512);
+        picker.primary.text = 'PRIVATE_HEADER_CANARY'.repeat(200);
+        for (let index = 0; index < 40; index++) picker.trigger.append(new Node('SPAN', {}, 'PRIVATE_CHILD_CANARY'));
+        const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic;
+        expect(diagnostic.chatHeader.textShape.textContent).toMatchObject({ length: 513, normalizedLength: null, over128: true });
+        expect(diagnostic.chatHeader.textShape.childCount).toBe(33);
+        expect(diagnostic.chatHeader.textShape.children).toHaveLength(4);
+        expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE');
+        expect(JSON.stringify(diagnostic).length).toBeLessThanOrEqual(8_192);
+        expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
       });
       test('generic closed chrome discovers actual power and verifies fresh family then Power before pinning', async () => {
         const behavior = { closedGenericHeader: true, resetToPowerOnClose: true };

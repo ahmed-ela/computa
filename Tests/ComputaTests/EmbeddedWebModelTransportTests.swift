@@ -6792,6 +6792,69 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTEmptyInitialHeaderHydratesBeforeAnyPickerInputThenVerifiesSendAndResponse() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true))
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setModelDiagnosticsObserverForTesting { diagnostics.append($0) }
+        defer { fixture.transport.setModelDiagnosticsObserverForTesting(nil) }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await evaluate(view, """
+            window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '0');
+            document.getElementById('fixture-model-header').textContent = '';
+            return true;
+            """)
+        let preparation = Task { @MainActor in
+            let ready = try await self.waitForState("ready", fixture.transport, token: token)
+            try self.assertChoiceEvidence(ready, choice: choice)
+        }
+        defer { preparation.cancel() }
+        // Observe the actual native clock registration while the private-world
+        // selector is suspended. Elapsed time alone does not prove the wait.
+        let registrationDeadline = ContinuousClock.now + .seconds(3)
+        var registered = false
+        while ContinuousClock.now < registrationDeadline {
+            let snapshot = fixture.browser.modelDiagnosticSnapshot(tabID: tabID)
+            if snapshot.contains("model_wait") && snapshot.contains("clocksPending=1") {
+                registered = true
+                break
+            }
+            await Task.yield()
+        }
+        guard registered else { XCTFail("Empty-header native deadline was not registered"); throw FixtureFailure.timeout }
+        let pending = try await evaluate(view, """
+            return {empty: document.getElementById('fixture-model-header').textContent === '',
+              opens: window.fixtureModelTriggerClicks, power: window.fixturePowerKeyEvents};
+            """) as? [String: Any]
+        XCTAssertEqual(pending?["empty"] as? Bool, true)
+        XCTAssertEqual(pending?["opens"] as? Int, 0)
+        XCTAssertEqual(pending?["power"] as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        _ = try await evaluate(view, "document.getElementById('fixture-model-header').textContent = 'Instant'; return true;")
+        try await preparation.value
+        let readiness = try diagnostics.compactMap { line -> [String: Any]? in
+            let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
+        }
+        XCTAssertTrue(readiness.contains { $0["startedEmpty"] as? Bool == true && $0["outcome"] as? String == "recognized" })
+        let prompt = "Synthetic empty-header hydration request"
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertTrue(prompts == [prompt] || prompts == [prompt + "\n"], "Only the existing terminal editor line break may differ")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTGenericClosedHeaderRejectsPostFamilyPowerResetWithoutRepairOrSend() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.genericClosedChatPowerPage(resetAfterFamily: true))

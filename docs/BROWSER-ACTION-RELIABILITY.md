@@ -2217,3 +2217,53 @@ were removed only after their executable, resources and signatures matched
 retained backup copies. Source, receipts, backups and installed256 were kept;
 623,872,972 logical bytes were removed. Receipt: `duplicate-build-output-
 cleanup257.json`.
+
+### Installed 257: model verification still fails before submission
+
+Signed build257 passed all eleven build/identity/signature/resource checks;
+installed source `ff41b26` and executable `deb2f9e8912a…` matched the validated
+artifact. The 694 adapter tests and eight refined WebKit cases above passed;
+they do not establish the live owned-page presentation.
+
+The exact frozen diagnostic prompt failed in 668 ms with no website submission,
+tools, compaction or final answer. Cookie preparation separately verified 26
+seeded cookies from 363 source cookies, with one unrelated duplicate ignored and
+zero source mutations. The owned session started, then failed model verification;
+its matching saved cleanup receipt reported `closed/not_created`. All five
+project files and modes remained unchanged. The initial closed header satisfied
+neither canonical nor generic-label recognition, and no menu was opened. The
+normal-tab `Thinking effort` compatibility change was therefore insufficient for
+this run; the owned header's exact text was not established.
+
+A separate ordinary Temporary-chat inspection observed an initially absent
+picker, followed later by a picker displaying `Instant`. No prompt or model
+selection was submitted, and its owned tab was closed. Hydration or hidden-layout
+differences remain hypotheses, not proven causes on the failed inference page.
+The next guarded experiment is a bounded wait only for an empty header, plus
+finite header diagnostics; it is not a semantic repair claim. All other browser
+and send cases remain unstarted, with no fixture servers launched. Private
+receipts: `chatgpt257/installed-association.json`, `diagnostic-review.json`,
+`diagnostic-model-logs.json` and `temporary-picker-inspection.json`.
+
+
+### Build258: bounded initial header readiness experiment
+
+An initial mutable ChatGPT selection can now wait for an empty closed picker
+label to hydrate, spending the existing 1,800 ms proof deadline and dispatching
+no input while empty. Every observed wake requires the same unique enabled
+closed trigger, owner, document and untouched attempt. Unknown text, replacement,
+new effects, ambiguity or expired ownership reject immediately. Read-only and
+already-pinned verification remain unchanged. Recognition only unlocks the
+existing complete Power/family proof; waiting itself supplies no model authority.
+
+Finite diagnostics distinguish rendered and DOM text using capped lengths,
+canonical/generic matches and at most four allowlisted child shapes. They contain
+no raw header text, arbitrary attributes, HTML or hashes. Successful selection
+can emit the same bounded diagnostic without putting it into model evidence.
+
+Validation on stable source: all 699 adapter tests and nine focused real-WebKit
+cases passed. The native hydration test observes actual clock registration,
+asserts zero picker/editor input before release, then verifies one Send, completed
+response and owned cleanup. These tests cover the mechanism, not the live cause;
+installed qualification remains pending. Private receipts: `bun258-model-adapters-
+result.json` and `swift258-header-readiness-result.json`.

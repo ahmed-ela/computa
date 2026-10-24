@@ -123,6 +123,16 @@ function websiteChatHeaderPower(trigger) {
   return typeof value === 'string' && value.length <= 128
     ? websiteChatPowers.find(power => power.label === websiteModelNormalize(value)) || null : null;
 }
+function websiteChatHeaderTextShape(value) {
+  const present = typeof value === 'string';
+  const normalized = present && value.length <= 512 ? websiteModelNormalize(value) : null;
+  const ordinal = present && value.length <= 128
+    ? websiteChatPowers.findIndex(power => power.label === normalized) : -1;
+  return { present, length: present ? Math.min(value.length, 513) : 0,
+    normalizedLength: normalized === null ? null : Math.min(normalized.length, 512),
+    empty: normalized === '', over128: present && value.length > 128,
+    canonicalOrdinal: ordinal < 0 ? null : ordinal, generic: normalized === 'Thinking effort' };
+}
 // Generic chrome carries no model value. This predicate supplies only negative
 // continuity after a full associated-menu proof on this exact owned header.
 function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computaChatPresetPin) {
@@ -411,6 +421,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
+  let headerReadiness = null;
   const tracked = new Map();
   const observeHeader = records => {
     if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
@@ -435,7 +446,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -715,6 +726,44 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   try {
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
+    // Only the first mutable selection may observe an empty, still-hydrating
+    // label. Waiting spends the same proof deadline and dispatches no input.
+    const initialText = websiteChatHeaderTextShape(initial.trigger?.innerText);
+    if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
+      && initial.closedPresentation && initialText.present && initialText.empty && !initialText.over128
+      && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
+      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
+      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      headerReadiness = { startedEmpty: true, outcome: 'waiting', reason: null };
+      readStage = 'initial_header_empty_wait';
+      let rejected = null;
+      const reject = reason => { rejected = reason; return true; };
+      const ready = () => {
+        if (rejected) return true;
+        if (!owned()) return reject('ownership_changed');
+        if (globalThis.__computaChatPresetPin || globalThis.__computaModelSelection !== attempt
+          || attempt.completed !== false || attempt.powerEvents !== 0 || attempt.familyClicked !== false
+          || primaryOpened || secondaryOpened || closeAttempted || observedProof) return reject('state_changed');
+        let current;
+        try { current = state(); } catch { return reject('state_changed'); }
+        if (!current.closedPresentation || current.trigger !== trigger) return reject('state_changed');
+        const text = websiteChatHeaderTextShape(current.trigger.innerText);
+        if (current.headerPower || current.headerPresentation) return true;
+        if (!text.present || !text.empty || text.over128) return reject('unknown_header');
+        return false;
+      };
+      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      ready();
+      if (!changed || Date.now() >= until || rejected) {
+        headerReadiness.outcome = 'rejected';
+        headerReadiness.reason = rejected || 'deadline';
+        readStage = 'initial_header_empty_rejected';
+        return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
+      }
+      initial = state();
+      headerReadiness.outcome = 'recognized';
+      readStage = 'initial_header_hydrated';
+    }
     if (!initial.closedPresentation || !initial.headerPower && !initial.headerPresentation) return failure('model_unverified');
     const genericHeader = !initial.headerPower;
     const headerIndex = initial.headerPower ? websiteChatPowers.findIndex(power => power.key === initial.headerPower.key) : null;
@@ -761,7 +810,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
       tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
         'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
-    const modelDiagnostic = websiteModelDiagnostic(familyState);
+    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness });
     observedProof = true; readStage = 'family_proof_observed';
     await close();
     let final = state();
@@ -856,7 +905,7 @@ async function websiteChatPickerAction(request, fresh, freshGuard) {
   if (result.error) return result;
   attempt.completed = true;
   attempt.choices = result.modelChoices;
-  return discovery ? result : { selected: true, modelEvidence: result.modelEvidence };
+  return discovery ? result : { selected: true, modelEvidence: result.modelEvidence, modelDiagnostic: result.modelDiagnostic };
 }
 function websiteModelReadonlyChoiceValid(request) {
   return websiteModelChoiceValid(request.expectedModelChoice)
@@ -1134,6 +1183,23 @@ function websiteModelDiagnostic(state, readObservation = null) {
       openPresentationRecognized: state.headerPresentation,
       ordinal: state.headerPower ? websiteChatPowers.findIndex(power => power.key === state.headerPower.key) : null,
       menuMode: ['power', 'family', 'unknown', 'closed'].includes(state.mode) ? state.mode : 'unknown' };
+    const header = state.trigger;
+    const headerChildren = [];
+    for (let index = 0; index < Math.min(header?.childNodes?.length || 0, 4); index++)
+      headerChildren.push(header.childNodes[index]);
+    diagnostic.chatHeader.textShape = {
+      innerText: websiteChatHeaderTextShape(header?.innerText), textContent: websiteChatHeaderTextShape(header?.textContent),
+      childCount: Math.min(header?.childNodes?.length || 0, 33),
+      children: headerChildren.map(node => ({
+        kind: node.nodeType === 1 ? 'element' : node.nodeType === 3 ? 'text' : 'other',
+        tag: ['span', 'div', 'svg', 'path'].includes(node.tagName?.toLowerCase()) ? node.tagName.toLowerCase() : 'other',
+        visible: node.nodeType === 1 ? state.visible(node) : null,
+        text: websiteChatHeaderTextShape(node.textContent) })) };
+    const readiness = readObservation?.headerReadiness;
+    if (readiness?.startedEmpty === true && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
+      diagnostic.chatHeader.readiness = { startedEmpty: true, outcome: readiness.outcome,
+        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
+          ? readiness.reason : null };
   }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
