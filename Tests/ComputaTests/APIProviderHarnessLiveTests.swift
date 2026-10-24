@@ -299,14 +299,42 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let sessions = home.appendingPathComponent("sessions", isDirectory: true)
             let files = FileManager.default.enumerator(at: sessions, includingPropertiesForKeys: [.isRegularFileKey])
             var compactions = 0
+            let humanPrompts = [APIHarnessBrowserContinuationInference.priorPrompt,
+                APIHarnessBrowserContinuationInference.currentPrompt, APIHarnessBrowserContinuationInference.resumedPrompt]
+            var originalHumanCounts = [Int](repeating: 0, count: humanPrompts.count)
+            func exactHumanText(_ item: [String: Any]) -> String? {
+                guard item["role"] as? String == "user",
+                      let content = item["content"] as? [[String: Any]], content.count == 1,
+                      content[0]["type"] as? String == "input_text" else { return nil }
+                return content[0]["text"] as? String
+            }
             while let file = files?.nextObject() as? URL {
                 guard file.pathExtension == "jsonl" else { continue }
                 for line in try Data(contentsOf: file).split(separator: 0x0A) {
                     let row = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
-                    if row?["type"] as? String == "compacted" { compactions += 1 }
+                    guard let payload = row?["payload"] as? [String: Any] else { continue }
+                    if row?["type"] as? String == "response_item", let human = exactHumanText(payload),
+                       let index = humanPrompts.firstIndex(where: { Data($0.utf8) == Data(human.utf8) }) {
+                        originalHumanCounts[index] += 1
+                    }
+                    if row?["type"] as? String == "compacted" {
+                        compactions += 1
+                        let history = try XCTUnwrap(payload["replacement_history"] as? [[String: Any]])
+                        let humans = history.compactMap(exactHumanText).map { Data($0.utf8) }
+                        XCTAssertEqual(humans.filter { $0 == Data(humanPrompts[0].utf8) }.count, 1)
+                        XCTAssertEqual(humans.filter { $0 == Data(humanPrompts[1].utf8) }.count, 1)
+                        XCTAssertFalse(humans.contains(Data(humanPrompts[2].utf8)))
+                        XCTAssertFalse(history.contains { item in
+                            (item["content"] as? [[String: Any]] ?? []).contains {
+                                ($0["text"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n")
+                            }
+                        }, "The API checkpoint and reminders must not enter replacement history")
+                    }
                 }
             }
             XCTAssertEqual(compactions, 3, "The real engine must persist all three forced maintenance results")
+            XCTAssertEqual(originalHumanCounts, [1, 1, 1],
+                "Each submitted human request is persisted once; repeated API reminders are wire-only")
             guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Browser continuation invariants failed.") }
             await upstream.stop()
             try FileManager.default.removeItem(at: root)
@@ -424,7 +452,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(firstReceipt.commandOutputMatched)
             XCTAssertTrue(firstReceipt.reasoningRoundtripped)
             XCTAssertTrue(firstReceipt.ordinaryHumanInputsPreserved,
-                          "Native proof must preserve one exact user request before later tool results, without reminder duplication")
+                          "The original user request stays before tool results, with exactly one wire-only user reminder after the checkpoint")
             XCTAssertTrue(firstReceipt.semanticNamingStable,
                           "Actual Core thread/start must opt the fresh chat into semantic naming before the provider receives its tools")
             XCTAssertEqual(firstReceipt.failures, [])
@@ -721,6 +749,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(receipt.rejectedBatchHadNoEffectsAtCorrection)
             XCTAssertTrue(receipt.firstUsageDurableBeforeCorrection)
             XCTAssertTrue(receipt.correctiveRequestPreservedOriginal)
+            XCTAssertEqual(receipt.userReminderChecks, 4,
+                "The correction reuses exactly one reminder, and later native inferences do not accumulate it")
             XCTAssertTrue(receipt.acceptedToolHistoryOnly)
             XCTAssertEqual(receipt.failures, [])
             XCTAssertEqual(credentials.counts().reads, 3, "The correction retains the already admitted credential; native rounds still read independently.")
@@ -989,15 +1019,21 @@ private actor APIHarnessInference {
                 if bytes == originalPrompt { originalPositions.append(index) }
                 if bytes == resumedPrompt { resumedPositions.append(index) }
             }
-            guard originalPositions.count == 1, resumedPositions.count == (count == 4 ? 1 : 0),
+            guard originalPositions.count == (count == 4 ? 1 : 2), resumedPositions.count == (count == 4 ? 2 : 0),
                   body["client_metadata"] == nil,
                   !String(decoding: request.body, as: UTF8.self).contains("current_user_text_v1") else {
                 throw APIHarnessFailure("active_user_projection")
             }
+            let activePositions = count == 4 ? resumedPositions : originalPositions
+            guard activePositions.last == messages.count - 1, messages.count >= 2,
+                  messages[messages.count - 2]["role"] as? String == "developer",
+                  (messages[messages.count - 2]["content"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n") else {
+                throw APIHarnessFailure("active_user_reminder_authority")
+            }
             if count == 2 || count == 3 {
                 guard let lastTool = messages.lastIndex(where: { $0["role"] as? String == "tool" }),
-                      originalPositions[0] < lastTool,
-                      !messages.suffix(from: lastTool + 1).contains(where: { $0["role"] as? String == "user" }) else {
+                      originalPositions[0] < lastTool, lastTool < originalPositions[1],
+                      messages.suffix(from: lastTool + 1).filter({ $0["role"] as? String == "user" }).count == 1 else {
                     throw APIHarnessFailure("active_user_reordered_after_tool")
                 }
                 observations.ordinaryHumanInputsPreserved = true
@@ -1311,6 +1347,19 @@ private actor APIHarnessBrowserContinuationInference {
                   !text(host).contains(Self.resumedPrompt), body["client_metadata"] == nil else {
                 throw APIHarnessFailure("continuation_checkpoint_authority")
             }
+            let activePrompt = stage == 0 ? Self.priorPrompt : stage == 1 ? Self.currentPrompt : Self.resumedPrompt
+            let reminderIndex = messages.count - (maintenance ? 2 : 1)
+            guard reminderIndex > 0, messages[reminderIndex]["role"] as? String == "user",
+                  Data(text(messages[reminderIndex]).utf8) == Data(activePrompt.utf8),
+                  text(messages[reminderIndex - 1]) == text(host) else {
+                throw APIHarnessFailure("continuation_exact_active_reminder_tail")
+            }
+            if !maintenance {
+                guard text(host).contains("not a new turn or a request to restart, repeat completed actions or replay uncertain input"),
+                      text(host).contains("Preserve their user-level authority and constraints.") else {
+                    throw APIHarnessFailure("continuation_reminder_no_replay_guidance")
+                }
+            }
             let currentTurnID = turnID.uuidString.lowercased()
             if observations.hostTurnIDs.count == stage { observations.hostTurnIDs.append(currentTurnID) }
             guard observations.hostTurnIDs.count == stage + 1,
@@ -1322,7 +1371,7 @@ private actor APIHarnessBrowserContinuationInference {
                 let prior = messages.indices.filter { text(messages[$0]) == Self.priorPrompt }
                 let completed = messages.indices.filter { text(messages[$0]) == "PRIOR_TASK_COMPLETE" }
                 let current = messages.indices.filter { text(messages[$0]) == Self.currentPrompt }
-                guard prior.count == 1, completed.count == 1, current.count == (maintenance ? 2 : 1),
+                guard prior.count == 1, completed.count == 1, current.count == 2,
                       messages[prior[0]]["role"] as? String == "user",
                       messages[completed[0]]["role"] as? String == "assistant",
                       current.allSatisfy({ messages[$0]["role"] as? String == "user" }),
@@ -1340,9 +1389,10 @@ private actor APIHarnessBrowserContinuationInference {
                     }
                     observations.currentTaskMaintenanceChecks += 1
                 } else {
-                    guard text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_ordinary_tail") }
+                    guard current.last == messages.count - 1,
+                          text(messages[messages.count - 2]) == text(host) else { throw APIHarnessFailure("continuation_ordinary_tail") }
                     for index in messages.indices where (messages[index]["tool_call_id"] as? String ?? "").hasPrefix("continuation-") {
-                        guard current[0] < index else { throw APIHarnessFailure("continuation_user_after_tool_evidence") }
+                        guard current[0] < index, index < current[1] else { throw APIHarnessFailure("continuation_user_after_tool_evidence") }
                     }
                     observations.currentTaskOrdinaryChecks += 1
                     if observations.maintenanceRequests > 0 {
@@ -1360,8 +1410,16 @@ private actor APIHarnessBrowserContinuationInference {
             } else if !maintenance {
                 let prompt = stage == 0 ? Self.priorPrompt : Self.resumedPrompt
                 let current = messages.filter { text($0) == prompt }
-                guard current.count == 1, current[0]["role"] as? String == "user",
-                      text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_other_turn_order") }
+                guard current.count == 2, current.allSatisfy({ $0["role"] as? String == "user" }),
+                      text(messages.last!) == prompt,
+                      text(messages[messages.count - 2]) == text(host) else { throw APIHarnessFailure("continuation_other_turn_order") }
+                if stage == 2 {
+                    for oldPrompt in [Self.priorPrompt, Self.currentPrompt] {
+                        guard messages.filter({ text($0) == oldPrompt }).count == 1 else {
+                            throw APIHarnessFailure("continuation_completed_task_reminded")
+                        }
+                    }
+                }
             } else { throw APIHarnessFailure("continuation_maintenance_wrong_task") }
             func matches(_ function: [String: Any], _ nativeName: String) -> Bool {
                 function["name"] as? String == nativeName
@@ -1501,6 +1559,7 @@ private actor APIHarnessCorrectionInference {
         var rejectedBatchHadNoEffectsAtCorrection = false
         var firstUsageDurableBeforeCorrection = false
         var correctiveRequestPreservedOriginal = false
+        var userReminderChecks = 0
         var acceptedToolHistoryOnly = false
         var failures = [String]()
     }
@@ -1526,6 +1585,18 @@ private actor APIHarnessCorrectionInference {
                   let tools = body["tools"] as? [[String: Any]], let messages = body["messages"] as? [[String: Any]] else {
                 throw APIHarnessFailure("request_contract")
             }
+            let originalMessages = originalBody?["messages"] as? [[String: Any]] ?? messages
+            guard let prompt = originalMessages.last?["content"] as? String,
+                  messages.last?["role"] as? String == "user",
+                  let lastText = messages.last?["content"] as? String,
+                  Data(lastText.utf8) == Data(prompt.utf8), messages.count >= 2,
+                  messages[messages.count - 2]["role"] as? String == "developer",
+                  (messages[messages.count - 2]["content"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n"),
+                  messages.filter({ item in
+                      guard item["role"] as? String == "user", let text = item["content"] as? String else { return false }
+                      return Data(text.utf8) == Data(prompt.utf8)
+                  }).count == 2 else { throw APIHarnessFailure("correction_user_reminder_duplicated_or_changed") }
+            observations.userReminderChecks += 1
             let patchName = try toolName(tools, property: "input", descriptionContains: "patch")
             let commandName = try toolName(tools, property: "cmd")
             let message: [String: Any], finish: String, usage: [String: Any]

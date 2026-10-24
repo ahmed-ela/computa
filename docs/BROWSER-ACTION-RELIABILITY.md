@@ -1520,9 +1520,9 @@ exactly and omitted the optional receipt. The fresh answer copied the current
 receipt exactly but changed recipient/body typography. These were sequential
 model choices, not evidence of concurrent native dispatch.
 
-The real Outlook lookup took21.944 seconds, eleven calls and one rejected stale
+The real Outlook lookup took 21.944 seconds, eleven calls and one rejected stale
 reference, with no compaction. The requested sender's header, recipient/date and
-attachment shared the same inner message path, and the final41-byte filename
+attachment shared the same inner message path, and the final 41-byte filename
 matched exactly. It reused an older pre-search reference once, then recovered.
 No real-mail send, forward, download or deletion was observed.
 
@@ -1535,3 +1535,33 @@ the attempt. No new fill authority was lost in that recovery output because none
 was published. The goal remains active: current-task adherence and consumed-
 reference selection still fail. Per-trial UI checks showed owned-tab cleanup and
 empty composers; local fixture shutdown is recorded after remaining qualification.
+
+
+## Build 249: retain exact current-user reminders on every inference
+
+Build 248 retained the exact current request in native history, including after
+compaction, but the ODE follow-up still returned to the previous task. The native
+proof confirms chronology and bytes; it does not establish model attention. As
+a controlled experiment, the API adapter now keeps its existing current-turn
+user-role reminders even when that proof matches. Original history, tool receipts,
+accepted-steer order and authority remain unchanged. The existing developer
+instruction explicitly forbids treating reminders as a restart or replaying
+completed or uncertain actions. Maintenance requests keep their final maintenance
+instruction after the reminders, and a correction reuses the frozen request.
+
+All 148 focused API/server/codec and actual bundled-engine tests passed, with
+zero skips and stable source hashes. Both provider wire formats preserve the
+complete original history prefix and exact whitespace, decomposed Unicode and
+duplicate steer inputs. Tests retain the unchanged 2,000,000-byte projection
+limit and fail closed when reminders make a request too large. The actual engine
+checks two successive tasks, three compactions, cold resume, no accumulated wire
+reminders and one canonical persisted human item per submission. Independent
+review found no authority, lifecycle or correction-budget relaxation.
+
+This is a salience experiment, not a demonstrated semantic repair. Added reminder
+bytes can reach the existing payload limit sooner, and repeating the active
+request may encourage model replay despite the explicit no-replay instruction.
+Installed qualification must therefore check exact current-task answers, consumed
+references and exactly one delivery per authorized synthetic send. No runtime,
+reference, retry, capture, history or recovery limit changed. Live results follow
+separately; the goal remains active.

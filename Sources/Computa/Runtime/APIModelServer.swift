@@ -77,7 +77,7 @@ actor APIModelServer {
         let inputCount: Int
         let reminderCount: Int
         var record: String {
-            "currentUserProjection proof_accepted=\(reason == .matched) reminders_omitted=\(reason == .matched) input_count=\(inputCount) reminder_count=\(reminderCount) reason=\(reason.rawValue)"
+            "currentUserProjection proof_accepted=\(reason == .matched) reminders_omitted=\(inputCount > 0 && reminderCount == 0) input_count=\(inputCount) reminder_count=\(reminderCount) reason=\(reason.rawValue)"
         }
     }
 #if DEBUG
@@ -393,7 +393,7 @@ actor APIModelServer {
 
     /// Native-only evidence that the admitted human inputs already occupy their
     /// original chronological positions. Never locate them by matching prose.
-    /// Missing, partial or obsolete proof retains the existing reminder fallback.
+    /// Proof validity is independent of whether current-turn reminders are sent.
     static func hasExactCurrentUserTextProof(_ body: [String: Any], translated: APIModelResponseCodec.Request,
                                             threadID: String, turnID: String, requestKind: String?,
                                             expected: [Data]) -> Bool {
@@ -626,7 +626,10 @@ actor APIModelServer {
                 let alreadyRetained = Self.hasExactCurrentUserTextProof(object, translated: translated,
                     threadID: context.identity.threadID, turnID: context.identity.turnID,
                     requestKind: nativeRequest.requestKind, expected: active.inputs)
-                userInputs = alreadyRetained ? [] : active.inputs.map { String(decoding: $0, as: UTF8.self) }
+                // Keep exact active inputs at user authority even when native
+                // proof confirms their earlier chronological presence. The
+                // existing disclaimer scopes these as same-turn reminders.
+                userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
                 let hasProof = (object["client_metadata"] as? [String: Any])?["current_user_text_v1"] != nil
                 userProjection = .init(reason: alreadyRetained ? .matched : nativeRequest.requestKind != "turn" ? .ineligibleKind : hasProof ? .invalidProof : .missingProof,
                     inputCount: active.inputs.count, reminderCount: userInputs.count)
