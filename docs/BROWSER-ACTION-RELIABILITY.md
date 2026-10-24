@@ -2381,3 +2381,55 @@ the projected requests against canonical history, verifies three closed leases,
 and cold-loads without replay. Unit cases cover both stream modes, multiple
 rounds, forged IDs/authority, and later prefix changes. Installed ChatGPT Instant
 qualification is the next gate; these provider-free tests do not establish it.
+
+### Installed 260: ChatGPT Instant execution and browser qualification
+
+The signed, non-notarized installed build matched source `7ab31b6`, executable
+`4accf725eea5…`, all resources, and runtime `mactopus-16`. Eleven build and
+identity checks passed. The following six task runs completed successfully:
+
+| Task | Time | Native tools | Result |
+| --- | ---: | ---: | --- |
+| Reused current-status diagnostic | 42.406 s | 3 commands | Current config and documented status both enabled; no invented setting change |
+| Fresh immediate attachment lookup | 133.503 s | 8 | Exact staff sender, topic and filename associated within one message |
+| Same-chat ODE follow-up | 77.892 s | 2 | Exact current announcement, time, body and filename |
+| Fresh delayed attachment lookup | 160.162 s | 9 | Correct same-message attachment attribution |
+| Same-chat delayed-case ODE follow-up | 83.836 s | 2 | Exact current announcement and attachment |
+| Fresh synthetic send | 138.993 s | 7 | One POST with exact recipient, subject and body; current receipt and final literals match |
+
+The diagnostic had a separate 8.994-second maintenance compaction beforehand.
+It did not read the false historical assistant log, so that adversarial-history
+case remains unexercised. The four browser-read turns and successful send had
+zero native errors or compactions. Their 33 website inferences each had exact
+Instant/Temporary, submission, completion, release and saved closed-cleanup
+proofs. The send used current references after each input and closed its own
+browser tab. User tabs were preserved; all owned fixture processes were stopped.
+The delayed case's 28 ms wait observed the 2.5-second transition after it had
+already completed; it does not establish a fresh blocking-wait measurement.
+
+One preceding **nonfresh send failed** after 66.440 seconds with
+`website_response_failed`: one browser open, no fills, no POST, no final answer.
+Both website leases closed. The native terminal's generic high-demand message
+does not establish the underlying cause. Normal ChatGPT was subsequently
+inspected signed in, in Chat mode, without a displayed error or challenge; its
+inspection-only tab was closed. A distinct fresh send then passed, as recorded
+above. This does not erase the failed attempt or establish its cause. No
+automatic prompt/input replay, provider capture, or limit increase was used.
+
+Private records are under `chatgpt260/`: `diagnostic-review.json`, each account
+case's attachment and ODE semantic/lifecycle reviews, the preserved
+`synthetic-send/failure-review.json`, and
+`synthetic-send-fresh/delivery-review.json`. Earlier real-mail semantic failures
+and the Cerebras HTTP 402 remain separate; Gemini and Claude qualification is
+still held. These controlled successes do not promise arbitrary-site reliability.
+
+Testing reached the unchanged 256-task transaction-store limit. After normal
+app shutdown and exact closure review, four wholly synthetic tasks (ten turns,
+42 started/closed inferences, plus the preserved pre-start continuation rejection)
+were manually and reversibly retired from the two live stores. Full byte/mode
+verified copies and original journals are retained privately with a rollback
+manifest; unselected store metadata, native chat history and failure stores were
+unchanged. This leaves 252 live task directories in each store. Historical
+cleanup banners for retired tests may no longer load. This is test-artifact
+cleanup, not a product retention solution: automatic archival beyond the fixed
+task limit remains a separate known limitation.
