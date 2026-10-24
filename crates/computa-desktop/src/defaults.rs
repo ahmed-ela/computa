@@ -5,18 +5,14 @@ use objc2_foundation::{NSJSONSerialization, NSJSONWritingOptions, NSString, NSUs
 use serde_json::{Map, Value};
 use uuid::Uuid;
 pub fn legacy_defaults() -> std::io::Result<Map<String, Value>> {
-    let suite = NSString::from_str(computa_contracts::chrome::APP_IDENTIFIER);
+    let suite = NSString::from_str("com.ahmedelamin.LocalCodex");
     let defaults = NSUserDefaults::initWithSuiteName(NSUserDefaults::alloc(), Some(&suite))
         .ok_or_else(|| std::io::Error::other("Native preferences are unavailable"))?;
     let mut result = Map::new();
     for key in [
         "LocalCodex.defaultModelID",
         "HeyDash.accessMode",
-        "HeyDash.rememberedChromeConnection",
         "ComputaReferenceToolThreads.v1",
-        "Macndash.chromeExtension.enabled",
-        "Macndash.chromeExtension.installationID",
-        "Computa.chromeExtension.temporaryTabs.v1",
     ] {
         if let Some(value) = defaults.objectForKey(&NSString::from_str(key)) {
             // SAFETY: these known preference keys contain property-list scalar,
@@ -45,9 +41,7 @@ pub fn browser_profile(private: bool) -> std::io::Result<Uuid> {
     }
     let defaults = NSUserDefaults::initWithSuiteName(
         NSUserDefaults::alloc(),
-        Some(&NSString::from_str(
-            computa_contracts::chrome::APP_IDENTIFIER,
-        )),
+        Some(&NSString::from_str("com.ahmedelamin.LocalCodex")),
     )
     .ok_or_else(|| std::io::Error::other("Native browser preferences are unavailable"))?;
     let key = NSString::from_str("Computa.EmbeddedBrowser.ProfileIdentifier.v1");

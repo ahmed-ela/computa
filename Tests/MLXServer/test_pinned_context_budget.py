@@ -28,8 +28,12 @@ class PinnedContextBudgetTests(unittest.IsolatedAsyncioTestCase):
             pinned = False
         if not pinned:
             raise unittest.SkipTest("Requires owned pinned mlx-vlm 0.7.1 environment")
-        model_dir = Path(os.environ.get("MACTOPUS_BUDGET_MODEL_DIR",
-            str(Path.home() / ".lmstudio/models/lmstudio-community/Qwen3.5-4B-MLX-4bit")))
+        model_name = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        candidates = [Path.home() / "Library/Application Support/LocalCodex/MLX/models" / model_name,
+                      Path.home() / ".lmstudio/models" / model_name]
+        override = os.environ.get("MACTOPUS_BUDGET_MODEL_DIR")
+        model_dir = Path(override) if override else next(
+            (path for path in candidates if (path / "tokenizer.json").is_file()), candidates[0])
         if not (model_dir / "tokenizer.json").is_file():
             raise unittest.SkipTest("Requires already-local Qwen processor assets; never downloads")
         # Model-module import installs the same processor registration as load(),
@@ -145,12 +149,21 @@ class PinnedContextBudgetTests(unittest.IsolatedAsyncioTestCase):
         await adapter({"type": "http.response.start", "status": 400, "headers": []})
         await adapter({"type": "http.response.body", "body": json.dumps({"detail": raised.exception.detail}).encode()})
         await adapter.finish()
-        event = json.loads(output[1]["body"].split(b"data: ")[1])
-        self.assertEqual(event["type"], "response.failed")
+        self.assertEqual(output[0]["status"], 200)
+        body = b"".join(message.get("body", b"") for message in output
+                        if message["type"] == "http.response.body")
+        frames = [frame for frame in body.split(b"\n\n") if frame]
+        data = [b"\n".join(line[6:] for line in frame.splitlines() if line.startswith(b"data: "))
+                for frame in frames]
+        self.assertEqual(data[-1], b"[DONE]")
+        events = [json.loads(value) for value in data[:-1]]
+        self.assertEqual([event["type"] for event in events],
+                         ["response.created", "error", "response.failed"])
+        event = events[-1]
         self.assertEqual(event["response"]["error"]["code"], "context_length_exceeded")
         self.assertEqual(event["response"]["context_budget"]["input_tokens"], exact)
         self.assertEqual(event["response"]["context_budget"]["max_output_tokens"], args.max_tokens)
-        self.assertNotIn("RECEIPT_MARKER", output[1]["body"].decode())
+        self.assertNotIn("RECEIPT_MARKER", body.decode())
         self.assertEqual(event["response"]["output"], [])
 
 

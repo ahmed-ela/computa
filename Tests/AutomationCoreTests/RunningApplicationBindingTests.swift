@@ -9,12 +9,10 @@ private final class RunningBindingFixture: RunningApplicationBindingRuntime, App
     let application = AXUIElementCreateApplication(61_000)
     var window = AXUIElementCreateApplication(61_001)
     var candidates = [state()]
-    var arguments: [Int32: [String]] = [:]
     var permission = true
     var boundPID: Int32 = 77
     var discoveryReads = 0
     var windowReads = 0
-    var argumentReads = [Int32]()
     var afterWindow: (() -> Void)?
     var beforeWindow: (() -> Void)?
     var onDiscovery: (() -> Void)?
@@ -35,11 +33,6 @@ private final class RunningBindingFixture: RunningApplicationBindingRuntime, App
         discoveryReads += 1
         onDiscovery?()
         return candidates
-    }
-
-    func chromeArguments(processIdentifier: Int32) throws -> [String]? {
-        argumentReads.append(processIdentifier)
-        return arguments[processIdentifier]
     }
 
     func binder() -> RunningApplicationBinder {
@@ -99,7 +92,6 @@ final class RunningApplicationBindingTests: XCTestCase {
         XCTAssertTrue(try binding.window.identity.isStillSelected())
         XCTAssertEqual(fixture.discoveryReads, 2)
         XCTAssertEqual(fixture.windowReads, 1)
-        XCTAssertTrue(fixture.argumentReads.isEmpty)
         // The runtime interface has no launch, activation or input operation.
     }
 
@@ -243,42 +235,17 @@ final class RunningApplicationBindingTests: XCTestCase {
     }
 
     @MainActor
-    func testChromeUsesOrdinaryProcessBesideIsolatedInstance() throws {
-        let fixture = RunningBindingFixture()
-        fixture.candidates = [RunningBindingFixture.state(pid: 42, bundle: "com.google.Chrome"), RunningBindingFixture.state(pid: 43, bundle: "com.google.Chrome")]
-        fixture.arguments = [42: ["chrome"], 43: ["chrome", "--user-data-dir=/tmp/synthetic"]]
-        let binding = try fixture.binder().bind(bundleIdentifier: "com.google.Chrome")
-        XCTAssertEqual(binding.application.processIdentifier, 42)
-        XCTAssertEqual(fixture.argumentReads, [42, 43, 42, 43])
-    }
-
-    @MainActor
-    func testChromeRejectsIsolatedUnknownAndAmbiguousCandidates() {
-        for (arguments, failure): ([Int32: [String]], ExistingChromeError) in [
-            ([42: ["chrome", "--remote-debugging-pipe"], 43: ["chrome", "--user-data-dir=/tmp/synthetic"]], .noOrdinaryBrowser),
-            ([42: ["chrome"]], .processCannotBeInspected),
-            ([42: ["chrome"], 43: ["chrome"]], .ambiguousOrdinaryBrowsers),
-        ] {
-            let fixture = RunningBindingFixture()
-            fixture.candidates = [RunningBindingFixture.state(pid: 42, bundle: "com.google.Chrome"), RunningBindingFixture.state(pid: 43, bundle: "com.google.Chrome")]
-            fixture.arguments = arguments
-            XCTAssertThrowsError(try fixture.binder().bind(bundleIdentifier: "com.google.Chrome")) {
-                XCTAssertEqual($0 as? ExistingChromeError, failure)
-            }
-            XCTAssertEqual(fixture.windowReads, 0)
-        }
-    }
-
-    @MainActor
-    func testChromeProfileIsRevalidatedAfterWindowResolution() {
+    func testBrowserApplicationUsesTheSameExactProcessPolicyAsOtherNativeApps() throws {
         let fixture = RunningBindingFixture()
         fixture.candidates = [RunningBindingFixture.state(pid: 42, bundle: "com.google.Chrome")]
-        fixture.arguments = [42: ["chrome"]]
-        fixture.afterWindow = { fixture.arguments[42] = ["chrome", "--remote-debugging-port=9222"] }
-        XCTAssertThrowsError(try fixture.binder().bind(bundleIdentifier: "com.google.Chrome")) {
-            XCTAssertEqual($0 as? ExistingChromeError, .noOrdinaryBrowser)
-        }
+        let binding = try fixture.binder().bind(bundleIdentifier: "com.google.Chrome")
+        XCTAssertEqual(binding.application.processIdentifier, 42)
         XCTAssertEqual(fixture.windowReads, 1)
+        fixture.candidates.append(RunningBindingFixture.state(pid: 43, bundle: "com.google.Chrome"))
+        XCTAssertThrowsError(try fixture.binder().bind(bundleIdentifier: "com.google.Chrome")) {
+            XCTAssertEqual($0 as? RunningApplicationBindingError, .ambiguousApplications(2))
+        }
+        XCTAssertEqual(fixture.windowReads, 1, "Ambiguity must fail before reading another window.")
     }
 
     @MainActor
@@ -302,7 +269,6 @@ final class RunningApplicationBindingTests: XCTestCase {
         XCTAssertEqual(fixture.windowReads, 2)
         XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
         XCTAssertEqual(fixture.discoveryReads, 3)
-        XCTAssertTrue(fixture.argumentReads.isEmpty)
     }
 
     @MainActor

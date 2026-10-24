@@ -55,6 +55,11 @@ struct NativeFailureEvidenceStore: Sendable {
         let diagnosticText: String
         let timestamp: Date
 
+        var entry: TimelineEntry {
+            TimelineEntry(id: "native-failure:\(turnID):\(callID)", kind: .system,
+                title: "Native action stopped", body: message, timestamp: timestamp, turnID: turnID)
+        }
+
         fileprivate func hasSameEvidence(as other: Self) -> Bool {
             threadID == other.threadID && turnID == other.turnID && callID == other.callID
                 && toolName == other.toolName && message == other.message && diagnosticText == other.diagnosticText
@@ -81,6 +86,31 @@ struct NativeFailureEvidenceStore: Sendable {
     static let maximumFileBytes = 64 * 1024
     private static let processLock = NSLock()
     private let directory: URL
+
+    /// Keep a stopped attempt beside its own turn after reload. Appending all
+    /// durable failures at the bottom makes an old stop look like a restriction
+    /// on a later successful or tool-free reply.
+    static func restoringFailures(_ records: [Record], in history: [TimelineEntry]) -> [TimelineEntry] {
+        var entries = history
+        for record in records.sorted(by: { $0.timestamp < $1.timestamp }) {
+            var entry = record.entry
+            entry.activityGroupID = entries.first(where: {
+                $0.kind == .user && $0.turnID == record.turnID
+            })?.activityGroupID
+            if let existing = entries.firstIndex(where: { $0.id == entry.id }) {
+                entries.remove(at: existing)
+            }
+            if let end = entries.lastIndex(where: { $0.turnID == record.turnID }) {
+                entries.insert(entry, at: end + 1)
+            } else {
+                // Older/partial histories may lack the turn. Retain the evidence
+                // without assigning it to the newest request.
+                let index = entries.firstIndex(where: { $0.timestamp > record.timestamp }) ?? entries.endIndex
+                entries.insert(entry, at: index)
+            }
+        }
+        return entries
+    }
 
     private struct Envelope: Codable {
         let version: Int
@@ -277,7 +307,8 @@ struct NativeFailureEvidenceStore: Sendable {
                 throw StoreError.invalid("record is not bounded native activation-failure evidence")
             }
         case "chrome_navigation_recovery_required":
-            // This explicit alternative has no PID, URL, or browser-state
+            // Historical schema only; the removed connection cannot emit new
+            // records. This alternative has no PID, URL, or browser-state
             // fields. Human-readable text is bounded inert evidence, not
             // authority; older copy must remain readable after wording changes.
             guard Set(diagnostic.keys) == ["type", "error", "cause", "website_status", "action_outcome", "tab_state", "retry_policy", "next_step"],
@@ -302,7 +333,8 @@ struct NativeFailureEvidenceStore: Sendable {
                   (1 ... ComputerActionEvidence.maximumOperations).contains(unresolved.intValue),
                   (0 ... unresolved.intValue).contains(failed.intValue),
                   (kind == .unverified ? record.toolName == "computer_outcome"
-                   : (record.toolName.hasPrefix("computer_v2_") || record.toolName == "computer" || record.toolName.hasPrefix("desktop_"))) else {
+                   : (record.toolName.hasPrefix("computer_v2_") || record.toolName == "computer" || record.toolName.hasPrefix("desktop_")
+                      || EmbeddedBrowserTools.names.contains(record.toolName))) else {
                 throw StoreError.invalid("record is not redacted runtime outcome evidence")
             }
         default:

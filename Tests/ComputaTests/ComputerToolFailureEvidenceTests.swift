@@ -4,6 +4,26 @@ import XCTest
 @testable import Computa
 
 final class ComputerToolFailureEvidenceTests: XCTestCase {
+    func testRecoveryProjectionUsesCurrentSurfaceWithoutChangingTheFailure() {
+        let failures: [Error] = [ComputerReadContinuation.Failure.unknownCursor,
+            ComputerReadContinuation.Failure.invalidScope,
+            ComputerInteractionPolicy.Violation.foregroundUnavailable,
+            ComputerInteractionPolicy.Violation.legacyMutationUnavailable]
+        for error in failures {
+            let message = ComputerToolFailureEvidence.text(for: error)
+            XCTAssertFalse(message.contains("computer_v2_tabs"))
+            XCTAssertFalse(message.contains("computer_v2_bind_tab"))
+            XCTAssertFalse(message.contains("authorized Chrome"))
+            XCTAssertTrue(message.contains("browser_"))
+            XCTAssertEqual(ComputerToolFailureEvidence.text(for: error), error.localizedDescription)
+            XCTAssertNil(ComputerToolFailureEvidence.terminalMessage(for: error))
+        }
+        let permission = AutomationError.permissionNotGranted(.accessibility)
+        XCTAssertEqual(ComputerToolFailureEvidence.text(for: permission), permission.localizedDescription)
+    }
+
+
+
     func testMissingPointerFieldsExplainTheWholeContractWithoutInventingCoordinates() {
         for field in ["x", "y", "capture_id", "delta_x", "delta_y"] {
             let error = ComputerV2ToolContract.ValidationError.missing(field)
@@ -40,44 +60,9 @@ final class ComputerToolFailureEvidenceTests: XCTestCase {
         XCTAssertLessThan(text.utf8.count, 1_024)
     }
 
-    func testNavigationRecoveryEvidenceIsDeterministicRedactedAndDoesNotInventOutcome() throws {
-        let error = ExistingChromeError.navigationRecoveryRequired
-        let text = ComputerToolFailureEvidence.text(for: error, tool: "computer_v2_open")
-        XCTAssertEqual(text, ComputerToolFailureEvidence.text(for: error, tool: "computer_v2_open"))
-        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(Set(value.keys),
-            ["type", "error", "cause", "website_status", "action_outcome", "tab_state", "retry_policy", "next_step"])
-        XCTAssertEqual(value["type"] as? String, "native_tool_failure")
-        let diagnostic = try XCTUnwrap(value["error"] as? [String: String])
-        XCTAssertEqual(diagnostic, ["code": "chrome_navigation_recovery_required", "message": error.localizedDescription])
-        XCTAssertEqual(value["cause"] as? String, "undetermined")
-        XCTAssertEqual(value["website_status"] as? String, "not_observed")
-        XCTAssertEqual(value["action_outcome"] as? String, "navigation_not_confirmed")
-        XCTAssertEqual(value["tab_state"] as? String, "preserved_if_created")
-        XCTAssertEqual(value["retry_policy"] as? String, "stop_for_turn")
-        let nextStep = try XCTUnwrap(value["next_step"] as? String)
-        XCTAssertTrue(nextStep.contains("Do not retry"))
-        XCTAssertTrue(nextStep.contains("Any tab already created was left open"))
-        XCTAssertTrue(nextStep.contains("Do not claim that Enter was sent"))
-        for unsupportedField in ["process_id", "url", "arguments", "dom", "http_status", "policy_name"] {
-            XCTAssertNil(value[unsupportedField])
-        }
-        XCTAssertFalse(text.contains("https://"))
-        XCTAssertFalse(text.contains("StudyLock"))
-        XCTAssertLessThan(text.utf8.count, 1_536)
-    }
 
-    func testOnlyExplicitNavigationRecoveryErrorTerminatesTheTurn() throws {
-        let error = ExistingChromeError.navigationRecoveryRequired
-        let message = try XCTUnwrap(ComputerToolFailureEvidence.terminalMessage(for: error))
-        XCTAssertTrue(message.hasPrefix(error.localizedDescription))
-        XCTAssertTrue(message.contains("Further computer actions are blocked for this turn"))
-        XCTAssertTrue(message.contains("Any tab already created was left open; navigation was not confirmed"))
-        for other in [ExistingChromeError.addressBarNotVerified, .tabStateNotVerified, .targetChanged, .invalidURL] {
-            XCTAssertNil(ComputerToolFailureEvidence.terminalMessage(for: other))
-            XCTAssertEqual(ComputerToolFailureEvidence.text(for: other), other.localizedDescription)
-        }
-    }
+
+
 
     func testRealPermissionDenialsAndOtherFailuresAreNotReinterpretedOrHidden() {
         let errors: [Error] = [

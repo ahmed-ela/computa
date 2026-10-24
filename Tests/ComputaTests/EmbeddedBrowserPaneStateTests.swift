@@ -5,6 +5,76 @@ import XCTest
 @testable import Computa
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
+    /// Native task selection resets review to Last turn. Exercise the compiled
+    /// Octane select as well as the native state, without desktop input.
+    @MainActor
+    func testReviewScopeSelectResetsWhenSwitchingTasks() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let tasks = ["review-first", "review-second"].map { id in
+            AgentTask(id: id, title: id, summary: "", status: .draft,
+                      workspace: "", model: "local")
+        }
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session)
+        state.isReviewPresented = true
+        await state.refreshReview(taskID: tasks[0].id)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1080, height: 820)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first)
+        let selector = "document.querySelector('select[aria-label=\"Changes scope\"]')"
+        let ready = await waitForScriptBool(on: chat, script: "\(selector)?.value === 'lastTurn'")
+        XCTAssertTrue(ready)
+
+        for scope in [FileReviewScope.unstaged, .staged, .branch, .commit] {
+            // Match the user path: a native select edits its DOM value before
+            // the asynchronous WebKit bridge delivers the scope to AppState.
+            _ = try await chat.evaluateJavaScript("""
+                (() => {
+                    const select = \(selector);
+                    select.value = '\(scope.rawValue)';
+                    select.dispatchEvent(new Event('input', { bubbles: true }));
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                })()
+                """)
+            let deadline = ContinuousClock.now + .seconds(5)
+            while state.review?.scope != scope, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(state.review?.scope, scope, "The real web bridge must receive the selection")
+            let selected = await waitForScriptBool(on: chat, script: "\(selector)?.value === '\(scope.rawValue)'")
+            XCTAssertTrue(selected, "The select must reflect the native scope")
+            state.selectTask(tasks[1].id)
+            let reset = await waitForScriptBool(on: chat, script: "\(selector)?.value === 'lastTurn' && document.querySelector('.review-scope-note')?.textContent.includes('Recorded edits') === true")
+            XCTAssertEqual(state.review?.scope, .lastTurn)
+            XCTAssertTrue(reset, "Switching from \(scope.rawValue) must reset both the select and its explanation")
+            // Native accessibility selection can deliver the select's commit
+            // event without a separate input event. That must still reach the
+            // current task, rather than leave DOM and native scope divergent.
+            _ = try await chat.evaluateJavaScript("""
+                (() => {
+                    const select = \(selector);
+                    select.value = '\(scope.rawValue)';
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                })()
+                """)
+            let secondDeadline = ContinuousClock.now + .seconds(5)
+            while state.review?.scope != scope, ContinuousClock.now < secondDeadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(state.review?.scope, scope, "The selection after switching must target the current task")
+            state.selectTask(tasks[0].id)
+            let restored = await waitForScriptBool(on: chat, script: "\(selector)?.value === 'lastTurn'")
+            XCTAssertTrue(restored)
+        }
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+    }
+
     /// Mounts the real shell offscreen, with synthetic chat data and an in-memory
     /// browser document. No runtime, account, external URL, or desktop input.
     @MainActor

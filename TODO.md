@@ -1,5 +1,9 @@
 # Computa TODO and validation
 
+Chrome connection support and its implementation have been removed. Browser work
+uses the built-in browser. Earlier Chrome comparisons below are historical records,
+not remaining feature requirements or instructions to reconnect Chrome.
+
 ## Embedded browser: human pane first
 
 The initial browser delivery is the human-operated right pane: toggle/resize,
@@ -8,24 +12,29 @@ Computa-owned website-data profile. Hiding the pane preserves tabs; open tabs
 are not restored after quitting. See [usage](README.md#native-browser-pane) and
 [implementation](docs/EMBEDDED-BROWSER.md).
 
-### Embedded-browser agent control (deferred)
+### Embedded-browser agent control
 
-- [ ] Design bounded isolated reading and action transport without granting
-  synthetic user activation or access to the privileged chat bridge.
+- [x] Implement bounded isolated reading and typed semantic actions without
+  trusted OS input or access to the privileged chat bridge. See the
+  [tool contract](docs/BUILT-IN-BROWSER-TOOLS.md) for supported surfaces.
 - [ ] Protect human focus/selection and qualify delayed callbacks during real
   concurrent human use; component-level checks alone are insufficient.
-- [ ] Give temporary task tabs explicit ownership, capacity limits, navigation
+- [x] Give temporary task tabs explicit ownership, capacity limits, navigation
   receipts, cancellation and cleanup. Never replace or close human-owned tabs.
-- [ ] Qualify approved one-dispatch actions with bounded read-only verification,
-  stale references, uncertain outcomes, lost acknowledgements and compaction.
+- [ ] Extend installed qualification of approved one-dispatch actions and
+  bounded read-only verification across stale references, uncertain outcomes,
+  lost acknowledgements and compaction. Existing component tests do not
+  establish reliability on arbitrary websites.
 - [ ] Benchmark isolated Qwen tasks for evidence-supported completion, latency
-  and memory before enabling tools. Obtain approval before account access or
+  and memory before claiming local-model readiness. Obtain approval before account access or
   interrupting the installed app; validate public pages and accounts separately.
-- [ ] Only after qualification, enable selected typed tools and document their
-  limits. This pane does not establish that the research-thread lookup works.
+- [x] Enable selected typed tools for fresh chats and document their limits.
+  This does not establish that the research-thread lookup works.
 
-Deferred agent prototypes are not part of this release. Existing Chrome and
-native desktop tooling retain their separate behavior.
+Source-bound offline and installed website-model results are recorded in the
+[workflow benchmark](docs/HARNESS-WORKFLOW-BENCHMARK.md). Scripted provider IDs,
+individual live provider/model checks and Qwen qualification remain separate.
+Existing Chrome and native desktop tooling retain their separate behavior.
 
 ## Preserved runtime fixes — 29 September 2026
 

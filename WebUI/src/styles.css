@@ -83,7 +83,6 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .task-row-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-row.selected .task-row-title { font-weight: 500; }
 .task-row-status { flex: 0 0 5px; }
-.task-row-time { flex: 0 0 auto; color: var(--text-tertiary); font-size: 10px; font-variant-numeric: tabular-nums; }
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
 .sidebar-footer { padding: 12px 14px; border-top: 1px solid var(--border); }

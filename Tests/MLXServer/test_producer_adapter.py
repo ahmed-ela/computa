@@ -80,14 +80,21 @@ class ProducerAdapterTests(PinnedEndpointHarness):
         original = [i for i in upstream[-1]["response"]["output"] if i["type"] == "function_call"]
         self.assertEqual(calls, original)
 
-    async def test_prompt_open_thinking_only_is_incomplete_not_public(self):
+    async def test_prompt_open_thinking_only_below_cap_fails_without_public_output(self):
         private = "Synthetic unfinished private thought"
-        events, _, errors = await self.adapted([private], thinking=True)
-        self.assertEqual(errors, [])
-        self.assertEqual(events[-1]["type"], "response.incomplete")
-        self.assertEqual(events[-1]["response"]["output_text"], "")
+        events, upstream, errors = await self.adapted([private], thinking=True)
+        self.assertLess(upstream[-1]["response"]["usage"]["output_tokens"], 4096)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), "Missing generated public output")
+        self.assertEqual(events[-1]["type"], "response.failed")
+        self.assertEqual(events[-1]["response"].get("output_text", ""), "")
+        self.assertEqual(events[-1]["response"]["output"], [])
+        self.assertEqual(events[-1]["response"]["error"]["code"], "invalid_prompt")
+        self.assertIn("reason=missing_generated_public_output", events[-1]["response"]["error"]["message"])
+        self.assertNotIn(private, json.dumps(events[-1]))
+        self.assertFalse(any(e["type"] in ("response.completed", "response.incomplete",
+                                           "response.output_item.done") for e in events))
         self.assertFalse(any(e["type"] == "response.output_text.delta" for e in events))
-        self.assertFalse(any(i["type"] == "function_call" for i in events[-1]["response"]["output"]))
 
     async def test_tool_examples_in_thinking_never_become_executable(self):
         events, _, errors = await self.adapted([

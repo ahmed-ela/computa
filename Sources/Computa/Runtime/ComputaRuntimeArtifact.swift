@@ -15,6 +15,7 @@ struct ComputaRuntimeArtifact: Sendable {
 
     enum Capability: String, Sendable, Hashable {
         case threadDynamicToolsV1
+        case browserLifecycleObservationsV1
     }
 
     struct Manifest: Equatable, Sendable {

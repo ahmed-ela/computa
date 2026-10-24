@@ -188,21 +188,21 @@ responses.on("line", line => {
       } else if (params.tool === "computer_v2_apps" && appInventoryCalls === 0 && openCalls === 0
           && (keys.length === 0 || (keys.length === 1 && keys[0] === "query"
             && typeof args.query === "string" && args.query.length <= 200 && args.query.trim().length > 0
-            && ["google chrome", "com.google.chrome"].some(value => value.includes(args.query.trim().toLowerCase()))))) {
+            && ["computa orders fixture", "com.ahmedelamin.computaordersfixture"].some(value => value.includes(args.query.trim().toLowerCase()))))) {
         appInventoryCalls += 1;
         stage = keys.length === 0 ? "apps-default" : "apps";
         text = keys.length === 0 ? queryRecovery["apps-default"] : queryRecovery.apps;
-      } else if (params.tool === "computer_v2_snapshot" && openCalls === 0 && unboundSnapshots === 0
+      } else if (params.tool === "computer_v2_read_page" && openCalls === 0 && unboundSnapshots === 0
           && (keys.length === 0 || literalQuery)) {
         unboundSnapshots += 1; stage = "unbound"; text = queryRecovery.unbound; success = false;
       } else if (params.tool === "computer_v2_open" && openCalls === 0
-          && keys.every(key => ["bundle_id", "browser_mode"].includes(key))
-          && args.bundle_id === "com.google.Chrome" && [undefined, "existing"].includes(args.browser_mode)) {
+          && keys.every(key => ["bundle_id", "activation"].includes(key))
+          && args.bundle_id === "com.ahmedelamin.ComputaOrdersFixture" && [undefined, "none"].includes(args.activation)) {
         openCalls += 1; stage = "open"; text = queryRecovery.open;
-      } else if (params.tool === "computer_v2_snapshot" && openCalls === 1 && keys.length === 0
+      } else if (params.tool === "computer_v2_read_page" && openCalls === 1 && keys.length === 0
           && initialSnapshots === 0 && targetedSnapshots === 0) {
         initialSnapshots += 1; stage = "initial"; text = queryRecovery.initial;
-      } else if (params.tool === "computer_v2_snapshot" && openCalls === 1 && targetedSnapshots === 0 && literalQuery) {
+      } else if (params.tool === "computer_v2_read_page" && openCalls === 1 && targetedSnapshots === 0 && literalQuery) {
         targetedSnapshots += 1;
         stage = initialSnapshots === 1 ? "query" : "direct-query";
         text = queryRecovery.targeted;

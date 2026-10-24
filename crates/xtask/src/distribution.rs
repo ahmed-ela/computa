@@ -249,9 +249,18 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
 pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileEntry>> {
     inspect_basic(app, "Computa", runner)?;
     let files = bundle_files(app)?;
+    if files.iter().any(|file| {
+        file.path.starts_with("Contents/Resources/ChromeBridge/")
+            || file
+                .path
+                .starts_with("Contents/Resources/BrowserExtension/")
+    }) {
+        return Err(invalid(
+            "Removed external browser components cannot be packaged",
+        ));
+    }
     for required in [
         "Contents/MacOS/Computa",
-        "Contents/Resources/ChromeBridge/ChromeBridgeHost",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/AgentRuntime/manifest.json",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
@@ -259,7 +268,6 @@ pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileE
         "Contents/Resources/InferenceRuntime/mlx.metallib",
         "Contents/Resources/InferenceRuntime/manifest.json",
         "Contents/Resources/WebUI/index.html",
-        "Contents/Resources/BrowserExtension/manifest.json",
     ] {
         if !files.iter().any(|f| f.path == required) {
             return Err(invalid(format!(
@@ -296,7 +304,6 @@ pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileE
     }
     for binary in [
         "Contents/MacOS/Computa",
-        "Contents/Resources/ChromeBridge/ChromeBridgeHost",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
         "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -386,7 +393,6 @@ pub fn verify_release_gates(
     let files = inspect_rust_app(app, runner)?;
     for relative in [
         "Contents/MacOS/Computa",
-        "Contents/Resources/ChromeBridge/ChromeBridgeHost",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
         "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -539,10 +545,6 @@ fn sign_bundle(
         (
             "Contents/Resources/AgentRuntime/codex-app-server",
             "AgentRuntime",
-        ),
-        (
-            "Contents/Resources/ChromeBridge/ChromeBridgeHost",
-            "ChromeBridgeHost",
         ),
         (
             "Contents/Resources/InferenceRuntime/computa-inference-worker",
@@ -1079,7 +1081,7 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
     };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(invalid)?;
     write_new(&payload.join("release-manifest.json"), &bytes)?;
-    write_new(&payload.join("READ ME.txt"),format!("Computa {release_version}, Apple Silicon macOS {minimum}+\n\nRun the signed Rust installer with install-release --package-root PATH --download-model to authorize the pinned 4B download. Existing verified model installations work offline; without that flag no weights are downloaded. Existing app backups and chats are preserved. Quit Computa and Mactopus before installation. Grant macOS permissions and Chrome consent separately. Channel: {:?}. The app notarization ticket does not notarize the DMG; assess the image separately before publishing.\n",options.channel).as_bytes())?;
+    write_new(&payload.join("READ ME.txt"),format!("Computa {release_version}, Apple Silicon macOS {minimum}+\n\nRun the signed Rust installer with install-release --package-root PATH --download-model to authorize the pinned 4B download. Existing verified model installations work offline; without that flag no weights are downloaded. Existing app backups and chats are preserved. Quit Computa and Mactopus before installation. Grant macOS permissions separately. Channel: {:?}. The app notarization ticket does not notarize the DMG; assess the image separately before publishing.\n",options.channel).as_bytes())?;
     let mut checksums = String::new();
     for name in [
         "Computa Installer",
@@ -1483,7 +1485,6 @@ mod tests {
         macho[16..20].copy_from_slice(&1u32.to_le_bytes());
         for binary in [
             "Contents/MacOS/Computa",
-            "Contents/Resources/ChromeBridge/ChromeBridgeHost",
             "Contents/Resources/AgentRuntime/codex-app-server",
             "Contents/Resources/InferenceRuntime/computa-inference-worker",
             "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -1526,7 +1527,6 @@ mod tests {
         for (name, data) in [
             ("Contents/Info.plist", "<plist/>"),
             ("Contents/Resources/WebUI/index.html", "<div/>"),
-            ("Contents/Resources/BrowserExtension/manifest.json", "{}"),
         ] {
             let file = path.join(name);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -1539,6 +1539,29 @@ mod tests {
         )
         .unwrap();
     }
+    #[test]
+    fn packaged_apps_reject_retired_external_browser_components() {
+        for retired in [
+            "ChromeBridge/ChromeBridgeHost",
+            "BrowserExtension/manifest.json",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let app = temp.path().canonicalize().unwrap().join("Computa.app");
+            fixture_app(&app, "native");
+            let runner = FixtureRunner::new();
+            inspect_rust_app(&app, &runner).unwrap();
+            let path = app.join("Contents/Resources").join(retired);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"retired").unwrap();
+            assert!(
+                inspect_rust_app(&app, &runner)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Removed external browser components")
+            );
+        }
+    }
+
     #[test]
     fn moved_app_requires_both_native_workers_and_exact_colocated_metal_bytes() {
         let temp = tempfile::tempdir().unwrap();

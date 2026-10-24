@@ -9,15 +9,17 @@ protocol AgentRuntimeClient: Sendable {
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws
     func compact(taskID: AgentTask.ID) async throws
     func interrupt(taskID: AgentTask.ID) async throws
     func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt
     func resolveApproval(requestID: String, approved: Bool) async throws
-    func connectChrome(_ request: ChromeConnectionRequest) async throws
-    func disconnectChrome() async
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async
+    func configureAPIProviders(_ providers: [APIProviderDefinition],
+                               credentialMutation: @escaping @Sendable () throws -> Void) async throws
     func shutdown() async -> RuntimeShutdownReport
 }
 
@@ -28,6 +30,12 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    /// Older adapters may keep their restricted submission path. They cannot
+    /// silently claim Full access without implementing its execution policy.
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+        guard accessMode == .askEveryTime else { throw AgentRuntimeCapabilityError.accessModeUnsupported }
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+    }
     func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
         WebsiteSessionCleanupReceipt(taskID: taskID, runtimeGeneration: UUID(), outcome: .unconfirmed,
             reason: .unsupportedRuntime, trigger: .manual)
@@ -45,13 +53,18 @@ extension AgentRuntimeClient {
         throw AgentRuntimeCapabilityError.compactionUnsupported
     }
 
-    func connectChrome(_ request: ChromeConnectionRequest) async throws {
-        throw AgentRuntimeCapabilityError.chromeConnectionUnsupported
+    func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {}
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {}
+
+    func configureAPIProviders(_ providers: [APIProviderDefinition]) async throws {
+        try await configureAPIProviders(providers, credentialMutation: {})
     }
 
-    func disconnectChrome() async {}
-
-    func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {}
+    func configureAPIProviders(_ providers: [APIProviderDefinition],
+                               credentialMutation: @escaping @Sendable () throws -> Void) async throws {
+        guard providers.isEmpty else { throw AgentRuntimeCapabilityError.apiProvidersUnsupported }
+        try credentialMutation()
+    }
 
     /// Resource-free adapters can keep the default; the production runtime
     /// explicitly implements shutdown for its owned processes and capabilities.
@@ -63,8 +76,9 @@ extension AgentRuntimeClient {
 enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case steeringUnsupported
     case compactionUnsupported
-    case chromeConnectionUnsupported
     case workspaceSelectionUnsupported
+    case accessModeUnsupported
+    case apiProvidersUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -72,10 +86,12 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support steering an active turn. Your message was not sent."
         case .compactionUnsupported:
             "This runtime does not support context compaction."
-        case .chromeConnectionUnsupported:
-            "This runtime does not support connecting to your existing Chrome session."
         case .workspaceSelectionUnsupported:
             "This runtime does not support choosing a project folder."
+        case .accessModeUnsupported:
+            "This runtime does not support Full access. Your message was not sent."
+        case .apiProvidersUnsupported:
+            "This runtime does not support API providers."
         }
     }
 }
@@ -97,7 +113,6 @@ enum AgentRuntimeEvent: Sendable {
     case approvalRequested(ActionApprovalRequest)
     case approvalResolved(requestID: String)
     case connectionChanged(RuntimeConnectionState)
-    case chromeConnectionChanged(connectionID: UUID, state: ChromeConnectionState)
 }
 
 enum RuntimeConnectionState: Equatable, Sendable {

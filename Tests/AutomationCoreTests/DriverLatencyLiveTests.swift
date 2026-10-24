@@ -26,30 +26,16 @@ final class DriverLatencyLiveTests: XCTestCase {
             "Set LOCALCODEX_DRIVER_PROBE_BUNDLE_ID to the already-focused safe target."
         )
         try XCTSkipUnless(
-            ["com.apple.calculator", "com.google.Chrome"].contains(bundleID),
-            "This probe is limited to Calculator and Chrome."
+            bundleID == "com.apple.calculator",
+            "This probe is limited to Calculator."
         )
         let repetitions = Int(environment["LOCALCODEX_DRIVER_PROBE_REPS"] ?? "5") ?? 0
         guard (1 ... 30).contains(repetitions) else {
             throw ProbeError(message: "LOCALCODEX_DRIVER_PROBE_REPS must be 1...30.")
         }
         let expectedAX = environment["LOCALCODEX_DRIVER_PROBE_EXPECTED_AX"]
-        let expectedChromeURL: String?
-        if bundleID == "com.google.Chrome" {
-            guard let rawURL = environment["LOCALCODEX_DRIVER_PROBE_EXPECTED_URL"],
-                  let url = URL(string: rawURL),
-                  url.scheme == "https", url.host == "example.com", url.path == "/",
-                  expectedAX == "Example Domain" else {
-                throw ProbeError(message: "Chrome probe requires the exact public example.com URL and Example Domain AX oracle.")
-            }
-            expectedChromeURL = rawURL
-        } else {
-            guard expectedAX == "Edit field" else {
-                throw ProbeError(
-                    message: "Calculator probe requires the exact non-button Edit field display oracle."
-                )
-            }
-            expectedChromeURL = nil
+        guard expectedAX == "Edit field" else {
+            throw ProbeError(message: "Calculator probe requires the exact non-button Edit field display oracle.")
         }
         let path = environment["LOCALCODEX_DRIVER_PROBE_PATH"] ?? "both"
         guard ["ax", "capture", "both"].contains(path) else {
@@ -73,8 +59,7 @@ final class DriverLatencyLiveTests: XCTestCase {
 
         let initial = try focusedWindow(expectedBundleID: bundleID)
         let processID = initial.processIdentifier
-        try requireSafeChromePage(processID: processID, expectedURL: expectedChromeURL)
-        let casePrefix = bundleID == "com.apple.calculator" ? "native" : "chrome"
+        let casePrefix = "native"
         let screenshotter = WindowScreenshotter()
         let formatter = AccessibilitySnapshotTextFormatter(
             prioritizesRelevantElements: expectedAX != nil,
@@ -90,7 +75,6 @@ final class DriverLatencyLiveTests: XCTestCase {
 
             if path != "capture" { do {
                 let before = try focusedWindow(expectedBundleID: bundleID, processID: processID)
-                try requireSafeChromePage(processID: processID, expectedURL: expectedChromeURL)
                 let started = DispatchTime.now().uptimeNanoseconds
                 let snapshot = try AccessibilitySession(
                     processIdentifier: processID,
@@ -99,16 +83,7 @@ final class DriverLatencyLiveTests: XCTestCase {
                 let rendered = formatter.format(snapshot)
                 let elapsed = milliseconds(since: started)
                 let after = try focusedWindow(expectedBundleID: bundleID, processID: processID)
-                try requireSafeChromePage(processID: processID, expectedURL: expectedChromeURL)
-                let hasExpectedElement = bundleID == "com.apple.calculator"
-                    ? hasUniqueCalculatorDisplay(in: snapshot)
-                    : expectedAX.map { expected in
-                        snapshot.elements.contains { element in
-                            [element.title, element.elementDescription, element.value]
-                                .compactMap { $0 }
-                                .contains { $0.localizedCaseInsensitiveContains(expected) }
-                        }
-                    } ?? true
+                let hasExpectedElement = hasUniqueCalculatorDisplay(in: snapshot)
                 let passed = sameWindow(before, after)
                     && snapshot.application.processIdentifier == processID
                     && snapshot.rootIndex != nil
@@ -141,7 +116,6 @@ final class DriverLatencyLiveTests: XCTestCase {
 
             if path != "ax" { do {
                 let before = try focusedWindow(expectedBundleID: bundleID, processID: processID)
-                try requireSafeChromePage(processID: processID, expectedURL: expectedChromeURL)
                 let started = DispatchTime.now().uptimeNanoseconds
                 let windows = try await screenshotter.availableWindows()
                 guard let window = matchingWindow(for: before, in: windows) else {
@@ -154,7 +128,6 @@ final class DriverLatencyLiveTests: XCTestCase {
                 )
                 let elapsed = milliseconds(since: started)
                 let after = try focusedWindow(expectedBundleID: bundleID, processID: processID)
-                try requireSafeChromePage(processID: processID, expectedURL: expectedChromeURL)
                 let uniqueSamples = sampledColorCount(image)
                 let passed = sameWindow(before, after)
                     && image.width > 0 && image.height > 0
@@ -208,58 +181,6 @@ final class DriverLatencyLiveTests: XCTestCase {
                     .contains(where: { $0 == "Edit field" })
                 && element.value?.isEmpty == false
         }.count == 1
-    }
-
-    private func requireSafeChromePage(processID: Int32, expectedURL: String?) throws {
-        guard let expectedURL else { return }
-        guard let focused = try FocusedWindowReader().focusedWindow(),
-              focused.processIdentifier == processID,
-              focused.bundleIdentifier == "com.google.Chrome",
-              focused.title?.localizedCaseInsensitiveContains("Example Domain") == true else {
-            throw ProbeError(message: "The safe Example Domain Chrome window is not focused.")
-        }
-        let session = AccessibilitySession(
-            processIdentifier: processID,
-            bundleIdentifier: "com.google.Chrome"
-        )
-        let snapshot = try session.snapshot(limits: .agentDefault)
-        guard try session.focusState(in: snapshot) == .focused else {
-            throw ProbeError(message: "The expected Chrome AX window is not frontmost and focused.")
-        }
-        let addresses = snapshot.elements.filter { element in
-            element.role == "AXTextField"
-                && [element.title, element.elementDescription]
-                    .contains(where: { $0 == "Address and search bar" })
-                && chromeAddress(element.value, matches: expectedURL)
-        }
-        let headings = snapshot.elements.filter { element in
-            element.role == "AXHeading"
-                && [element.title, element.elementDescription, element.value]
-                    .contains(where: { $0 == "Example Domain" })
-                && hasAncestor(role: "AXWebArea", of: element, in: snapshot)
-        }
-        guard addresses.count == 1, headings.count == 1 else {
-            throw ProbeError(message: "The focused Chrome page is not the exact safe example.com target.")
-        }
-    }
-
-    private func chromeAddress(_ value: String?, matches expectedURL: String) -> Bool {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else { return false }
-        return value == expectedURL || "https://\(value)" == expectedURL
-    }
-
-    private func hasAncestor(
-        role: String,
-        of element: AccessibilityTreeElement,
-        in snapshot: AccessibilityTreeSnapshot
-    ) -> Bool {
-        var index = element.parentIndex
-        while let current = index, let ancestor = snapshot.element(at: current) {
-            if ancestor.role == role { return true }
-            index = ancestor.parentIndex
-        }
-        return false
     }
 
     private func matchingWindow(

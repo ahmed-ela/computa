@@ -15,18 +15,13 @@ pub fn build_web(root: &Path, wasm_bindgen: &str, release: bool) -> io::Result<P
         path(&target)?,
         "-p",
         "computa-ui",
-        "-p",
-        "computa-extension",
     ];
     if release {
         args.push("--release");
     }
     run("cargo", &args, root, false)?;
     let output = root.join("target/product-resources");
-    for (crate_name, folder) in [
-        ("computa_ui", "WebUI"),
-        ("computa_extension", "BrowserExtension"),
-    ] {
+    for (crate_name, folder) in [("computa_ui", "WebUI")] {
         let destination = output.join(folder);
         fs::create_dir_all(&destination)?;
         let binary = target
@@ -57,8 +52,6 @@ pub fn build_web(root: &Path, wasm_bindgen: &str, release: bool) -> io::Result<P
         ui.join("bootstrap.js"),
         "import init from './computa_ui.js';\nawait init();\n",
     )?;
-    let extension = output.join("BrowserExtension");
-    copy_tree(&root.join("crates/computa-extension/platform"), &extension)?;
     Ok(output)
 }
 pub fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {

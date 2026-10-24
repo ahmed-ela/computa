@@ -32,6 +32,35 @@ enum EmbeddedBrowserURLPolicy {
         }
     }
 
+    /// srcdoc is a browser-created iframe document, not a top-level address.
+    /// Keep address-bar and popup validation unchanged; the containing web
+    /// document and WebKit's frame/origin rules supply its browsing context.
+    static func validateNavigation(_ url: URL, isMainFrame: Bool, mainDocumentURL: URL?) throws {
+        if !isMainFrame, url.absoluteString == "about:srcdoc",
+           let mainDocumentURL, ["http", "https"].contains(mainDocumentURL.scheme?.lowercased() ?? "") {
+            try validate(mainDocumentURL)
+            return
+        }
+        try validate(url)
+    }
+
+    /// Finite diagnostics never include an address, credentials or page data.
+    static func diagnosticAddressKind(_ url: URL?) -> String {
+        guard let url else { return "missing" }
+        if url.absoluteString == "about:srcdoc" { return "about_srcdoc" }
+        if url.absoluteString == "about:blank" { return "about_blank" }
+        switch url.scheme?.lowercased() {
+        case "http": return "http"
+        case "https": return "https"
+        case "about": return "about_other"
+        case "blob": return "blob"
+        case "data": return "data"
+        case "file": return "file"
+        case "javascript": return "javascript"
+        default: return "other"
+        }
+    }
+
     static func normalize(_ address: String) throws -> URL {
         let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw Rejection.invalidAddress }

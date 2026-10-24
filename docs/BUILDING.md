@@ -13,8 +13,8 @@ OS-process Stop validation remain open.
 
 The source-install entry point builds the pinned Rust engine, native app and
 WebUI, then prepares app-owned headless MLX serving. Orchestration and rollback
-have deterministic tests. **A full clean-machine installation and live Chrome
-pairing of another developer's signed build have not yet been verified.**
+have deterministic tests. **A full clean-machine installation has not yet
+been verified.**
 This is a source-build workflow, not a notarized prebuilt distribution.
 See [the measured packaging validation](SOURCE-INSTALL-VALIDATION.md) for checks
 that passed and the remaining clean-machine qualification limits.
@@ -40,9 +40,6 @@ been granted repository access; it does not imply anonymous public access.
 - Optional Qwen 3.5 4B MLX 4-bit weights: approximately **3.06 GB** of model
   files, separate from the app and build caches. Runtime RAM requirements are
   larger than the weight size; 16 GB or more unified memory is recommended.
-- For the optional Chrome extension bridge: your own installed **Apple
-  Development or Developer ID Application** code-signing identity. Local chat
-  and native Accessibility do not require an Apple signing account.
 
 Rust's broader workspace test suite can need additional SDKs. The packaged
 `codex-app-server` normal/build dependency graph does **not** require GStreamer;
@@ -69,9 +66,8 @@ cd computa
 ```
 
 This default ad-hoc-signed build supports local chat and native app
-Accessibility, subject to normal macOS permissions. **Chrome extension pairing
-is unavailable for ad-hoc builds**: the bridge requires an Apple-backed signing
-identity so an unrelated local process cannot impersonate the app.
+Accessibility, subject to normal macOS permissions. No Apple signing account
+is required for a local build.
 
 If you already have your own Apple code-signing identity installed, build with:
 
@@ -81,7 +77,7 @@ If you already have your own Apple code-signing identity installed, build with:
 
 Replace that entire example certificate name with your exact installed
 identity, or use its 40-character SHA-1 fingerprint. Setup validates it before
-building, signs the helper and outer app with it, and verifies the Apple trust
+building, signs the app with it, and verifies the Apple trust
 chain before installation. It does not create an Apple account, enroll in a
 paid program, import credentials, or approve Keychain prompts. A self-signed
 certificate with an Apple-like name is not accepted as that trust anchor.
@@ -157,14 +153,9 @@ Spotlight picked the desired copy. The setup command opens that exact path.
 
 The stable legacy bundle ID is `com.ahmedelamin.LocalCodex`; the product name is
 Computa. A locally rebuilt ad-hoc signature may require macOS permissions to
-be granted again. Setup does not edit TCC, bypass Gatekeeper, enable Remote
-Debugging, install a browser extension silently, or grant Full Access. Review
-Accessibility and Screen Recording prompts yourself. Optional Chrome access
-requires installing and explicitly pairing the extension in the intended
-profile as described in [`BrowserExtension/README.md`](../BrowserExtension/README.md).
-The app and helper must be signed by the same verified Apple team for this
-optional bridge. Pairing and macOS permissions remain native user decisions;
-signing does not grant access automatically.
+be granted again. Setup does not edit TCC, bypass Gatekeeper, or grant Full Access.
+Review Accessibility and Screen Recording prompts yourself. Signing does not
+grant access automatically.
 
 ## Test fixture portability
 
@@ -184,14 +175,7 @@ shell's PATH. Owned HOME/configuration isolation remains unchanged. The
 `MACTOPUS_*` fixture variables retain their compatibility names. The fixture resolver checks for an executable regular file that is
 not group/world writable; it does not claim to authenticate the Bun publisher.
 
-An optional signing-boundary test uses your existing Apple identity to compile
-and sign small temporary fixtures; it does not connect to Chrome:
-
-```sh
-MACTOPUS_RUN_SIGNING_TESTS=1 MACTOPUS_TEST_SIGNING_IDENTITY='Your existing Apple signing identity' bun test Scripts/chrome-bridge-signing.test.ts
-```
-
-Without that explicit flag the signing tests are skipped. Provisioning and
+Provisioning and
 synthetic downloader tests are not evidence of a fresh multi-gigabyte model
 download; that end-to-end download has not been repeated during packaging.
 

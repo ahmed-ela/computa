@@ -222,7 +222,8 @@ class ContractTests(unittest.TestCase):
             ("tool-only", fixture(public="", call=CALL), "completed", ["fc_original", "msg_fixture"]),
             ("reasoning-tool", fixture(public="", reasoning="private", call=CALL), "completed",
              ["rs_fixture", "fc_original", "msg_fixture"]),
-            ("reasoning-only", fixture(public="", reasoning="private"), "incomplete", ["rs_fixture", "msg_fixture"]),
+            ("reasoning-only-at-cap", fixture(public="", reasoning="private", tokens=100), "incomplete",
+             ["rs_fixture", "msg_fixture"]),
             ("capped-tool", fixture(public="", call=CALL, tokens=100), "incomplete", ["msg_fixture"]),
             ("capped-reasoning-tool", fixture(public="", reasoning="private", call=CALL, tokens=100),
              "incomplete", ["rs_fixture", "msg_fixture"]),
@@ -307,14 +308,35 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(calls, [CALL])
         self.assertEqual([i for i in after[-1]["response"]["output"] if i["type"] == "function_call"], [CALL])
 
-    def test_reasoning_only_is_incomplete_and_never_an_answer(self):
-        for tokens in (50, 100):
+    def test_reasoning_only_at_or_above_token_cap_is_incomplete_and_never_an_answer(self):
+        for tokens in (100, 101):
             output = self.process(fixture(public="", reasoning="PRIVATE_SYNTHETIC_NOT_AN_ANSWER", tokens=tokens))
             self.assertEqual(output[-1]["type"], "response.incomplete")
             self.assertEqual(output[-1]["response"]["output_text"], "")
+            self.assertEqual(output[-1]["response"]["incomplete_details"], {"reason": "max_output_tokens"})
             messages = [i for i in output[-1]["response"]["output"] if i["type"] == "message"]
             self.assertEqual(messages[0]["content"], [])
             self.assertFalse(any(e["type"] == "response.completed" for e in output))
+
+    def test_below_cap_missing_public_output_is_a_fixed_protocol_error(self):
+        private = "PRIVATE_SYNTHETIC_NOT_AN_ANSWER"
+        for public, reasoning, tokens in (("", private, 50), (" \t\n", private, 99),
+                                          ("", "", 0), (" \t\n", "", 25)):
+            with self.subTest(public=repr(public), reasoning=bool(reasoning), tokens=tokens):
+                contract, source = SSEContract(100), fixture(public=public, reasoning=reasoning, tokens=tokens)
+                before = parse(contract.feed(wire(source[:-1])))
+                with self.assertRaises(ProtocolError) as caught:
+                    contract.feed(wire(source[-1:]))
+                self.assertEqual(str(caught.exception), "Missing generated public output")
+                self.assertEqual(sse.protocol_error_diagnostic(caught.exception),
+                                 ("missing_generated_public_output", 1, False))
+                failure = parse(contract.failure())
+                self.assertEqual(failure[-1]["type"], "response.failed")
+                self.assertEqual(failure[-1]["response"]["output"], [])
+                self.assertNotIn(private, json.dumps(failure))
+                self.assertFalse(any(e["type"] in ("response.completed", "response.incomplete")
+                                     or e["type"] == "response.output_item.done" for e in before + failure))
+                self.assertEqual(contract.failure(), b"")
 
     def test_exhaustion_cannot_release_an_executable_function(self):
         output = self.process(fixture(public="", call=CALL, tokens=100))

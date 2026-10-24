@@ -15,7 +15,7 @@ async function fixture() {
     CFBundleShortVersionString: "0.1.0", CFBundleVersion: "1", LSMinimumSystemVersion: "14.0" };
   await file(join(app, "Contents/Info.plist"), JSON.stringify(info));
   for (const name of ["Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
-    "Contents/Resources/ChromeBridge/ChromeBridgeHost", "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
+    "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
   await chmod(join(app, "Contents/MacOS/Computa"), 0o755);
   const binary = join(app, "Contents/Resources/AgentRuntime/codex-app-server");
   await file(join(app, "Contents/Resources/AgentRuntime/manifest.json"), JSON.stringify({ schemaVersion: 1,
@@ -94,15 +94,14 @@ test("fresh package policy cannot be bypassed through the module API", async () 
   await expect(lstat(f.output)).rejects.toThrow();
 });
 
-test("checks the supported arm64 slice of universal app and helper plus the arm64-only runtime", async () => {
+test("checks the supported arm64 slice of the app plus the arm64-only runtime", async () => {
   const f = await fixture();
   await inspectApp(f.context, f.app, "signed-test");
   const inspections = f.calls.filter(call => call[0] === "/usr/bin/otool");
-  expect(inspections).toHaveLength(3);
+  expect(inspections).toHaveLength(2);
   expect(inspections.every(call => call.slice(1, 4).join(" ") === "-arch arm64 -L")).toBe(true);
   expect(inspections.map(call => call.at(-1)!.slice(f.app.length + 1))).toEqual([
     "Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
-    "Contents/Resources/ChromeBridge/ChromeBridgeHost",
   ]);
 });
 
@@ -140,4 +139,15 @@ test("does not overwrite existing artifacts or allow output inside the signed ap
   await expect(packageRelease(f.options, f.context)).rejects.toThrow("already exists");
   expect(await readFile(join(f.output, "SHA256SUMS"), "utf8")).toBe("existing");
   await expect(packageRelease({ ...f.options, output: join(f.app, "output") }, f.context)).rejects.toThrow("separate");
+});
+
+test("refuses stale retired resources before packaging without modifying the source app", async () => {
+  for (const relative of ["Contents/Resources/ChromeBridge", "Contents/Resources/BrowserExtension"]) {
+    const f = await fixture();
+    await mkdir(join(f.app, relative));
+    const before = await bundleFiles(f.app);
+    await expect(packageRelease(f.options, f.context)).rejects.toThrow("Retired bundle resource remains");
+    expect(await bundleFiles(f.app)).toEqual(before);
+    expect(f.calls.some(call => call[0] === "/usr/bin/ditto" || call[0] === "/usr/bin/hdiutil")).toBe(false);
+  }
 });

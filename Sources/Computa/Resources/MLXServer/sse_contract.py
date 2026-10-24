@@ -81,6 +81,7 @@ _PROTOCOL_MESSAGES = frozenset((
     'Malformed stream structure',
     'Malformed terminal item',
     'Missing event type',
+    'Missing generated public output',
     'Missing incomplete reason',
     'Missing item completion',
     'Missing message lifecycle',
@@ -572,7 +573,8 @@ class SSEContract:
         self._check_final_text(self._items[self._message_id], response.get("output_text"))
         _require(not public.strip() or self._message_id in seen, "Terminal omitted public message")
         has_call = any(s["added"]["type"] == "function_call" for s in self._items.values())
-        incomplete = usage["output_tokens"] >= self.max_output_tokens or (not public.strip() and not has_call)
+        incomplete = usage["output_tokens"] >= self.max_output_tokens
+        _require(incomplete or public.strip() or has_call, "Missing generated public output")
         status = "incomplete" if incomplete else "completed"
         output = []
         for identity, state in self._items.items():

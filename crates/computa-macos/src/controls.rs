@@ -21,25 +21,18 @@ pub enum NativeAccessMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeControlEvent {
     AccessModeChanged(NativeAccessMode),
-    RequestPairingUi,
-    DisconnectChrome,
-    RequestTemporaryTabGrant,
     ApprovalResolved { id: String, approved: bool },
-    PairingResolved { id: String, remember: bool },
-    TemporaryTabGrantResolved { id: String, approved: bool },
     RequestAccessibility,
     RequestScreenRecording,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Prompt {
     Approval(String),
-    Pairing(String),
-    Temporary(String),
 }
 impl Prompt {
     fn id(&self) -> &str {
         match self {
-            Self::Approval(id) | Self::Pairing(id) | Self::Temporary(id) => id,
+            Self::Approval(id) => id,
         }
     }
 }
@@ -47,7 +40,7 @@ struct TargetIvars {
     callback: Rc<dyn Fn(NativeControlEvent)>,
     mode: Cell<NativeAccessMode>,
     mode_button: RefCell<Option<Retained<NSPopUpButton>>>,
-    chrome_button: RefCell<Option<Retained<NSPopUpButton>>>,
+    permissions_button: RefCell<Option<Retained<NSPopUpButton>>>,
     pending: Rc<RefCell<Option<Prompt>>>,
 }
 define_class!(
@@ -69,10 +62,10 @@ define_class!(
             self.ivars().mode.set(mode);(self.ivars().callback)(NativeControlEvent::AccessModeChanged(mode));
         }
         // SAFETY: exact native sender and action signature, no page-controlled input.
-        #[unsafe(method(chromeChanged:))]
-        fn chrome_changed(&self,sender:&NSPopUpButton){
-            if self.ivars().chrome_button.borrow().as_ref().is_none_or(|b|!std::ptr::eq(&**b,sender)){return}
-            let event=match sender.indexOfSelectedItem(){1=>Some(NativeControlEvent::RequestPairingUi),2=>Some(NativeControlEvent::DisconnectChrome),3=>Some(NativeControlEvent::RequestTemporaryTabGrant),4=>Some(NativeControlEvent::RequestAccessibility),5=>Some(NativeControlEvent::RequestScreenRecording),_=>None};
+        #[unsafe(method(permissionsChanged:))]
+        fn permissions_changed(&self,sender:&NSPopUpButton){
+            if self.ivars().permissions_button.borrow().as_ref().is_none_or(|b|!std::ptr::eq(&**b,sender)){return}
+            let event=match sender.indexOfSelectedItem(){1=>Some(NativeControlEvent::RequestAccessibility),2=>Some(NativeControlEvent::RequestScreenRecording),_=>None};
             sender.selectItemAtIndex(0);if let Some(event)=event{(self.ivars().callback)(event)}
         }
     }
@@ -83,7 +76,7 @@ impl ControlTarget {
             callback,
             mode: Cell::new(NativeAccessMode::AskEveryTime),
             mode_button: RefCell::new(None),
-            chrome_button: RefCell::new(None),
+            permissions_button: RefCell::new(None),
             pending: Rc::new(RefCell::new(None)),
         });
         // SAFETY: superclass init is called once after Rust ivars initialization.
@@ -95,7 +88,7 @@ pub struct TrustedNativeControls {
     view: Retained<NSView>,
     target: Retained<ControlTarget>,
     mode: Retained<NSPopUpButton>,
-    chrome: Retained<NSPopUpButton>,
+    permissions: Retained<NSPopUpButton>,
     status: Retained<NSTextField>,
     alert: Option<Retained<NSAlert>>,
 }
@@ -121,20 +114,17 @@ impl TrustedNativeControls {
         for title in ["Ask every time", "Full access"] {
             mode.addItemWithTitle(&NSString::from_str(title))
         }
-        let chrome = NSPopUpButton::initWithFrame_pullsDown(
+        let permissions = NSPopUpButton::initWithFrame_pullsDown(
             NSPopUpButton::alloc(mtm),
             NSRect::new(NSPoint::new(170., 3.), NSSize::new(190., 28.)),
             false,
         );
         for title in [
-            "Chrome connection",
-            "Pair extension…",
-            "Disconnect Chrome",
-            "Allow temporary tabs…",
+            "macOS permissions",
             "Accessibility Settings…",
             "Screen Recording Settings…",
         ] {
-            chrome.addItemWithTitle(&NSString::from_str(title))
+            permissions.addItemWithTitle(&NSString::from_str(title))
         }
         let status = NSTextField::labelWithString(&NSString::from_str("Runtime disconnected"), mtm);
         status.setFrame(NSRect::new(NSPoint::new(375., 8.), NSSize::new(550., 20.)));
@@ -143,15 +133,15 @@ impl TrustedNativeControls {
         unsafe {
             mode.setTarget(Some(&target));
             mode.setAction(Some(sel!(modeChanged:)));
-            chrome.setTarget(Some(&target));
-            chrome.setAction(Some(sel!(chromeChanged:)));
+            permissions.setTarget(Some(&target));
+            permissions.setAction(Some(sel!(permissionsChanged:)));
             view.addSubview(&mode);
-            view.addSubview(&chrome);
+            view.addSubview(&permissions);
             view.addSubview(&status);
             content.addSubview(&view);
         }
         *target.ivars().mode_button.borrow_mut() = Some(mode.clone());
-        *target.ivars().chrome_button.borrow_mut() = Some(chrome.clone());
+        *target.ivars().permissions_button.borrow_mut() = Some(permissions.clone());
         // SAFETY: a live borrowed window is retained before long-term storage.
         let window = unsafe { Retained::retain(window as *const NSWindow as *mut NSWindow) }
             .ok_or(AutomationError::WindowUnavailable)?;
@@ -160,7 +150,7 @@ impl TrustedNativeControls {
             view,
             target,
             mode,
-            chrome,
+            permissions,
             status,
             alert: None,
         })
@@ -213,19 +203,6 @@ impl TrustedNativeControls {
             "Allow once",
         )
     }
-    pub fn present_pairing(
-        &mut self,
-        id: &str,
-        extension_id: &str,
-        installation_id: &str,
-    ) -> Result<()> {
-        validate_id(id)?;
-        self.present(Prompt::Pairing(id.into()),"Pair Chrome extension",&format!("Allow the Computa Chrome extension to connect?\nExtension: {extension_id}\nInstallation: {installation_id}\n\nPairing is stored in your macOS Keychain. Browser and computer actions remain subject to your access mode and capability checks."),"Pair and remember")
-    }
-    pub fn present_temporary_tab_grant(&mut self, id: &str) -> Result<()> {
-        validate_id(id)?;
-        self.present(Prompt::Temporary(id.into()),"Allow temporary Chrome tabs", "Allow Computa to create an inactive temporary copy of an observed Chrome tab for an authorized task? The grant belongs to this paired connection. User activation relinquishes ownership; Computa closes only tabs it can still prove it owns.","Allow temporary tabs")
-    }
     fn present(&mut self, prompt: Prompt, title: &str, detail: &str, accept: &str) -> Result<()> {
         let mtm = MainThreadMarker::new().ok_or(AutomationError::WrongThread)?;
         if self.interaction_blocked() {
@@ -252,13 +229,6 @@ impl TrustedNativeControls {
             let id = prompt.id().to_owned();
             callback(match prompt {
                 Prompt::Approval(_) => NativeControlEvent::ApprovalResolved { id, approved },
-                Prompt::Pairing(_) => NativeControlEvent::PairingResolved {
-                    id,
-                    remember: approved,
-                },
-                Prompt::Temporary(_) => {
-                    NativeControlEvent::TemporaryTabGrantResolved { id, approved }
-                }
             });
         });
         alert.beginSheetModalForWindow_completionHandler(&self.window, Some(&completion));
@@ -284,11 +254,11 @@ impl Drop for TrustedNativeControls {
             self.dismiss_prompt(&id);
         }
         self.mode.setEnabled(false);
-        self.chrome.setEnabled(false);
+        self.permissions.setEnabled(false);
         // SAFETY: targets are disconnected before their owner is destroyed.
         unsafe {
             self.mode.setTarget(None);
-            self.chrome.setTarget(None);
+            self.permissions.setTarget(None);
             self.view.removeFromSuperview();
         }
     }

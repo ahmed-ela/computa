@@ -5,27 +5,8 @@ import Foundation
 /// cause into a website, permission, or policy diagnosis. This is evidence for
 /// the model, not a replacement for approval, policy, or execution checks.
 enum ComputerToolFailureEvidence {
-    static var navigationRecoveryDescription: String {
-        ExistingChromeError.navigationRecoveryRequired.localizedDescription
-    }
-
-    static let navigationRecoveryNextStep =
-        "Do not retry this failed navigation or open another tab. Any tab already created was left open. "
-        + "Further computer actions are blocked for this turn. Tell the user navigation was not confirmed. "
-        + "Do not claim that Enter was sent, that navigation completed, or that a website or policy blocked it."
-
-    static var navigationRecoveryTerminalMessage: String {
-        navigationRecoveryDescription + " Further computer actions are blocked for this turn to avoid creating duplicate tabs. "
-            + "Any tab already created was left open; navigation was not confirmed."
-    }
-
-    /// An exhausted native activation is not something model reasoning can
-    /// repair. A retained partial navigation likewise must not be retried as a
-    /// fresh open. Report either as an app diagnostic and end this action turn.
+    /// An exhausted native activation cannot be repaired by model retries.
     static func terminalMessage(for error: Error) -> String? {
-        if let chrome = error as? ExistingChromeError, chrome == .navigationRecoveryRequired {
-            return navigationRecoveryTerminalMessage
-        }
         guard let native = error as? ComputerInputError,
               case .applicationActivationFailed = native else { return nil }
         return native.localizedDescription + " The cause is unknown. Further computer actions are blocked for this turn. "
@@ -33,22 +14,13 @@ enum ComputerToolFailureEvidence {
     }
 
     static func text(for error: Error, tool: String? = nil) -> String {
-        if let chrome = error as? ExistingChromeError, chrome == .navigationRecoveryRequired {
-            let evidence: [String: Any] = [
-                "type": "native_tool_failure",
-                "error": ["code": "chrome_navigation_recovery_required", "message": navigationRecoveryDescription],
-                "cause": "undetermined",
-                "website_status": "not_observed",
-                "action_outcome": "navigation_not_confirmed",
-                "tab_state": "preserved_if_created",
-                "retry_policy": "stop_for_turn",
-                "next_step": navigationRecoveryNextStep,
-            ]
-            guard let data = try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]),
-                  let text = String(data: data, encoding: .utf8) else {
-                return navigationRecoveryDescription
-            }
-            return text
+        // Recovery guidance must describe the active tool surface. This does
+        // not reinterpret permission denials or change backend admission.
+        if let continuation = error as? ComputerReadContinuation.Failure {
+            return continuation.localizedDescription
+        }
+        if let policy = error as? ComputerInteractionPolicy.Violation {
+            return policy.localizedDescription
         }
         if tool == ComputerV2ToolContract.Tool.pointer.rawValue,
            let validation = error as? ComputerV2ToolContract.ValidationError,

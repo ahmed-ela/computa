@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -89,12 +88,10 @@ describe("rename compatibility contracts", () => {
     expect(project).toMatch(/DEVELOPMENT_TEAM:\s*MSMG8CJLB3/);
   });
 
-  test("model, access mode and remembered Chrome preferences keep their stored keys", () => {
+  test("model and access mode preferences keep their stored keys", () => {
     const state = source("State/AppState.swift");
     expect(state).toContain('defaultModelPreferenceKey = "LocalCodex.defaultModelID"');
     expect(state).toContain('accessModePreferenceKey = "HeyDash.accessMode"');
-    expect(source("Runtime/RememberedChromeConnection.swift"))
-      .toContain('preferenceKey = "HeyDash.rememberedChromeConnection"');
   });
 
   test("conversation and visual-model storage retain the LocalCodex support directory", () => {
@@ -123,28 +120,14 @@ describe("rename compatibility contracts", () => {
     expect(source("Runtime/CodexAppServerRuntime.swift")).toContain('"name": "local_codex"');
   });
 
-  test("Chrome extension branding changes without losing its paired identity", () => {
-    const manifest = JSON.parse(read("BrowserExtension/manifest.json"));
-    const id = [...createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)]
-      .map(digit => String.fromCharCode(97 + Number.parseInt(digit, 16))).join("");
-    expect(manifest.name).toBe("Computa Browser Bridge");
-    expect(id).toBe("gdghbmoiibghgkfmhjlckipjjlclnlbk");
-    expect(read("BrowserExtension/bridge.js")).toContain('HOST_NAME = "com.macndash.chrome_bridge"');
-    expect(read("BrowserExtension/bridge.js")).toContain('STORAGE_KEY = "macndashChromeBridgeV1"');
-    expect(source("Runtime/ChromeBridgeIPC.swift")).toContain('hostName = "com.macndash.chrome_bridge"');
-    const coordinator = source("Runtime/BrowserExtensionCoordinator.swift");
-    expect(coordinator).toContain('enabledKey = "Macndash.chromeExtension.enabled"');
-    expect(coordinator).toContain('installationKey = "Macndash.chromeExtension.installationID"');
-  });
-
   test("a product rename does not relabel or replace the pinned agent runtime", () => {
     const pin = JSON.parse(read("Runtime/codex-source.lock.json"));
-    expect(pin.runtimeVersion).toBe("mactopus-5");
+    expect(pin.runtimeVersion).toBe("mactopus-16");
     // The verified binary/manifest are intentionally not committed. Also check
     // an already-built artifact when present, without making it a test prerequisite.
     if (existsSync(resolve(root, "Sources/Computa/Resources/AgentRuntime/manifest.json"))) {
       const manifest = JSON.parse(source("Resources/AgentRuntime/manifest.json"));
-      expect(manifest.runtimeVersion).toBe("mactopus-5");
+      expect(manifest.runtimeVersion).toBe(pin.runtimeVersion);
       expect(manifest.sourceCommit).toBe(pin.sourceCommit);
       expect(manifest.patchSHA256).toBe(pin.patchSHA256);
     }

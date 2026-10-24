@@ -219,10 +219,10 @@ final class FileEditingContractTests: XCTestCase {
         let data = try ComputaModelToolCatalog.catalogData(additionalModelID: "fixture/model")
         let catalog = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let models = try XCTUnwrap(catalog["models"] as? [[String: Any]])
-        XCTAssertEqual(Set(models.compactMap { $0["slug"] as? String }), Set(LocalModelCatalog.options.map(\.id) + ["fixture/model"]))
+        XCTAssertEqual(Set(models.compactMap { $0["slug"] as? String }), Set(LocalModelCatalog.options.map(\.id) + ["fixture/model", "api/"]))
         for model in models {
             let id = try XCTUnwrap(model["slug"] as? String)
-            if LocalModelCatalog.isWebBrowser(id) { XCTAssertEqual(model["apply_patch_tool_type"] as? String, "freeform") }
+            if LocalModelCatalog.isWebBrowser(id) || id == "api/" { XCTAssertEqual(model["apply_patch_tool_type"] as? String, "freeform") }
             else { XCTAssertTrue(model["apply_patch_tool_type"] is NSNull, "The local MLX contract supports function calls, not custom freeform calls") }
             XCTAssertEqual(model["shell_type"] as? String, "unified_exec")
             XCTAssertEqual(model["context_window"] as? Int, 272_000)

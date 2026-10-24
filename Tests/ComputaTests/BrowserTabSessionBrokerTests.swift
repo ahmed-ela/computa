@@ -3,7 +3,659 @@ import Foundation
 import XCTest
 @testable import Computa
 
+/// The unchanged local mailbox's 15 captured nodes. In build242 its final
+/// Message and Send rows fell off ordinary pages despite complete capture.
+func compactMailboxFixtureNodes(message: String = "Please confirm Tuesday at 10:30 AM.") -> [BrowserDocumentNode] {
+    func node(_ id: Int, _ role: String, _ name: String, parent: Int? = nil, children: [Int] = [],
+              value: String? = nil, href: String? = nil) -> BrowserDocumentNode {
+        let field = role == "textbox", disabled = role == "statictext"
+        return BrowserDocumentNode(backendNodeID: Int64(id + 1), role: role, name: name, value: value,
+            isDisabled: disabled, isReadOnly: disabled, isIgnored: false, nodeID: "n\(id)",
+            parentNodeID: parent.map { "n\($0)" }, childNodeIDs: children.map { "n\($0)" }, linkURL: href,
+            isDOMClickable: role == "button" || role == "link", isEditable: field,
+            constraintValidation: field ? .init(required: true, candidate: true, valid: true, issues: []) : nil)
+    }
+    return [
+        node(0, "main", "", children: [1, 2, 8, 9, 10, 11, 12, 13, 14]),
+        node(1, "heading", "Compose message", parent: 0),
+        node(2, "navigation", "", parent: 0, children: [3, 4, 5, 6, 7]),
+        node(3, "link", "Inbox", parent: 2, href: "http://127.0.0.1:54746/"),
+        node(4, "statictext", "|", parent: 2),
+        node(5, "link", "Compose", parent: 2, href: "http://127.0.0.1:54746/compose"),
+        node(6, "statictext", "|", parent: 2),
+        node(7, "link", "Sent", parent: 2, href: "http://127.0.0.1:54746/sent"),
+        node(8, "statictext", "To", parent: 0),
+        node(9, "textbox", "To", parent: 0, value: "course-staff@example.invalid"),
+        node(10, "statictext", "Subject", parent: 0),
+        node(11, "textbox", "Subject", parent: 0, value: "ODE schedule test 241 fresh"),
+        node(12, "statictext", "Message", parent: 0),
+        node(13, "textbox", "Message", parent: 0, value: message),
+        node(14, "button", "Send message", parent: 0),
+    ]
+}
+
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testCompactFooterDoesNotDuplicateCursorOrNameAnUnavailableTool() throws {
+        let cursor = "opaque-\"\\🙂-cursor"
+        let footer = try BrowserCompleteObservation.footer(cursor: cursor)
+        let prefix = "\nBROWSER_ACTION_REFERENCES "
+        XCTAssertTrue(footer.hasPrefix(prefix))
+        let metadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(footer.dropFirst(prefix.count).utf8)) as? [String: Any])
+        XCTAssertEqual(Set(metadata.keys), ["refs", "next", "copy"])
+        XCTAssertFalse(footer.contains(cursor)); XCTAssertNil(metadata["continuation"])
+        XCTAssertTrue(try XCTUnwrap(metadata["refs"] as? String).contains("input consumes all"))
+        XCTAssertFalse(footer.contains("browser_continue")); XCTAssertFalse(footer.contains("\"tool\""))
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(footer), 0)
+        let completed = try BrowserCompleteObservation.footer(cursor: nil)
+        let completedMetadata = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(completed.dropFirst(prefix.count).utf8)) as? [String: Any])
+        XCTAssertNil(completedMetadata["continuation"])
+        XCTAssertEqual(footer, completed)
+    }
+
+    func testCompactOrdinaryMailboxFitsEveryRowInReadInputAndRecoveryEnvelopes() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: compactMailboxFixtureNodes(), semanticReadiness: .ready)
+        let fill = #"{"dispatched":true,"kind":"fill","label":"Message","outcome":"unverified","partial":false}"#
+        let rejection = BrowserCompleteObservation.RejectionReceipt.stale(wasFill: false, documentChanged: false)
+        for (name, view, encoding, expected) in [
+            ("read", SemanticReadView.all, BrowserCompleteObservation.Encoding.read, 15),
+            ("input", .overview, .input(wasFill: true, receipt: fill), 12),
+            ("recovery", .overview, .recovery(receipt: rejection, view: .overview), 12),
+        ] {
+            let observed = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: view), compact: true, compactEncoding: encoding)
+            let snapshot = observed.snapshot
+            XCTAssertEqual(snapshot.elements.count, expected, name)
+            XCTAssertEqual(snapshot.totalMatches, expected); XCTAssertNil(snapshot.nextCursor)
+            XCTAssertTrue(snapshot.elements.contains { $0.label == "Send message" && $0.supportsPress })
+            XCTAssertTrue(snapshot.elements.contains { $0.label == "Message" && $0.value == "Please confirm Tuesday at 10:30 AM." })
+            XCTAssertFalse(snapshot.formattedText.contains("document_epoch="))
+            XCTAssertEqual(snapshot.documentEpoch, observed.binding.documentEpoch)
+            let complete = snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: nil))
+            let encoded = try encoding.encode(complete, snapshotID: snapshot.id)
+            let reserve = snapshot.elements.reduce(0) { $0 + ($1.isEnabled ? (($1.supportsPress ? 64 : 0) + ($1.supportsSetText ? 64 : 0)) : 0) }
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(encoded, referenceReserve: reserve,
+                actionReceipt: encoding.retentionCue), 0, name)
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testOverviewAssociatesInterleavedRecordHeadingsAndReceiptsWithoutNewAuthority() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        // The live238 Sent view interleaved the fresh heading before the old
+        // receipt. Record identity must survive that ordering and a page cut.
+        let nodes = [
+            semanticNode(0, role: "main", name: "", children: ["n1", "n10", "n20", "n30"]),
+            semanticNode(1, role: "heading", name: "Sent messages", parent: "n0"),
+            semanticNode(10, role: "article", name: "UNEXPOSED_OLD_CONTAINER", parent: "n0", children: ["n11", "n14", "n12", "n13"]),
+            semanticNode(11, role: "heading", name: "ODE schedule test 238", parent: "n10"),
+            semanticNode(14, role: "StaticText", name: "To: course-staff@example.invalid", parent: "n10"),
+            semanticNode(12, role: "StaticText", name: "Please confirm Tuesday at 10:30 AM.", parent: "n10"),
+            semanticNode(13, role: "StaticText", name: "Receipt: LOCAL-dee65262e116fe66", parent: "n10"),
+            semanticNode(20, role: "article", name: "UNEXPOSED_FRESH_CONTAINER", parent: "n0", children: ["n21", "n24", "n22", "n23"]),
+            semanticNode(21, role: "heading", name: "ODE schedule test 238 fresh", parent: "n20"),
+            semanticNode(24, role: "StaticText", name: "To: course-staff@example.invalid", parent: "n20"),
+            semanticNode(22, role: "StaticText", name: "Please confirm Tuesday at 10:30 AM.", parent: "n20"),
+            semanticNode(23, role: "StaticText", name: "Receipt: LOCAL-d11da0d0c59ffe80", parent: "n20"),
+            semanticNode(30, role: "button", name: "Existing action", parent: "n0"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview), compact: true)
+        let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        var records: [String: String] = [:], seen: [String] = []
+        var pages = 0
+        repeat {
+            pages += 1
+            XCTAssertLessThan(pages, 12)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertLessThanOrEqual(page.snapshot.elements.count, 18)
+            XCTAssertFalse(complete.contains("UNEXPOSED_"))
+            for row in try XCTUnwrap(page.snapshot.presentation).rows {
+                let element = try XCTUnwrap(page.snapshot.element(at: row.index))
+                seen.append(element.label)
+                if element.recordPath.isEmpty { XCTAssertFalse(row.text.contains(" record_path=")); continue }
+                let path = try renderedJSONField("record_path", in: row.text)
+                XCTAssertEqual(path, source.uuidString + "/" + element.recordPath.map(String.init).joined(separator: "/"))
+                records[element.label] = path
+                XCTAssertTrue(row.text.contains(source.uuidString), "Historical whole-row excerpts need their own capture scope")
+                XCTAssertFalse(element.supportsPress); XCTAssertFalse(element.supportsSetText)
+                XCTAssertFalse(row.text.contains("UNEXPOSED_"))
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertEqual(records["ODE schedule test 238"], records["Receipt: LOCAL-dee65262e116fe66"])
+        XCTAssertEqual(records["ODE schedule test 238 fresh"], records["Receipt: LOCAL-d11da0d0c59ffe80"])
+        XCTAssertNotEqual(records["ODE schedule test 238"], records["ODE schedule test 238 fresh"])
+        XCTAssertLessThan(try XCTUnwrap(seen.firstIndex(of: "ODE schedule test 238 fresh")),
+                          try XCTUnwrap(seen.firstIndex(of: "Receipt: LOCAL-dee65262e116fe66")),
+                          "Reproduce cross-record interleaving rather than hiding it in a sorted fixture")
+        XCTAssertTrue(seen.contains("Existing action"))
+        let filtered = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "LOCAL-", view: .content), compact: true)
+        let freshSource = try XCTUnwrap(filtered.snapshot.readReceipt?.sourceID)
+        XCTAssertNotEqual(freshSource, source)
+        XCTAssertEqual(filtered.snapshot.elements.map(\.recordPath), [[1], [2]])
+        for row in try XCTUnwrap(filtered.snapshot.presentation).rows {
+            XCTAssertTrue(try renderedJSONField("record_path", in: row.text).hasPrefix(freshSource.uuidString + "/"))
+            XCTAssertFalse(row.text.contains(source.uuidString))
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testRecordAncestrySurvivesNestedSubtreeAndEscapedFieldContinuationWithinExistingCaps() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let label = String(repeating: "\"quoted\\cafe\u{301}\" 🧭\n", count: 180) + "EXACT_END"
+        let nodes = [semanticNode(0, role: "main", name: "", children: ["n1"]),
+                     semanticNode(1, role: "article", name: "", parent: "n0", children: ["n2"]),
+                     semanticNode(2, role: "listitem", name: "", parent: "n1", children: ["n3"]),
+                     semanticNode(3, role: "StaticText", name: label, parent: "n2")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes,
+            sourceTruncated: true)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n2" })
+        let source = try XCTUnwrap(all.snapshot.readReceipt?.sourceID)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        var reconstructed = "", pages = 0
+        repeat {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceTruncated, true)
+            XCTAssertTrue(complete.contains("source_truncated=1"))
+            XCTAssertTrue(complete.contains("Records may span pages. Not input targets or verified outcomes."))
+            for row in try XCTUnwrap(page.snapshot.presentation).rows {
+                XCTAssertEqual(try renderedJSONField("record_path", in: row.text), source.uuidString + "/1/2")
+                XCTAssertNil(row.parentIndex, "Ancestor metadata must not fabricate a parent row outside this selected page")
+                let exposure = try XCTUnwrap(page.snapshot.readReceipt?.exposures.first { $0.field == .label })
+                XCTAssertEqual(exposure.startUTF8, reconstructed.utf8.count)
+                reconstructed += try renderedJSONField("label", in: row.text)
+                XCTAssertEqual(exposure.endUTF8, reconstructed.utf8.count)
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(Data(reconstructed.utf8), Data(label.utf8))
+        await fixture.assertNoInput()
+    }
+
+    func testFreshCaptureRecordRenumberingPreservesOnlyCorroboratedPublishedActionAuthority() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let target = fixture.observation.binding.targetID, committedID = UUID()
+        let nodes = [semanticNode(10, role: "article", name: "", children: ["n11"]),
+                     semanticNode(11, role: "button", name: "Existing action", parent: "n10")]
+        try await fixture.transport.replaceNodes(targetID: target, nodes: nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: target, id: committedID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let original = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        XCTAssertEqual(original.element.recordPath, [1])
+        // A different source-order record precedes the unchanged target in the
+        // same committed document. Only passive group numbering changes.
+        try await fixture.transport.replaceNodes(targetID: target,
+            nodes: [semanticNode(20, role: "article", name: "Unrelated record")] + nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: target, id: committedID)
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true,
+            priorPublishedActions: [original])
+        let proof = try XCTUnwrap(fresh.snapshot.corroboratedActionWitnesses.first)
+        XCTAssertEqual(fresh.snapshot.elements.first { $0.nodeID == "n11" }?.recordPath, [2])
+        XCTAssertNotEqual(first.snapshot.readReceipt?.sourceID, fresh.snapshot.readReceipt?.sourceID)
+        XCTAssertEqual(proof.publicationID, original.publicationID)
+        XCTAssertEqual(proof.element.recordPath, [1], "Original published target remains frozen")
+        XCTAssertEqual(proof.exposures, original.exposures)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: original)
+        }
+        try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: proof)
+        _ = try await fixture.broker.perform(taskKey: "task-a", binding: fresh.binding, witness: proof, action: "AXPress")
+        let count = await fixture.transport.pressCount(targetID: target)
+        XCTAssertEqual(count, 1)
+        await assertBrowserError(.staleSnapshot) {
+            _ = try await fixture.broker.perform(taskKey: "task-a", binding: fresh.binding, witness: proof, action: "AXPress")
+        }
+        let finalCount = await fixture.transport.pressCount(targetID: target)
+        XCTAssertEqual(finalCount, 1)
+    }
+
+    func testNamedContainerAncestryKeepsDuplicateLabelsSeparateAcrossPagesAndSubtrees() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let long = String(repeating: "quoted \\\"cafe\u{301}\\\" 🧭 ", count: 160) + "EXACT_END"
+        let nodes = [
+            semanticNode(0, role: "main", name: "", children: ["n1"]),
+            semanticNode(1, role: "region", name: "Conversation", parent: "n0", children: ["n2", "n6"], namedContainer: true),
+            semanticNode(2, role: "group", name: "Message", parent: "n1", children: ["n3", "n4", "n5"], namedContainer: true),
+            semanticNode(3, role: "heading", name: "Shared subject", parent: "n2"),
+            semanticNode(4, role: "StaticText", name: "Sender A", parent: "n2"),
+            semanticNode(5, role: "StaticText", name: long, parent: "n2"),
+            semanticNode(6, role: "group", name: "Message", parent: "n1", children: ["n7", "n8", "n9"], namedContainer: true),
+            semanticNode(7, role: "heading", name: "Shared subject", parent: "n6"),
+            semanticNode(8, role: "StaticText", name: "Sender B", parent: "n6"),
+            semanticNode(9, role: "StaticText", name: "Other-file.pdf", parent: "n6"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n2" })
+        let source = try XCTUnwrap(all.snapshot.readReceipt?.sourceID)
+        var subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        var reconstructed = "", pages = 0
+        repeat {
+            pages += 1; XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(subtree.snapshot.readReceipt?.sourceID, source)
+            let text = subtree.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: subtree.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text), 0)
+            XCTAssertFalse(text.contains("Sender B")); XCTAssertFalse(text.contains("Other-file.pdf"))
+            XCTAssertFalse(text.contains("click_ref=")); XCTAssertFalse(text.contains("fill_ref="))
+            for row in try XCTUnwrap(subtree.snapshot.presentation).rows {
+                XCTAssertEqual(try renderedJSONField("record_path", in: row.text), source.uuidString + "/1/2")
+                if try XCTUnwrap(subtree.snapshot.element(at: row.index)).nodeID == "n5" {
+                    reconstructed += try renderedJSONField("label", in: row.text)
+                }
+            }
+            guard let cursor = subtree.snapshot.nextCursor else { break }
+            subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        } while true
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(Data(reconstructed.utf8), Data(long.utf8))
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings), compact: true)
+        XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Shared subject", "Shared subject"])
+        XCTAssertEqual(fresh.snapshot.elements.map(\.recordPath), [[1, 2], [1, 3]])
+        XCTAssertNotEqual(fresh.snapshot.readReceipt?.sourceID, source)
+        XCTAssertTrue(fresh.snapshot.formattedText.contains("prefixes show nesting, not authorship"))
+        await fixture.assertNoInput()
+    }
+
+    func testGroupRecordAncestryRequiresExplicitNamingEvidenceNotAggregatedText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for role in ["group", "region"] {
+            for named in [false, true] {
+                for name in ["", " \n ", "Observed name"] {
+                    try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                        semanticNode(0, role: role, name: name, children: ["n1"], namedContainer: named),
+                        semanticNode(1, role: "StaticText", name: "Target", parent: "n0")])
+                    let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                        bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Target", view: .content), compact: true)
+                    XCTAssertEqual(page.snapshot.elements.count, 1)
+                    XCTAssertEqual(page.snapshot.elements.first?.recordPath, named && name == "Observed name" ? [1] : [])
+                }
+            }
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testRecordAncestryFailsClosedOnIncompleteIgnoredDuplicateCyclicOrDeepAncestors() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let target = semanticNode(1, role: "StaticText", name: "Target", parent: "n2")
+        let ignored = BrowserDocumentNode(backendNodeID: 3, role: "article", name: "HIDDEN_PARENT",
+            value: nil, isDisabled: false, isReadOnly: true, isIgnored: true, nodeID: "n2")
+        let cases: [[BrowserDocumentNode]] = [
+            [target],
+            [target, ignored],
+            [target, semanticNode(2, role: "article", name: "A"), semanticNode(2, role: "article", name: "B")],
+            [target, semanticNode(2, role: "article", name: "", parent: "n3"), semanticNode(3, role: "article", name: "", parent: "n2")],
+            [target] + (2...10).map { semanticNode($0, role: "article", name: "", parent: $0 == 10 ? nil : "n\($0 + 1)") },
+        ]
+        for nodes in cases {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Target", view: .all), compact: true)
+            XCTAssertEqual(page.snapshot.elements.count, 1)
+            XCTAssertEqual(page.snapshot.elements.first?.recordPath, [])
+            XCTAssertFalse(page.snapshot.formattedText.contains("record_path="))
+            XCTAssertFalse(page.snapshot.formattedText.contains("HIDDEN_PARENT"))
+        }
+        var action = BrowserTabElement(index: 0, backendNodeID: 1, role: "AXButton", label: "Action",
+            value: nil, isEnabled: true, supportsPress: true, supportsSetText: false, recordPath: [1])
+        let prior = action
+        action.recordPath = [22, 23]
+        XCTAssertTrue(action.hasIdenticalActionSemantics(to: prior), "Capture-local record renumbering cannot change input authority")
+        await fixture.assertNoInput()
+    }
+
+    func testLegacyPressBackendDefaultFeedbackAdapterDispatchesExactlyOnce() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let feedback = try await fixture.broker.perform(taskKey: "task-a", binding: fixture.observation.binding,
+            snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress")
+        XCTAssertNil(feedback)
+        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
+        XCTAssertEqual(count, 1)
+        do {
+            _ = try await fixture.broker.perform(taskKey: "task-a", binding: fixture.observation.binding,
+                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress")
+            XCTFail("A consumed click cannot be replayed by the optional feedback adapter")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let unchanged = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
+        XCTAssertEqual(unchanged, 1)
+    }
+
+    func testCompactPagesPreserveEveryEscapedFieldByteAndFollowingRowsWithoutCursorSkips() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let label = "e\u{301}" + String(repeating: "🙂\\\"\n\t\u{0001}", count: 220) + " EXACT_LABEL_TAIL"
+        let value = String(repeating: "\\\"\n", count: 250) + " EXACT_VALUE_TAIL"
+        let link = "https://example.test/" + String(repeating: "quoted%22/path/", count: 180) + "destination"
+        let nodes = [semanticNode(0, role: "textbox", name: label, link: link, value: value)]
+            + (1...8).map { semanticNode($0, role: "button", name: "Following control \($0)") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: nodes, sourceTruncated: true)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        var reconstructed: [String: String] = [:]
+        var pages = 0
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 32)
+            let receipt = try XCTUnwrap(page.snapshot.readReceipt)
+            XCTAssertEqual(receipt.sourceID, source)
+            XCTAssertEqual(receipt.selectedElementCount, nodes.count)
+            XCTAssertTrue(receipt.sourceTruncated)
+            XCTAssertEqual(receipt.outputTruncated, page.snapshot.nextCursor != nil)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            XCTAssertTrue(complete.contains("source_truncated=1"))
+            let rows = try XCTUnwrap(page.snapshot.presentation).rows
+            for exposure in receipt.exposures {
+                let element = try XCTUnwrap(page.snapshot.elements.first { "backend:\($0.backendNodeID)" == exposure.nodeID })
+                let row = try XCTUnwrap(rows.first { $0.index == element.index }).text
+                let key = "\(exposure.nodeID):\(exposure.field.rawValue)"
+                XCTAssertEqual(exposure.startUTF8, reconstructed[key, default: ""].utf8.count)
+                let partial = exposure.startUTF8 != 0 || exposure.endUTF8 != exposure.totalUTF8
+                let field = exposure.field == .linkURL ? (partial ? "href_fragment" : "href") : exposure.field.rawValue
+                let emitted = try renderedJSONField(field, in: row)
+                XCTAssertEqual(emitted.utf8.count, exposure.endUTF8 - exposure.startUTF8)
+                reconstructed[key, default: ""] += emitted
+                if exposure.field == .linkURL, partial { XCTAssertFalse(row.contains(" href=")) }
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 2)
+        XCTAssertEqual(Array(reconstructed["backend:1:label", default: ""].utf8), Array(label.utf8))
+        XCTAssertEqual(reconstructed["backend:1:value"], value)
+        XCTAssertEqual(reconstructed["backend:1:linkURL"], link)
+        for id in 1...8 { XCTAssertEqual(reconstructed["backend:\(id + 1):label"], "Following control \(id)") }
+        await fixture.assertNoInput()
+    }
+
+    func testCompactDocumentPagesKeepUsefulCapacityAndExactReadOnlyProvenance() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let passage = "The documented setting is managed by the workspace administrator. Review supported settings before changing configuration. "
+        let nodes = [semanticNode(0, role: "main", name: "", children: (1...18).map { "n\($0)" })]
+            + (1...18).map { semanticNode($0, role: "StaticText", name: "Section \($0). " + passage, parent: "n0") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        let receipt = try XCTUnwrap(read.snapshot.readReceipt)
+        let full = read.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor))
+        let usefulBytes = receipt.exposures.reduce(0) { $0 + $1.endUTF8 - $1.startUTF8 }
+        XCTAssertGreaterThanOrEqual(read.snapshot.elements.count, 5)
+        XCTAssertGreaterThan(Double(usefulBytes) / Double(full.utf8.count), 0.20)
+        XCTAssertEqual(receipt.selectedElementCount, 18)
+        XCTAssertTrue(receipt.exposures.allSatisfy { $0.kind == .readable && $0.provenance == .main })
+        XCTAssertEqual(try BrowserCompleteObservation.excessBytes(full), 0)
+        XCTAssertTrue(full.contains("content=text; all=toolbars."))
+        XCTAssertFalse(full.contains("click_ref=")); XCTAssertFalse(full.contains("fill_ref="))
+        print("COMPACT_READ_CAPACITY rows=\(read.snapshot.elements.count) bytes=\(full.utf8.count) field_bytes=\(usefulBytes) field_ratio=\(Double(usefulBytes) / Double(full.utf8.count)) footer_bytes=\(try BrowserCompleteObservation.footer(cursor: read.snapshot.nextCursor).utf8.count)")
+        await fixture.assertNoInput()
+    }
+
+    func testCompactContentSignalsFilteredInputNodesWithoutExposingTheirLabelsOrAuthority() async throws {
+        for truncated in [false, true] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            let nodes = [
+                semanticNode(0, role: "heading", name: "Pick an account"),
+                semanticNode(1, role: "button", name: "PRIVATE_ACCOUNT_LABEL"),
+                semanticNode(2, role: "textbox", name: "PRIVATE_FIELD_LABEL"),
+                semanticNode(3, role: "button", name: "DISABLED_LABEL", disabled: true),
+                semanticNode(4, role: "textbox", name: "READ_ONLY_LABEL", readOnly: true),
+                BrowserDocumentNode(backendNodeID: 6, role: "button", name: "IGNORED_LABEL", value: nil,
+                    isDisabled: false, isReadOnly: false, isIgnored: true, nodeID: "n5"),
+                BrowserDocumentNode(backendNodeID: 7, role: "button", name: "NO_PRESS_LABEL", value: nil,
+                    isDisabled: false, isReadOnly: false, isIgnored: false, nodeID: "n6", isPressUnsupported: true),
+            ]
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                nodes: nodes, sourceTruncated: truncated, semanticReadiness: .ready)
+            let before = await fixture.transport.readinessRequests().count
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+            let after = await fixture.transport.readinessRequests().count
+            XCTAssertEqual(after, before + 1, "The signal uses the existing capture, without another read")
+            let text = read.snapshot.formattedText
+            XCTAssertTrue(text.contains("VIEW content omitted_input_nodes=2 basis=captured_view_and_query."))
+            XCTAssertTrue(text.contains("Read overview/all without cursor/query for controls before an access-block claim."))
+            XCTAssertTrue(text.contains("source_truncated=\(truncated ? 1 : 0)"))
+            XCTAssertTrue(text.contains("not site results/relevance/absence"))
+            XCTAssertEqual(read.snapshot.elements.map(\.label), ["Pick an account"])
+            for hidden in ["PRIVATE_ACCOUNT_LABEL", "PRIVATE_FIELD_LABEL", "DISABLED_LABEL", "READ_ONLY_LABEL", "IGNORED_LABEL", "NO_PRESS_LABEL"] {
+                XCTAssertFalse(text.contains(hidden))
+            }
+            XCTAssertTrue(read.snapshot.actionWitnesses.isEmpty)
+            XCTAssertFalse(text.contains("click_ref=")); XCTAssertFalse(text.contains("fill_ref="))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text + BrowserCompleteObservation.footer(cursor: nil)), 0)
+            await fixture.assertNoInput()
+
+            let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+            XCTAssertFalse(all.snapshot.formattedText.contains("omitted_input_nodes="))
+            let account = try XCTUnwrap(all.snapshot.elements.first { $0.label == "PRIVATE_ACCOUNT_LABEL" })
+            XCTAssertNotNil(all.snapshot.actionWitnesses[account.index])
+            try await fixture.broker.perform(taskKey: "task-a", binding: all.binding,
+                snapshot: all.snapshot, elementIndex: account.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
+            XCTAssertEqual(pressed, [2], "Only the subsequently published exact control receives input")
+        }
+    }
+
+    func testCompactAllViewQueryReportsOnlyControlsExcludedByTheLocalSelection() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "heading", name: "Selected heading"),
+            semanticNode(1, role: "button", name: "Selected button"),
+            semanticNode(2, role: "textbox", name: "PRIVATE_OTHER_FIELD"),
+        ])
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Selected", view: .all), compact: true)
+        XCTAssertTrue(read.snapshot.formattedText.contains("VIEW all omitted_input_nodes=1 basis=captured_view_and_query."))
+        XCTAssertFalse(read.snapshot.formattedText.contains("PRIVATE_OTHER_FIELD"))
+        XCTAssertEqual(read.snapshot.totalMatches, 2)
+        XCTAssertEqual(read.snapshot.elements.map(\.label), ["Selected heading", "Selected button"])
+        XCTAssertEqual(read.snapshot.actionWitnesses.count, 1)
+        XCTAssertEqual(try selectionEvidence(read.snapshot)["site_search_evaluated"] as? Bool, false)
+        await fixture.assertNoInput()
+    }
+
+    func testCompactFilteredInputCountFollowsTheImmutableSelectionRatherThanLiveChangesOrPages() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let nodes = (0..<18).map { semanticNode($0, role: "StaticText", name: "Passage \($0) " + String(repeating: "observed text ", count: 18)) }
+            + [semanticNode(18, role: "button", name: "PRIVATE_FILTERED_CONTROL")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        let source = page.snapshot.readReceipt?.sourceID
+        // Continuation revalidates the document but retains its original capture.
+        try await fixture.transport.replaceNodes(targetID: page.binding.targetID,
+            nodes: Array(nodes.dropLast()))
+        var pages = 0
+        var seen = Set<Int64>()
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
+            XCTAssertEqual(page.snapshot.totalMatches, 18)
+            XCTAssertTrue(page.snapshot.formattedText.contains("omitted_input_nodes=1"))
+            XCTAssertFalse(page.snapshot.formattedText.contains("PRIVATE_FILTERED_CONTROL"))
+            XCTAssertTrue(page.snapshot.actionWitnesses.isEmpty)
+            let complete = page.snapshot.formattedText + (try BrowserCompleteObservation.footer(cursor: page.snapshot.nextCursor))
+            XCTAssertEqual(try BrowserCompleteObservation.excessBytes(complete), 0)
+            seen.formUnion(page.snapshot.elements.map(\.backendNodeID))
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(seen, Set((1...18).map(Int64.init)))
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content), compact: true)
+        XCTAssertFalse(fresh.snapshot.formattedText.contains("omitted_input_nodes="))
+        await fixture.assertNoInput()
+    }
+
+    func testCompactPaginationDoesNotMislabelSelectedControlsAsFilteredOut() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: (0..<45).map { semanticNode($0, role: "button", name: "Selected control \($0)") })
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        var pages = 0
+        var seen = Set<Int64>()
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 20)
+            XCTAssertEqual(page.snapshot.totalMatches, 45)
+            XCTAssertFalse(page.snapshot.formattedText.contains("omitted_input_nodes="))
+            seen.formUnion(page.snapshot.elements.map(\.backendNodeID))
+            guard let cursor = page.snapshot.nextCursor else { break }
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor), compact: true)
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(seen, Set((1...45).map(Int64.init)))
+        await fixture.assertNoInput()
+    }
+
+    func testCompactFilteredInputSignalRespectsSubtreeAndDoesNotInferAbsenceFromIncompleteCapture() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "generic", name: "Observed subtree", children: ["n1"]),
+            semanticNode(1, role: "heading", name: "Selected heading", parent: "n0"),
+            semanticNode(2, role: "button", name: "PRIVATE_OUTSIDE_CONTROL"),
+        ], sourceTruncated: true)
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all), compact: true)
+        let root = try XCTUnwrap(all.snapshot.elements.first { $0.nodeID == "n0" })
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .content, snapshotID: all.snapshot.id, elementIndex: root.index), compact: true)
+        XCTAssertEqual(read.snapshot.elements.map(\.label), ["Selected heading"])
+        XCTAssertTrue(read.snapshot.formattedText.contains("scope=subtree"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("source_truncated=1"))
+        XCTAssertTrue(read.snapshot.formattedText.contains("not site results/relevance/absence"))
+        XCTAssertFalse(read.snapshot.formattedText.contains("omitted_input_nodes="))
+        XCTAssertFalse(read.snapshot.formattedText.contains("PRIVATE_OUTSIDE_CONTROL"))
+        XCTAssertTrue(read.snapshot.actionWitnesses.isEmpty)
+        await fixture.assertNoInput()
+    }
+
+    func testCompletedReadOmitsCursorFieldWithoutRewritingLiteralPageText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let literal = "Observed documentation: next_cursor=none"
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "main", name: "", children: ["n1"]),
+            semanticNode(1, role: "StaticText", name: literal, parent: "n0"),
+        ])
+        for view in [SemanticReadView.all, .overview, .content] {
+            for query in [nil, "Absent fixture text"] as [String?] {
+                let observed = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: query, view: view))
+                let read = try XCTUnwrap(observed.snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix("READ ") })
+                XCTAssertNil(observed.snapshot.nextCursor)
+                XCTAssertFalse(read.contains("next_cursor="), "An absent continuation must not look like a usable token")
+                XCTAssertTrue(read.contains("output_truncated=0"))
+                let receipt = try XCTUnwrap(observed.snapshot.readReceipt)
+                XCTAssertFalse(receipt.outputTruncated)
+                if query == nil {
+                    XCTAssertTrue(observed.snapshot.formattedText.contains(literal), "Only native metadata changes, never page text")
+                    let exposure = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "backend:2" && $0.field == .label })
+                    XCTAssertEqual(exposure.startUTF8, 0); XCTAssertEqual(exposure.endUTF8, literal.utf8.count)
+                } else {
+                    XCTAssertTrue(observed.snapshot.elements.isEmpty); XCTAssertTrue(receipt.exposures.isEmpty)
+                }
+            }
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testConstraintMetadataRemainsAttachedToItsPublishedRowWithinReadBudgets() async throws {
+        for view in [SemanticReadView.all, .overview] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            let state = BrowserConstraintValidation(required: true, candidate: true, valid: false, issues: [.valueMissing])
+            let longLabel = String(repeating: "🙂 quoted \"field\" ", count: 400) + "UNPUBLISHED_TAIL"
+            let nodes: [BrowserDocumentNode] = (1...25).map { (index: Int) -> BrowserDocumentNode in
+                let label: String = index == 1 ? longLabel : "Field \(index)"
+                let constraints: BrowserConstraintValidation? = index == 1 ? state : nil
+                return BrowserDocumentNode(backendNodeID: Int64(index), role: "textbox",
+                    name: label, value: "",
+                    isDisabled: false, isReadOnly: false, isIgnored: false,
+                    nodeID: "n\(index)", isEditable: true, constraintValidation: constraints)
+            }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: view))
+            XCTAssertFalse(page.snapshot.formattedText.contains("UNPUBLISHED_TAIL"))
+            var pages = 0, seen = Set<Int64>()
+            repeat {
+                pages += 1
+                let rows = try XCTUnwrap(page.snapshot.presentation).rows
+                let bodyBytes = rows.reduce(0) { $0 + $1.text.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }
+                XCTAssertLessThanOrEqual(bodyBytes, view == .overview ? 6_000 : 10_000)
+                XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+                for row in rows {
+                    let element = try XCTUnwrap(page.snapshot.element(at: row.index))
+                    seen.insert(element.backendNodeID)
+                    XCTAssertEqual(row.text.contains("required=true constraint=invalid[value_missing]"), element.backendNodeID == 1)
+                    XCTAssertEqual(row.text.contains("constraint="), element.constraintValidation != nil)
+                    XCTAssertTrue(page.snapshot.formattedText.contains(row.text))
+                }
+                guard let cursor = page.snapshot.nextCursor else { break }
+                XCTAssertLessThan(pages, 20, "Continued metadata cannot prevent byte progress")
+                page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+            } while true
+            XCTAssertGreaterThan(pages, 1)
+            XCTAssertEqual(seen, Set((1...25).map(Int64.init)))
+            await fixture.assertNoInput()
+        }
+    }
+
+    func testContentReadinessIsRequestedOnlyForFreshContentNotQueryContinuationOrSubtree() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes:
+            (0..<100).map { semanticNode($0, role: "StaticText", name: "Observed row \($0)") })
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Observed", view: .content))
+        let cursor = try XCTUnwrap(first.snapshot.nextCursor)
+        let continuation = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(cursor: cursor))
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: continuation.binding,
+            bundleIdentifier: "com.ahmedelamin.computa",
+            read: .init(view: .content, snapshotID: continuation.snapshot.id, elementIndex: 0))
+        XCTAssertEqual(subtree.snapshot.elements.count, 1)
+        let afterRetained = await fixture.transport.readinessRequests()
+        XCTAssertEqual(afterRetained, [.semanticContent, .content], "Retained reads stay immutable and use only immediate identity preflight")
+        _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Absent", view: .all))
+        let afterAll = await fixture.transport.readinessRequests()
+        XCTAssertEqual(afterAll, [.semanticContent, .content, .semanticContent], "Query text does not determine the readiness mode")
+        await fixture.assertNoInput()
+    }
+
     func testPresentationOffersFillWithoutPressForEditableTextFieldsAndPreservesOtherControls() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = [
@@ -18,7 +670,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let snapshot = observation.snapshot
         let presentation = try XCTUnwrap(snapshot.presentation)
         XCTAssertEqual(presentation.rows.map(\.text),
@@ -69,7 +721,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let snapshot = observation.snapshot
         let presentation = try XCTUnwrap(snapshot.presentation)
         let rows = snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }.map(String.init)
@@ -94,35 +746,49 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
-    func testOverviewSurfacesControlsHeadingsAndNavigationWithoutClaimingBodyCoverage() async throws {
+    func testOverviewInterleavesDocumentTextWithControlsHeadingsAndNavigationWithoutAddingAuthority() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
-        let body = String(repeating: "Ordinary document passage. ", count: 1_000)
+        let body = "Ordinary document passage with an exact identifier: cafe\u{301}-219."
         let links = (10..<60).map { semanticNode($0, role: "link", name: "Destination \($0)", link: "https://example.com/item/\($0)") }
-        let nodes = [semanticNode(0, role: "StaticText", name: body)] + links + [
+        let nodes = [semanticNode(0, role: "StaticText", name: body, parent: "n1000")] + links + [
             semanticNode(100, role: "heading", name: "Observed heading"),
             semanticNode(101, role: "heading", name: "Other heading"),
             semanticNode(200, role: "button", name: "Open panel", children: ["n201"]),
             semanticNode(201, role: "StaticText", name: "Inherited control child", parent: "n200"),
             semanticNode(202, role: "searchbox", name: "Find records"),
             semanticNode(203, role: "generic", name: "Custom action", clickable: true),
+            semanticNode(1000, role: "main", name: "", children: ["n0"]),
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let overview = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
-        XCTAssertEqual(overview.snapshot.elements.prefix(3).map(\.semanticRole), ["button", "heading", "link"])
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
+        XCTAssertEqual(overview.snapshot.elements.prefix(4).map(\.semanticRole), ["button", "heading", "StaticText", "link"])
         for label in ["Open panel", "Find records", "Custom action", "Observed heading"] {
             XCTAssertTrue(overview.snapshot.elements.contains { $0.label == label })
         }
-        XCTAssertFalse(overview.snapshot.formattedText.contains("Ordinary document passage"))
+        XCTAssertTrue(overview.snapshot.formattedText.contains(body))
         XCTAssertFalse(overview.snapshot.formattedText.contains("Inherited control child"))
         XCTAssertTrue(overview.snapshot.formattedText.contains("document_content_exhaustive=false"))
         let receipt = try XCTUnwrap(overview.snapshot.readReceipt)
         XCTAssertEqual(receipt.view, .overview)
-        XCTAssertEqual(receipt.selectedElementCount, 55)
-        XCTAssertFalse(receipt.exposures.contains { ["backend:1", "backend:202"].contains($0.nodeID) })
+        XCTAssertEqual(receipt.selectedElementCount, 56)
+        let bodyExposure = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "backend:1" && $0.field == .label })
+        XCTAssertEqual(bodyExposure.startUTF8, 0); XCTAssertEqual(bodyExposure.endUTF8, body.utf8.count)
+        XCTAssertEqual(bodyExposure.kind, .readable); XCTAssertEqual(bodyExposure.provenance, .main)
+        XCTAssertFalse(receipt.exposures.contains { $0.nodeID == "backend:202" })
+        let bodyElement = try XCTUnwrap(overview.snapshot.elements.first { $0.backendNodeID == 1 })
+        XCTAssertFalse(bodyElement.supportsPress); XCTAssertFalse(bodyElement.supportsSetText)
+        await assertBrowserError(.unsupportedAction("AXPress")) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: overview.binding,
+                snapshot: overview.snapshot, elementIndex: bodyElement.index, action: "AXPress")
+        }
+        await assertBrowserError(.unsupportedAction("set text")) {
+            try await fixture.broker.setText(taskKey: "task-a", binding: overview.binding,
+                snapshot: overview.snapshot, elementIndex: bodyElement.index, text: "Not authorized")
+        }
         XCTAssertTrue(overview.snapshot.elements.contains { $0.label == "Custom action" && $0.supportsPress })
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: overview.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         XCTAssertEqual(all.snapshot.elements.first?.label, body, "Explicit all retains original source order and full internal fields.")
         let controlIndex = try XCTUnwrap(overview.snapshot.elements.first { $0.label == "Open panel" }?.index)
         await assertBrowserError(.staleSnapshot) {
@@ -130,7 +796,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 snapshot: overview.snapshot, elementIndex: controlIndex, action: "AXPress")
         }
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.first?.label, body)
         XCTAssertEqual(content.snapshot.readReceipt?.view, .content)
         XCTAssertNotEqual(content.snapshot.readReceipt?.sourceID, receipt.sourceID)
@@ -153,7 +819,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let nodes = weak + semantic + headings + navigation
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         XCTAssertEqual(page.snapshot.elements.prefix(3).map(\.semanticRole), ["button", "heading", "link"])
         XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Find records" && $0.supportsPress })
         XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Record query" && $0.supportsSetText })
@@ -170,7 +836,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             seen += page.snapshot.elements.map(\.backendNodeID)
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         let weakIDs = Set(weak.compactMap(\.backendNodeID))
         let semanticIDs = Set(semantic.compactMap(\.backendNodeID))
@@ -188,32 +854,35 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let controls = (0..<41).map { semanticNode($0, role: "button", name: "Control \($0)") }
         let headings = (100..<115).map { semanticNode($0, role: "heading", name: "Heading \($0)") }
         let links = (200..<220).map { semanticNode($0, role: "link", name: "Destination \($0)", link: "https://example.com/\($0)") }
-        let nodes = controls + headings + links + [semanticNode(300, role: "StaticText", name: "Body remains unread")]
+        let body = (300..<310).map { semanticNode($0, role: "StaticText", name: "Captured body \($0)", parent: "n500") }
+        let other = [semanticNode(500, role: "article", name: "", children: body.compactMap(\.nodeID)),
+                     semanticNode(600, role: "StaticText", name: "Unscoped text remains outside overview")]
+        let nodes = controls + headings + links + body + other
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes, sourceTruncated: true)
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         let source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
         try await fixture.transport.replaceNodes(targetID: page.binding.targetID, nodes: [semanticNode(400, role: "button", name: "Later live control")])
         var seen = [Int64]()
         repeat {
             let rows = page.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
             XCTAssertLessThanOrEqual(rows.count, 18)
-            XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 }, 6_000)
+            XCTAssertLessThanOrEqual(rows.reduce(0) { $0 + $1.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
             XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
             XCTAssertEqual(page.snapshot.readReceipt?.view, .overview)
             XCTAssertEqual(page.snapshot.readReceipt?.sourceID, source)
-            XCTAssertEqual(page.snapshot.readReceipt?.selectedElementCount, 76)
+            XCTAssertEqual(page.snapshot.readReceipt?.selectedElementCount, 86)
             XCTAssertEqual(page.snapshot.readReceipt?.sourceTruncated, true)
             XCTAssertFalse(page.snapshot.formattedText.contains("Later live control"))
-            XCTAssertFalse(page.snapshot.formattedText.contains("Body remains unread"))
+            XCTAssertFalse(page.snapshot.formattedText.contains("Unscoped text remains outside overview"))
             seen += page.snapshot.elements.map(\.backendNodeID)
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
-        XCTAssertEqual(seen.count, 76)
-        XCTAssertEqual(Set(seen).count, 76)
-        XCTAssertEqual(Set(seen), Set((controls + headings + links).compactMap(\.backendNodeID)))
+        XCTAssertEqual(seen.count, 86)
+        XCTAssertEqual(Set(seen).count, 86)
+        XCTAssertEqual(Set(seen), Set((controls + headings + body + links).compactMap(\.backendNodeID)))
         await fixture.assertNoInput()
     }
 
@@ -224,7 +893,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "link", name: label, link: url)])
         var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         var labelBytes = 0, urlBytes = 0
         var reconstructedLabel = "", reconstructedURL = ""
         repeat {
@@ -252,7 +921,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             }
             guard let cursor = page.snapshot.nextCursor else { break }
             page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(reconstructedLabel, label)
         XCTAssertEqual(reconstructedURL, url)
@@ -261,18 +930,73 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
-    func testEmptyOverviewDoesNotMakeAnOrdinaryDocumentEmpty() async throws {
+    func testOverviewDocumentTextUsesExactExposuresAndExistingContinuationBudget() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let body = String(repeating: "Observed \"cafe\u{301}\" 🙂\n", count: 900) + "UNPUBLISHED_BODY_TAIL"
+        let nodes = [semanticNode(0, role: "main", name: "", children: ["n1", "n2", "n3", "n4"]),
+                     semanticNode(1, role: "StaticText", name: body, parent: "n0"),
+                     semanticNode(2, role: "button", name: "Available action", parent: "n0"),
+                     semanticNode(3, role: "heading", name: "Observed document", parent: "n0"),
+                     semanticNode(4, role: "link", name: "Available destination", parent: "n0", link: "https://example.com/next")]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        var page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
+        let first = page, source = try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+        XCTAssertTrue(page.snapshot.elements.contains { $0.label == "Available action" && $0.supportsPress })
+        XCTAssertFalse(page.snapshot.formattedText.contains("UNPUBLISHED_BODY_TAIL"))
+        XCTAssertEqual(page.snapshot.elements.first { $0.backendNodeID == 2 }?.label, body,
+                       "Retaining the full field must not publish its unexposed tail")
+        var bytes = Data(), offset = 0, pages = 0
+        repeat {
+            pages += 1
+            let receipt = try XCTUnwrap(page.snapshot.readReceipt), presentation = try XCTUnwrap(page.snapshot.presentation)
+            let read = try XCTUnwrap(page.snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix("READ ") })
+            if let cursor = page.snapshot.nextCursor {
+                XCTAssertEqual(read.split(separator: " ").first { $0.hasPrefix("next_cursor=") }.map(String.init), "next_cursor=\(cursor)")
+                XCTAssertTrue(receipt.outputTruncated)
+            } else {
+                XCTAssertFalse(read.contains("next_cursor=")); XCTAssertFalse(receipt.outputTruncated)
+            }
+            XCTAssertEqual(receipt.sourceID, source); XCTAssertFalse(receipt.sourceTruncated)
+            XCTAssertLessThanOrEqual(presentation.rows.count, 18)
+            XCTAssertLessThanOrEqual(presentation.rows.reduce(0) { $0 + $1.text.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve }, 6_000)
+            XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+            for exposure in receipt.exposures where exposure.nodeID == "backend:2" && exposure.field == .label {
+                let element = try XCTUnwrap(page.snapshot.elements.first { $0.backendNodeID == 2 })
+                let row = try XCTUnwrap(presentation.rows.first { $0.index == element.index })
+                XCTAssertEqual(exposure.startUTF8, offset); XCTAssertEqual(exposure.totalUTF8, body.utf8.count)
+                XCTAssertEqual(exposure.provenance, .main); XCTAssertEqual(exposure.kind, .readable)
+                XCTAssertFalse(element.supportsPress); XCTAssertFalse(element.supportsSetText)
+                let fragment = try renderedJSONField("label", in: row.text)
+                XCTAssertEqual(fragment.utf8.count, exposure.endUTF8 - exposure.startUTF8)
+                bytes.append(contentsOf: fragment.utf8); offset = exposure.endUTF8
+            }
+            guard let cursor = page.snapshot.nextCursor else { break }
+            XCTAssertLessThan(pages, 20, "A long body must continue by actual exposed bytes")
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+        } while true
+        XCTAssertGreaterThan(pages, 1); XCTAssertEqual(bytes, Data(body.utf8))
+        let oldAction = try XCTUnwrap(first.snapshot.elements.first { $0.label == "Available action" })
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding,
+                snapshot: first.snapshot, elementIndex: oldAction.index, action: "AXPress")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testOverviewDoesNotPromoteUnscopedTextOrImplyItsAbsence() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "StaticText", name: "Observed body fact")])
         let overview = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .overview))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .overview))
         XCTAssertTrue(overview.snapshot.elements.isEmpty)
         XCTAssertEqual(overview.snapshot.readReceipt?.selectedElementCount, 0)
         XCTAssertNil(overview.snapshot.nextCursor)
         XCTAssertTrue(overview.snapshot.formattedText.contains("document_content_exhaustive=false"))
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: overview.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.map(\.label), ["Observed body fact"])
         await fixture.assertNoInput()
     }
@@ -292,7 +1016,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
         XCTAssertEqual(rows.count, 3)
         XCTAssertTrue(observation.snapshot.formattedText.contains("scope=document"))
@@ -334,7 +1058,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(3, role: "button", name: "Next records", parent: "n0"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
         XCTAssertTrue(rows[1].contains("semantic_role=\"StaticText\""))
         XCTAssertTrue(rows[1].contains("parent_index=2"))
@@ -358,7 +1082,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         // The display marker cannot make this snapshot usable after a fresh read.
         _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         await assertBrowserError(.staleSnapshot) {
             try await fixture.broker.perform(taskKey: "task-a", binding: observation.binding,
                 snapshot: observation.snapshot, elementIndex: 3, action: "AXPress", verificationPlan: plan)
@@ -380,7 +1104,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: nodes, sourceTruncated: variant == "clipped")
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
             XCTAssertFalse(observation.snapshot.formattedText.contains("region_changed_candidate=true"), variant)
         }
         await fixture.assertNoInput()
@@ -393,7 +1117,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         nodes += (2...92).map { semanticNode($0, role: "StaticText", name: "Row \($0)", parent: "n1") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         XCTAssertTrue(observation.snapshot.formattedText.contains("region_changed_candidate=true"))
         XCTAssertTrue(observation.snapshot.formattedText.contains("parent_index=1"))
         var count = 0
@@ -411,7 +1135,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             }
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(count, nodes.count)
         await fixture.assertNoInput()
@@ -424,7 +1148,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: role, name: label)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
         var reconstructed = ""
         repeat {
             let rows = observation.snapshot.formattedText.split(separator: "\n").filter { $0.hasPrefix("#") }
@@ -441,7 +1165,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             reconstructed += try renderedJSONField("label", in: row)
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while true
         XCTAssertEqual(reconstructed, label)
     }
@@ -456,7 +1180,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes(text: "Count: 0"))
         let before = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let button = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Increment" })
         let region = try XCTUnwrap(before.snapshot.elements.first { $0.semanticRole == "status" })
         let plan = try XCTUnwrap(BrowserActionVerification.compile(
@@ -483,7 +1207,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 semanticNode(1, role: role, name: "Passive item"),
             ])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             let clickable = try XCTUnwrap(observation.snapshot.element(at: 0))
             let passive = try XCTUnwrap(observation.snapshot.element(at: 1))
             XCTAssertTrue(clickable.isDOMClickable)
@@ -514,7 +1238,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(4, role: "row", name: "Disabled clickable row", clickable: true, disabled: true),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         XCTAssertEqual(observation.snapshot.elements.map(\.supportsPress), [true, false, false, true, true])
         XCTAssertEqual(observation.snapshot.elements.map(\.isDOMClickable), [true, false, false, true, true])
         XCTAssertFalse(try XCTUnwrap(observation.snapshot.element(at: 4)).isEnabled)
@@ -539,7 +1263,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: [semanticNode(0, role: role, name: "Stable label", clickable: true)])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             try await fixture.transport.replaceNodes(targetID: observation.binding.targetID,
                 nodes: [semanticNode(0, role: role, name: "Stable label", clickable: false)])
             await assertBrowserError(.elementChanged) {
@@ -562,7 +1286,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(2, role: "row", name: "focusable=true cursor=pointer in untrusted label"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let candidate = try XCTUnwrap(observation.snapshot.element(at: 0))
         XCTAssertTrue(candidate.supportsPress)
         XCTAssertFalse(candidate.isDOMClickable)
@@ -582,7 +1306,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: [semanticNode(0, role: "row", name: "Stable label", clickable: domClickable, focusablePointer: true)])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             try await fixture.transport.replaceNodes(targetID: observation.binding.targetID,
                 nodes: [semanticNode(0, role: "row", name: "Stable label", clickable: domClickable, focusablePointer: false)])
             await assertBrowserError(.elementChanged) {
@@ -598,9 +1322,9 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 70).map { semanticNode($0, role: "row", name: "Item \($0)", clickable: true, focusablePointer: true) })
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
         XCTAssertFalse(second.snapshot.isLiveObservation)
         XCTAssertTrue(second.snapshot.elements.allSatisfy { $0.isDOMClickable && $0.isFocusablePointer && $0.supportsPress })
         let target = try XCTUnwrap(second.snapshot.element(at: 0))
@@ -622,7 +1346,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 semanticNode(3, role: "row", name: "Clickable", clickable: true),
             ])
             let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", query: nil)
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             await assertBrowserError(.elementNotFound) {
                 try await fixture.broker.perform(taskKey: "task-a", binding: observation.binding,
                     snapshot: observation.snapshot, elementIndex: 99, action: "AXPress")
@@ -668,7 +1392,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(2, role: "status", name: "No results found", parent: "n1"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         XCTAssertEqual(observation.snapshot.elements.map(\.role), ["AXTextField", "AXGroup", "AXGroup"])
         XCTAssertEqual(observation.snapshot.elements.map(\.semanticRole), ["searchbox", "region", "status"])
         let input = try XCTUnwrap(observation.snapshot.elements.first)
@@ -682,7 +1406,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "textbox", name: "Text")])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", query: nil)
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "searchbox", name: "Text")])
         await assertBrowserError(.elementChanged) {
@@ -704,7 +1428,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             nodes: [semanticNode(0, role: "link", name: "Read exact destination", link: longURL)]
         )
         let result = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         XCTAssertTrue(result.snapshot.formattedText.contains("url_omitted=1"))
         XCTAssertTrue(result.snapshot.formattedText.contains("href_omitted=1"))
@@ -731,7 +1455,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: wrappers + headings)
         var observation = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(view: .headings)
         )
         var labels = observation.snapshot.elements.map(\.label)
@@ -742,7 +1466,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertLessThanOrEqual(observation.snapshot.formattedText.utf8.count, 16_384)
         while let cursor = observation.snapshot.nextCursor {
             observation = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: observation.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: cursor)
             )
             labels.append(contentsOf: observation.snapshot.elements.map(\.label))
@@ -769,7 +1493,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(9, role: "article", name: label, parent: "n8"),
         ])
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(query: label, view: .all))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(query: label, view: .all))
         XCTAssertEqual(observation.snapshot.elements.map(\.label), Array(repeating: label, count: 5))
         XCTAssertEqual(observation.snapshot.elements.map(\.contentScope), [.navigation, .main, .article, .navigation, .complementary])
         XCTAssertEqual(observation.snapshot.elements.map(\.supportsPress), [true, false, false, true, false],
@@ -795,7 +1519,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(6, role: "StaticText", name: "Ambiguous parent", parent: "n5"),
         ], sourceTruncated: true)
         let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(view: .content))
         XCTAssertEqual(observation.snapshot.elements.count, 4)
         XCTAssertTrue(observation.snapshot.elements.allSatisfy { $0.contentScope == .unknown && $0.contentKind == .readable })
         XCTAssertTrue(observation.snapshot.formattedText.contains("document_content_shown=0"))
@@ -818,7 +1542,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                                                  nodes: nodes, sourceTruncated: true)
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(view: .content))
         var allElements = [BrowserTabElement]()
         var pages = 0
         while true {
@@ -838,7 +1562,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             pages += 1
             guard let cursor = observation.snapshot.nextCursor else { break }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: SemanticReadRequest(cursor: cursor))
         }
         XCTAssertGreaterThan(pages, 1)
         XCTAssertEqual(allElements.count, 73)
@@ -848,6 +1572,122 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testLocalFilterEchoInSearchFieldIsNotPresentedAsWebsiteSearchResults() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "RootWebArea", name: "Mailbox", children: ["n1", "n2"]),
+            semanticNode(1, role: "searchbox", name: "Search", parent: "n0", value: "ODE"),
+            semanticNode(2, role: "StaticText", name: "Unrelated message", parent: "n0"),
+        ], sourceTruncated: true)
+        let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .all))
+        let evidence = try selectionEvidence(read.snapshot)
+        XCTAssertEqual(evidence["operation"] as? String, "local_capture_filter")
+        XCTAssertEqual(evidence["counts_scope"] as? String, "captured_elements_only")
+        XCTAssertEqual(evidence["query_applied"] as? Bool, true)
+        XCTAssertEqual(read.snapshot.totalMatches, 1)
+        XCTAssertTrue(read.snapshot.sourceTruncated)
+        XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false)
+        XCTAssertEqual(evidence["site_result_count"] as? String, "not_measured")
+        let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+        XCTAssertEqual(hits["basis"] as? String, "emitted_field_fragments")
+        XCTAssertEqual(hits["input_value_elements"] as? Int, 1)
+        XCTAssertEqual(hits["readable_text_elements"] as? Int, 0)
+        XCTAssertEqual(hits["other_field_elements"] as? Int, 0)
+        XCTAssertEqual(hits["only_input_values"] as? Bool, true)
+        let encoded = try JSONSerialization.data(withJSONObject: evidence)
+        XCTAssertLessThan(encoded.count, 420, "Selection provenance stays compact and does not repeat header counts")
+        XCTAssertTrue(try XCTUnwrap(read.snapshot.elements.first).supportsSetText,
+                      "Evidence classification does not change the observed input capability")
+        await fixture.assertNoInput()
+    }
+
+    func testEmptyLocalSelectionIsNotSiteAbsenceEvenWhenCaptureIsNotTruncated() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for truncated in [false, true] {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: "StaticText", name: "Other captured content"),
+            ], sourceTruncated: truncated)
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .content))
+            let evidence = try selectionEvidence(read.snapshot)
+            XCTAssertEqual(read.snapshot.totalMatches, 0)
+            XCTAssertTrue(read.snapshot.elements.isEmpty)
+            XCTAssertEqual(read.snapshot.sourceTruncated, truncated)
+            XCTAssertNil(read.snapshot.nextCursor)
+            XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false)
+            XCTAssertEqual(evidence["site_result_count"] as? String, "not_measured")
+            XCTAssertTrue(read.snapshot.elements.isEmpty)
+            XCTAssertTrue(read.snapshot.formattedText.contains("This is not a website search result or proof of absent content"))
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testSelectionEvidencePreservesReadablePositiveAndExplicitEmptyResultText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        for text in ["ODE exam announcement: the time changed.", "No results found for ODE in this folder."] {
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: "main", name: "", children: ["n1"]),
+                semanticNode(1, role: "StaticText", name: text, parent: "n0"),
+            ], sourceTruncated: true)
+            let read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "ODE", view: .content))
+            let evidence = try selectionEvidence(read.snapshot)
+            let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+            XCTAssertEqual(hits["readable_text_elements"] as? Int, 1)
+            XCTAssertEqual(hits["input_value_elements"] as? Int, 0)
+            XCTAssertEqual(hits["only_input_values"] as? Bool, false)
+            XCTAssertTrue(read.snapshot.formattedText.contains(text),
+                          "Truthful positive or scoped empty-state reports must remain available from literal page evidence")
+            XCTAssertEqual(evidence["site_search_evaluated"] as? Bool, false,
+                           "The host does not classify site-specific result semantics from generic text")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testQueryMatchProvenanceCountsOnlyEmittedFragmentsAndFollowsCursorPages() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let tail = "TAIL_QUERY_MATCH"
+        let text = String(repeating: "unrelated prefix ", count: 700) + tail
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+            nodes: [semanticNode(0, role: "StaticText", name: text)])
+        var read = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: tail, view: .content))
+        var pages = 0, matchedPages = 0
+        while true {
+            let evidence = try selectionEvidence(read.snapshot)
+            let hits = try XCTUnwrap(evidence["emitted_query_matches"] as? [String: Any])
+            XCTAssertEqual(read.snapshot.totalMatches, 1)
+            XCTAssertEqual(evidence["query_applied"] as? Bool, true)
+            XCTAssertEqual(read.snapshot.readReceipt?.outputTruncated, read.snapshot.nextCursor != nil)
+            XCTAssertLessThanOrEqual(read.snapshot.formattedText.utf8.count, 16_384)
+            let exposed = read.snapshot.formattedText.split(separator: "\n")
+                .filter { $0.hasPrefix("#") }.contains { $0.contains(tail) }
+            XCTAssertEqual(hits["readable_text_elements"] as? Int, exposed ? 1 : 0,
+                           "Retained field tails are not emitted query evidence")
+            if exposed { matchedPages += 1 }
+            pages += 1
+            guard let cursor = read.snapshot.nextCursor else { break }
+            read = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+        }
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(matchedPages, 1)
+        let unfiltered = try await fixture.broker.snapshot(taskKey: "task-a", binding: read.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        let evidence = try selectionEvidence(unfiltered.snapshot)
+        XCTAssertEqual(evidence["operation"] as? String, "capture_view_selection")
+        XCTAssertEqual(evidence["query_applied"] as? Bool, false)
+        XCTAssertNil(evidence["emitted_query_matches"])
+        await fixture.assertNoInput()
+    }
+
+    private func selectionEvidence(_ snapshot: BrowserTabSnapshot) throws -> [String: Any] {
+        let prefix = "READ_SELECTION_EVIDENCE "
+        let line = try XCTUnwrap(snapshot.formattedText.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst(prefix.count).utf8)) as? [String: Any])
+    }
+
     func testNoMatchReturnsNoUnrelatedFallbackAndReportsIncompleteSource() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(
@@ -855,7 +1695,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             nodes: [semanticNode(0, role: "heading", name: "A real title")], sourceTruncated: true
         )
         let result = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(query: "video title")
         )
         XCTAssertTrue(result.snapshot.elements.isEmpty)
@@ -877,10 +1717,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         ]
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
         let first = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil
+            taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         let expanded = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(snapshotID: first.snapshot.id, elementIndex: 0)
         )
         XCTAssertEqual(expanded.snapshot.elements.map(\.label), ["First card", "Exact title", "Publisher"])
@@ -890,7 +1730,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(expanded.snapshot.readReceipt?.subtreeNodeID, "n0")
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(snapshotID: first.snapshot.id, elementIndex: 0)
             )
         }
@@ -902,24 +1742,24 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
             let first = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(view: .links)
             )
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             switch cause {
             case "reuse":
                 _ = try await fixture.broker.snapshot(
-                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     read: SemanticReadRequest(cursor: cursor)
                 )
             case "new_read":
-                _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+                _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
             default:
                 try await fixture.transport.navigate(targetID: first.binding.targetID, url: URL(string: "https://example.test/new")!, loaderID: "new-loader")
             }
             await assertBrowserError(.staleSnapshot) {
                 _ = try await fixture.broker.snapshot(
-                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                    taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     read: SemanticReadRequest(cursor: cursor)
                 )
             }
@@ -932,10 +1772,10 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
             let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(
                     query: options == "query" || options == "both" ? " Item\n" : nil,
                     view: options == "view" || options == "both" ? .links : nil, cursor: cursor))
             XCTAssertEqual(second.snapshot.totalMatches, 140)
@@ -946,7 +1786,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertTrue(firstLabels.isDisjoint(with: secondLabels))
             await assertBrowserError(.staleSnapshot) {
                 _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: second.binding,
-                    bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links, cursor: cursor))
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links, cursor: cursor))
             }
             await fixture.assertNoInput()
         }
@@ -958,7 +1798,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
                 nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") })
             let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
             let cursor = try XCTUnwrap(first.snapshot.nextCursor)
             let request = SemanticReadRequest(query: change == "query" ? "Different" : "Item",
                 view: change == "view" ? .content : .links, cursor: cursor,
@@ -966,7 +1806,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 elementIndex: change == "index" || change == "subtree" ? 0 : nil)
             do {
                 _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                    bundleIdentifier: "com.google.Chrome", read: request)
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: request)
                 XCTFail("Conflicting continuation must fail: \(change)")
             } catch let error as BrowserTabBrokerError {
                 guard case .invalidRead = error else { return XCTFail("Expected invalidRead, got \(error)") }
@@ -980,13 +1820,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") })
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links))
         let cursor = try XCTUnwrap(first.snapshot.nextCursor)
         try await fixture.transport.navigate(targetID: first.binding.targetID,
             url: URL(string: "https://example.test/replaced")!, loaderID: "replaced-loader")
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(query: "Item", view: .links, cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Item", view: .links, cursor: cursor))
         }
         await fixture.assertNoInput()
     }
@@ -995,12 +1835,12 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         try await fixture.transport.replaceNodes(
             targetID: first.binding.targetID, nodes: nodes + [semanticNode(999, role: "heading", name: "Clock changed")]
         )
         let second = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(cursor: try XCTUnwrap(first.snapshot.nextCursor))
         )
         XCTAssertEqual(second.snapshot.totalMatches, 140, "One observation must not splice in the new clock.")
@@ -1019,20 +1859,20 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let changedIndex = first.snapshot.elements.count
         var changedNodes = nodes
         changedNodes[changedIndex] = semanticNode(changedIndex, role: "link", name: "Replacement destination")
         try await fixture.transport.replaceNodes(targetID: first.binding.targetID, nodes: changedNodes)
         let second = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+            taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
             read: SemanticReadRequest(cursor: try XCTUnwrap(first.snapshot.nextCursor))
         )
         await assertBrowserError(.elementChanged) {
             try await fixture.broker.perform(taskKey: "task-a", binding: second.binding, snapshot: second.snapshot, elementIndex: 0, action: "AXPress")
         }
         let fresh = try await fixture.broker.snapshot(
-            taskKey: "task-a", binding: second.binding, bundleIdentifier: "com.google.Chrome", query: "Replacement destination"
+            taskKey: "task-a", binding: second.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: "Replacement destination"
         )
         XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Replacement destination"])
         XCTAssertTrue(fresh.snapshot.formattedText.contains("observation=live"))
@@ -1045,14 +1885,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         )
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: first.snapshot.nextCursor)
             )
         }
-        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.google.Chrome", query: "Item 139")
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: "Item 139")
         XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["Item 139"])
     }
 
@@ -1062,11 +1902,11 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             targetID: fixture.observation.binding.targetID,
             nodes: (0 ..< 140).map { semanticNode($0, role: "link", name: "Item \($0)") }
         )
-        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.google.Chrome", query: nil)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding, bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil)
         let other = try await fixture.broker.open(taskKey: "task-b", processIdentifier: 60, url: URL(string: "https://example.test/other")!)
         await assertBrowserError(.staleSnapshot) {
             _ = try await fixture.broker.snapshot(
-                taskKey: "task-b", binding: other, bundleIdentifier: "com.google.Chrome",
+                taskKey: "task-b", binding: other, bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 read: SemanticReadRequest(cursor: first.snapshot.nextCursor)
             )
         }
@@ -1093,13 +1933,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(8, role: "StaticText", name: "Sidebar phrase", parent: "n7"),
         ])
         let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         XCTAssertEqual(content.snapshot.elements.map(\.label), ["Actual document detail", "Readable without landmarks"])
         XCTAssertEqual(content.snapshot.elements.map(\.contentScope), [.main, .unknown])
         XCTAssertEqual(content.snapshot.elements.map(\.supportsPress), [false, true])
         XCTAssertTrue(content.snapshot.formattedText.contains("document_content_shown=1"))
         let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         XCTAssertEqual(all.snapshot.elements.map(\.contentKind),
             [.metadata, .control, .control, .control, .readable, .metadata, .readable, .navigation, .navigation])
         let button = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "button" })
@@ -1108,6 +1948,288 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             elementIndex: button.index, action: "AXPress")
         let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
         XCTAssertEqual(pressed, [3])
+    }
+
+    func testContentViewWarnsThatOtherReadyControlsAreFilteredWhileAllRetainsTheirExactAction() async throws {
+        for includeHeading in [false, true] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            var nodes = [
+                semanticNode(0, role: "main", name: "Synthetic workspace", children: includeHeading ? ["n1", "n2"] : ["n2"]),
+                semanticNode(2, role: "menu", name: "Synthetic menu", parent: "n0", children: ["n3"]),
+                semanticNode(3, role: "menuitem", name: "Synthetic menu action", parent: "n2", children: ["n4"], clickable: true),
+                semanticNode(4, role: "StaticText", name: "Synthetic menu preview", parent: "n3"),
+            ]
+            if includeHeading { nodes.insert(semanticNode(1, role: "heading", name: "Synthetic results heading", parent: "n0"), at: 1) }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                nodes: nodes, semanticReadiness: .ready)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+            let lines = content.snapshot.formattedText.split(separator: "\n").map(String.init)
+            XCTAssertTrue(lines[1].contains("view=content")); XCTAssertTrue(lines[1].contains("semantic_readiness=ready"))
+            XCTAssertTrue(lines[1].contains("source_truncated=0"))
+            XCTAssertTrue(lines[2].hasPrefix("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true"))
+            XCTAssertTrue(lines[2].contains("Included options retain original actions"))
+            XCTAssertTrue(lines[2].contains("read view=overview or all for other controls and before absence/access claims"))
+            XCTAssertEqual(content.snapshot.elements.map(\.label), includeHeading ? ["Synthetic results heading"] : [])
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic menu action"))
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic menu preview"))
+            XCTAssertTrue(lines[1].contains(includeHeading ? "no_matches=0" : "no_matches=1"))
+            let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+            XCTAssertFalse(all.snapshot.formattedText.contains("CONTENT_VIEW_SCOPE"))
+            let item = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "menuitem" })
+            XCTAssertTrue(item.isEnabled); XCTAssertTrue(item.supportsPress)
+            XCTAssertEqual(item.contentKind, .control)
+            let row = try XCTUnwrap(all.snapshot.presentation?.rows.first { $0.index == item.index })
+            XCTAssertEqual(row.actions, ["AXPress"])
+            let preview = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Synthetic menu preview" })
+            XCTAssertEqual(preview.contentKind, .control); XCTAssertFalse(preview.supportsPress)
+            try await fixture.broker.perform(taskKey: "task-a", binding: all.binding, snapshot: all.snapshot,
+                elementIndex: item.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
+            XCTAssertEqual(pressed, [4], "Only the exact menu item receives input; the filtered text child gains no action")
+        }
+    }
+
+    func testContentViewIncludesObservedListboxOptionsAndTextWithoutReclassifyingOrInferringActions() async throws {
+        for scopeRole in ["main", "complementary"] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: scopeRole, name: "Synthetic workspace", children: ["n1"]),
+                semanticNode(1, role: "listbox", name: "Synthetic results", parent: "n0", children: ["n2"]),
+                semanticNode(2, role: "group", name: "Synthetic group", parent: "n1", children: ["n3", "n5"]),
+                semanticNode(3, role: "option", name: "Selectable result", parent: "n2", children: ["n7"], clickable: true),
+                semanticNode(7, role: "group", name: "Result layout", parent: "n3", children: ["n4"]),
+                semanticNode(4, role: "StaticText", name: "Result detail", parent: "n7"),
+                semanticNode(5, role: "option", name: "Read-only result", parent: "n2", children: ["n6"], readOnly: true),
+                semanticNode(6, role: "StaticText", name: "Read-only detail", parent: "n5"),
+            ], semanticReadiness: .ready)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+            XCTAssertEqual(content.snapshot.elements.map(\.label),
+                ["Selectable result", "Result detail", "Read-only result", "Read-only detail"])
+            XCTAssertEqual(content.snapshot.elements.map(\.contentKind), Array(repeating: .control, count: 4))
+            XCTAssertEqual(content.snapshot.elements.map(\.contentScope),
+                Array(repeating: scopeRole == "main" ? BrowserContentScope.main : .complementary, count: 4))
+            XCTAssertEqual(content.snapshot.elements.map(\.supportsPress), [true, false, false, false])
+            XCTAssertTrue(content.snapshot.formattedText.contains("document_content_shown=0"))
+            XCTAssertTrue(content.snapshot.formattedText.contains("controls_shown=4"))
+            let option = try XCTUnwrap(content.snapshot.elements.first)
+            XCTAssertEqual(option.backendNodeID, 4); XCTAssertEqual(option.nodeID, "n3")
+            let rows = try XCTUnwrap(content.snapshot.presentation).rows
+            XCTAssertEqual(rows.first { $0.index == option.index }?.actions, ["AXPress"])
+            for element in content.snapshot.elements.dropFirst() {
+                XCTAssertEqual(rows.first { $0.index == element.index }?.actions, [])
+                await assertBrowserError(.unsupportedAction("AXPress")) {
+                    try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                        elementIndex: element.index, action: "AXPress")
+                }
+            }
+            try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                elementIndex: option.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: content.binding.targetID)
+            XCTAssertEqual(pressed, [4])
+        }
+    }
+
+    func testContentViewDoesNotPromoteUnscopedOptionsNavigationOrOtherControls() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "main", name: "Workspace", children: ["n1", "n2", "n3", "n4", "n7", "n10", "n13"]),
+            semanticNode(1, role: "option", name: "Bare option", parent: "n0", clickable: true),
+            semanticNode(2, role: "button", name: "Ordinary button", parent: "n0", clickable: true),
+            semanticNode(3, role: "treeitem", name: "Tree item", parent: "n0", clickable: true),
+            semanticNode(4, role: "navigation", name: "Navigation", parent: "n0", children: ["n5"]),
+            semanticNode(5, role: "listbox", name: "Navigation list", parent: "n4", children: ["n6"]),
+            semanticNode(6, role: "option", name: "Navigation option", parent: "n5", clickable: true),
+            semanticNode(7, role: "banner", name: "Banner", parent: "n0", children: ["n8"]),
+            semanticNode(8, role: "listbox", name: "Banner list", parent: "n7", children: ["n9"]),
+            semanticNode(9, role: "option", name: "Banner option", parent: "n8", clickable: true),
+            semanticNode(10, role: "contentinfo", name: "Footer", parent: "n0", children: ["n11"]),
+            semanticNode(11, role: "listbox", name: "Footer list", parent: "n10", children: ["n12"]),
+            semanticNode(12, role: "option", name: "Footer option", parent: "n11", clickable: true),
+            semanticNode(13, role: "listbox", name: "Results", parent: "n0", children: ["n14"]),
+            semanticNode(14, role: "option", name: "Result", parent: "n13", children: ["n15"], clickable: true),
+            semanticNode(15, role: "button", name: "Nested button", parent: "n14", children: ["n16"], clickable: true),
+            semanticNode(16, role: "StaticText", name: "Nested button text", parent: "n15"),
+        ])
+        let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        XCTAssertEqual(content.snapshot.elements.map(\.label), ["Result"])
+        XCTAssertEqual(content.snapshot.elements.first?.contentKind, .control)
+        await fixture.assertNoInput()
+    }
+
+    func testContentListboxInclusionRejectsMissingAmbiguousAndCyclicParentLineage() async throws {
+        for lineage in ["missing", "duplicate", "cycle", "intervening-control"] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            var nodes = [
+                semanticNode(0, role: "main", name: "Workspace", children: ["n1"]),
+                semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: ["n2"]),
+                semanticNode(2, role: "option", name: "Unverified result", parent: "n1", clickable: true),
+            ]
+            if lineage == "missing" { nodes.removeFirst() }
+            if lineage == "duplicate" { nodes.append(semanticNode(1, role: "listbox", name: "Duplicate", parent: "n0")) }
+            if lineage == "cycle" { nodes[0] = semanticNode(0, role: "main", name: "Workspace", parent: "n2", children: ["n1"]) }
+            if lineage == "intervening-control" {
+                nodes[2] = semanticNode(2, role: "option", name: "Unverified result", parent: "n3", clickable: true)
+                nodes.append(semanticNode(3, role: "button", name: "Wrapper", parent: "n1", children: ["n2"], clickable: true))
+            }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+            XCTAssertTrue(content.snapshot.elements.isEmpty)
+            await fixture.assertNoInput()
+        }
+    }
+
+    func testContentListboxRowsKeepTruncatedSourceAndImmutableContinuationFences() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<142).map { semanticNode($0, role: "option", name: "Result \($0)", parent: "n1", clickable: true) }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "complementary", name: "Workspace", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options, sourceTruncated: true)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        let cursor = try XCTUnwrap(first.snapshot.nextCursor)
+        let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
+        XCTAssertTrue(firstReceipt.sourceTruncated); XCTAssertEqual(firstReceipt.selectedElementCount, 140)
+        XCTAssertLessThanOrEqual(first.snapshot.formattedText.utf8.count, 16_384)
+        XCTAssertTrue(first.snapshot.elements.allSatisfy { $0.contentKind == .control && $0.contentScope == .complementary })
+        await assertBrowserError(.elementNotFound) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 100, action: "AXPress")
+        }
+        let next = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
+        XCTAssertEqual(next.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
+        XCTAssertTrue(next.snapshot.readReceipt?.sourceTruncated == true)
+        XCTAssertTrue(next.snapshot.elements.allSatisfy { $0.contentKind == .control && $0.contentScope == .complementary })
+        XCTAssertTrue(Set(first.snapshot.elements.compactMap(\.nodeID)).isDisjoint(with: next.snapshot.elements.compactMap(\.nodeID)))
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testContentPrioritizesCapturedReadingPaneWhileAllKeepsSourceOrderAndExactActions() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<42).map {
+            semanticNode($0, role: "option", name: "Selectable result \($0) " + String(repeating: "x", count: 120),
+                parent: "n1", clickable: true)
+        }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "complementary", name: "Result region", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options + [
+            semanticNode(1000, role: "main", name: "Reading pane", children: ["n1001", "n1002", "n1003"]),
+            semanticNode(1001, role: "heading", name: "Opened record", parent: "n1000"),
+            semanticNode(1002, role: "StaticText", name: "The complete requested document detail.", parent: "n1000"),
+            semanticNode(1003, role: "StaticText", name: "A distinct supporting passage.", parent: "n1000"),
+        ])
+        let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        XCTAssertEqual(Array(content.snapshot.elements.prefix(3).map(\.nodeID)), ["n1001", "n1002", "n1003"])
+        XCTAssertTrue(content.snapshot.elements.prefix(3).allSatisfy { $0.contentKind == .readable && $0.contentScope == .main })
+        let option = try XCTUnwrap(content.snapshot.elements.first { $0.semanticRole == "option" })
+        XCTAssertEqual(option.index, 3); XCTAssertEqual(option.backendNodeID, 3); XCTAssertEqual(option.nodeID, "n2")
+        XCTAssertEqual(option.contentScope, .complementary); XCTAssertEqual(option.contentKind, .control)
+        XCTAssertTrue(option.supportsPress); XCTAssertNotNil(content.snapshot.nextCursor)
+        await assertBrowserError(.unsupportedAction("AXPress")) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+            elementIndex: option.index, action: "AXPress")
+        let pressed = await fixture.transport.pressedNodeIDs(targetID: content.binding.targetID)
+        XCTAssertEqual(pressed, [3], "Reordering changes only the published index, never the exact target")
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        XCTAssertEqual(Array(all.snapshot.elements.prefix(3).map(\.nodeID)), ["n0", "n1", "n2"])
+    }
+
+    func testContentPriorityKeepsUnselectedResultsAndAllDuplicateOrDistinctSupportingText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let duplicate = "Exact result preview"
+        let nodes = [
+            semanticNode(0, role: "complementary", name: "Results", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Result list", parent: "n0", children: ["n2"]),
+            semanticNode(2, role: "option", name: duplicate, parent: "n1", children: ["n3", "n4"], clickable: true),
+            semanticNode(3, role: "StaticText", name: duplicate, parent: "n2"),
+            semanticNode(4, role: "StaticText", name: "Distinct detail absent from the option label", parent: "n2"),
+            semanticNode(5, role: "main", name: "Unselected reading pane"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let unselected = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        XCTAssertEqual(unselected.snapshot.elements.map(\.label),
+            [duplicate, duplicate, "Distinct detail absent from the option label"])
+        XCTAssertEqual(unselected.snapshot.elements.map(\.supportsPress), [true, false, false])
+        let body = semanticNode(6, role: "StaticText", name: "Opened document passage", parent: "n5")
+        try await fixture.transport.replaceNodes(targetID: unselected.binding.targetID, nodes: nodes + [body])
+        let selected = try await fixture.broker.snapshot(taskKey: "task-a", binding: unselected.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        XCTAssertEqual(selected.snapshot.elements.map(\.label),
+            ["Opened document passage", duplicate, duplicate, "Distinct detail absent from the option label"])
+        let query = try await fixture.broker.snapshot(taskKey: "task-a", binding: selected.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Distinct detail", view: .content))
+        XCTAssertEqual(query.snapshot.elements.map(\.nodeID), ["n4"])
+        XCTAssertEqual(query.snapshot.elements.first?.contentKind, .control)
+        XCTAssertFalse(query.snapshot.elements.first?.supportsPress ?? true)
+        await fixture.assertNoInput()
+    }
+
+    func testContentPriorityFreezesTheOrderedSelectionAcrossBoundedPagesAndSourceChanges() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<92).map { semanticNode($0, role: "option", name: "Result \($0)", parent: "n1", clickable: true) }
+        let original = [
+            semanticNode(0, role: "complementary", name: "Results", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Result list", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options + [
+            semanticNode(1000, role: "article", name: "Reading pane", children: ["n1001"]),
+            semanticNode(1001, role: "StaticText", name: "Captured document passage", parent: "n1000"),
+            semanticNode(1002, role: "StaticText", name: "Readable without a landmark"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: original, sourceTruncated: true)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
+        XCTAssertEqual(Array(first.snapshot.elements.prefix(2).map(\.nodeID)), ["n1001", "n1002"])
+        XCTAssertEqual(firstReceipt.selectedElementCount, 92); XCTAssertTrue(firstReceipt.sourceTruncated)
+        let firstCursor = try XCTUnwrap(first.snapshot.nextCursor)
+        await assertBrowserError(.elementNotFound) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 100, action: "AXPress")
+        }
+        try await fixture.transport.replaceNodes(targetID: first.binding.targetID, nodes: [
+            semanticNode(1000, role: "article", name: "Reading pane", children: ["n1001"]),
+            semanticNode(1001, role: "StaticText", name: "New live passage", parent: "n1000"),
+        ])
+        var page = first
+        var labels = first.snapshot.elements.map(\.label)
+        var pages = 1
+        var cursor: String? = firstCursor
+        while let next = cursor {
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: next))
+            pages += 1; XCTAssertLessThan(pages, 12)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
+            XCTAssertTrue(page.snapshot.readReceipt?.sourceTruncated == true)
+            XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+            labels += page.snapshot.elements.map(\.label)
+            cursor = page.snapshot.nextCursor
+        }
+        XCTAssertEqual(labels, ["Captured document passage", "Readable without a landmark"] + options.map(\.name))
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
+        XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["New live passage"])
+        await fixture.assertNoInput()
     }
 
     func testLongFieldContinuationReconstructsExactUnicodeAndEscapedBytesWithBoundedOutput() async throws {
@@ -1119,7 +2241,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "StaticText", name: text)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let source = try XCTUnwrap(observation.snapshot.readReceipt).sourceID
         var reconstructed = ""
         var end = 0
@@ -1150,7 +2272,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertTrue(receipt.fieldTruncated)
             XCTAssertTrue(receipt.outputTruncated)
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         } while pages < 20
         XCTAssertGreaterThan(pages, 2)
         XCTAssertEqual(reconstructed, text)
@@ -1166,7 +2288,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "textbox", name: "Observed label", link: link, value: value)])
         var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         var values = "", links = ""
         var pages = 0
         while true {
@@ -1191,7 +2313,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             guard let cursor = observation.snapshot.nextCursor else { break }
             guard pages < 20 else { return XCTFail("Continuation failed to make progress") }
             observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
-                bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: cursor))
         }
         XCTAssertEqual(values, value)
         XCTAssertEqual(links, link)
@@ -1207,9 +2329,9 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
             nodes: [semanticNode(0, role: "button", name: label)])
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(first.snapshot.nextCursor)))
         await assertBrowserError(.staleSnapshot) {
             try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
                 elementIndex: 0, action: "AXPress")
@@ -1230,12 +2352,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             semanticNode(1, role: "StaticText", name: "First mounted row", parent: "n0"),
         ], sourceTruncated: true)
         let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init())
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init())
         let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
         let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content, snapshotID: first.snapshot.id, elementIndex: 0))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content, snapshotID: first.snapshot.id, elementIndex: 0))
         let subtreeReceipt = try XCTUnwrap(subtree.snapshot.readReceipt)
         XCTAssertEqual(subtreeReceipt.sourceID, firstReceipt.sourceID)
+        XCTAssertNotEqual(subtree.snapshot.actionSelectionID, first.snapshot.actionSelectionID)
+        XCTAssertFalse(subtree.snapshot.isActionContinuation)
         XCTAssertEqual(subtreeReceipt.subtreeNodeID, "n0")
         XCTAssertEqual(subtreeReceipt.view, .content)
         XCTAssertEqual(subtreeReceipt.selectedElementCount, 1)
@@ -1243,7 +2367,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         try await fixture.transport.replaceNodes(targetID: first.binding.targetID,
             nodes: [semanticNode(2, role: "StaticText", name: "Different mounted row")])
         let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
-            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .content))
         let freshReceipt = try XCTUnwrap(fresh.snapshot.readReceipt)
         XCTAssertNotEqual(freshReceipt.sourceID, firstReceipt.sourceID)
         XCTAssertEqual(freshReceipt.targetGeneration, firstReceipt.targetGeneration)
@@ -1265,13 +2389,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         _ id: Int, role: String, name: String, parent: String? = nil,
         children: [String] = [], link: String? = nil, value: String? = nil,
         clickable: Bool = false, focusablePointer: Bool = false, disabled: Bool = false, readOnly: Bool = false,
-        editable: Bool = false
+        editable: Bool = false, namedContainer: Bool = false
     ) -> BrowserDocumentNode {
         BrowserDocumentNode(
             backendNodeID: Int64(id + 1), role: role, name: name, value: value,
             isDisabled: disabled, isReadOnly: readOnly, isIgnored: false,
             nodeID: "n\(id)", parentNodeID: parent, childNodeIDs: children, linkURL: link,
-            isDOMClickable: clickable, isFocusablePointer: focusablePointer, isEditable: editable
+            isDOMClickable: clickable, isFocusablePointer: focusablePointer, isEditable: editable,
+            isExplicitlyNamedContainer: namedContainer
         )
     }
 
@@ -1292,7 +2417,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-b",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: "Mark this tab complete"
             )
             XCTFail("A cross-task browser handle must fail closed.")
@@ -1316,7 +2441,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let observation = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         try await transport.navigate(
@@ -1343,7 +2468,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await broker.snapshot(
             taskKey: "task-a",
             binding: observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         XCTAssertNotEqual(
@@ -1368,13 +2493,13 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let first = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         _ = try await broker.snapshot(
             taskKey: "task-a",
             binding: first.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
 
@@ -1411,7 +2536,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-a",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
             XCTFail("A closed tab must reject before any input.")
@@ -1437,7 +2562,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await broker.snapshot(
                 taskKey: "task-a",
                 binding: binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
             XCTFail("A target-ID reuse must not resurrect the opaque handle.")
@@ -1460,7 +2585,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let observationA = try await broker.snapshot(
             taskKey: "task-a",
             binding: bindingA,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: "Mark this tab complete"
         )
         let targetB = try await transport.createForegroundTarget(
@@ -1497,7 +2622,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1505,7 +2630,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1561,7 +2686,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 let refreshed = try await fixture.broker.snapshot(
                     taskKey: "task-a",
                     binding: fixture.observation.binding,
-                    bundleIdentifier: "com.google.Chrome",
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     query: nil
                 )
                 XCTAssertNotEqual(
@@ -1579,7 +2704,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 _ = try await fixture.broker.snapshot(
                     taskKey: "task-a",
                     binding: fixture.observation.binding,
-                    bundleIdentifier: "com.google.Chrome",
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex",
                     query: nil
                 )
             }
@@ -1587,7 +2712,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await fixture.broker.snapshot(
             taskKey: "task-a",
             binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         XCTAssertNotEqual(refreshed.snapshot.id, fixture.observation.snapshot.id)
@@ -1606,7 +2731,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             _ = try await fixture.broker.snapshot(
                 taskKey: "task-a",
                 binding: fixture.observation.binding,
-                bundleIdentifier: "com.google.Chrome",
+                bundleIdentifier: "com.ahmedelamin.LocalCodex",
                 query: nil
             )
         }
@@ -1660,7 +2785,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let refreshed = try await fixture.broker.snapshot(
             taskKey: "task-a",
             binding: fixture.observation.binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         let field = try XCTUnwrap(refreshed.snapshot.element(at: 1))
@@ -1674,6 +2799,193 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
                 text: "not allowed"
             )
         }
+        await fixture.assertNoInput()
+    }
+
+    func testEarlierActionWitnessCannotFollowSubtreeSelectionOfSameCapture() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "article", name: "Card", children: ["n1"]),
+            semanticNode(1, role: "button", name: "Intended action", parent: "n0"),
+        ])
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let witness = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
+            read: .init(view: .all, snapshotID: first.snapshot.id, elementIndex: 0))
+        XCTAssertEqual(subtree.snapshot.readReceipt?.sourceID, first.snapshot.readReceipt?.sourceID)
+        XCTAssertNotEqual(subtree.snapshot.actionSelectionID, witness.selectionID)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: subtree.binding, witness: witness)
+        }
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: subtree.binding, witness: witness, action: "AXPress")
+        }
+        await fixture.assertNoInput()
+    }
+
+    func testFreshCaptureCorroboratesOnlyCurrentSameBindingPublishedWitnesses() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "article", name: "Card", children: ["n1"]),
+            semanticNode(1, role: "button", name: "Intended action", parent: "n0"),
+        ])
+        try await fixture.transport.setCommittedDocumentID(targetID: fixture.observation.binding.targetID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let original = try XCTUnwrap(first.snapshot.actionWitnesses[1])
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [original])
+        XCTAssertTrue(fresh.snapshot.elements.isEmpty)
+        XCTAssertTrue(fresh.snapshot.actionWitnesses.isEmpty, "Native presence alone cannot mint new row authority")
+        let proof = try XCTUnwrap(fresh.snapshot.corroboratedActionWitnesses.first)
+        XCTAssertEqual(proof.publicationID, original.publicationID)
+        XCTAssertEqual(proof.element, original.element); XCTAssertEqual(proof.exposures, original.exposures)
+        XCTAssertEqual(proof.snapshotID, original.snapshotID)
+        XCTAssertEqual(proof.authoritySourceID, fresh.snapshot.readReceipt?.sourceID)
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: original)
+        }
+        try await fixture.broker.validatePublishedAction(taskKey: "task-a", binding: fresh.binding, witness: proof)
+        let second = try await fixture.broker.snapshot(taskKey: "task-a", binding: fresh.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [proof, original])
+        XCTAssertEqual(second.snapshot.corroboratedActionWitnesses.count, 1, "A stale earlier proof cannot seed authority")
+        let foreign = try await fixture.broker.open(taskKey: "task-b", processIdentifier: 47,
+            url: XCTUnwrap(URL(string: "http://127.0.0.1/foreign")))
+        let other = try await fixture.broker.snapshot(taskKey: "task-b", binding: foreign,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all),
+            priorPublishedActions: second.snapshot.corroboratedActionWitnesses)
+        XCTAssertTrue(other.snapshot.corroboratedActionWitnesses.isEmpty)
+        // Same immutable source is insufficient after selecting a new subtree.
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: second.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let beforeSubtree = try XCTUnwrap(all.snapshot.actionWitnesses[1])
+        let subtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all, snapshotID: all.snapshot.id, elementIndex: 0))
+        let afterSubtree = try await fixture.broker.snapshot(taskKey: "task-a", binding: subtree.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .headings),
+            priorPublishedActions: [beforeSubtree])
+        XCTAssertTrue(afterSubtree.snapshot.corroboratedActionWitnesses.isEmpty)
+        await fixture.assertNoInput()
+    }
+
+    func testMutationPermitChecksCaptureDeadlineInsideCommit() throws {
+        var inputs = 0
+        let expired = BrowserMutationPermit(deadline: .now - .milliseconds(1))
+        XCTAssertThrowsError(try expired.commit { inputs += 1 }) { error in
+            XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot)
+        }
+        XCTAssertEqual(inputs, 0)
+        let current = BrowserMutationPermit(deadline: .now + .seconds(10))
+        try current.commit { inputs += 1 }
+        XCTAssertEqual(inputs, 1)
+    }
+
+    func testActionReferenceExportRequiresExactCurrentPublicationAndBindingWithoutMutation() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        var registry = EmbeddedBrowserActionReferences()
+        let suffixes = registry.publish(snapshot: page.snapshot, binding: page.binding)
+        let exported = registry.exportCurrent(snapshot: page.snapshot, binding: page.binding)
+        XCTAssertTrue(exported.isValid)
+        XCTAssertFalse(exported.clickReferences.isEmpty); XCTAssertFalse(exported.fillReferences.isEmpty)
+        for token in exported.clickReferences + exported.fillReferences {
+            XCTAssertTrue(suffixes.values.contains { $0.contains(token) })
+        }
+        let before = registry.countsForTesting
+        let captures = await fixture.transport.readinessRequests()
+        for _ in 0..<3 {
+            XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: page.binding), exported)
+        }
+        XCTAssertEqual(registry.exportCurrent(snapshot: nil, binding: page.binding), .empty)
+        XCTAssertEqual(registry.exportCurrent(snapshot: fixture.observation.snapshot, binding: page.binding), .empty)
+        var otherSelection = page.snapshot
+        otherSelection.actionSelectionID = UUID()
+        XCTAssertEqual(registry.exportCurrent(snapshot: otherSelection, binding: page.binding), .empty)
+        var otherDocument = page.snapshot
+        otherDocument.evidenceDocument?.committedDocumentID = UUID()
+        XCTAssertEqual(registry.exportCurrent(snapshot: otherDocument, binding: page.binding), .empty)
+        let binding = page.binding
+        for mismatch in ["handle", "instance", "epoch"] {
+            let foreign = BrowserTabBinding(handle: mismatch == "handle" ? UUID() : binding.handle,
+                taskKey: binding.taskKey, browserGeneration: binding.browserGeneration, targetID: binding.targetID,
+                targetInstanceToken: mismatch == "instance" ? "other-incarnation" : binding.targetInstanceToken,
+                processIdentifier: binding.processIdentifier,
+                documentEpoch: mismatch == "epoch" ? UUID() : binding.documentEpoch,
+                ownership: binding.ownership, lifetime: binding.lifetime,
+                committedDocumentID: binding.committedDocumentID)
+            XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: foreign), .empty, mismatch)
+        }
+        let after = registry.countsForTesting
+        XCTAssertEqual(before.current, after.current); XCTAssertEqual(before.retired, after.retired)
+        let capturesAfter = await fixture.transport.readinessRequests()
+        XCTAssertEqual(capturesAfter, captures)
+        registry.retireCurrent()
+        XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: page.binding), .empty)
+        await fixture.assertNoInput()
+    }
+
+    func testRepublishedOldestReferenceCannotBeEvictedByLaterRowsOnItsCurrentPage() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let nodes = (0..<220).map { semanticNode($0, role: "button", name: "Control \($0)") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        try await fixture.transport.setCommittedDocumentID(targetID: fixture.observation.binding.targetID)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        let presentation = try XCTUnwrap(first.snapshot.presentation)
+        XCTAssertGreaterThan(presentation.rows.count, 2)
+        var registry = EmbeddedBrowserActionReferences()
+        // Model a bounded native publication exposing only the first original
+        // row. Its witness and every later test row are broker-minted, unchanged.
+        var oldestPage = first.snapshot
+        oldestPage.presentation = .init(snapshotID: first.snapshot.id, rows: [presentation.rows[0]])
+        let firstSuffix = try XCTUnwrap(registry.publish(snapshot: oldestPage, binding: first.binding)[0])
+        let oldest = try renderedJSONField("click_ref", in: firstSuffix)
+        let contextID = UUID()
+        let frozen = try registry.prepare(taskKey: "task-a", contextID: contextID, tool: "browser_click",
+            arguments: ["click_ref": oldest], snapshot: oldestPage)
+        var page = first
+        var exposed = 1
+        // Add exactly 119 other references, retaining the original issuance age.
+        while exposed < 120 {
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(cursor: try XCTUnwrap(page.snapshot.nextCursor)))
+            var limited = page.snapshot
+            let rows = Array(try XCTUnwrap(limited.presentation).rows.prefix(120 - exposed))
+            limited.presentation = .init(snapshotID: limited.id, rows: rows)
+            _ = registry.publish(snapshot: limited, binding: page.binding)
+            exposed += rows.count
+        }
+        XCTAssertEqual(registry.countsForTesting.current, 120)
+        // Re-publish the oldest row followed by one previously withheld row.
+        // Eviction must skip this page's printed token without renewing its age.
+        var mixed = first.snapshot
+        mixed.isActionContinuation = true
+        mixed.presentation = .init(snapshotID: mixed.id, rows: Array(presentation.rows.prefix(2)))
+        let suffixes = registry.publish(snapshot: mixed, binding: first.binding)
+        XCTAssertEqual(try renderedJSONField("click_ref", in: XCTUnwrap(suffixes[0])), oldest)
+        XCTAssertTrue(registry.admits(frozen, snapshot: mixed))
+        let projected = registry.exportCurrent(snapshot: mixed, binding: first.binding)
+        XCTAssertTrue(projected.clickReferences.contains(oldest))
+        XCTAssertEqual(projected.clickReferences.count, 120)
+        for suffix in suffixes.values {
+            let token = try renderedJSONField("click_ref", in: suffix)
+            let prepared = try registry.prepare(taskKey: "task-a", contextID: contextID, tool: "browser_click",
+                arguments: ["click_ref": token], snapshot: mixed)
+            XCTAssertTrue(registry.admits(prepared, snapshot: mixed))
+            XCTAssertTrue(projected.clickReferences.contains(token))
+        }
+        XCTAssertEqual(registry.countsForTesting.current, 120)
+        // A later publication can evict that old token: republication did not
+        // promote it to the back of the FIFO or renew its immutable witness.
+        mixed.presentation = .init(snapshotID: mixed.id, rows: [presentation.rows[2]])
+        _ = registry.publish(snapshot: mixed, binding: first.binding)
+        XCTAssertFalse(registry.admits(frozen, snapshot: mixed))
+        XCTAssertFalse(registry.exportCurrent(snapshot: mixed, binding: first.binding).clickReferences.contains(oldest))
         await fixture.assertNoInput()
     }
 
@@ -1709,7 +3021,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertNil(targetA)
         let observationB = try await fixture.broker.snapshot(
             taskKey: "task-b", binding: bindingB,
-            bundleIdentifier: "com.google.Chrome", query: nil
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", query: nil
         )
         try await fixture.broker.setText(
             taskKey: "task-b", binding: observationB.binding,
@@ -1785,86 +3097,11 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(values, ["updated"], "Closing a fake target must not erase evidence of input.")
     }
 
-    func testSuccessfulPressWaitsForIndependentProofBeforeReturning() async throws {
-        let fixture = try await BrowserBrokerTestFixture.make()
-        let pause = BrowserPressBoundaryPause()
-        let chrome = pressBoundaryBroker(fixture, pause: pause)
-        let action = Task {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-            await pause.returned()
-        }
-        await pause.waitUntilEntered()
-        let held = await pause.snapshot()
-        XCTAssertEqual(held.events, ["proof_started"])
-        XCTAssertEqual(held.handle, fixture.observation.binding.handle)
-        XCTAssertEqual(held.snapshotID, fixture.observation.snapshot.id)
-        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
-        XCTAssertEqual(count, 1)
 
-        // The successful action consumed its snapshot before reaching the proof.
-        // A retry cannot dispatch again or create a second proof callback.
-        do {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-            XCTFail("A consumed snapshot must fail even while proof is suspended.")
-        } catch {
-            XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot)
-        }
-        await pause.release()
-        try await action.value
-        let completed = await pause.snapshot()
-        XCTAssertEqual(completed.events, ["proof_started", "proof_completed", "press_returned"])
-        let report = await chrome.shutdown()
-        XCTAssertTrue(report.succeeded)
-    }
 
-    func testShutdownRevokesWhileReadOnlyPressProofIsSuspended() async throws {
-        let fixture = try await BrowserBrokerTestFixture.make()
-        let pause = BrowserPressBoundaryPause()
-        let chrome = pressBoundaryBroker(fixture, pause: pause)
-        let action = Task {
-            try await chrome.perform(
-                taskKey: fixture.observation.binding.taskKey, binding: fixture.observation.binding,
-                snapshot: fixture.observation.snapshot, elementIndex: 0, action: "AXPress"
-            )
-        }
-        await pause.waitUntilEntered()
-        let report = await chrome.shutdown()
-        XCTAssertTrue(report.succeeded)
-        XCTAssertThrowsError(try fixture.observation.binding.lifetime.check())
-        let held = await pause.snapshot()
-        XCTAssertEqual(held.events, ["proof_started"])
-        await pause.release()
-        try await action.value // The earlier press happened; no second input is authorized.
-        let count = await fixture.transport.pressCount(targetID: fixture.observation.binding.targetID)
-        XCTAssertEqual(count, 1)
-        let ownership = await chrome.ownership()
-        XCTAssertNil(ownership)
-        let repeated = await chrome.shutdown()
-        XCTAssertEqual(repeated, report)
-    }
 
-    private func pressBoundaryBroker(
-        _ fixture: BrowserBrokerTestFixture, pause: BrowserPressBoundaryPause
-    ) -> ChromeTabBroker {
-        let initial = ChromeTabBroker.BrowserProcess(
-            process: BrowserPressBoundaryChild(processIdentifier: fixture.observation.binding.processIdentifier),
-            dataDirectory: URL(fileURLWithPath: "/not-created/LocalCodexBrowserBroker-proof-test"),
-            generation: fixture.observation.binding.browserGeneration,
-            transport: SystemChromeDevToolsTransport(port: 1), sessions: fixture.broker
-        )
-        return ChromeTabBroker(
-            initialBrowser: initial, removeProfile: { _ in nil },
-            didPerformPress: { binding, snapshot in
-                await pause.enter(handle: binding.handle, snapshotID: snapshot.id)
-            }
-        )
-    }
+
+
 }
 
 private struct BrowserBrokerTestFixture: Sendable {
@@ -1887,7 +3124,7 @@ private struct BrowserBrokerTestFixture: Sendable {
         let observation = try await broker.snapshot(
             taskKey: "task-a",
             binding: binding,
-            bundleIdentifier: "com.google.Chrome",
+            bundleIdentifier: "com.ahmedelamin.LocalCodex",
             query: nil
         )
         return BrowserBrokerTestFixture(
@@ -1958,6 +3195,23 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
     private var foregroundTargetID: String?
     private var nextObservationHook: (@Sendable () async throws -> Void)?
     private var nextMutationHook: (@Sendable () async throws -> Void)?
+    private var requestedReadiness = [BrowserReadReadiness]()
+
+    func readinessRequests() -> [BrowserReadReadiness] { requestedReadiness }
+
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation {
+        guard let current = states[target.targetID]?.target else { throw BrowserTabBrokerError.targetClosed }
+        guard current.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetReplaced }
+        try Task.checkCancellation()
+        try authorization(current)
+        return try await observeForRead(target: current, readiness: readiness)
+    }
+
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
+        requestedReadiness.append(readiness)
+        return try await observe(target: target)
+    }
 
     func onNextCreation(_ hook: @escaping @Sendable () async throws -> Void) {
         nextCreationHook = hook
@@ -1973,12 +3227,20 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         nextMutationHook = hook
     }
 
-    func replaceNodes(targetID: String, nodes: [BrowserDocumentNode], sourceTruncated: Bool = false) throws {
+    func replaceNodes(targetID: String, nodes: [BrowserDocumentNode], sourceTruncated: Bool = false,
+                      semanticReadiness: BrowserDocumentObservation.SemanticReadiness? = nil) throws {
         guard var state = states[targetID] else { throw BrowserTabBrokerError.targetClosed }
         state.document = BrowserDocumentObservation(
             loaderID: state.document.loaderID, title: state.document.title, url: state.document.url,
             nodes: nodes, sourceTruncated: sourceTruncated
         )
+        state.document.semanticReadiness = semanticReadiness
+        states[targetID] = state
+    }
+
+    func setCommittedDocumentID(targetID: String, id: UUID = UUID()) throws {
+        guard var state = states[targetID] else { throw BrowserTabBrokerError.targetClosed }
+        state.document.committedDocumentID = id
         states[targetID] = state
     }
 
@@ -2195,9 +3457,8 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         BrowserTarget(
             targetID: targetID,
             instanceToken: instanceToken,
-            title: "Safe computer-use benchmark - Google Chrome",
-            url: url,
-            webSocketURL: URL(string: instanceToken)!
+            title: "Safe computer-use benchmark - Computa",
+            url: url
         )
     }
 
@@ -2207,7 +3468,7 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
     ) -> BrowserDocumentObservation {
         BrowserDocumentObservation(
             loaderID: loaderID,
-            title: "Safe computer-use benchmark - Google Chrome",
+            title: "Safe computer-use benchmark - Computa",
             url: url,
             nodes: [
                 BrowserDocumentNode(

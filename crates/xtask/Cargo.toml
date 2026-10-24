@@ -20,8 +20,8 @@ fs2 = "0.4"
 libc.workspace = true
 uuid.workspace = true
 computa-runtime = { path = "../computa-runtime" }
+computa-state = { path = "../computa-state" }
 computa-contracts = { path = "../computa-contracts" }
-computa-browser = { path = "../computa-browser" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

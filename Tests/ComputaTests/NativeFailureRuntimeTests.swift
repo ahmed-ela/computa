@@ -36,6 +36,16 @@ final class NativeFailureRuntimeTests: XCTestCase {
             XCTAssertEqual(audit.assistant, ["NEXT_TURN_OK"])
             XCTAssertTrue(audit.assistantDeltas.isEmpty, "A resumed turn must not accept deltas from the previously stopped turn.")
             let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
+            let starts = trace.messages.filter { $0.direction == .clientToServer && $0.object["method"] as? String == "turn/start" }
+            let current = try XCTUnwrap(starts.last?.object["params"] as? [String: Any])
+            let input = try XCTUnwrap(current["input"] as? [[String: String]])
+            XCTAssertEqual(input.first?["text"], "A new unrelated turn")
+            XCTAssertTrue(input.contains { $0["text"] == ComputaAgentInstructions.runtimeInteractionPolicy() })
+            let correction = try XCTUnwrap(input.first { $0["text"]?.hasPrefix("APP_RUNTIME_OUTCOME_CORRECTION") == true }?["text"])
+            XCTAssertTrue(correction.contains("turn=native-failure-turn"), "Keep prior outcome evidence visible")
+            XCTAssertTrue(correction.contains("historical outcomes, not current-turn tool failures or new permission restrictions"))
+            XCTAssertTrue(correction.contains("do not make this request read-only or revoke the user's current authorization"))
+            XCTAssertTrue(correction.contains("Preserve ongoing user constraints and actual current denials"))
             let denial = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.identifier == "string:late-tool" })
             XCTAssertNotNil(denial.object["error"])
             let stale = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.identifier == "string:stale-tool-after-resume" })
@@ -54,32 +64,6 @@ final class NativeFailureRuntimeTests: XCTestCase {
             XCTAssertTrue(audit.assistant.isEmpty)
             XCTAssertTrue(audit.assistantDeltas.isEmpty)
             XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("result-received").path))
-        }
-    }
-
-    func testChromeRecoveryExhaustionStopsRetriesAndPersistsWithoutInventingNavigation() async throws {
-        try await withHarness(chromeRecoveryFailure: true) { runtime, root, audit in
-            try await runtime.submit(prompt: "Synthetic exhausted Chrome recovery", toTaskID: "native-failure-task", modelID: self.modelID)
-            try await self.waitFor { audit.status == .waiting && !audit.diagnostics.isEmpty }
-            XCTAssertEqual(audit.diagnostics.count, 1)
-            XCTAssertTrue(audit.assistant.isEmpty)
-            XCTAssertTrue(audit.assistantDeltas.isEmpty)
-            XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("interrupt-order"), encoding: .utf8), "interrupt-first")
-            let records = try NativeFailureEvidenceStore(directory: root.appendingPathComponent("heydash-native-failures"))
-                .load(threadID: "native-failure-task")
-            XCTAssertEqual(records.count, 1)
-            let diagnostic = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[0].diagnosticText.utf8)) as? [String: Any])
-            XCTAssertEqual((diagnostic["error"] as? [String: String])?["code"], "chrome_navigation_recovery_required")
-            XCTAssertEqual(diagnostic["action_outcome"] as? String, "navigation_not_confirmed")
-            let reloaded = try await runtime.loadTasks()
-            XCTAssertEqual(reloaded.first?.entries.filter { $0.title == "Native action stopped" }.map(\.body), audit.diagnostics)
-            try await runtime.submit(prompt: "A new unrelated turn", toTaskID: "native-failure-task", modelID: self.modelID)
-            try await self.waitFor { audit.status == .completed }
-            XCTAssertEqual(audit.assistant, ["NEXT_TURN_OK"])
-            XCTAssertTrue(audit.assistantDeltas.isEmpty)
-            let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
-            let denied = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.identifier == "string:late-tool" })
-            XCTAssertNotNil(denied.object["error"])
         }
     }
 
@@ -117,7 +101,7 @@ final class NativeFailureRuntimeTests: XCTestCase {
         }
     }
 
-    private func withHarness(chromeRecoveryFailure: Bool = false, expectedShutdownIssues: [String] = [],
+    private func withHarness(expectedShutdownIssues: [String] = [],
                              _ body: (CodexAppServerRuntime, URL, Audit) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaNativeFailure-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -129,7 +113,6 @@ final class NativeFailureRuntimeTests: XCTestCase {
         var config = CodexAppServerRuntime.Configuration.localQwen
         config.executable = .fixture(path: executable.path)
         config.fixtureActivationFailurePID = 1234
-        config.fixtureChromeNavigationRecoveryFailure = chromeRecoveryFailure
         config.model = modelID
         config.codexHomePath = root.path
         config.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path

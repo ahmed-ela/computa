@@ -50,8 +50,7 @@ produces `1.0.0` build `3`, and build produces `0.1.1` build `3`.
 The bump command checks consistency first, then updates the xcconfig, Cargo
 workspace version, and only the workspace packages in `Cargo.lock`. Dependency
 versions, runtime/source pins, lock hashes, protocol/schema versions, website
-and WebUI package versions, and the separately shipped Chrome extension version
-remain independent. The command does not create a commit, tag or release, sign,
+and WebUI package versions remain independent. The command does not create a commit, tag or release, sign,
 install, publish, or download anything. Review and commit its diff with the
 release changes. Run `check` and the normal build/tests before packaging.
 

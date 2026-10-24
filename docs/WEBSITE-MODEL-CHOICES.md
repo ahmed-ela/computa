@@ -1,8 +1,10 @@
 # Website model choices
 
-Computa's Swift desktop runtime discovers model choices from the signed-in ChatGPT, Gemini, and Claude websites and sends website inference through its owned embedded browser. A concrete choice requests an exact website model key and label. It does not identify an immutable backend model version.
+Computa's Swift desktop runtime discovers choices from the signed-in ChatGPT, Gemini, and Claude websites and sends website inference through its owned embedded browser. ChatGPT now has a Chat-only power-preset contract with automatic selection of the highest offered plain GPT family. Gemini and Claude retain exact website-family choices. Neither contract identifies an immutable backend model version.
 
 **Complete live qualification of all advertised choices is pending.** Earlier provider-default harness results in [BACKGROUND-WEBSITE-SESSIONS.md](BACKGROUND-WEBSITE-SESSIONS.md) and [EMBEDDED-PROVIDERS-QUALIFICATION.md](EMBEDDED-PROVIDERS-QUALIFICATION.md) do not establish that every concrete choice works. Automated fixtures, source changes, builds, installed-app behavior, and live provider results are separate evidence.
+
+The current Chat-only contract supersedes the earlier remove-Latest preference and the historical ChatGPT family tables below. It is implemented in source; signed installed validation and live qualification remain separate. Build 66's four direct human controls failed with the same native -1000 / POSIX 22 error chain across normal app restart, family and temporary-mode changes. Empty-page selector inspection established the controls described here, not a network fix or a successful inference. See the [current benchmark and receipts](HARNESS-WORKFLOW-BENCHMARK.md#requested-chat-power-presets-and-selector-observations).
 
 On October 8, signed installed build34's human Google search and Gemini composer loaded without CAPTCHA. One explicit website-model refresh cleared the stale saved Gemini checkpoint. Google had already recovered before refresh; the original challenge trigger remains unknown, and no post-recovery model turn was submitted. See [the experiments, recovery explanation and deferred first-request follow-up](GOOGLE-VERIFICATION-RECOVERY.md).
 
@@ -10,13 +12,38 @@ On October 8, signed installed build34's human Google search and Gemini composer
 
 After the privileged app UI and its background render host are ready, `AppState` reuses cached choices and starts one bounded discovery pass only for providers without a saved catalog. Opening or relaunching the app with all three catalogs cached makes no discovery page requests. **Refresh website models** explicitly refreshes all providers. Refresh requests share an in-flight pass; an explicit refresh extends a partial startup pass without loading a provider twice. Each requested provider is inspected sequentially in an app-owned background `WKWebView` using the same persistent sign-in profile as the human browser. These pages are excluded from the human tab strip; the background-session ownership and cleanup rules still apply.
 
-The fixed provider adapters inspect the actual model picker. They open supported menus when necessary, read enabled model-family leaves, and close menus they opened. They do not populate the selector from marketing documentation, an API model catalog, or an assistant's self-description. Disabled choices, upgrades, descriptions, effort controls, and ambiguous or duplicate menu identities are not advertised as selectable models. A changed or unsupported website menu can make discovery fail; the parser does not guess its meaning.
+The fixed provider adapters inspect the actual picker and close menus they opened. They do not populate choices from marketing documentation, an API catalog, or an assistant's self-description. Gemini and Claude advertise enabled model-family leaves; their thinking and effort controls remain separate. ChatGPT instead advertises the five observed Chat powers: **Instant, Medium, High, Extra High and Pro**. Work and Sol are excluded from this Chat contract. Disabled controls, upgrades, descriptions, ambiguous identities and unsupported menu shapes cannot establish availability.
 
-Each successful provider result replaces that provider's cached choices. A provider failure leaves its previous cache intact and reports a provider-specific refresh error. Therefore a cached option is a previous observation, not a guarantee that the current account can still use it. Inference must verify it again. The cache is stored under `Computa.websiteModelChoices.v2-chat-product`, with at most 32 choices per provider, 96 overall, and a 100 KiB read bound. Migration validates the complete previous `v1` catalog before preserving Gemini and Claude entries; previous ChatGPT entries are removed because that catalog did not distinguish Chat from Work. A guarded discovery refresh can add the same legitimate model labels again.
+For each Chat inference, the selected family must be the highest enabled plain GPT version in the associated observed family menu. Numeric components determine ordering, so GPT-6.10 follows GPT-6.9. Sol, Work and other suffixes are not plain GPT versions. Equivalent or duplicate versions, leading-zero components and ambiguous menus fail verification. “Latest” names this policy; it is not a literal website option. A native parser independently validates the bounded offered-family list and the resolved family/power evidence.
 
-The selector includes each provider's legacy **Website default** and its discovered concrete choices. ChatGPT's **Latest** choice is explicitly retired: discovery and validated caches omit it, and it cannot be selected again. Defaults and idle chats that selected Latest move to an observed concrete ChatGPT choice, preferring GPT-5.6 Sol; without an observed concrete choice they use ChatGPT Website default. Active or queued turns keep their original identity. Recorded messages remain intact, and historical Latest IDs still parse. Other valid saved choices absent from the current cache remain visible as unavailable. The UI disables unavailable options. An invalid saved website ID is also unavailable and cannot become local inference.
+Each successful provider result replaces that provider's cached choices. A provider failure retains its previous cache and reports a provider-specific refresh error. Cached options are previous observations, not promises of current availability. The cache is `Computa.websiteModelChoices.v3-chat-latest-power`, bounded to 32 choices per provider, 96 overall and 100 KiB. Migration validates the complete prior `v2-chat-product` or `v1` catalog before preserving Gemini and Claude entries. Prior ChatGPT entries are removed until fresh discovery proves the family and power contract; migration cannot invent availability or hide duplicate malformed entries.
 
-This contract covers model families. Thinking mode, reasoning effort, and other generation settings are separate controls and are not encoded as additional model choices. Selecting a family does not promise a particular effort setting. Provider documentation also treats these settings separately; see [Claude's model, effort, and thinking settings](https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings) and [Gemini's model and feature availability](https://support.google.com/gemini/answer/16275805?hl=en).
+Gemini and Claude retain **Website default** alongside their observed families. ChatGPT requires an explicit power preset: its old Website default, literal Latest, Sol and concrete-family IDs remain readable in history but cannot start a new inference. Defaults and idle chats with retired selections move to an observed Medium preset, then Instant or another observed preset. Without one, the saved default appears as disabled **Choose a Chat preset** until discovery succeeds. Active or queued turns retain their captured identities; recorded messages are not rewritten. Other valid saved choices absent from the current cache remain unavailable, and invalid website IDs cannot fall through to local inference.
+
+Chat power and family are separate evidence dimensions. Native inspection saw power values 1–5 while the associated DOM slider used 0–4. The slider had no direct label; its owning Power menuitem belonged to the exact popup referenced by the expanded Select ChatGPT model button. Family radios appeared in that same popup. The fixed adapter must establish these structural relationships rather than identify an arbitrary slider by position or a numeric value alone. Claude and Gemini effort settings remain outside their family-choice contract; see [Claude's settings](https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings) and [Gemini's model and feature availability](https://support.google.com/gemini/answer/16275805?hl=en).
+
+The closed **Select ChatGPT model** button shows the selected power: Instant,
+Medium, High, Extra High or Pro. Opening that picker changes its caption to
+**Thinking effort**, so the open caption cannot establish the power. A read
+starts with a fresh canonical closed label, observes the checked highest plain
+GPT family in the active associated popup, closes its owned popup, and requires
+the same canonical power on the same restored enabled button. The popup may
+remember the Family panel on reopening; a read does not require reopening an
+inactive Power panel. Closed buttons may remove `aria-controls`; that alone
+does not invalidate acknowledged closure.
+
+Changing power requires the visible enabled Power menuitem and its physically
+rendered SPAN thumb with ordinal 0–4. Accessibility suppression on the thumb or
+a wrapper strictly inside that exact item does not hide its metadata. Inert or
+hidden state at or above the Power item, disabled controls, foreign or CSS-
+hidden metadata, duplicates and unsupported shapes block input. After focusing
+the Power item, the adapter checks the same enabled trigger, item, thumb and
+ordinal before one arrow event, then requires exactly one ordinal step. Power
+changes precede family selection; an unexpected reset by the family choice
+rejects the operation instead of repairing it. Scoped inactive slider metadata
+can detect contradictory or changed selection but cannot authorize a read or
+input. Bounded `chatPower` and `chatHeader` diagnostics contain only structural
+flags, recognized ordinals and fixed panel modes.
 
 ## Stable local identity
 
@@ -30,9 +57,9 @@ browser/<provider>/choice/<unpadded-base64url-of-canonical-JSON>
 
 The encoded JSON contains exactly `key` and `label`, with sorted keys. The provider is in the path. Parsing requires the canonical round trip, so extra or duplicate fields, alternate encodings, padding, and malformed identities are rejected. The ID is self-contained: restoring a chat does not depend on a mutable global model-name registry.
 
-The native start request passes the provider and a `modelChoice` string containing canonical JSON with exactly `key`, `label`, and `provider`. An inference request retains the full concrete model ID. Labels are not silently rewritten or mapped to another website family.
+The native start request passes the provider and a `modelChoice` string containing canonical JSON with exactly `key`, `label`, and `provider`. An inference retains that full ID. Chat preset keys are `chat/latest/instant`, `chat/latest/medium`, `chat/latest/high`, `chat/latest/extra-high` and `chat/latest/pro`. Canonical identities name the power, including the stable label Pro. The observed catalog can display a resolved family name such as GPT-6 Pro without baking that family into the Pro inference identity. The independently resolved family is carried in `chatSelection`, not inferred from a power label. A mismatched expected identity fails closed; the request model echo is not response attribution.
 
-The old IDs `browser/chatgpt`, `browser/gemini`, and `browser/claude` remain compatible with saved chats and defaults. They request the website's default selection and carry no exact-choice claim. The native runtime accepts missing legacy evidence for compatibility; it requires evidence for concrete IDs. Existing local transcripts remain local, and neither changing models nor cleaning up a website conversation deletes the Computa transcript.
+The old IDs still parse for saved history. `browser/gemini` and `browser/claude` retain their implicit-default behavior and carry no exact-choice claim; the runtime accepts missing legacy model evidence for those routes. `browser/chatgpt` is not an inference fallback: runtime, server and embedded-transport admission require an explicit current Chat preset before acquiring a website lease. Neither changing a selection nor cleaning up a website conversation deletes the local Computa transcript.
 
 ## Session pinning and failure behavior
 
@@ -40,11 +67,23 @@ A website session is pinned to its owning Computa task, provider, route, session
 
 The selected choice is verified during preparation, immediately before Send in the provider adapter, on admitted ready/running/complete snapshots, and with a fresh native verification after awaited adapter results. These checks run alongside the existing session-token, document-generation, route, conversation, first-user fingerprint, and response-ownership checks. A proof copied from an earlier page or from before an asynchronous mutation is insufficient.
 
+For Chat presets, both the embedded transport and Responses server pin the resolved family and power at the first accepted proof for that inference. A stable Medium ID cannot hide a family change between readiness, submission and completion. Subsequent snapshots must still resolve the highest offered family and match the pinned family/power. A new inference resolves the policy independently; it cannot change an existing inference's attribution or replay a failed prompt.
+
 ChatGPT's focus-only preparation and read-only model verification each use one fresh final model read. Preparation does not insert text or click Send. Before admitting a successful awaited read, the adapter rechecks the exact owned URL, HTTPS provider origin, token, temporary mode, and preparation user count; native validation still follows. Insertion, Send readiness, submission, and response inspection retain their model checks before and after the operation.
 
 During initial preparation, an already claimed concrete model-selection phase can advance while its owned popup hides the composer or temporary-mode control. Native inspection still requires zero users, zero responses, no conversation URL, the same document generation and route, and a previously verified temporary session. This branch cannot claim selection from an arbitrary hidden editor or bypass initial composer/mode preparation. It admits ready state only after the selection operation returns exact proof and a fresh native model verification succeeds. Ready confirms that proof and current temporary mode; the later prepare operation independently checks the actual composer before inserting any prompt.
 
-After clicking a different ChatGPT model family, the adapter observes closure of its owned picker and performs a fresh selection read within one shared 1,800 ms deadline. A family choice can return to its associated parent popup. Under the unchanged fresh-session identity and empty-message guards, the adapter may dismiss that exact associated popup once with Escape. The closure attempt is claimed before dispatch; an unrelated or ambiguous menu, trigger drift, lost acknowledgment, or repeated settlement fails. A hidden checked family radio remains diagnostic data, not selected-model proof.
+Chat verification shares one 1,800 ms deadline for the active family proof and
+fresh closed-power acknowledgment. After clicking a different family, it must
+observe that family as checked and still highest among the enabled plain GPT
+choices. A family choice can return to its associated parent popup. Under the
+unchanged fresh-session identity and empty-message guards, the adapter may
+dismiss that exact associated popup once with Escape. The closure attempt is
+claimed before dispatch; an unrelated or ambiguous menu, trigger drift, lost
+acknowledgment, or repeated settlement fails. A hidden checked family radio
+cannot supply positive family proof. Canonical header changes are latched,
+including a change followed by restoration before the next read. The open
+Thinking effort caption is a presentation state, not a selected power.
 
 An observation that opens a picker acknowledges its closure only after the same enabled trigger is visible, its `aria-expanded` and `data-state` attributes report closed (or are absent), and every visible menu is gone. Removing the popup alone is insufficient: a framework may update its trigger later. This wait uses the existing observation deadline and does not add another opening click. Content-free read diagnostics identify the fixed call scope, validated adapter action and selection-attempt state, without logging page, prompt or response text.
 
@@ -125,11 +164,15 @@ For an explicitly selected local debugging task, the runtime supports a one-shot
 
 The capture uses no-follow file descriptors, exclusive claims and atomic publication. Invalid permissions, ownership, links, arm data or output state skip capture without changing the original error. The Claude adapter additionally reports finite JSON validity, known envelope type, selected extraction and rejection-reason fields; these explain literal-code admission versus rendered-text fallback without admitting additional response forms. A `json_fenced:false` error describes the parser input and does not establish whether the website rendered a code block. None of these diagnostics repair a reply, dispatch rejected calls, replay a prompt or establish a successful fixture.
 
-This handoff does not register website-native tools or give the website direct filesystem access. The owned model conversation is not a computer-tool target. The current built-in WebKit browser has no general tab driver; ordinary browser tools, when offered, use an authorized Chrome connection. Local terminal and native-app capabilities depend on the schemas and permissions actually offered for the inference. Full Access changes eligible approval handling, not sandbox or macOS access boundaries.
+This handoff does not register website-native tools or give the website direct filesystem access. Computa's ordinary built-in browser tools use `EmbeddedBrowserTabTransport` through `EmbeddedBrowserControlBackend`, without requiring Chrome. They list and bind human tabs, create background task-owned tabs, navigate, read bounded visible DOM semantics, click or fill exact observed controls, wait for DOM changes and close only task-owned tabs. Inference conversations and the privileged app UI are excluded from that inventory. Reads expose snapshot IDs and element indices through the shared AX-style text format; their source is `computa_webkit_dom`, not a native accessibility-tree capture. This tool set has no browser screenshot operation. Separate computer tools use their own native-app bindings and access checks. The ordinary WebKit driver has offline fixture coverage; that does not establish a completed installed-provider workflow under the current Chat preset contract.
+
+Local terminal and native-app capabilities depend on the schemas and permissions actually offered for the inference. Full Access changes eligible approval handling, not sandbox or macOS access boundaries.
 
 ## What model verification proves
 
-The native parser accepts this bounded evidence schema:
+Chat presets additionally require `chatSelection`, with exact `family` and `power` identities and `automaticFamily: {"policy":"highest_offered_plain_gpt","offered":[...]}`. The family key and label must name the same plain GPT version; the power key and label must be one of the five canonical pairs. The offered list is bounded to 32 unique plain versions, and its highest member must equal the resolved family. Native comparison pins these dimensions independently of the stable preset ID. Missing, extra, malformed or contradictory fields cannot authorize the preset. Chat presets require `website_selection` and no `response` field: repeating a synthetic preset key cannot establish which family and power produced a response. The independent response-attribution form below remains available for Gemini and Claude family choices, not Chat presets.
+
+The general family-selection parser accepts this bounded evidence schema:
 
 ```json
 {
@@ -139,7 +182,7 @@ The native parser accepts this bounded evidence schema:
 }
 ```
 
-`source` is optional and, when present, must be `model_picker_label`, `checked_model_option`, or `selected_model_indicator`. The last represents an explicit website selected-row indicator verified with its exact model-family label; focus or active styling alone cannot establish selection. The selected key and label must exactly match the requested concrete choice. All three sources remain selection-only proof, supported explicitly as `website_selection`.
+For Gemini and Claude family choices, `source` is optional and, when present, must be `model_picker_label`, `checked_model_option`, or `selected_model_indicator`. Chat presets require `selected_model_indicator` together with the family/power evidence above. This source combines a fresh canonical closed-power label with the active checked family control; focus or active styling alone cannot establish selection. The selected key and label must exactly match the requested concrete choice. All three sources remain selection-only proof, supported explicitly as `website_selection`.
 
 When the website exposes response attribution, evidence can instead contain:
 

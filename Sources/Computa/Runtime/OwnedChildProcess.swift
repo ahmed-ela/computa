@@ -102,6 +102,26 @@ actor OwnedChildProcess {
         outputDescriptor: Int32? = nil,
         errorDescriptor: Int32? = nil
     ) throws {
+        processIdentifier = try Self.spawn(
+            executableURL: executableURL, arguments: arguments,
+            environment: environment, workingDirectory: workingDirectory,
+            inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor,
+            errorDescriptor: errorDescriptor
+        )
+    }
+
+    /// Transfers sole ownership of an unreaped child and its new process group
+    /// to the caller. The caller must finish group signaling before reaping.
+    /// Synchronous command runners use this same descriptor and signal setup.
+    nonisolated static func spawn(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        workingDirectory: URL? = nil,
+        inputDescriptor: Int32? = nil,
+        outputDescriptor: Int32? = nil,
+        errorDescriptor: Int32? = nil
+    ) throws -> Int32 {
         var attributes: posix_spawnattr_t?
         var actions: posix_spawn_file_actions_t?
         try Self.requireSuccess(posix_spawnattr_init(&attributes))
@@ -178,7 +198,7 @@ actor OwnedChildProcess {
             }
         }
         try Self.requireSuccess(status)
-        processIdentifier = pid
+        return pid
     }
 
     func stop() async -> StopResult {

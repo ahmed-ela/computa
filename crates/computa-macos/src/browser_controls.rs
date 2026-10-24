@@ -287,10 +287,8 @@ impl TrustedNativeBrowserControls {
         address.setPlaceholderString(Some(&NSString::from_str(
             "Search or enter a website address",
         )));
-        let status = NSTextField::labelWithString(
-            &NSString::from_str("Your browser inside Computa — sign in separately from Chrome"),
-            mtm,
-        );
+        let status =
+            NSTextField::labelWithString(&NSString::from_str("Your browser inside Computa"), mtm);
         status.setFrame(NSRect::new(NSPoint::new(8., -8.), NSSize::new(550., 20.)));
         let mut buttons = vec![];
         for title in ["+", "Close tab", "Back", "Forward", "Reload", "Go", "Hide"] {

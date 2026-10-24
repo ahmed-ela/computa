@@ -41,10 +41,6 @@ pub enum AutomationError {
     Invalid(String),
     #[error("Native operation {operation} failed (code {code}).")]
     Native { operation: String, code: i32 },
-    #[error(
-        "Chrome navigation could not be confirmed safely. Any newly created tab was preserved; no additional tab or URL was submitted. Stop retrying this navigation and inspect Chrome."
-    )]
-    NavigationUnverified,
     #[error("The requested native capability is unavailable on this platform.")]
     UnsupportedPlatform,
 }

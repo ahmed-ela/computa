@@ -272,7 +272,8 @@ class OpenResponsesTests(unittest.TestCase):
         self.artifacts["mlx-function-call"] = (result, "sse", "completed")
 
     def test_empty_message_never_exposes_a_content_part_absent_from_final_item(self):
-        for source in (fixture(public="", call=CALL), fixture(public="", reasoning="Synthetic reasoning")):
+        for source in (fixture(public="", call=CALL),
+                       fixture(public="", reasoning="Synthetic reasoning", tokens=100)):
             # The producer may publish a zero-length token before tool/reasoning
             # output. It must not expose an empty content lifecycle prematurely.
             source.insert(4, {"type": "response.output_text.delta", "item_id": "msg_fixture",

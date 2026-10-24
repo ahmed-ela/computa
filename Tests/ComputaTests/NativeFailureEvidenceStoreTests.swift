@@ -19,6 +19,33 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         root = nil
     }
 
+    func testRestoredFailureStaysWithItsTurnBeforeLaterSuccessfulReplies() {
+        let record = fixture(timestamp: Date(timeIntervalSince1970: 20))
+        let history = [
+            TimelineEntry(id: "user-1", kind: .user, title: "", body: "Search", timestamp: Date(timeIntervalSince1970: 10),
+                activityGroupID: "group-1", turnID: "turn-1"),
+            TimelineEntry(id: "tool-1", kind: .tool, title: "", body: "Rejected", timestamp: Date(timeIntervalSince1970: 19), turnID: "turn-1"),
+            TimelineEntry(id: "user-2", kind: .user, title: "", body: "New action", timestamp: Date(timeIntervalSince1970: 30), turnID: "turn-2"),
+            TimelineEntry(id: "reply-2", kind: .assistant, title: "", body: "Done", timestamp: Date(timeIntervalSince1970: 40), turnID: "turn-2"),
+        ]
+        let restored = NativeFailureEvidenceStore.restoringFailures([record], in: history)
+        XCTAssertEqual(restored.map(\.id), ["user-1", "tool-1", record.entry.id, "user-2", "reply-2"])
+        XCTAssertEqual(restored[2].turnID, "turn-1")
+        XCTAssertEqual(restored[2].activityGroupID, "group-1")
+        XCTAssertEqual(NativeFailureEvidenceStore.restoringFailures([record], in: restored), restored)
+    }
+
+    func testFailureWithMissingHistoricalTurnRemainsVisibleWithoutAttachingToCurrentTurn() {
+        let record = fixture(timestamp: Date(timeIntervalSince1970: 20))
+        let current = TimelineEntry(id: "current", kind: .user, title: "", body: "Continue",
+            timestamp: Date(timeIntervalSince1970: 30), activityGroupID: "current", turnID: "turn-2")
+        let restored = NativeFailureEvidenceStore.restoringFailures([record], in: [current])
+        XCTAssertEqual(restored.map(\.id), [record.entry.id, "current"])
+        XCTAssertNil(restored[0].activityGroupID)
+        XCTAssertEqual(restored[0].turnID, "turn-1")
+        XCTAssertEqual(restored[0].body, record.message)
+    }
+
     func testRoundTripReloadAndPrivateHashedFilename() throws {
         let store = try NativeFailureEvidenceStore(directory: directory)
         let record = fixture(threadID: "../../outside/thread")
@@ -157,6 +184,27 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(threadID: valid.threadID), [valid])
     }
 
+    func testBuiltInBrowserRecoveryFailurePersistsWithoutAcceptingUnknownToolsOrPageData() throws {
+        let store = try NativeFailureEvidenceStore(directory: directory)
+        let outcome = try outcomeFixture(kind: .recoveryExhausted)
+        func record(_ tool: String, callID: String? = nil) -> NativeFailureEvidenceStore.Record {
+            .init(threadID: outcome.threadID, turnID: outcome.turnID, callID: callID ?? "call-\(tool)",
+                  toolName: tool, message: outcome.message, diagnosticText: outcome.diagnosticText,
+                  timestamp: outcome.timestamp)
+        }
+        let expected = ["browser_tabs", "browser_open", "browser_bind", "browser_navigate",
+                        "browser_read", "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close"].map { record($0) }
+        for value in expected { try store.append(value) }
+        XCTAssertEqual(try NativeFailureEvidenceStore(directory: directory).load(threadID: outcome.threadID), expected)
+
+        for tool in ["browser_unknown", "browser_", "exec_command"] {
+            XCTAssertThrowsError(try store.append(record(tool)))
+        }
+        let leakedPage = try withDiagnostic(record("browser_click", callID: "call-private-data")) { $0["page_text"] = "private mailbox content" }
+        XCTAssertThrowsError(try store.append(leakedPage))
+        XCTAssertEqual(try store.load(threadID: outcome.threadID), expected)
+    }
+
     func testRuntimeOutcomeBuilderRejectsInvalidCountsAndStoreRejectsWrongToolOrMessage() throws {
         for counts in [(0, 0), (65, 1), (1, 2), (1, -1)] {
             XCTAssertThrowsError(try ComputerOutcomeDiagnostic.make(kind: .unverified,
@@ -177,7 +225,7 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
     func testNavigationRecoveryCannotDisguiseAnActivationSchema() throws {
         let store = try NativeFailureEvidenceStore(directory: directory)
         let substitutedRecovery = try withDiagnostic(fixture()) {
-            $0["error"] = ["code": "chrome_navigation_recovery_required", "message": ComputerToolFailureEvidence.navigationRecoveryDescription]
+            $0["error"] = ["code": "chrome_navigation_recovery_required", "message": "Historical navigation recovery failed."]
         }
         let substitutedActivation = try withDiagnostic(navigationRecoveryFixture()) {
             $0["error"] = ["code": "application_activation_failed", "message": "Application activation failed"]
@@ -334,11 +382,12 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
             diagnosticText: diagnosticText ?? ComputerToolFailureEvidence.text(for: error), timestamp: timestamp)
     }
 
+    /// Archived schema only: the removed Chrome route can never produce new records.
     private func navigationRecoveryFixture(toolName: String = "computer_v2_open", message: String? = nil) -> NativeFailureEvidenceStore.Record {
-        let error = ExistingChromeError.navigationRecoveryRequired
+        let diagnostic = #"{"type":"native_tool_failure","error":{"code":"chrome_navigation_recovery_required","message":"Historical navigation recovery failed."},"cause":"undetermined","website_status":"not_observed","action_outcome":"navigation_not_confirmed","tab_state":"preserved_if_created","retry_policy":"stop_for_turn","next_step":"Historical failure; no operation was replayed."}"#
         return .init(threadID: "thread-1", turnID: "turn-navigation", callID: "call-navigation", toolName: toolName,
-            message: message ?? ComputerToolFailureEvidence.terminalMessage(for: error)!,
-            diagnosticText: ComputerToolFailureEvidence.text(for: error), timestamp: Date(timeIntervalSinceReferenceDate: 123_457))
+            message: message ?? "Historical navigation recovery failed.",
+            diagnosticText: diagnostic, timestamp: Date(timeIntervalSinceReferenceDate: 123_457))
     }
 
     private func outcomeFixture(kind: ComputerOutcomeDiagnostic.Kind) throws -> NativeFailureEvidenceStore.Record {

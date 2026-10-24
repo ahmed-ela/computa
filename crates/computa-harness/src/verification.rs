@@ -220,7 +220,6 @@ fn property(
         PostconditionKind::RegionText | PostconditionKind::DetailView => {
             region_text(snapshot, node)
         }
-        _ => Err(VerificationError::InvalidRequest),
     }
 }
 fn fields(node: &AxNode) -> Vec<String> {
@@ -389,7 +388,6 @@ impl VerificationPlan {
                     .detail_element_index
                     .ok_or(VerificationError::InvalidRequest)?
             }
-            _ => return Err(VerificationError::InvalidRequest),
         };
         if !exposed.contains(&target_index) {
             return Err(VerificationError::Unexposed);

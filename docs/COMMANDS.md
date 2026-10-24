@@ -35,13 +35,18 @@ normal authorization flow. No password or API key should be pasted into a task.
 
 ## Permissions and running processes
 
-The existing workspace-write sandbox remains enabled. The engine requests
-approval when an operation needs it. **Ask every time** presents those engine
-requests with the command and working directory; sandbox-permitted commands may
-run without a prompt. **Full access** resolves the same requests automatically
-under the app's existing rules; it does not remove tool validation or macOS
-permissions. CLI support does not authorize bypassing browser, app, or system
-access controls.
+**Ask every time** uses the workspace-write sandbox with network access disabled.
+It presents protected engine requests with the command and working directory;
+sandbox-permitted commands may run without a prompt. **Full access** allows
+terminal/file commands outside the workspace and network access without engine
+approval prompts. It also automatically approves permitted native
+browser/computer action requests. Both modes retain tool validation, macOS
+permissions and browser, app and system access controls.
+
+The persisted native selection is sent on each new turn, including turns in an
+existing chat. Switching changes native action approvals immediately, but does
+not revoke an active turn's execution policy or terminate existing processes.
+Stop that turn and its commands before continuing with reduced execution access.
 
 The model can start a command with `exec_command` and poll or provide input to
 its live session with `write_stdin`. These session IDs belong to the current

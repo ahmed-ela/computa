@@ -165,7 +165,7 @@ export function ReviewPanel({ taskID, review, busy, post, onFeedback }: {
       </div>
     </header>
     <div className="review-options">
-      <NativeSelect aria-label="Changes scope" value={current?.scope ?? 'lastTurn'} disabled={loading} onInput={(event: Event) => setScope((event.currentTarget as HTMLSelectElement).value as ReviewScope)}>
+      <NativeSelect aria-label="Changes scope" value={current?.scope ?? 'lastTurn'} disabled={loading} onChange={(event: Event) => setScope((event.currentTarget as HTMLSelectElement).value as ReviewScope)}>
         {scopes.map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}
       </NativeSelect>
       {current?.scope === 'branch' || current?.scope === 'commit' ? <div className="review-reference">

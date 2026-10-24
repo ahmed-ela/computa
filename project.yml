@@ -48,22 +48,6 @@ targets:
       - path: Sources/Computa/Resources/BrowserModels
         type: folder
         buildPhase: resources
-      - path: BrowserExtension
-        type: folder
-        buildPhase: resources
-        excludes:
-          - '*.test.js'
-    preBuildScripts:
-      - name: Build signed Chrome native bridge
-        script: '/bin/sh "$SRCROOT/Scripts/build-chrome-bridge.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"'
-        inputFiles:
-          - $(SRCROOT)/Scripts/build-chrome-bridge.sh
-          - $(SRCROOT)/Sources/Computa/Runtime/ChromeBridgeIPC.swift
-          - $(SRCROOT)/Sources/Computa/Runtime/ChromeBridgeIdentity.swift
-          - $(SRCROOT)/Sources/ChromeBridgeHost/main.swift
-        outputFiles:
-          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ChromeBridge/ChromeBridgeHost
-        basedOnDependencyAnalysis: false
     dependencies:
       - target: AutomationCore
     configFiles:

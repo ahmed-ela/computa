@@ -8,11 +8,17 @@ actor WorkspaceReviewService {
     private var snapshots: [String: RetainedReview] = [:]
     private var busy = false
     private let configurationEnvironment: [String: String]?
+    private let commandConfiguration: ReviewCommandConfiguration
 
     /// Fixtures can supply private config files without changing user settings.
     /// Normal app calls inspect the user's effective Git configuration.
-    init(configurationEnvironment: [String: String]? = nil) {
+    init(configurationEnvironment: [String: String]? = nil,
+         commandExecutableForTesting: URL? = nil, commandTimeoutForTesting: TimeInterval? = nil) {
         self.configurationEnvironment = configurationEnvironment
+        commandConfiguration = ReviewCommandConfiguration(
+            executable: commandExecutableForTesting ?? URL(fileURLWithPath: "/usr/bin/git"),
+            timeout: commandTimeoutForTesting ?? 15
+        )
     }
 
     func load(workspace: String, scope: FileReviewScope, reference: String? = nil,
@@ -21,9 +27,12 @@ actor WorkspaceReviewService {
         busy = true
         defer { busy = false }
         let configurationEnvironment = configurationEnvironment
+        let commandConfiguration = commandConfiguration
         let retained = try await Task.detached(priority: .userInitiated) {
-            try ReviewGit.$configurationEnvironment.withValue(configurationEnvironment) {
-                try ReviewGit.load(workspace: workspace, scope: scope, reference: reference, turnDiff: turnDiff, turnChanges: turnChanges)
+            try ReviewGit.$commandConfiguration.withValue(commandConfiguration) {
+                try ReviewGit.$configurationEnvironment.withValue(configurationEnvironment) {
+                    try ReviewGit.load(workspace: workspace, scope: scope, reference: reference, turnDiff: turnDiff, turnChanges: turnChanges)
+                }
             }
         }.value
         remember(retained)
@@ -37,9 +46,12 @@ actor WorkspaceReviewService {
         busy = true
         defer { busy = false }
         let configurationEnvironment = configurationEnvironment
+        let commandConfiguration = commandConfiguration
         let updated = try await Task.detached(priority: .userInitiated) {
-            try ReviewGit.$configurationEnvironment.withValue(configurationEnvironment) {
-                try ReviewGit.mutate(retained, operation: operation, fileID: fileID, hunkID: hunkID)
+            try ReviewGit.$commandConfiguration.withValue(commandConfiguration) {
+                try ReviewGit.$configurationEnvironment.withValue(configurationEnvironment) {
+                    try ReviewGit.mutate(retained, operation: operation, fileID: fileID, hunkID: hunkID)
+                }
             }
         }.value
         // A successful mutation consumes every older snapshot of this repository.
@@ -81,6 +93,7 @@ private struct ReviewPath: Sendable {
 
 private enum ReviewGit {
     @TaskLocal static var configurationEnvironment: [String: String]?
+    @TaskLocal static var commandConfiguration = ReviewCommandConfiguration.production
     static let maximumFiles = 200
     static let maximumDisplayBytes = 1_048_576
     static let maximumSnapshotBytes = 4_194_304
@@ -88,6 +101,11 @@ private enum ReviewGit {
 
     static func load(workspace: String, scope: FileReviewScope, reference: String?, turnDiff: String?,
                      turnChanges: [AgentFileChange] = []) throws -> RetainedReview {
+        // URL(fileURLWithPath:) resolves empty/relative input against the host's
+        // working directory. A task without a chosen workspace must not read it.
+        guard workspace.hasPrefix("/") else {
+            throw FileReviewError.unavailable("Choose an existing workspace folder to review its files.")
+        }
         let root = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &directory), directory.boolValue else {
@@ -594,7 +612,8 @@ private enum ReviewGit {
         if let command = arguments.first, ["status", "diff", "apply"].contains(command) {
             try requireNoContentFilters(root)
         }
-        let result = try ReviewGitCommand.run(root: root, arguments: arguments, input: input, limit: maximumCommandBytes)
+        let result = try ReviewGitCommand.run(root: root, arguments: arguments, input: input, limit: maximumCommandBytes,
+                                              configuration: commandConfiguration)
         guard allowedExitCodes.contains(result.status) else {
             let error = String(decoding: result.stderr.prefix(2_048), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             throw FileReviewError.commandFailed(error.isEmpty ? "Git could not complete that review operation." : error)
@@ -612,7 +631,8 @@ private enum ReviewGit {
         // index blobs, so these repositories are explicitly unsupported here.
         let configuration = try ReviewGitCommand.run(root: root,
             arguments: ["config", "--null", "--name-only", "--list"], input: nil, limit: maximumCommandBytes,
-            inspectConfiguration: true, configurationEnvironment: configurationEnvironment)
+            inspectConfiguration: true, configurationEnvironment: configurationEnvironment,
+            configuration: commandConfiguration)
         guard configuration.status == 0, !configuration.truncated else {
             throw FileReviewError.unavailable("The repository's Git filter configuration could not be verified.")
         }
@@ -635,28 +655,35 @@ private struct ReviewCommandResult: Sendable {
     var string: String { String(decoding: stdout, as: UTF8.self) }
 }
 
-private final class ReviewOutputBuffer: @unchecked Sendable {
-    private let lock = NSLock()
+private struct ReviewCommandConfiguration: Sendable {
+    let executable: URL
+    let timeout: TimeInterval
+    static let production = Self(executable: URL(fileURLWithPath: "/usr/bin/git"), timeout: 15)
+}
+
+private struct ReviewOutputBuffer {
     private var data = Data()
     private var exceeded = false
     private let limit: Int
     init(limit: Int) { self.limit = limit }
-    func append(_ chunk: Data) {
-        lock.lock(); defer { lock.unlock() }
+    mutating func append(_ chunk: Data) {
         let remaining = max(0, limit - data.count)
         data.append(chunk.prefix(remaining))
         if chunk.count > remaining { exceeded = true }
     }
-    func result() -> (Data, Bool) { lock.lock(); defer { lock.unlock() }; return (data, exceeded) }
+    func result() -> (Data, Bool) { (data, exceeded) }
 }
 
 private enum ReviewGitCommand {
     static func run(root: URL, arguments: [String], input: Data?, limit: Int,
-                    inspectConfiguration: Bool = false, configurationEnvironment: [String: String]? = nil) throws -> ReviewCommandResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-c", "core.quotePath=true", "-c", "core.pager=cat", "-c", "diff.external=",
-                             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", root.path] + arguments
+                    inspectConfiguration: Bool = false, configurationEnvironment: [String: String]? = nil,
+                    configuration: ReviewCommandConfiguration = .production) throws -> ReviewCommandResult {
+        // Fixtures may shorten the deadline, but cannot relax production's 15s bound.
+        guard configuration.timeout.isFinite, configuration.timeout > 0, configuration.timeout <= 15 else {
+            throw FileReviewError.commandFailed("Invalid Git review deadline.")
+        }
+        let commandArguments = ["-c", "core.quotePath=true", "-c", "core.pager=cat", "-c", "diff.external=",
+                                "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", root.path] + arguments
         var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
         if inspectConfiguration {
             // Config-only reads execute no filters. Include real global/system
@@ -674,38 +701,163 @@ private enum ReviewGitCommand {
         }
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GIT_OPTIONAL_LOCKS"] = "0"
-        process.environment = environment
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
-        // A child that exits or times out must not terminate Computa's writer.
-        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
-        process.standardOutput = stdout
-        process.standardError = stderr
-        process.standardInput = input == nil ? FileHandle.nullDevice : stdin
-        let output = ReviewOutputBuffer(limit: limit), errors = ReviewOutputBuffer(limit: 16_384)
-        let group = DispatchGroup()
-        try process.run()
-        for (handle, buffer) in [(stdout.fileHandleForReading, output), (stderr.fileHandleForReading, errors)] {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                defer { group.leave(); try? handle.close() }
-                while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty { buffer.append(chunk) }
+        let handles = [stdout.fileHandleForReading, stdout.fileHandleForWriting,
+                       stderr.fileHandleForReading, stderr.fileHandleForWriting,
+                       stdin.fileHandleForReading, stdin.fileHandleForWriting]
+        defer { for handle in handles { try? handle.close() } }
+        let outputFD = stdout.fileHandleForReading.fileDescriptor
+        let errorFD = stderr.fileHandleForReading.fileDescriptor
+        let inputFD = stdin.fileHandleForWriting.fileDescriptor
+        for descriptor in [outputFD, errorFD, inputFD] {
+            let flags = fcntl(descriptor, F_GETFL)
+            guard flags != -1, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != -1 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
         }
-        if let input {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                defer { try? stdin.fileHandleForWriting.close(); group.leave() }
-                try? stdin.fileHandleForWriting.write(contentsOf: input)
-            }
+        // Only this pipe's writer suppresses SIGPIPE; no host signal disposition changes.
+        guard fcntl(inputFD, F_SETNOSIGPIPE, 1) != -1 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        let deadline = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: deadline)
-        process.waitUntilExit()
-        deadline.cancel()
-        group.wait()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(configuration.timeout))
+        let pid = try OwnedChildProcess.spawn(
+            executableURL: configuration.executable, arguments: commandArguments, environment: environment,
+            inputDescriptor: input == nil ? nil : stdin.fileHandleForReading.fileDescriptor,
+            outputDescriptor: stdout.fileHandleForWriting.fileDescriptor,
+            errorDescriptor: stderr.fileHandleForWriting.fileDescriptor
+        )
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForWriting.close()
+        try? stdin.fileHandleForReading.close()
+        var output = ReviewOutputBuffer(limit: limit), errors = ReviewOutputBuffer(limit: 16_384)
+        var outputOpen = true, errorOpen = true, inputOpen = !(input?.isEmpty ?? true)
+        if !inputOpen { try? stdin.fileHandleForWriting.close() }
+        var inputOffset = 0, inputRejected = false, terminal = false
+        var failure: Error?
+        var bytes = [UInt8](repeating: 0, count: 65_536)
+        do {
+            while true {
+                guard clock.now < deadline else {
+                    throw FileReviewError.commandFailed(terminal && (outputOpen || errorOpen)
+                        ? "Git review timed out while draining inherited pipes."
+                        : "Git review timed out or was interrupted.")
+                }
+                if !terminal {
+                    var information = siginfo_t()
+                    let observed = waitid(P_PID, id_t(pid), &information, WEXITED | WNOHANG | WNOWAIT)
+                    if observed == -1 {
+                        if errno == EINTR { continue }
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    terminal = information.si_pid == pid
+                }
+                if terminal && !outputOpen && !errorOpen && !inputOpen { break }
+                var descriptors = [pollfd]()
+                if outputOpen { descriptors.append(pollfd(fd: outputFD, events: Int16(POLLIN), revents: 0)) }
+                if errorOpen { descriptors.append(pollfd(fd: errorFD, events: Int16(POLLIN), revents: 0)) }
+                if inputOpen { descriptors.append(pollfd(fd: inputFD, events: Int16(POLLOUT), revents: 0)) }
+                let polled = descriptors.withUnsafeMutableBufferPointer {
+                    poll($0.baseAddress, nfds_t($0.count), 20)
+                }
+                if polled == -1 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                for descriptor in descriptors where descriptor.revents != 0 {
+                    guard descriptor.revents & Int16(POLLNVAL) == 0 else { throw POSIXError(.EBADF) }
+                    if descriptor.fd == inputFD, inputOpen, let input {
+                        let count = input.withUnsafeBytes {
+                            Darwin.write(inputFD, $0.baseAddress!.advanced(by: inputOffset), min(65_536, input.count - inputOffset))
+                        }
+                        if count > 0 { inputOffset += count }
+                        else if count == -1 && errno == EPIPE { inputRejected = true }
+                        else if count == -1 && errno != EINTR && errno != EAGAIN {
+                            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                        }
+                        if inputOffset == input.count || inputRejected {
+                            try? stdin.fileHandleForWriting.close()
+                            inputOpen = false
+                        }
+                    } else {
+                        // At most one chunk per ready stream keeps floods from starving the deadline.
+                        let count = bytes.withUnsafeMutableBytes { Darwin.read(descriptor.fd, $0.baseAddress!, $0.count) }
+                        if count > 0 {
+                            let chunk = Data(bytes.prefix(count))
+                            if descriptor.fd == outputFD { output.append(chunk) }
+                            else { errors.append(chunk) }
+                        } else if count == 0 {
+                            if descriptor.fd == outputFD {
+                                try? stdout.fileHandleForReading.close(); outputOpen = false
+                            } else { try? stderr.fileHandleForReading.close(); errorOpen = false }
+                        } else if errno != EINTR && errno != EAGAIN {
+                            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                        }
+                    }
+                }
+            }
+        } catch { failure = error }
+        // No blocking readers/writer exist. Close our ends before bounded owned-group cleanup.
+        for handle in handles { try? handle.close() }
+        let cleanup = finishOwnedGroup(pid: pid, clock: clock)
+        guard cleanup.issues.isEmpty, let status = cleanup.status else {
+            throw FileReviewError.commandFailed("Git review cleanup could not be verified. " + cleanup.issues.joined(separator: " "))
+        }
+        if let failure { throw failure }
+        guard (status & 0x7f) == 0 else { throw FileReviewError.commandFailed("Git review was interrupted.") }
+        let exitCode = (status >> 8) & 0xff
+        guard !inputRejected || exitCode != 0 else { throw FileReviewError.commandFailed("Git did not consume the review input.") }
         let (out, truncated) = output.result()
         let (err, _) = errors.result()
-        guard process.terminationReason == .exit else { throw FileReviewError.commandFailed("Git review timed out or was interrupted.") }
-        return ReviewCommandResult(stdout: out, stderr: err, status: process.terminationStatus, truncated: truncated)
+        return ReviewCommandResult(stdout: out, stderr: err, status: exitCode, truncated: truncated)
+    }
+
+    private static func finishOwnedGroup(pid: Int32, clock: ContinuousClock) -> (status: Int32?, issues: [String]) {
+        guard pid > 1 else { return (nil, ["Refused an invalid owned child ID."]) }
+        let deadline = clock.now.advanced(by: .seconds(2))
+        // Verify the exclusively spawned root is still our unreaped child before
+        // the final nonzero signal. Never signal a discovered or already-reaped PID.
+        while true {
+            var information = siginfo_t()
+            if waitid(P_PID, id_t(pid), &information, WEXITED | WNOHANG | WNOWAIT) == 0 {
+                guard information.si_pid == 0 || information.si_pid == pid else {
+                    return (nil, ["Owned child observation returned an unexpected ID."])
+                }
+                break
+            }
+            let errorNumber = errno
+            guard errorNumber == EINTR, clock.now < deadline else {
+                return (nil, ["Owned child observation failed: errno=\(errorNumber)."])
+            }
+        }
+        let signalled = Darwin.kill(-pid, SIGKILL)
+        let signalError = signalled == -1 ? errno : 0
+        var status: Int32?, groupGone = false, issues = [String]()
+        repeat {
+            if status == nil {
+                var observedStatus: Int32 = 0
+                let waited = waitpid(pid, &observedStatus, WNOHANG)
+                if waited == pid, (observedStatus & 0x7f) != 0x7f { status = observedStatus }
+                else if waited == -1, errno != EINTR {
+                    issues.append("Owned child reap failed: errno=\(errno).")
+                    break
+                } else if waited != 0 && waited != -1 && waited != pid {
+                    issues.append("Owned child wait returned an unexpected ID.")
+                    break
+                }
+            }
+            // After reaping, only absence probes are permitted. EPERM is not absence.
+            let probe = Darwin.kill(-pid, 0)
+            groupGone = probe == -1 && errno == ESRCH
+            if status != nil && groupGone { break }
+            _ = poll(nil, 0, 10)
+        } while clock.now < deadline
+        if status == nil { issues.append("Owned child did not finish within cleanup deadline.") }
+        if !groupGone { issues.append("Owned process group absence was not verified.") }
+        // A zombie-only group's EPERM is resolved only by successful reap + fresh ESRCH.
+        if signalError != 0 && signalError != ESRCH && (signalError != EPERM || status == nil || !groupGone) {
+            issues.append("Owned group signal failed: errno=\(signalError).")
+        }
+        return (status, issues)
     }
 }

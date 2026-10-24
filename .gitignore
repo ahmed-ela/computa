@@ -9,3 +9,7 @@ xcuserdata/
 *.profraw
 __pycache__/
 *.py[cod]
+Sources/Computa/Resources/AgentRuntime/codex-app-server
+Sources/Computa/Resources/AgentRuntime/manifest.json
+Sources/Computa/Resources/AgentRuntime/LICENSE
+Sources/Computa/Resources/AgentRuntime/NOTICE

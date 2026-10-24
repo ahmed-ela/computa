@@ -34,11 +34,21 @@ struct WebsiteTurnFailureStore: Sendable {
             guard text.utf8.count <= 8_192, let provider = WebModelServer.provider(for: modelID),
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-                  let error = supplied["error"] as? [String: Any], let code = error["code"] as? String,
-                  let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
-                  retryable.boolValue == false else { return nil }
+                  let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
+            // The fixed local inspection error has no retry metadata. Only its
+            // exact generated envelope can pass the canonical equality below.
+            if code != "browser_model_error" {
+                guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
+                      retryable.boolValue == false else { return nil }
+            }
             let nativeError: any Error
             switch code {
+            case "chatgpt_profile_preparation_failed", "website_browser_session_failed":
+                guard let rawReason = error["reason"] as? String,
+                      let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,
+                      !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
+                nativeError = reason
+            case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,
                       let reason = WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason(rawValue: rawReason),
@@ -49,6 +59,14 @@ struct WebsiteTurnFailureStore: Sendable {
             case "sign_in_required": nativeError = EmbeddedWebModelTransport.Failure.signInRequired
             case "website_usage_limit": nativeError = EmbeddedWebModelTransport.Failure.usageLimited(webProvider)
             case "unexpected_website_page": nativeError = EmbeddedWebModelTransport.Failure.unexpectedPage(webProvider)
+            case "website_ownership_unverified":
+                guard let rawReason = error["ownership_reason"] as? String,
+                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason) else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
+            case "website_continuation_unverified":
+                guard provider == "gemini", let rawReason = error["reason"] as? String,
+                      let reason = WebsiteTurnContinuation.Failure(rawValue: rawReason) else { return nil }
+                nativeError = reason
             case "product_mode_unverified":
                 nativeError = error["message"] as? String == WebModelServer.Failure.productModeUnverified.localizedDescription
                     ? WebModelServer.Failure.productModeUnverified : EmbeddedWebModelTransport.Failure.productModeUnverified

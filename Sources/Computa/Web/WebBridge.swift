@@ -117,12 +117,24 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "createTask":
             state.createTask()
 
+        case "prepareWebsiteModel":
+            guard Set(body.keys) == ["action", "taskID"],
+                  let taskID = body["taskID"] as? String, taskID == state.selectedTaskID,
+                  state.tasks.contains(where: { $0.id == taskID }) else { return }
+            state.prepareWebsiteModel(taskID: taskID)
+
         case "submitPrompt":
             guard let prompt = body["prompt"] as? String,
                   let taskID = body["taskID"] as? String,
                   let requestID = body["requestID"] as? String
             else { return }
-            state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
+            let profile = WebsiteDispatchProfile.begin(taskID: taskID,
+                modelID: state.tasks.first(where: { $0.id == taskID })?.model ?? "",
+                requestID: requestID, origin: .webUI)
+            profile?.mark(.bridgeReceived)
+            WebsiteDispatchProfile.$current.withValue(profile) {
+                _ = state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
+            }
 
         case "beginQueueEdit", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "steerQueuedPrompt":
             guard let taskID = body["taskID"] as? String,
@@ -257,6 +269,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         case "refreshWebsiteModels":
             Task { @MainActor [weak state] in await state?.refreshWebsiteModels() }
+
+        case "showAPIProviders":
+            guard Set(body.keys) == ["action"] else { return }
+            state.presentAPIProviders()
 
         case "setTaskModel":
             guard let modelID = body["modelID"] as? String,

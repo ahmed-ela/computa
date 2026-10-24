@@ -190,6 +190,106 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertEqual(session.tabs.map(\.id), [human])
     }
 
+    func testSettledHumanRecoveryIsOncePerCheckpointAndCommittedDocumentWithoutClearance() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let url = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 1 }
+        XCTAssertEqual(candidates.count, 1)
+        let first = try XCTUnwrap(candidates.first)
+        XCTAssertEqual(first.provider, "gemini"); XCTAssertEqual(first.checkpointID, checkpoint)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(first))
+        view.navigationDelegate?.webView?(view, didCommit: nil)
+        view.navigationDelegate?.webView?(view, didFinish: nil)
+        await Task.yield()
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertEqual(session.tabs.map(\.id), [id], "An event is an intent, never a provider probe or prompt")
+
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 2 }
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(first))
+        let second = try XCTUnwrap(candidates.last)
+        XCTAssertNotEqual(second.committedDocumentID, first.committedDocumentID)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(second))
+        session.closeTab(id)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(second))
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+    }
+
+    func testRealBackendBorrowAndReobserveRevokeRecoveryEvenAfterLeaseRelease() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let url = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 1 }
+        let first = try XCTUnwrap(candidates.last)
+        let backend = EmbeddedBrowserTabTransport(session: session)
+        let targets = try await backend.humanTargets()
+        let target = try XCTUnwrap(targets.first { $0.targetID == id.uuidString })
+        let broker = BrowserTabSessionBroker(transport: backend, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "recovery-borrow-fixture", processIdentifier: 1, target: target)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(first), "Binding performs a marked observation before publishing its lease")
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 2 }
+        let second = try XCTUnwrap(candidates.last)
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(second))
+        _ = try await broker.snapshot(taskKey: "recovery-borrow-fixture", binding: binding, bundleIdentifier: "fixture", query: nil)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(second), "An old binding must reobserve the new document before input")
+        try await broker.revoke(taskKey: "recovery-borrow-fixture", binding: binding)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(second), "Release cannot restore a used document's recovery intent")
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 3 }
+        XCTAssertEqual(candidates.count, 3)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(try XCTUnwrap(candidates.last)))
+        XCTAssertNotNil(session.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertEqual(session.tabs.map(\.id), [id])
+    }
+
+    func testFailedNavigationAndModelOrToolPagesCannotOfferRecovery() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let url = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        let human = try session.createTab(), view = try XCTUnwrap(session.webView(for: human))
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 1 }
+        let initial = try XCTUnwrap(candidates.first)
+        view.navigationDelegate?.webView?(view, didStartProvisionalNavigation: nil)
+        view.navigationDelegate?.webView?(view, didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+        view.navigationDelegate?.webView?(view, didFinish: nil)
+        await Task.yield()
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(initial))
+        XCTAssertEqual(candidates.count, 1)
+        let model = try session.createUnloadedModelTabForTesting()
+        let tool = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        for id in [model, tool] { try await loadLocalFixture(XCTUnwrap(session.webView(for: id)), at: url) }
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertNotNil(session.savedHumanVerificationCheckpointIDs["gemini"])
+    }
+
+    private func waitForRecovery(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(condition(), "The native committed/settled recovery event did not arrive")
+    }
+
     private func loadLocalFixture(_ view: WKWebView, at url: URL) async throws {
         view.loadHTMLString("<!doctype html><title>Local checkpoint fixture</title><p>Fixture</p>", baseURL: url)
         try await waitForNativeURL(view, at: url)

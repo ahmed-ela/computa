@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -38,11 +39,14 @@ class ModelInstallationTests(unittest.TestCase):
             calls.append(arguments)
             for name, data in contents.items():
                 (Path(arguments["local_dir"]) / name).write_bytes(data)
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=2**40)) as capacity:
             root = Path(temporary) / "models"
             destination = installer.install_model(root, manifest, download)
             installer.verify_model(destination, manifest)
+            capacity.return_value = SimpleNamespace(free=0)
             self.assertEqual(installer.install_model(root, manifest, download), destination)
+            capacity.assert_called_once()
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0]["revision"], manifest["revision"])
             self.assertIs(calls[0]["token"], False)
@@ -67,12 +71,40 @@ class ModelInstallationTests(unittest.TestCase):
         manifest, _ = self.fixture()
         def incomplete(**arguments):
             (Path(arguments["local_dir"]) / "config.json").write_bytes(b"{}")
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=2**40)):
             root = Path(temporary)
             with self.assertRaises(FileNotFoundError):
                 installer.install_model(root, manifest, incomplete)
             self.assertFalse((root / manifest["repo"]).exists())
             self.assertEqual(list((root / "lmstudio-community").iterdir()), [])
+
+    def test_disk_reserve_boundary_controls_download_without_publishing_partial_files(self):
+        manifest, contents = self.fixture()
+        required = manifest["totalBytes"] + 512 * 1024 * 1024
+        for available in (required - 1, required):
+            with self.subTest(available=available), tempfile.TemporaryDirectory() as temporary, \
+                 patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=available)):
+                root = Path(temporary)
+                retained = root / "existing-note.txt"
+                retained.write_bytes(b"keep existing user data")
+                calls = []
+                def download(**arguments):
+                    calls.append(arguments)
+                    for name, data in contents.items():
+                        (Path(arguments["local_dir"]) / name).write_bytes(data)
+                if available < required:
+                    with self.assertRaisesRegex(ValueError, "Insufficient disk space"):
+                        installer.install_model(root, manifest, download)
+                    self.assertEqual(calls, [])
+                    self.assertFalse((root / manifest["repo"]).exists())
+                    self.assertEqual(list((root / "lmstudio-community").iterdir()), [])
+                else:
+                    destination = installer.install_model(root, manifest, download)
+                    installer.verify_model(destination, manifest)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(list(destination.parent.iterdir()), [destination])
+                self.assertEqual(retained.read_bytes(), b"keep existing user data")
 
     def test_symlinked_or_extra_files_are_rejected_without_following_them(self):
         manifest, contents = self.fixture()

@@ -30,7 +30,7 @@ enum BrowserActionVerification {
         let documentEpoch: UUID
         let loaderID: String
         let documentURL: String
-        /// BrowserDocumentObservation is produced from the main-frame CDP
+        /// BrowserDocumentObservation is produced from the main-frame
         /// capture; subframe identity is not inferred from matching text.
         let frame: String
 
@@ -106,8 +106,8 @@ enum BrowserActionVerification {
             try revalidateBaseline(document: document)
         }
 
-        /// Called again at the CDP adapter's existing final observation. This
-        /// narrows, but cannot eliminate, changes between separate CDP reads
+        /// Called again at the browser adapter's final observation. This
+        /// narrows, but cannot eliminate, changes between separate browser reads
         /// and the event handler; it never authorizes another dispatch.
         func revalidateBaseline(document: BrowserDocumentObservation) throws {
             try BrowserActionVerification.revalidateBaseline(self, document: document)
@@ -618,7 +618,7 @@ enum BrowserActionVerification {
             return DialogBaseline(rootBackendNodeID: backend, rootRole: role(root))
         }
 
-        /// CDP captures the main AX tree. Reject iframe/nested web-area ancestry
+        /// The capture covers the main document. Reject iframe/nested web-area ancestry
         /// rather than treating a matching role in a subframe as this dialog.
         private func isInMainFrame(_ node: BrowserDocumentNode) -> Bool {
             var cursor = node.parentNodeID.flatMap { byID[$0] }

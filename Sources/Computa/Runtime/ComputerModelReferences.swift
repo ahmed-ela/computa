@@ -32,7 +32,7 @@ struct ComputerModelReferences {
     }
 
     private enum Capability: Equatable {
-        case action(String), field, link, region
+        case action(String), field, region
     }
 
     private struct Entry {
@@ -92,9 +92,6 @@ struct ComputerModelReferences {
             canonical["view"] = arguments["view"]
             canonical["query"] = arguments["query"]
             return Resolved(tool: ComputerV2ToolContract.Tool.snapshot.rawValue, arguments: canonical)
-        case .follow:
-            canonical["element_index"] = try entry("link_ref", capability: .link).index
-            return Resolved(tool: ComputerV2ToolContract.Tool.followLink.rawValue, arguments: canonical)
         case .fill:
             canonical["element_index"] = try entry("field_ref", capability: .field).index
             canonical["text"] = arguments["text"]
@@ -148,15 +145,10 @@ struct ComputerModelReferences {
         var controls: [String] = [], regions: [String] = []
         for row in rows {
             var addresses: [String] = []
-            if row.followLink {
-                addresses.append("link_ref=\(mint(.link, index: row.index, prefix: "l"))")
-            }
             if row.settable {
                 addresses.append("field_ref=\(mint(.field, index: row.index, prefix: "f"))")
             }
-            // A proven browser link needs only follow, not a competing generic
-            // press choice with a second verification contract.
-            for action in row.actions where !(row.followLink && action == "AXPress") {
+            for action in row.actions {
                 let token = mint(.action(action), index: row.index, prefix: "a")
                 addresses.append(row.actions.count == 1 ? "action_ref=\(token)" : "\(action)_ref=\(token)")
             }
@@ -184,7 +176,7 @@ struct ComputerModelReferences {
             if passedRows { footer.append(retained) } else { header.append(retained) }
         }
         header.append("REFERENCES current_page_only=true. Each new read or action result replaces these references; copy the token for the intended tool.")
-        if !controls.isEmpty { header += ["CONTROLS (follow link_ref; fill field_ref; press action_ref)"] + controls }
+        if !controls.isEmpty { header += ["CONTROLS (fill field_ref; press action_ref)"] + controls }
         if !regions.isEmpty { header += ["READABLE CONTEXT (region_ref reads a subtree; it cannot be pressed)"] + regions }
         header.append("Use read_page for a fresh view; read_region for a region_ref; continue with next_cursor. Read document content before making content claims.")
         let result = (header + footer).joined(separator: "\n")

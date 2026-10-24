@@ -5,6 +5,146 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testCommittedDocumentIdentityIgnoresCancelledProvisionalNavigationAndRejectsStaleOrModelReads() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        // Use real WebKit navigation tokens with synchronous native delegate
+        // callbacks. Detaching avoids asynchronous page-load races in this test.
+        view.navigationDelegate = nil
+        let initialGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: initialGeneration))
+        let first = try XCTUnwrap(view.loadHTMLString("<main>First document</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: first)
+        let firstGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        delegate.webView?(view, didCommit: first)
+        let firstID = try XCTUnwrap(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        delegate.webView?(view, didFinish: first)
+        let provisional = try XCTUnwrap(view.loadHTMLString("<main>Never committed</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: provisional)
+        let provisionalGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNotEqual(firstGeneration, provisionalGeneration)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: firstGeneration))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: provisionalGeneration), firstID)
+        delegate.webView?(view, didFailProvisionalNavigation: provisional,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: provisionalGeneration), firstID,
+                       "Cancelled provisional navigation must not refund failures on the old document")
+        let replacement = try XCTUnwrap(view.loadHTMLString("<main>Replacement</main>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: replacement)
+        let replacementGeneration = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: replacementGeneration), firstID)
+        delegate.webView?(view, didCommit: replacement)
+        let replacementID = try XCTUnwrap(session.committedHumanDocumentID(for: id, generation: replacementGeneration))
+        XCTAssertNotEqual(replacementID, firstID)
+        delegate.webView?(view, didCommit: replacement)
+        XCTAssertEqual(session.committedHumanDocumentID(for: id, generation: replacementGeneration), replacementID)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: provisionalGeneration))
+        let modelID = try session.createUnloadedModelTabForTesting()
+        let modelView = try XCTUnwrap(session.webView(for: modelID)), modelDelegate = try XCTUnwrap(modelView.navigationDelegate)
+        modelView.navigationDelegate = nil
+        let modelNavigation = try XCTUnwrap(modelView.loadHTMLString("<main>Inference</main>", baseURL: nil))
+        modelDelegate.webView?(modelView, didStartProvisionalNavigation: modelNavigation)
+        modelDelegate.webView?(modelView, didCommit: modelNavigation)
+        XCTAssertNil(session.committedHumanDocumentID(for: modelID, generation: try XCTUnwrap(session.documentGeneration(for: modelID))))
+        session.closeTab(id)
+        XCTAssertNil(session.committedHumanDocumentID(for: id, generation: replacementGeneration))
+    }
+
+    func testWebInspectorOptInIsPerTabAndPreservesTheBrowserDocument() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let firstID = try session.createTab()
+        let secondID = try session.createTab(select: false)
+        let first = try XCTUnwrap(session.webView(for: firstID))
+        let second = try XCTUnwrap(session.webView(for: secondID))
+        let generation = session.documentGeneration(for: firstID)
+        XCTAssertFalse(first.isInspectable)
+        XCTAssertFalse(second.isInspectable)
+        XCTAssertTrue(session.canInspect(tabID: firstID))
+        try session.setWebInspectorEnabled(true, for: firstID)
+        XCTAssertTrue(first.isInspectable)
+        XCTAssertTrue(try XCTUnwrap(session.humanTab(id: firstID)).isWebInspectorEnabled)
+        XCTAssertFalse(second.isInspectable)
+        XCTAssertEqual(session.selectedTabID, firstID)
+        XCTAssertEqual(session.documentGeneration(for: firstID), generation)
+        XCTAssertNil(first.url)
+        XCTAssertTrue(first.configuration.userContentController.userScripts.isEmpty)
+        try session.setWebInspectorEnabled(false, for: firstID)
+        XCTAssertFalse(first.isInspectable)
+        XCTAssertFalse(try XCTUnwrap(session.humanTab(id: firstID)).isWebInspectorEnabled)
+        session.closeTab(firstID)
+        XCTAssertFalse(session.canInspect(tabID: firstID))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: firstID)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .tabClosed)
+        }
+    }
+
+    func testWebInspectorCannotBeEnabledForInferenceOrToolOwnedViews() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let modelID = try session.createUnloadedModelTabForTesting()
+        let toolID = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        for id in [modelID, toolID] {
+            let view = try XCTUnwrap(session.webView(for: id))
+            XCTAssertFalse(session.canInspect(tabID: id))
+            XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: id))
+            XCTAssertFalse(view.isInspectable)
+            try session.setWebInspectorEnabled(false, for: id)
+            XCTAssertFalse(view.isInspectable)
+        }
+    }
+
+    func testWebInspectorIsRevokedBeforeToolMutationAndDoesNotResumeAfterReplacement() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        try await loadPopupFixture(view)
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        try session.setWebInspectorEnabled(true, for: id)
+        XCTAssertTrue(view.isInspectable)
+        _ = try session.prepareToolMutation(tabID: id, generation: generation)
+        XCTAssertFalse(view.isInspectable)
+        XCTAssertFalse(try XCTUnwrap(session.humanTab(id: id)).isWebInspectorEnabled)
+        XCTAssertFalse(session.canInspect(tabID: id))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: id))
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        let ready = try await script(view, "return !!document.getElementById('ready');")
+        XCTAssertEqual(ready, Data("true".utf8))
+        try await loadPopupFixture(view)
+        XCTAssertTrue(session.canInspect(tabID: id), "A committed replacement releases the tool's old document")
+        XCTAssertFalse(view.isInspectable, "Inspection requires another explicit opt-in")
+        try session.setWebInspectorEnabled(true, for: id)
+        session.closeTab(id)
+        XCTAssertFalse(view.isInspectable, "Retaining the detached WebView cannot retain inspection access")
+    }
+
+    func testWebInspectorDoesNotPropagateToPopupsAndShutdownRevokesHeldViews() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        defer { session.shutdown() }
+        try await loadPopupFixture(opener)
+        try session.setWebInspectorEnabled(true, for: openerID)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(2, session: session)
+        let childID = try XCTUnwrap(session.tabs.first(where: { $0.id != openerID })).id
+        let child = try XCTUnwrap(session.webView(for: childID))
+        XCTAssertTrue(opener.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        try session.setWebInspectorEnabled(true, for: childID)
+        session.shutdown()
+        XCTAssertFalse(opener.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        XCTAssertFalse(session.canInspect(tabID: childID))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: childID)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .sessionClosed)
+        }
+    }
+
     func testStartsEmptyAndCreatesBlankTabWithoutLoadingAHomepage() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -39,6 +179,48 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertTrue(first.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
         XCTAssertNotNil(first.navigationDelegate)
         XCTAssertNotNil(first.uiDelegate)
+    }
+
+    func testOnlyInferenceViewsDisableInactiveSchedulingBeforeConstruction() throws {
+        let platformDefault = WKWebViewConfiguration().preferences.inactiveSchedulingPolicy
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let humanID = try session.createTab()
+        let human = try XCTUnwrap(session.webView(for: humanID))
+        var constructionPolicy: WKPreferences.InactiveSchedulingPolicy?
+        var constructionHasNoScripts = false
+        let modelID = try session.createUnloadedModelTabForTesting { configuration in
+            constructionPolicy = configuration.preferences.inactiveSchedulingPolicy
+            constructionHasNoScripts = configuration.userContentController.userScripts.isEmpty
+            return WKWebView(frame: .zero, configuration: configuration)
+        }
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        let toolID = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let tool = try XCTUnwrap(session.webView(for: toolID))
+        let laterHuman = try XCTUnwrap(session.webView(for: session.createTab(select: false)))
+
+        XCTAssertEqual(constructionPolicy, WKPreferences.InactiveSchedulingPolicy.none)
+        XCTAssertEqual(model.configuration.preferences.inactiveSchedulingPolicy, .none)
+        for view in [human, tool, laterHuman] {
+            XCTAssertEqual(view.configuration.preferences.inactiveSchedulingPolicy, platformDefault,
+                           "Model scheduling must not change the platform policy for human or tool tabs")
+            XCTAssertFalse(view.configuration.preferences === model.configuration.preferences)
+        }
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertFalse(model.isInspectable)
+        XCTAssertFalse(model.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertFalse(tool.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(human.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(constructionHasNoScripts)
+        // The production completion observer is installed only after the
+        // inference view exists. It must never enter human or tool views.
+        let scripts = model.configuration.userContentController.userScripts
+        XCTAssertEqual(scripts.count, 1)
+        XCTAssertTrue(try XCTUnwrap(scripts.first).source.contains(EmbeddedBrowserSession.responseCompletionName))
+        XCTAssertTrue(try XCTUnwrap(scripts.first).isForMainFrameOnly)
+        for view in [human, tool, laterHuman] {
+            XCTAssertTrue(view.configuration.userContentController.userScripts.isEmpty)
+        }
     }
 
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
@@ -354,6 +536,146 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let after = try await session.waitForModelChange(tabID: id, after: before, until: .now + .seconds(5))
         XCTAssertGreaterThan(after, before)
         XCTAssertNotNil(session.webView(for: id))
+    }
+
+    func testModelNavigationDiagnosticsTrackActualProvisionalCommitAndFinish() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let initial = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(initial.generationCommitted)
+        XCTAssertFalse(initial.generationFinished)
+        XCTAssertFalse(initial.settled, "An idle unloaded view is not a finished document")
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        let observer = ModelNavigationDiagnosticFixture(delegate: delegate) {
+            session.modelNavigationDiagnostic(tabID: id, view: view)
+        }
+        view.navigationDelegate = observer
+        defer { view.navigationDelegate = delegate }
+        view.loadHTMLString("<p>Local navigation diagnostic fixture</p>", baseURL: nil)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while observer.finished == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let provisional = try XCTUnwrap(observer.provisional)
+        XCTAssertTrue(provisional.navigationPending)
+        XCTAssertFalse(provisional.generationCommitted)
+        XCTAssertFalse(provisional.generationFinished)
+        XCTAssertFalse(provisional.settled)
+        let committed = try XCTUnwrap(observer.committed)
+        XCTAssertTrue(committed.navigationPending)
+        XCTAssertTrue(committed.generationCommitted)
+        XCTAssertFalse(committed.generationFinished)
+        XCTAssertFalse(committed.settled)
+        let finished = try XCTUnwrap(observer.finished)
+        XCTAssertFalse(finished.navigationPending)
+        XCTAssertTrue(finished.generationCommitted)
+        XCTAssertTrue(finished.generationFinished)
+        XCTAssertFalse(finished.navigationError)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).settled)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+    }
+
+    func testModelNavigationDiagnosticsRejectFailedOrUncommittedFinish() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        // Drive the real delegate with local WebKit navigation identities;
+        // no asynchronous navigation callbacks can race this fixture.
+        view.navigationDelegate = nil
+        for committed in [false, true] {
+            let navigation = try XCTUnwrap(view.loadHTMLString("<p>Local failure</p>", baseURL: nil))
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+            if committed { delegate.webView?(view, didCommit: navigation) }
+            let failure = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled,
+                                  userInfo: [NSLocalizedDescriptionKey: "PRIVATE_NAVIGATION_ERROR_CANARY"])
+            if committed { delegate.webView?(view, didFail: navigation, withError: failure) }
+            else { delegate.webView?(view, didFailProvisionalNavigation: navigation, withError: failure) }
+            let result = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+            XCTAssertEqual(result.generationCommitted, committed)
+            XCTAssertFalse(result.generationFinished)
+            XCTAssertTrue(result.navigationError, "Cancellation is not a successful finish")
+            XCTAssertFalse(result.navigationPending)
+            XCTAssertFalse(result.settled)
+            XCTAssertFalse(result.logDescription.contains("PRIVATE_NAVIGATION_ERROR_CANARY"))
+        }
+        let uncommitted = try XCTUnwrap(view.loadHTMLString("<p>No commit callback</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: uncommitted)
+        delegate.webView?(view, didFinish: uncommitted)
+        let result = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(result.generationCommitted)
+        XCTAssertFalse(result.generationFinished)
+        XCTAssertFalse(result.navigationError)
+        XCTAssertFalse(result.settled)
+    }
+
+    func testModelNavigationDiagnosticsResetAndIgnoreStaleCallbacks() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        view.navigationDelegate = nil
+        let first = try XCTUnwrap(view.loadHTMLString("<p>First</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: first)
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFinish: first)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).generationFinished)
+        let oldGeneration = session.documentGeneration(for: id)
+        try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
+        XCTAssertNotEqual(session.documentGeneration(for: id), oldGeneration)
+        let prepared = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(prepared.generationCommitted, "Reset occurs synchronously before didStart")
+        XCTAssertFalse(prepared.generationFinished)
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFinish: first)
+        XCTAssertEqual(session.modelNavigationDiagnostic(tabID: id, view: view), prepared)
+        let second = try XCTUnwrap(view.loadHTMLString("<p>Second</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: second)
+        let current = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFail: first, withError: NSError(domain: NSURLErrorDomain, code: -1000))
+        XCTAssertEqual(session.modelNavigationDiagnostic(tabID: id, view: view), current)
+        delegate.webView?(view, didCommit: second)
+        delegate.webView?(view, didFinish: second)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).generationFinished)
+        for terminate in [false, true] {
+            if terminate { delegate.webViewWebContentProcessDidTerminate?(view) }
+            else { session.stop(tabID: id) }
+            delegate.webView?(view, didCommit: second)
+            delegate.webView?(view, didFinish: second)
+            let reset = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+            XCTAssertFalse(reset.generationCommitted)
+            XCTAssertFalse(reset.generationFinished)
+            XCTAssertFalse(reset.navigationPending)
+            XCTAssertFalse(reset.settled)
+        }
+    }
+
+    func testModelNavigationDiagnosticsRequireExactPrivateViewAndContainOnlyFacts() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let otherID = try session.createUnloadedModelTabForTesting()
+        let humanID = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let other = try XCTUnwrap(session.webView(for: otherID))
+        let human = try XCTUnwrap(session.webView(for: humanID))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: id, view: other))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: humanID, view: human))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: UUID(), view: view))
+        let facts = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertEqual(facts.logDescription, "known=true viewLoading=false tabLoading=false navigationPending=false generationCommitted=false generationFinished=false navigationError=false settled=false geminiDocumentCommitObserved=false serverRedirectObservedInCurrentNavigation=false")
+        XCTAssertEqual(EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription,
+                       "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown geminiDocumentCommitObserved=unknown serverRedirectObservedInCurrentNavigation=unknown")
+        session.closeTab(id)
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertNotNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))
+        session.shutdown()
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))
     }
 
     func testModelRenderHostAttachesFixedViewportWithoutChangingHumanSelectionOrFocus() async throws {
@@ -777,6 +1099,78 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
     }
 
+    func testNativeChannelDeadlineCannotInventChangeOrConsumeTheNextWaiter() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        defer { channel.close() }
+        let before = try channel.currentRevision()
+        let deadline = ContinuousClock.now + .milliseconds(50)
+        let expired = try await channel.wait(after: before, until: deadline)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now, deadline, "A deadline-only wake must never return early")
+        XCTAssertEqual(expired, before, "Timer expiry is not a page mutation")
+        XCTAssertEqual(try channel.currentRevision(), before)
+        let alreadyExpired = try await channel.wait(after: before, until: deadline)
+        XCTAssertEqual(alreadyExpired, before)
+
+        let next = Task { try await channel.wait(after: before, until: .now + .seconds(5)) }
+        await Task.yield()
+        channel.signal()
+        let nextRevision = try await next.value
+        XCTAssertEqual(nextRevision, before + 1, "An expired wait cannot consume a subsequent real signal")
+        XCTAssertEqual(try channel.currentRevision(), before + 1)
+
+        let cancelled = Task { try await channel.wait(after: before + 1, until: .now + .seconds(5)) }
+        await Task.yield()
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancellation must terminate its own waiter") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(try channel.currentRevision(), before + 1, "Cancelling a waiter must not invent a mutation")
+
+        let afterCancellation = Task { try await channel.wait(after: before + 1, until: .now + .seconds(5)) }
+        await Task.yield()
+        channel.signal()
+        let afterCancellationRevision = try await afterCancellation.value
+        XCTAssertEqual(afterCancellationRevision, before + 2,
+                       "A cancelled waiter must be removed and resumed only once")
+        XCTAssertEqual(try channel.currentRevision(), before + 2)
+    }
+
+    func testNativeDOMSignalBatchingDoesNotDependOnWebsiteTimers() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        let before = try channel.currentRevision()
+        for _ in 0..<500 { channel.signalDOMChange() }
+        let first = try await channel.wait(after: before, until: .now + .seconds(2))
+        XCTAssertEqual(first, before + 1, "A burst produces one native wake")
+        let settled = try await channel.wait(after: first, until: .now + .milliseconds(150))
+        XCTAssertEqual(settled, first, "The native timer is one-shot, never recurring polling")
+        for _ in 0..<500 { channel.signalDOMChange() }
+        let second = try await channel.wait(after: first, until: .now + .seconds(2))
+        XCTAssertEqual(second, first + 1, "A later actual change starts a fresh batch")
+        channel.close()
+    }
+
+    func testNativeNavigationSignalBypassesPendingDOMBatch() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        defer { channel.close() }
+        channel.signalDOMChange()
+        channel.signal()
+        XCTAssertEqual(try channel.currentRevision(), 1, "Native navigation/profile changes wake synchronously")
+        let after = try await channel.wait(after: 1, until: .now + .seconds(2))
+        XCTAssertEqual(after, 2)
+    }
+
+    func testClosingNativeChannelCancelsDOMBatchAndResumesWaiterOnce() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        let waiting = Task { try await channel.wait(after: 0, until: .now + .seconds(2)) }
+        await Task.yield()
+        channel.signalDOMChange()
+        channel.close()
+        do { _ = try await waiting.value; XCTFail("Closed channel must reject the pending read") }
+        catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
+        channel.signalDOMChange()
+        channel.signal()
+        XCTAssertThrowsError(try channel.currentRevision())
+    }
+
     func testModelNotificationHandlerIsPrivateAndAcceptsOnlyItsExactReceipt() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -853,9 +1247,248 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertThrowsError(try session.modelChangeRevision(for: id), "An unsupported origin must not install a channel")
     }
 
-    private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page) async throws -> Data {
+    func testModelDiagnosticsRejectForeignAndLateReceiptsWithoutWakingTheChannel() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        let human = try XCTUnwrap(session.webView(for: session.createTab()))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString, operation = UUID()
+        let world = WKContentWorld.world(name: "computa-diagnostic-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let hidden = "return !window.webkit?.messageHandlers?.computaModelDiagnostic;"
+        let pageHidden = try await script(view, hidden)
+        let humanHidden = try await script(human, hidden, world: world)
+        XCTAssertEqual(pageHidden, Data("true".utf8))
+        XCTAssertEqual(humanHidden, Data("true".utf8))
+        let revision = try session.modelChangeRevision(for: id)
+        let invalid = """
+        const handler = window.webkit.messageHandlers.computaModelDiagnostic;
+        const valid = {ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'first_user_hash'};
+        for (const body of [{...valid, ownerToken: '\(UUID().uuidString)'},
+          {...valid, operationID: '\(UUID().uuidString)'}, {...valid, phase: 'PRIVATE_RAW_PAGE_CANARY'},
+          {...valid, text: 'PRIVATE_RAW_PAGE_CANARY'}, {...valid, operationID: null},
+          {ownerToken: valid.ownerToken, phase: valid.phase}]) handler.postMessage(body);
+        return true;
+        """
+        _ = try await script(view, invalid, world: world)
+        let rejected = session.modelDiagnosticSnapshot(tabID: id)
+        XCTAssertTrue(rejected.contains("phases=not_started"))
+        XCTAssertTrue(rejected.contains("diagnosticsReceived=6 diagnosticsAccepted=0 diagnosticRejected=payload"))
+        XCTAssertTrue(rejected.contains("generationCurrent=true originCurrent=true"))
+        let receipt = "window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'first_user_hash'}); return true;"
+        _ = try await script(view, receipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=first_user_hash"))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticsReceived=7 diagnosticsAccepted=1"))
+        let after = try await session.waitForModelChange(tabID: id, after: revision, until: .now + .milliseconds(100))
+        XCTAssertEqual(after, revision, "Diagnostics cannot wake an inference or authorize an action")
+        session.endModelDiagnostic(tabID: id, operationID: UUID())
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"))
+        let next = UUID()
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: next)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticsReceived=0 diagnosticsAccepted=0 diagnosticRejected=none"))
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id, operationID: operation), "state=superseded")
+        session.endModelDiagnostic(tabID: id, operationID: operation)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"), "Ending an older operation cannot cancel the newer diagnostic")
+        _ = try await script(view, receipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A late callback cannot contaminate the next operation")
+        let nextReceipt = receipt.replacingOccurrences(of: operation.uuidString, with: next.uuidString)
+        let childFixture = DiagnosticChildFrameFixture()
+        view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
+        defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
+        // The production delegate must load the frame while its independent
+        // native message handler continues to reject child-frame authority.
+        let navigationDelegate = view.navigationDelegate
+        _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
+        let childDeadline = ContinuousClock.now + .seconds(5)
+        while childFixture.frame == nil, ContinuousClock.now < childDeadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let frame = try XCTUnwrap(childFixture.frame, "The controlled child frame must actually load")
+        XCTAssertNil(session.tabs.first(where: { $0.id == id })?.error)
+        _ = try await script(view, nextReceipt, world: world, frame: frame)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A same-origin child frame has no diagnostic authority")
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticRejected=frame"))
+        view.navigationDelegate = navigationDelegate
+        view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
+        _ = try await script(view, nextReceipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A changed generation invalidates the diagnostic operation")
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("generationCurrent=false originCurrent=true"))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticRejected=generation"))
+        session.closeTab(id)
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id), "state=closed")
+    }
+
+    func testModelDiagnosticsPinOriginsAndBoundPhaseHistoryAndNativeGeometry() async throws {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let id = try session.createTab(select: false)
+            let view = try XCTUnwrap(session.webView(for: id))
+            let owner = UUID().uuidString, world = WKContentWorld.world(name: "computa-diagnostic-\(host)")
+            try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world, originHost: host)
+            for origin in [host, "foreign.example.test"] {
+                try await loadDiagnosticFixture(view, host: origin)
+                let operation = UUID()
+                try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+                let phases = EmbeddedBrowserSession.ModelAdapterPhase.allCases.map(\.rawValue)
+                let encoded = try String(decoding: JSONSerialization.data(withJSONObject: phases), as: UTF8.self)
+                _ = try await script(view, "for (const phase of \(encoded)) window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase}); return true;", world: world)
+                let snapshot = session.modelDiagnosticSnapshot(tabID: id)
+                if origin == host {
+                    XCTAssertTrue(snapshot.contains("phases=" + phases.suffix(8).joined(separator: ",")))
+                    XCTAssertFalse(snapshot.contains("adapter_entry"))
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=9 diagnosticRejected=none"))
+                } else {
+                    XCTAssertTrue(snapshot.contains("phases=not_started"))
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=0 diagnosticRejected=origin"))
+                    XCTAssertTrue(snapshot.contains("originCurrent=false"))
+                }
+                XCTAssertLessThan(snapshot.utf8.count, 1_024)
+                XCTAssertFalse(snapshot.contains(host))
+                XCTAssertFalse(snapshot.contains(owner))
+                XCTAssertFalse(snapshot.contains(operation.uuidString))
+                XCTAssertFalse(snapshot.contains("PRIVATE_RAW_PAGE_CANARY"))
+                session.endModelDiagnostic(tabID: id, operationID: operation)
+            }
+        }
+    }
+
+    func testModelClockUsesNativeDeadlineWhenWebsiteTimersNeverRun() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let hidden = try await script(view, "return !window.webkit?.messageHandlers?.computaModelClock;")
+        XCTAssertEqual(hidden, Data("true".utf8), "The page world has no clock handler")
+        _ = try await script(view, "window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'model_wait'}); globalThis.setTimeout = () => { throw new Error('website timer must not run'); }; return true;", world: world)
+        let revision = try session.modelChangeRevision(for: id), began = ContinuousClock.now
+        let elapsed = try await script(view, "return await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100});", world: world)
+        XCTAssertEqual(elapsed, Data("true".utf8))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - began, .milliseconds(80))
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(2))
+        XCTAssertEqual(try session.modelChangeRevision(for: id), revision)
+        let snapshot = session.modelDiagnosticSnapshot(tabID: id)
+        let ageField = try XCTUnwrap(snapshot.split(separator: " ").first { $0.hasPrefix("phaseAgeMs=") })
+        let age = try XCTUnwrap(Int(ageField.dropFirst("phaseAgeMs=".count)))
+        XCTAssertGreaterThanOrEqual(age, 80)
+        XCTAssertLessThanOrEqual(age, 45_000)
+        XCTAssertTrue(snapshot.contains("clocksPending=0"))
+        XCTAssertFalse(snapshot.contains(owner))
+        XCTAssertFalse(snapshot.contains("PRIVATE_RAW_PAGE_CANARY"))
+        session.endModelDiagnostic(tabID: id, operationID: operation)
+    }
+
+    func testModelClockRejectsInvalidReceiptsAndCancelsExactlyOnceOnSupersedeAndClose() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-scope-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let invalid = """
+        const valid = {ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100};
+        const bodies = [-1, 0, 0.5, 10001, true, '100', null].map(milliseconds => ({...valid, milliseconds}));
+        bodies.push({...valid, ownerToken: '\(UUID().uuidString)'}, {...valid, operationID: '\(UUID().uuidString)'},
+          {...valid, pageText: 'PRIVATE_RAW_PAGE_CANARY'}, {ownerToken: valid.ownerToken, operationID: valid.operationID});
+        let rejected = 0;
+        for (const body of bodies) {
+          try { await window.webkit.messageHandlers.computaModelClock.postMessage(body); }
+          catch (error) { if(error.message === 'model_clock_rejected') rejected++; }
+        }
+        return rejected === bodies.length;
+        """
+        let invalidRejected = try await script(view, invalid, world: world)
+        XCTAssertEqual(invalidRejected, Data("true".utf8))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+        _ = try await script(view, "globalThis.clockReplies = 0; for(let index = 0; index < 33; index++) window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 5000}).then(() => globalThis.clockReplies++, () => globalThis.clockReplies++); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=32"), "Pending native clocks are bounded")
+        let next = UUID()
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: next)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+        let superseded = try await script(view, "return globalThis.clockReplies;", world: world)
+        XCTAssertEqual(superseded, Data("33".utf8))
+        _ = try await script(view, "window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(next.uuidString)', milliseconds: 5000}).then(() => globalThis.clockReplies++, () => globalThis.clockReplies++); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=1"))
+        session.closeTab(id)
+        let closed = try await script(view, "return globalThis.clockReplies;", world: world)
+        XCTAssertEqual(closed, Data("34".utf8))
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id), "state=closed")
+    }
+
+    func testModelClockPinsProviderMainFrameAndDocumentGeneration() async throws {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let id = try session.createTab(select: false), owner = UUID().uuidString
+            let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-origin-\(host)")
+            try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world, originHost: host)
+            for origin in [host, "foreign.example.test"] {
+                try await loadDiagnosticFixture(view, host: origin)
+                let operation = UUID()
+                try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+                let receipt = "try { await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 1}); return 'expired'; } catch(error) { return error.message; }"
+                let result = try await script(view, receipt, world: world)
+                XCTAssertEqual(result, Data("\"\(origin == host ? "expired" : "model_clock_rejected")\"".utf8))
+                session.endModelDiagnostic(tabID: id, operationID: operation)
+            }
+        }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-frame-test")
+        let human = try XCTUnwrap(session.webView(for: session.createTab()))
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        let humanHidden = try await script(human, "return !window.webkit?.messageHandlers?.computaModelClock;", world: world)
+        XCTAssertEqual(humanHidden, Data("true".utf8))
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let receipt = "try { await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100}); return 'expired'; } catch(error) { return error.message; }"
+        let childFixture = DiagnosticChildFrameFixture()
+        view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
+        defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
+        let navigationDelegate = view.navigationDelegate
+        _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while childFixture.frame == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        let frame = try XCTUnwrap(childFixture.frame)
+        XCTAssertNil(session.tabs.first(where: { $0.id == id })?.error)
+        let childResult = try await script(view, receipt, world: world, frame: frame)
+        XCTAssertEqual(childResult, Data("\"model_clock_rejected\"".utf8))
+        _ = try await script(view, "globalThis.clockResult = null; window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100}).then(() => globalThis.clockResult = 'expired', error => globalThis.clockResult = error.message); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=1"))
+        view.navigationDelegate = navigationDelegate
+        view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
+        try await Task.sleep(for: .milliseconds(150))
+        let staleReply = try await script(view, "return globalThis.clockResult;", world: world)
+        XCTAssertEqual(staleReply, Data("\"model_clock_cancelled\"".utf8))
+        let staleReceipt = try await script(view, receipt, world: world)
+        XCTAssertEqual(staleReceipt, Data("\"model_clock_rejected\"".utf8))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+    }
+
+    private func loadDiagnosticFixture(_ view: WKWebView, host: String) async throws {
+        view.loadHTMLString("<p id='ready'>PRIVATE_RAW_PAGE_CANARY</p>", baseURL: URL(string: "https://\(host)/"))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, (try? await script(view, "return !!document.getElementById('ready');")) == Data("true".utf8) {
+                try await Task.sleep(for: .milliseconds(150))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("The local diagnostic fixture did not load")
+    }
+
+    private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page, frame: WKFrameInfo? = nil) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            view.callAsyncJavaScript(body, arguments: [:], in: nil, in: world) { result in
+            view.callAsyncJavaScript(body, arguments: [:], in: frame, in: world) { result in
                 switch result {
                 case .success(let value):
                     do { continuation.resume(returning: try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)) }
@@ -957,9 +1590,75 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testSrcdocNavigationRequiresSubframeWithinValidWebDocument() throws {
+        let srcdoc = try XCTUnwrap(URL(string: "about:srcdoc"))
+        for parent in ["https://example.test/", "http://localhost:5181/"] {
+            let document = try XCTUnwrap(URL(string: parent))
+            XCTAssertNoThrow(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: false, mainDocumentURL: document))
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: true, mainDocumentURL: document))
+        }
+        for parent in [nil, "about:blank", "file:///tmp/page.html", "https://user:secret@example.test/", "https://example.test:70000/"] as [String?] {
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: false, mainDocumentURL: parent.flatMap(URL.init(string:))))
+        }
+        XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(srcdoc))
+        XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.normalize("about:srcdoc"))
+        for address in ["about:srcdoc#other", "about:config", "file:///tmp/page.html", "javascript:alert(1)", "data:text/html,hello", "custom:page"] {
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(XCTUnwrap(URL(string: address)), isMainFrame: false, mainDocumentURL: URL(string: "https://example.test/")))
+        }
+        XCTAssertNoThrow(try EmbeddedBrowserURLPolicy.validateNavigation(XCTUnwrap(URL(string: "https://example.test/path")), isMainFrame: true, mainDocumentURL: nil))
+    }
+
+    func testNavigationRejectionDiagnosticsNeverIncludePageOrCredentialData() {
+        let inputs = ["about:srcdoc": "about_srcdoc", "about:blank": "about_blank", "about:config": "about_other",
+                      "blob:https://example.com/private-identifier": "blob", "data:text/html,private-content": "data",
+                      "file:///private/name": "file", "javascript:secret()": "javascript",
+                      "https://user:password@example.com/private?token=secret": "https", "custom:secret": "other"]
+        XCTAssertEqual(EmbeddedBrowserURLPolicy.diagnosticAddressKind(nil), "missing")
+        for (input, expected) in inputs {
+            XCTAssertEqual(EmbeddedBrowserURLPolicy.diagnosticAddressKind(URL(string: input)), expected)
+        }
+    }
+
     func testWebsiteNavigationDoesNotUseSearchFallback() throws {
         for input in ["javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "custom:search"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(XCTUnwrap(URL(string: input))), input)
         }
+    }
+}
+
+@MainActor
+private final class ModelNavigationDiagnosticFixture: NSObject, WKNavigationDelegate {
+    let delegate: any WKNavigationDelegate
+    let snapshot: () -> EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var provisional: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var committed: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var finished: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+
+    init(delegate: any WKNavigationDelegate, snapshot: @escaping () -> EmbeddedBrowserSession.ModelNavigationDiagnostic?) {
+        self.delegate = delegate
+        self.snapshot = snapshot
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        delegate.webView?(webView, didStartProvisionalNavigation: navigation)
+        provisional = snapshot()
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        delegate.webView?(webView, didCommit: navigation)
+        committed = snapshot()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        delegate.webView?(webView, didFinish: navigation)
+        finished = snapshot()
+    }
+}
+
+@MainActor
+private final class DiagnosticChildFrameFixture: NSObject, WKScriptMessageHandler {
+    var frame: WKFrameInfo?
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if !message.frameInfo.isMainFrame, message.body as? String == "ready" { frame = message.frameInfo }
     }
 }

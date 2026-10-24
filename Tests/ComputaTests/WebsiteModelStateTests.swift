@@ -4,11 +4,11 @@ import XCTest
 
 @MainActor
 final class WebsiteModelStateTests: XCTestCase {
-    func testRetiredLatestDefaultAndIdleChatMigrateToCachedSolWithoutChangingHistory() throws {
+    func testRetiredFamilyDefaultAndIdleChatMigrateToCachedMediumWithoutChangingHistory() throws {
         let preferences = isolatedTestPreferences()
         let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
-        let other = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
-        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let other = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
         let gemini = WebsiteModelChoice(provider: "gemini", key: "Pro", label: "Pro")
         preferences.set(try JSONEncoder().encode([latest, other, sol, gemini]), forKey: WebsiteModelCatalog.preferenceKey)
         preferences.set(latest.modelID, forKey: "LocalCodex.defaultModelID")
@@ -47,13 +47,16 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testDiscoveryFiltersLatestAndActiveChatMigratesOnlyAfterCompletion() async {
         let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
-        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
         let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save([sol], to: preferences)
         let busy = AgentTask(id: "active-latest", title: "Active", summary: "", status: .running, workspace: "/tmp", model: latest.modelID)
         let state = AppState(tasks: [busy], preferences: preferences, websiteModelDiscovery: { provider in
             provider == "chatgpt" ? [latest, sol] : [WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
         })
         await state.refreshWebsiteModels()
+        XCTAssertTrue(state.websiteModelsError?.contains("ChatGPT:") == true,
+                      "A fresh family-only discovery cannot replace the verified preset cache")
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [sol])
         XCTAssertFalse(state.modelOptions.contains { $0.id == latest.modelID })
         XCTAssertEqual(state.selectedTask?.model, latest.modelID)
@@ -64,7 +67,7 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testDeletingFinalPausedPromptReleasesRetiredModelWithoutDispatchingIt() async throws {
         let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
-        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
         let preferences = isolatedTestPreferences()
         WebsiteModelCatalog.save([sol], to: preferences)
         let busy = AgentTask(id: "queued-latest", title: "Queued", summary: "", status: .running, workspace: "/tmp", model: latest.modelID)
@@ -86,7 +89,7 @@ final class WebsiteModelStateTests: XCTestCase {
     func testStartupUsesCompleteCachedCatalogWithoutDiscovery() async {
         let preferences = isolatedTestPreferences()
         let cached = WebsiteModelCatalog.providers.map {
-            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+            modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(cached, to: preferences)
         var calls: [String] = []
@@ -107,7 +110,7 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testStartupDiscoversOnlyMissingProvidersOnce() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelChoice(provider: "chatgpt", key: "cached", label: "Cached")
+        let cached = modelStateChoice(provider: "chatgpt", key: "cached", label: "Cached")
         WebsiteModelCatalog.save([cached], to: preferences)
         let ledger = WebsiteDiscoveryLedger()
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
@@ -130,7 +133,7 @@ final class WebsiteModelStateTests: XCTestCase {
     func testExplicitRefreshReplacesAllCachedProviders() async {
         let preferences = isolatedTestPreferences()
         let cached = WebsiteModelCatalog.providers.map {
-            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+            modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(cached, to: preferences)
         let ledger = WebsiteDiscoveryLedger()
@@ -141,7 +144,8 @@ final class WebsiteModelStateTests: XCTestCase {
         await state.refreshWebsiteModels()
 
         XCTAssertEqual(ledger.calls, WebsiteModelCatalog.providers)
-        XCTAssertEqual(state.websiteModelChoices.map(\.key), ["fixture", "fixture", "fixture"])
+        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
+        XCTAssertTrue(state.websiteModelChoices.allSatisfy(\.isSelectable))
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
         XCTAssertNil(state.websiteModelsError)
     }
@@ -149,7 +153,7 @@ final class WebsiteModelStateTests: XCTestCase {
     func testExplicitRefreshExtendsPartialStartupWithoutDuplicateLoads() async {
         let preferences = isolatedTestPreferences()
         let cached = ["chatgpt", "claude"].map {
-            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+            modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(cached, to: preferences)
         let ledger = WebsiteDiscoveryLedger(delay: .milliseconds(50))
@@ -163,7 +167,8 @@ final class WebsiteModelStateTests: XCTestCase {
 
         XCTAssertEqual(ledger.calls, ["gemini", "chatgpt", "claude"])
         XCTAssertEqual(ledger.maximumActive, 1)
-        XCTAssertEqual(state.websiteModelChoices.map(\.key), ["fixture", "fixture", "fixture"])
+        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
+        XCTAssertTrue(state.websiteModelChoices.allSatisfy(\.isSelectable))
         XCTAssertFalse(state.websiteModelsRefreshing)
         XCTAssertNil(state.websiteModelsError)
     }
@@ -180,8 +185,11 @@ final class WebsiteModelStateTests: XCTestCase {
         let preferences = isolatedTestPreferences()
         let task = AgentTask(id: "fixture-task", title: "Fixture", summary: "", status: .draft, workspace: "/tmp", model: "browser/chatgpt")
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
-            [WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast"),
-             WebsiteModelChoice(provider: provider, key: "fixture-pro", label: "Fixture Pro")]
+            provider == "chatgpt"
+                ? [WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium"),
+                   WebsiteModelChoice(provider: provider, key: "chat/latest/pro", label: "GPT-6 Pro")]
+                : [WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast"),
+                   WebsiteModelChoice(provider: provider, key: "fixture-pro", label: "Fixture Pro")]
         })
         await state.refreshWebsiteModels()
         let snapshot = WebUISnapshot(state: state)
@@ -247,7 +255,7 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testInvalidDiscoveryAndProviderFailureRetainPreviousMenuWithoutPartialPoisoning() async {
         let preferences = isolatedTestPreferences()
-        let old = WebsiteModelChoice(provider: "chatgpt", key: "fixture-old", label: "Fixture Old")
+        let old = modelStateChoice(provider: "chatgpt", key: "fixture-old", label: "Fixture Old")
         WebsiteModelCatalog.save([old], to: preferences)
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             if provider == "chatgpt" { return [old, old] }
@@ -262,6 +270,23 @@ final class WebsiteModelStateTests: XCTestCase {
         XCTAssertTrue(state.websiteModelsError?.contains("Gemini:") == true)
         XCTAssertFalse(state.websiteModelsRefreshing)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+    }
+
+    func testLegacyChatFamilyDiscoveryCannotReplaceVerifiedPresetCache() async {
+        for rejected in [WebsiteModelChoice(provider: "chatgpt", key: "GPT-6", label: "GPT-6"),
+                         WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro")] {
+            let preferences = isolatedTestPreferences()
+            let medium = syntheticChatGPTChoice
+            WebsiteModelCatalog.save([medium], to: preferences)
+            let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+                provider == "chatgpt" ? [rejected] : [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+            })
+            await state.refreshWebsiteModels()
+            XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [medium])
+            XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+            XCTAssertTrue(state.websiteModelsError?.contains("ChatGPT:") == true)
+            XCTAssertFalse(state.setDefaultModel(rejected.modelID))
+        }
     }
 
     func testConcurrentRefreshRequestsCoalesceAndDiscoveryIsSequential() async {
@@ -281,8 +306,8 @@ final class WebsiteModelStateTests: XCTestCase {
     }
 
     func testBusyTaskCannotSwitchToAnotherDiscoveredChoice() async {
-        let first = WebsiteModelChoice(provider: "chatgpt", key: "first", label: "First")
-        let second = WebsiteModelChoice(provider: "chatgpt", key: "second", label: "Second")
+        let first = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let second = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
         let preferences = isolatedTestPreferences()
         WebsiteModelCatalog.save([first, second], to: preferences)
         let task = AgentTask(id: "busy-task", title: "Busy", summary: "", status: .running, workspace: "/tmp", model: first.modelID)
@@ -327,6 +352,11 @@ private final class WebsiteDiscoveryLedger {
         defer { active -= 1 }
         do { try await Task.sleep(for: delay) }
         catch { cancelled = true; throw error }
-        return [WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
+        return [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
     }
+}
+
+private func modelStateChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
+    provider == "chatgpt" ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
+        : WebsiteModelChoice(provider: provider, key: key, label: label)
 }

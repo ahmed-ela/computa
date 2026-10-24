@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Computa
@@ -6,6 +7,36 @@ import XCTest
 /// incremental delivery is established before the fixture can finish a reply.
 @MainActor
 final class RuntimeStreamingTests: XCTestCase {
+    func testHistoryTitlesPreserveExplicitNamesAndUseOnlyTheFirstVisibleUserPrompt() throws {
+        let prompt = "APP_RUNTIME_literal 🧭 café"
+        let history: [String: Any] = ["result": ["thread": ["turns": [
+            ["id": "first-turn", "status": "completed", "items": [
+                ["id": "first-user", "type": "userMessage", "content": [
+                    ["type": "text", "text": prompt],
+                    ["type": "text", "text": "APP_RUNTIME_INTERACTION_POLICY: PRIVATE_POLICY_CANARY"]
+                ]]
+            ]],
+            ["id": "later-turn", "status": "completed", "items": [
+                ["id": "later-user", "type": "userMessage", "content": [
+                    ["type": "text", "text": "Later prompts cannot rename the initial chat"]
+                ]]
+            ]]
+        ]]]]
+        let entries = try AppServerThreadHistoryContract.entries(from: JSONSerialization.data(withJSONObject: history))
+        let projected = AppServerThreadHistoryContract.displayTitle(name: nil,
+            preview: prompt + "APP_RUNTIME_INTERACTION_POLICY: PRIVATE_POLICY_CANARY", entries: entries)
+        XCTAssertEqual(projected, prompt)
+        XCTAssertFalse(projected.contains("PRIVATE_POLICY_CANARY"))
+        XCTAssertEqual(AppServerThreadHistoryContract.displayTitle(name: "  My explicit saved name 🧭  ",
+            preview: "Different preview", entries: entries), "My explicit saved name 🧭")
+        let long = " \n" + String(repeating: "é🧭", count: 50) + "\t"
+        let longEntries = [TimelineEntry(kind: .user, title: "You", body: long)]
+        XCTAssertEqual(AppServerThreadHistoryContract.displayTitle(name: nil, preview: "Wrong preview", entries: longEntries),
+            String(long.prefix(72)).trimmingCharacters(in: .whitespacesAndNewlines))
+        XCTAssertEqual(AppServerThreadHistoryContract.displayTitle(name: nil, preview: "  Saved preview  "), "Saved preview")
+        XCTAssertEqual(AppServerThreadHistoryContract.displayTitle(name: "  ", preview: nil), "Untitled task")
+    }
+
     func testAssistantPhasesUseOnlyExplicitAuthoritativeMetadataAndPrecedeText() async throws {
         try await withHarness(scenario: "phase-contract") { harness in
             try await harness.submit()
@@ -256,7 +287,7 @@ final class RuntimeStreamingTests: XCTestCase {
         try await withHarness(scenario: "command-progress") { harness in
             let state = AppState(tasks: [AgentTask(id: harness.taskID, title: "CLI", summary: "",
                 status: .draft, workspace: harness.root.path, model: harness.modelID)], runtime: harness.runtime,
-                preferences: isolatedTestPreferences(), enableChromeExtensionBridge: false)
+                preferences: isolatedTestPreferences())
             harness.audit.state = state
             try await harness.submit()
             try await self.waitFor("command output fence") { harness.audit.measuredTokens == 1_000 }
@@ -340,6 +371,167 @@ final class RuntimeStreamingTests: XCTestCase {
             XCTAssertFalse(harness.markerExists("terminated-9999"))
             XCTAssertTrue(harness.audit.approvals.isEmpty)
             XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("AFTER_STOP") == true })
+        }
+    }
+
+    func testTerminalCommandFailureCleansOwnedSessionBeforePublishingWaiting() async throws {
+        for scenario in ["command-terminal-error", "command-terminal-failed", "command-terminal-interrupted"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+                XCTAssertEqual(harness.audit.status, .running)
+                XCTAssertFalse(harness.markerExists("command-cleanup-requested"), "Retrying and foreign-turn errors cannot revoke a command")
+                try harness.release("release-command-failure")
+                try await self.waitFor("terminal error processed") { harness.audit.measuredTokens == 1_001 }
+                try await self.waitFor("cleanup admission or premature idle") {
+                    harness.markerExists("command-cleanup-requested") || harness.audit.status == .waiting
+                }
+                XCTAssertEqual(harness.audit.status, .running, "A terminal error must await owned command cleanup before exposing an idle task")
+                let requested = harness.markerExists("command-cleanup-requested")
+                XCTAssertTrue(requested, "Terminal errors must inventory surviving native exec_command sessions")
+                XCTAssertFalse(harness.markerExists("terminated-4321"))
+                if requested {
+                    do { try await harness.submit(); XCTFail("New input must wait for failed-turn command cleanup") }
+                    catch { XCTAssertTrue(error.localizedDescription.contains("command cleanup")) }
+                }
+                try harness.release("release-command-cleanup")
+                if requested {
+                    try await self.waitFor("terminal command cleanup") { harness.audit.systemTitles.contains("Command cleanup") }
+                    try await self.waitFor("waiting after command cleanup") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.markerExists("terminated-4321"))
+                    XCTAssertFalse(harness.markerExists("terminated-4322"))
+                    XCTAssertFalse(harness.markerExists("terminated-9999"))
+                    XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("Exit code: 0") == true })
+                    let trace = try harness.trace()
+                    XCTAssertEqual(trace.messages.filter { $0.method == "thread/backgroundTerminals/terminate" }.count, 1,
+                        "An error followed by turn/completed must not terminate twice")
+                }
+            }
+        }
+    }
+
+    func testCompactionCannotSupersedeHeldFailedTurnCommandCleanup() async throws {
+        try await withHarness(scenario: "command-terminal-error") { harness in
+            try await harness.submit()
+            try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("held failed-turn cleanup") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            // If admission regresses, keep the artificial maintenance finite so
+            // the negative test can record the unexpected RPC and shut down.
+            try harness.release("release-maintenance")
+            do {
+                try await harness.runtime.compact(taskID: harness.taskID)
+                XCTFail("Compaction must wait for failed-turn command cleanup")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("command cleanup"), error.localizedDescription)
+            }
+            XCTAssertFalse(try harness.trace().messages.contains { $0.method == "thread/compact/start" },
+                "Rejected maintenance cannot replace the failed turn's cleanup identity")
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("cleanup completion") { harness.audit.status == .waiting }
+        }
+    }
+
+    func testFailedTurnCommandCleanupPreservesSuccessfulPriorTurnSession() async throws {
+        try await withHarness(scenario: "command-terminal-prior") { harness in
+            try await harness.submit()
+            try await self.waitFor("successful background turn") { harness.audit.measuredTokens == 1_001 }
+            XCTAssertFalse(harness.markerExists("command-cleanup-requested"))
+            try await harness.submit()
+            try await self.waitFor("new turn command") { harness.audit.measuredTokens == 1_002 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("failed-turn inventory held") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("failed-turn cleanup done") { harness.audit.status == .waiting }
+            XCTAssertTrue(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-4321"), "The failed turn cannot terminate a successful earlier turn's background session")
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            XCTAssertTrue(harness.markerExists("terminated-4321"), "Explicit task Stop can still clean the earlier owned session")
+        }
+    }
+
+    func testFailedTurnPresentationPreservesEarlierRunningCommandAndItsLaterCompletion() async throws {
+        for scenario in ["command-terminal-prior", "command-terminal-prior-failed"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("successful earlier background turn") { harness.audit.measuredTokens == 1_001 }
+                XCTAssertEqual(harness.audit.commands.last { $0.id == "command-item" }?.toolEvent?.status, .running)
+                let earlierUpdates = harness.audit.commands.filter { $0.id == "command-item" }.count
+                try await harness.submit()
+                try await self.waitFor("second turn command") { harness.audit.measuredTokens == 1_002 }
+                try harness.release("release-command-failure")
+                try await self.waitFor("failed-turn cleanup held") { harness.markerExists("command-cleanup-requested") }
+                try harness.release("release-command-cleanup")
+                try await self.waitFor("failed-turn cleanup complete") { harness.audit.status == .waiting }
+                XCTAssertEqual(harness.audit.commands.filter { $0.id == "command-item" }.count, earlierUpdates,
+                               "A later terminal turn must not replace the earlier command's row")
+                let earlier = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
+                XCTAssertEqual(earlier.toolEvent?.status, .running)
+                XCTAssertFalse(earlier.toolEvent?.output?.contains("Turn failed") == true)
+                XCTAssertEqual(harness.audit.commands.last { $0.id == "command-item-two" }?.toolEvent?.status, .failed)
+                XCTAssertTrue(harness.markerExists("terminated-4322")); XCTAssertFalse(harness.markerExists("terminated-4321"))
+                try harness.release("release-prior-command")
+                try await self.waitFor("earlier genuine command completion") {
+                    harness.audit.commands.last { $0.id == "command-item" }?.toolEvent?.status == .succeeded
+                }
+                let completed = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
+                XCTAssertTrue(completed.toolEvent?.output?.contains("earlier authoritative completion") == true)
+                XCTAssertTrue(completed.toolEvent?.output?.contains("Exit code: 0") == true)
+                XCTAssertEqual(harness.audit.status, .waiting)
+                XCTAssertEqual(Set(harness.audit.commands.map(\.id)), ["command-item", "command-item-two"])
+            }
+        }
+    }
+
+    func testUnconfirmedFailedTurnCommandCleanupIsReportedBeforeWaitingAndCanRetryStop() async throws {
+        try await withHarness(scenario: "command-terminal-refused") { harness in
+            try await harness.submit()
+            try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("held cleanup") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("unconfirmed cleanup") { harness.audit.status == .waiting }
+            XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup unconfirmed"))
+            XCTAssertFalse(harness.audit.systemTitles.contains("Command cleanup"))
+            XCTAssertFalse(harness.markerExists("terminated-4321"))
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            XCTAssertTrue(harness.markerExists("terminated-4321"))
+            XCTAssertFalse(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+        }
+    }
+
+    func testTerminalCommandNotificationWaitsForInFlightStopCleanupResult() async throws {
+        for scenario in ["command-terminal-stop", "command-terminal-stop-refused"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+                let stop = Task { try await harness.runtime.interrupt(taskID: harness.taskID) }
+                try await self.waitFor("Stop inventory held after terminal notification") {
+                    harness.markerExists("command-cleanup-requested") && harness.audit.measuredTokens == 1_001
+                }
+                XCTAssertEqual(harness.audit.status, .running)
+                try harness.release("release-command-cleanup")
+                if scenario.hasSuffix("refused") {
+                    do { try await stop.value; XCTFail("Stop must report the unconfirmed cleanup") }
+                    catch { XCTAssertTrue(error.localizedDescription.contains("termination")) }
+                    try await self.waitFor("terminal cleanup failure") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup unconfirmed"))
+                    XCTAssertFalse(harness.markerExists("terminated-4321"))
+                } else {
+                    try await stop.value
+                    try await self.waitFor("terminal cleanup success") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup"))
+                    XCTAssertTrue(harness.markerExists("terminated-4321"))
+                }
+                XCTAssertEqual(try harness.trace().messages.filter { $0.method == "thread/backgroundTerminals/terminate" }.count, 1)
+                XCTAssertFalse(harness.markerExists("terminated-4322"))
+                XCTAssertFalse(harness.markerExists("terminated-9999"))
+            }
         }
     }
 
@@ -477,21 +669,46 @@ final class RuntimeStreamingTests: XCTestCase {
 
     @MainActor
     private final class Harness {
-        let taskID = "streaming-task"
-        let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        let taskID: String
+        let modelID: String
         let root: URL
+        let rootDevice: dev_t
+        let rootInode: ino_t
         let runtime: CodexAppServerRuntime
         let audit = Audit()
         var eventTask: Task<Void, Never>?
 
-        init(scenario: String) throws {
-            root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaStreaming-\(UUID().uuidString)")
+        init(scenario: String, websiteModel: Bool = false) throws {
+            taskID = websiteModel ? UUID().uuidString.lowercased() : "streaming-task"
+            modelID = websiteModel
+                ? WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+                : "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+            root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("ComputaStreaming-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                                                   attributes: [.posixPermissions: 0o700])
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR else { throw POSIXError(.EINVAL) }
+            rootDevice = identity.st_dev
+            rootInode = identity.st_ino
+            print("fixtureOwned kind=runtime_streaming path=\(root.path) device=\(rootDevice) inode=\(rootInode)")
             let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("Fixtures/StreamingAppServer.ts")
             let fixture = root.appendingPathComponent("fixture.ts")
-            try FileManager.default.copyItem(at: source, to: fixture)
+            if websiteModel {
+                var script = try String(contentsOf: source, encoding: .utf8)
+                let thread = "const threadId = 'streaming-thread';"
+                let turn = "const turnId = currentTurn = `streaming-turn-${++turnCount}`;"
+                guard script.components(separatedBy: thread).count == 2,
+                      script.components(separatedBy: turn).count == 2 else {
+                    throw NSError(domain: "StreamingFixtureShape", code: 1)
+                }
+                script = script.replacingOccurrences(of: "#!/usr/bin/env bun\n", with: "#!/usr/bin/env bun\nimport { randomUUID } from 'node:crypto';\n")
+                    .replacingOccurrences(of: thread, with: "const threadId = randomUUID();")
+                    .replacingOccurrences(of: turn, with: "const turnId = currentTurn = (++turnCount, randomUUID());")
+                try Data(script.utf8).write(to: fixture)
+            } else { try FileManager.default.copyItem(at: source, to: fixture) }
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
             try Data(scenario.utf8).write(to: root.appendingPathComponent("scenario"))
             var configuration = CodexAppServerRuntime.Configuration.localQwen
@@ -509,8 +726,8 @@ final class RuntimeStreamingTests: XCTestCase {
             }
         }
 
-        func submit() async throws {
-            try await runtime.submit(prompt: "Synthetic text-only streaming check. Do not use tools.", toTaskID: taskID, modelID: modelID)
+        func submit(prompt: String = "Synthetic text-only streaming check. Do not use tools.") async throws {
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
         }
         func markerExists(_ name: String) -> Bool {
             FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path)
@@ -523,6 +740,16 @@ final class RuntimeStreamingTests: XCTestCase {
             XCTAssertTrue(trace.parseFailures.isEmpty)
             return trace
         }
+
+        func removeFixtureAfterVerifiedShutdown() -> String? {
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR,
+                  identity.st_dev == rootDevice, identity.st_ino == rootInode else {
+                return "Fixture identity changed; refusing removal of \(root.path)."
+            }
+            return OwnedProfileCleanup.removeAndVerify(root, operations: .live)
+        }
     }
 
     private struct NoModelVisualGrounder: VisualGroundingClient {
@@ -533,17 +760,30 @@ final class RuntimeStreamingTests: XCTestCase {
         func shutdown() async -> [String] { [] }
     }
 
-    private func withHarness(scenario: String, _ body: (Harness) async throws -> Void) async throws {
-        let harness = try Harness(scenario: scenario)
+    private func withHarness(scenario: String, websiteModel: Bool = false, _ body: (Harness) async throws -> Void) async throws {
+        let failuresBefore = testRun?.failureCount ?? 0
+        let harness = try Harness(scenario: scenario, websiteModel: websiteModel)
         do {
             _ = try await harness.runtime.loadTasks()
             try await body(harness)
             let report = await harness.runtime.shutdown()
             harness.eventTask?.cancel()
+            await harness.eventTask?.value
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            guard report.succeeded, (testRun?.failureCount ?? 0) == failuresBefore else {
+                print("fixtureCleanupPreserved kind=runtime_streaming path=\(harness.root.path) reason=test_or_shutdown_failed")
+                return
+            }
+            if let issue = harness.removeFixtureAfterVerifiedShutdown() {
+                XCTFail("Fixture cleanup failed: \(String(issue.prefix(1_024)))")
+            } else {
+                print("fixtureCleanupVerified kind=runtime_streaming path=\(harness.root.path) device=\(harness.rootDevice) inode=\(harness.rootInode)")
+            }
         } catch {
-            _ = await harness.runtime.shutdown()
+            let report = await harness.runtime.shutdown()
             harness.eventTask?.cancel()
+            await harness.eventTask?.value
+            print("fixtureCleanupPreserved kind=runtime_streaming path=\(harness.root.path) shutdownVerified=\(report.succeeded) reason=\(String(error.localizedDescription.prefix(512)))")
             throw error
         }
     }
@@ -555,5 +795,24 @@ final class RuntimeStreamingTests: XCTestCase {
         }
         XCTFail("Timed out waiting for \(label)")
         throw NSError(domain: "RuntimeStreamingTests", code: 1, userInfo: [NSLocalizedDescriptionKey: label])
+    }
+}
+
+// A website-free admission probe. Reaching this transport proves the real
+// WebModelServer accepted the exact native thread/turn context. A failed owned
+// startup and exact-token cleanup avoid authorizing any website action.
+private struct InitialNameProbeTransport: WebModelTransport {
+    let root: URL
+    private let token = UUID().uuidString.lowercased()
+    init(root: URL) { self.root = root }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderStart" {
+            try Data("admitted".utf8).write(to: root.appendingPathComponent("website-transport-entered"))
+            return try JSONSerialization.data(withJSONObject: ["sessionToken": token, "state": "failed"])
+        }
+        guard ["webProviderCancel", "webProviderFinish"].contains(operation),
+              let args = try JSONSerialization.jsonObject(with: params) as? [String: String],
+              args["sessionToken"] == token else { throw WebModelServer.Failure.invalidRequest }
+        return try JSONSerialization.data(withJSONObject: ["cleanup": "not_created"])
     }
 }
