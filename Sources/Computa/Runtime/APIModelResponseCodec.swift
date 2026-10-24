@@ -417,7 +417,12 @@ enum APIModelResponseCodec {
 
     static func prepare(_ data: Data, selection: APIProviderCatalog.Selection, threadID: String,
                         capsules: APIReasoningCapsules, toolNaming: ToolNaming = .legacy,
-                        browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> Request {
+                        browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
+                        browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil) throws -> Request {
+        if let references = browserActionReferences {
+            guard references.isValid,
+                  browserToolAvailability != .unbound || references == .empty else { throw Failure.invalidRequest }
+        }
         guard data.count <= maximumText, var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let localID = raw["model"] as? String,
               APIProviderCatalog.identity(for: localID) == APIProviderCatalog.Identity(providerID: selection.provider.id, modelID: selection.model.id),
@@ -434,7 +439,7 @@ enum APIModelResponseCodec {
         let historyTools = try parseTools(raw["tools"], naming: toolNaming)
         if let definitions = raw["tools"] as? [[String: Any]] {
             raw["tools"] = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: localID,
-                browserToolAvailability: browserToolAvailability)
+                browserToolAvailability: browserToolAvailability, browserActionReferences: browserActionReferences)
         }
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
@@ -505,8 +510,11 @@ enum APIModelResponseCodec {
                 body[field] = number
             }
         }
+        let encoded = try json(body)
+        // Native reference enums are part of the existing request budget too.
+        guard encoded.count <= maximumText else { throw Failure.invalidRequest }
         return Request(localModelID: localID, provider: selection.provider, model: selection.model, threadID: threadID,
-                       stream: stream, body: try json(body), tools: tools, toolNaming: toolNaming, allowedTools: allowed, requiredTool: required,
+                       stream: stream, body: encoded, tools: tools, toolNaming: toolNaming, allowedTools: allowed, requiredTool: required,
                        maximumCalls: maximumCalls, historyCallIDs: history.callIDs, capsules: capsules, responseConfiguration: configuration)
     }
 

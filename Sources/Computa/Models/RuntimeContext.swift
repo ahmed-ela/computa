@@ -280,11 +280,15 @@ struct AppServerCommandTranscript: Sendable {
 
     mutating func beginTurn() { records = records.filter { !$0.value.terminal } }
 
-    mutating func finishUnconfirmed(reason: String, interrupted: Bool, retainingPending: Bool = false) -> [TimelineEntry] {
-        let pending = records.filter { !$0.value.terminal }.map { id, record in
+    mutating func finishUnconfirmed(reason: String, interrupted: Bool, retainingPending: Bool = false,
+                                   itemIDs: Set<String>? = nil) -> [TimelineEntry] {
+        let pending = records.filter { !$0.value.terminal && (itemIDs?.contains($0.key) ?? true) }.map { id, record in
             Self.entry(id: id, record: record, status: interrupted ? .failed : .running, result: reason)
         }
-        if !retainingPending { records.removeAll() }
+        if !retainingPending {
+            if let itemIDs { records = records.filter { !itemIDs.contains($0.key) } }
+            else { records.removeAll() }
+        }
         return pending
     }
 

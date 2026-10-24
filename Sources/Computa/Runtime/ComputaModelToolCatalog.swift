@@ -248,7 +248,8 @@ enum ComputaModelToolCatalog {
     /// Also applies to schemas retained by old native threads. History stays
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String,
-                                       browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) -> [[String: Any]] {
+                                       browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
+                                       browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil) -> [[String: Any]] {
         let overrides = nativeToolDescriptions(modelID: modelID)
         // Availability is already scoped by the caller's interaction policy.
         // Reject removed names without hiding valid foreground tools that are
@@ -322,10 +323,26 @@ enum ComputaModelToolCatalog {
                 return value
             }
             if value["type"] as? String == "function", ["browser_click", "browser_fill"].contains(name) {
+                // The API's native snapshot narrows only a whole recognized
+                // original definition. A valid half of a modified dual-schema
+                // declaration must not acquire host reference constraints.
+                if browserActionReferences != nil, !requiresBrowserBinding(definition, namespace: namespace) {
+                    return definition
+                }
+                let references = browserActionReferences.map {
+                    name == "browser_click" ? $0.clickReferences : $0.fillReferences
+                }
+                if references?.isEmpty == true { return nil }
                 for key in ["parameters", "inputSchema"] {
                     guard let schema = value[key] as? [String: Any],
                           let variants = browserMutationSchemaVariants(name: name, namespace: namespace, schema: schema) else { continue }
-                    value[key] = variants.current
+                    var current = variants.current
+                    if let references, var properties = current["properties"] as? [String: [String: Any]] {
+                        let field = name == "browser_click" ? "click_ref" : "fill_ref"
+                        properties[field]?["enum"] = references
+                        current["properties"] = properties
+                    }
+                    value[key] = current
                     value["description"] = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name }?["description"]
                 }
                 // Do not partially refresh a custom shape under this name.

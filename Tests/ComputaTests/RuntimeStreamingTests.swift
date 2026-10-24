@@ -453,6 +453,39 @@ final class RuntimeStreamingTests: XCTestCase {
         }
     }
 
+    func testFailedTurnPresentationPreservesEarlierRunningCommandAndItsLaterCompletion() async throws {
+        for scenario in ["command-terminal-prior", "command-terminal-prior-failed"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("successful earlier background turn") { harness.audit.measuredTokens == 1_001 }
+                XCTAssertEqual(harness.audit.commands.last { $0.id == "command-item" }?.toolEvent?.status, .running)
+                let earlierUpdates = harness.audit.commands.filter { $0.id == "command-item" }.count
+                try await harness.submit()
+                try await self.waitFor("second turn command") { harness.audit.measuredTokens == 1_002 }
+                try harness.release("release-command-failure")
+                try await self.waitFor("failed-turn cleanup held") { harness.markerExists("command-cleanup-requested") }
+                try harness.release("release-command-cleanup")
+                try await self.waitFor("failed-turn cleanup complete") { harness.audit.status == .waiting }
+                XCTAssertEqual(harness.audit.commands.filter { $0.id == "command-item" }.count, earlierUpdates,
+                               "A later terminal turn must not replace the earlier command's row")
+                let earlier = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
+                XCTAssertEqual(earlier.toolEvent?.status, .running)
+                XCTAssertFalse(earlier.toolEvent?.output?.contains("Turn failed") == true)
+                XCTAssertEqual(harness.audit.commands.last { $0.id == "command-item-two" }?.toolEvent?.status, .failed)
+                XCTAssertTrue(harness.markerExists("terminated-4322")); XCTAssertFalse(harness.markerExists("terminated-4321"))
+                try harness.release("release-prior-command")
+                try await self.waitFor("earlier genuine command completion") {
+                    harness.audit.commands.last { $0.id == "command-item" }?.toolEvent?.status == .succeeded
+                }
+                let completed = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
+                XCTAssertTrue(completed.toolEvent?.output?.contains("earlier authoritative completion") == true)
+                XCTAssertTrue(completed.toolEvent?.output?.contains("Exit code: 0") == true)
+                XCTAssertEqual(harness.audit.status, .waiting)
+                XCTAssertEqual(Set(harness.audit.commands.map(\.id)), ["command-item", "command-item-two"])
+            }
+        }
+    }
+
     func testUnconfirmedFailedTurnCommandCleanupIsReportedBeforeWaitingAndCanRetryStop() async throws {
         try await withHarness(scenario: "command-terminal-refused") { harness in
             try await harness.submit()

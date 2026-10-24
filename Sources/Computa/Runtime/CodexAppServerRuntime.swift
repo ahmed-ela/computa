@@ -1063,6 +1063,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.browserToolAvailabilityForFixture(request)
     }
 
+    func browserAPIToolStateForFixture(_ request: EmbeddedBrowserToolAvailabilityRequest)
+        async throws -> EmbeddedBrowserAPIToolState {
+        try await core.browserAPIToolStateForFixture(request)
+    }
+
     #endif
 
     func shutdown() async -> RuntimeShutdownReport {
@@ -1596,13 +1601,17 @@ private extension CodexAppServerRuntime {
             }
             guard embeddedBrowserTools == nil else { return }
             embeddedBrowserTools = controller
-            let provider: EmbeddedBrowserToolAvailabilityProvider = { [weak self] request in
+            let apiProvider: EmbeddedBrowserAPIToolStateProvider = { [weak self] request in
                 guard let self else { throw CancellationError() }
-                return try await self.browserToolAvailability(request)
+                return try await self.browserAPIToolState(request)
+            }
+            let websiteProvider: EmbeddedBrowserToolAvailabilityProvider = { [weak self] request in
+                guard let self else { throw CancellationError() }
+                return try await self.browserAPIToolState(request).availability
             }
             let installation = Task { [apiModelServer, webModelServer] in
-                await apiModelServer.setBrowserToolAvailabilityProvider(provider)
-                await webModelServer.setBrowserToolAvailabilityProvider(provider)
+                await apiModelServer.setBrowserToolStateProvider(apiProvider)
+                await webModelServer.setBrowserToolAvailabilityProvider(websiteProvider)
             }
             embeddedBrowserAvailabilityInstallation = installation
             await installation.value
@@ -1682,7 +1691,13 @@ private extension CodexAppServerRuntime {
         func browserToolAvailabilityForFixture(_ request: EmbeddedBrowserToolAvailabilityRequest)
             async throws -> EmbeddedBrowserToolAvailability {
             guard case .fixture = configuration.executable else { throw CancellationError() }
-            return try await browserToolAvailability(request)
+            return try await browserAPIToolState(request).availability
+        }
+
+        func browserAPIToolStateForFixture(_ request: EmbeddedBrowserToolAvailabilityRequest)
+            async throws -> EmbeddedBrowserAPIToolState {
+            guard case .fixture = configuration.executable else { throw CancellationError() }
+            return try await browserAPIToolState(request)
         }
 
         func installNativeBackgroundBindingForFixture(taskID: AgentTask.ID, application: ActivatedApplication,
@@ -3403,7 +3418,8 @@ private extension CodexAppServerRuntime {
                 }
                 finishCommandPresentation(taskID: taskID,
                     reason: "Turn ended; process completion unconfirmed. Poll the owned session if still needed.",
-                    interrupted: turn?["status"] as? String != "completed", retainingPending: true)
+                    interrupted: turn?["status"] as? String != "completed", retainingPending: true,
+                    turnID: turn?["id"] as? String)
                 let maintenance = managedCompactions[taskID]
                 let manualCompactionExpected = compactionReservations.contains(taskID)
                 let wasContextStopped = contextStoppedTurns[taskID] == turn?["id"] as? String
@@ -3743,7 +3759,8 @@ private extension CodexAppServerRuntime {
                 guard case .terminal(let failedTurnID, let nativeMessage) = disposition,
                       turnIdentity.complete(taskID: taskID, turnID: failedTurnID) else { return }
                 let message = terminalFailureMessage(taskID: taskID, threadID: threadID, turnID: failedTurnID, nativeMessage: nativeMessage) ?? nativeMessage
-                finishCommandPresentation(taskID: taskID, reason: "Turn failed; final exit status unconfirmed", interrupted: true)
+                finishCommandPresentation(taskID: taskID, reason: "Turn failed; final exit status unconfirmed",
+                                          interrupted: true, turnID: failedTurnID)
                 events.yield(.assistantMessagesDiscarded(taskID: taskID))
                 pendingAssistantItems.removeValue(forKey: taskID)
                 discardReasoningDrafts(taskID: taskID)
@@ -3812,10 +3829,18 @@ private extension CodexAppServerRuntime {
             return true
         }
 
-        private func finishCommandPresentation(taskID: AgentTask.ID, reason: String, interrupted: Bool, retainingPending: Bool = false) {
-            guard var transcript = commandTranscripts.removeValue(forKey: taskID) else { return }
-            let entries = transcript.finishUnconfirmed(reason: reason, interrupted: interrupted, retainingPending: retainingPending)
-            if retainingPending { commandTranscripts[taskID] = transcript }
+        private func finishCommandPresentation(taskID: AgentTask.ID, reason: String, interrupted: Bool,
+                                               retainingPending: Bool = false, turnID: String? = nil) {
+            guard var transcript = commandTranscripts[taskID] else { return }
+            // A terminal turn does not settle successful earlier background
+            // commands. Explicit Stop/disconnect retain their task-wide scope.
+            let items = turnID.map { turn in
+                Set((commandItemTurns[taskID] ?? [:]).compactMap { $0.value == turn ? $0.key : nil })
+            }
+            let entries = transcript.finishUnconfirmed(reason: reason, interrupted: interrupted,
+                retainingPending: retainingPending, itemIDs: items)
+            if retainingPending || turnID != nil { commandTranscripts[taskID] = transcript }
+            else { commandTranscripts.removeValue(forKey: taskID) }
             for entry in entries {
                 events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
             }
@@ -5040,8 +5065,8 @@ private extension CodexAppServerRuntime {
             return expected
         }
 
-        private func browserToolAvailability(_ request: EmbeddedBrowserToolAvailabilityRequest)
-            async throws -> EmbeddedBrowserToolAvailability {
+        private func browserAPIToolState(_ request: EmbeddedBrowserToolAvailabilityRequest)
+            async throws -> EmbeddedBrowserAPIToolState {
             // Server admission canonicalizes UUID spelling, while Core retains
             // the original task ID. Resolve only through the authoritative thread
             // mapping, then compare UUID values without rewriting any Core keys.
@@ -5054,14 +5079,14 @@ private extension CodexAppServerRuntime {
             let generation = serverGeneration
             let lease = try reserveEmbeddedBrowserTurnLease(taskID: taskID,
                 threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
-            let availability = try await controller.toolAvailability(taskKey: lease.key)
+            let state = try await controller.apiToolState(taskKey: lease.key)
             // The controller actor hop must not publish a prior preparation's
             // state into a new turn, or recreate a lease retired by Stop.
             guard inferencePreparations[taskID] == request.preparationID,
                   embeddedBrowserTurnKeys[taskID] == lease else { throw CancellationError() }
             _ = try reserveEmbeddedBrowserTurnLease(taskID: taskID,
                 threadID: request.threadID, turnID: request.turnID, epoch: epoch, generation: generation)
-            return availability
+            return state
         }
 
         /// Browser mechanics live behind a separate controller; this boundary

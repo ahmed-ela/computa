@@ -1714,3 +1714,60 @@ still-running earlier successful command as Failed. Process ownership was correc
 but task-wide transcript retirement was not. This remains open for build252;
 source251 does not claim the row-labeling issue is repaired. Model adherence,
 message association, literal copying and useful diagnostics also remain unresolved.
+
+
+## Build 252: current API action choices and turn-scoped command presentation
+
+The native browser registry already knew when input had consumed its action
+references, but the API model still saw those old tokens in original history
+without a current callable constraint. This allowed observed cases to reuse a
+consumed click or fill reference and spend another native recovery call. API
+inference now obtains one authenticated native snapshot containing binding state
+and the currently retained, unexpired click/fill refs. Exactly recognized native
+mutation schemas expose only those values as enum choices; an empty kind omits
+that mutation tool for the inference. Original historical definitions, arguments,
+results and wire identities stay unchanged.
+
+The registry query is read-only and performs no browser capture. It preserves
+valid earlier continuation-page refs and freshly corroborated refs with their
+original expiry and FIFO age. It excludes consumed, retired, expired and foreign
+publications. Core retains original task UUID identity and its turn, lease,
+preparation, generation, submission, Stop and cleanup checks before and after the
+controller hop. Custom, narrowed, foreign and partly modified dual-schema tools
+do not acquire native constraints. A correction reuses the frozen snapshot; a
+new inference samples again. Website inference retains its availability-only
+contract, and native dispatch still validates the actual target immediately
+before input.
+
+This is a constraint on known-current choices, not a fresh DOM guarantee. A page
+can change after inference or the first action in a multi-call reply can consume
+the second action's ref. Native validation still rejects those cases. Rejection
+of an already-retired choice moves to the existing API response validator, using
+the same single correction allowance where supported, without inventing native
+recovery or replay. Wrong but currently valid targets, message association and
+literal answer copying are separate model behaviors. No limit grew; final encoded
+requests including the enums must fit the existing two-million-byte bound.
+
+The installed251 trial also showed task-wide command presentation marking a
+successful prior turn's live background process Failed. Transcript settlement
+now selects exact item IDs belonging to the terminal turn. Earlier running rows
+survive and can later settle from their own actual completion. Explicit Stop,
+disconnect and shutdown retain their task-wide presentation scope. A regression
+covers native error followed by failed completion and failed completion alone,
+then the earlier command's later successful exit on its original row.
+
+
+The coordinated final-source suite passed all 659 cases, with no failures or
+skips and stable source hashes. It covers both API wires, native registry/controller
+and Core fences, command streaming/context/shutdown, website compatibility, and
+six actual bundled-engine cases. The extended lifecycle fixture exercises nine
+ordinary requests, five real compactions and a cold-resume request, verifying
+current enums, consumed references, stable historical arguments/aliases and
+unbound omission. The earlier251 failed-process test remains unchanged.
+
+Measured final encoded request overhead at 60 native-shaped click refs plus
+60 fill refs is 5,478 bytes on both wires: Chat Completions 3,511 to 8,989 bytes;
+Responses 2,941 to 8,419 bytes for the controlled identical payload/catalog.
+The worst-case 128-byte token shapes and exact two-million-byte/+1 boundary also
+passed. These are payload measurements, not live model latency or semantic success.
+No provider capture was rearmed. Installed qualification is recorded separately.

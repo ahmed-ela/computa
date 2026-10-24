@@ -388,6 +388,31 @@ struct EmbeddedBrowserToolAvailabilityRequest: Equatable, Sendable {
 typealias EmbeddedBrowserToolAvailabilityProvider = @Sendable (EmbeddedBrowserToolAvailabilityRequest)
     async throws -> EmbeddedBrowserToolAvailability
 
+/// Ordered, previously published native references. This is not a wire input
+/// type or an authority grant; live dispatch still validates the frozen target.
+struct EmbeddedBrowserCurrentActionReferences: Equatable, Sendable {
+    let clickReferences: [String]
+    let fillReferences: [String]
+    static let empty = Self(clickReferences: [], fillReferences: [])
+    var isValid: Bool {
+        let all = clickReferences + fillReferences
+        return all.count <= EmbeddedBrowserActionReferences.maximumCurrent
+            && Set(all).count == all.count
+            && all.allSatisfy { !$0.isEmpty && $0.utf8.count <= 128
+                && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }
+    }
+}
+
+struct EmbeddedBrowserAPIToolState: Equatable, Sendable {
+    let availability: EmbeddedBrowserToolAvailability
+    let references: EmbeddedBrowserCurrentActionReferences
+    static let unbound = Self(availability: .unbound, references: .empty)
+    var isValid: Bool { references.isValid && (availability == .bound || references == .empty) }
+}
+
+typealias EmbeddedBrowserAPIToolStateProvider = @Sendable (EmbeddedBrowserToolAvailabilityRequest)
+    async throws -> EmbeddedBrowserAPIToolState
+
 /// Each active turn receives its own taskKey from the runtime. The controller
 /// retains an exact tab lease and capability; it never operates on an active tab.
 actor EmbeddedBrowserToolController {
@@ -441,6 +466,10 @@ actor EmbeddedBrowserToolController {
     /// Core must first reserve this exact current-turn key. No context, target,
     /// observation, or input authority is created by this catalog-only query.
     func toolAvailability(taskKey: String) throws -> EmbeddedBrowserToolAvailability {
+        try apiToolState(taskKey: taskKey).availability
+    }
+
+    func apiToolState(taskKey: String) throws -> EmbeddedBrowserAPIToolState {
         try Task.checkCancellation()
         guard !closed, !taskKey.isEmpty, taskKey.utf8.count <= 4_096,
               taskKey == taskKey.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -458,7 +487,8 @@ actor EmbeddedBrowserToolController {
               binding.targetID == target.targetID, binding.targetInstanceToken == target.instanceToken,
               leases[target.targetID] == taskKey else { throw BrowserTabBrokerError.handleMissing }
         try lifetime.check()
-        return .bound
+        return .init(availability: .bound,
+            references: context.actionReferences.exportCurrent(snapshot: context.snapshot, binding: binding))
     }
 
     /// Freeze this native-only invocation before retry accounting and approval.

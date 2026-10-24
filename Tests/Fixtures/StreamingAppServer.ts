@@ -143,11 +143,13 @@ input.on('line', line => {
       }
       result(request.id, { turn: { id: turnId, status: 'inProgress' } });
       notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
-      if (scenario === 'command-terminal-prior' && turnCount > 1) {
+      if (scenario.startsWith('command-terminal-prior') && turnCount > 1) {
         command(turnId, 'inProgress', { processId: '4322' }, 'command-item-two');
         fence(turnId, 1_002);
         afterMarker('release-command-failure', () => {
-          notify('error', { turnId, willRetry: false, error: { message: 'Synthetic second-turn failure.' } });
+          if (scenario !== 'command-terminal-prior-failed') {
+            notify('error', { turnId, willRetry: false, error: { message: 'Synthetic second-turn failure.' } });
+          }
           completeTurn(turnId, 'failed'); fence(turnId, 1_003);
         });
       } else if (turnCount > 1) {
@@ -202,7 +204,7 @@ input.on('line', line => {
             fence(turnId, 1_001);
           });
           else if (scenario === 'command-disconnect') afterMarker('release-command', () => process.exit(0));
-          else if (terminalCommandScenario && scenario !== 'command-terminal-prior') {
+          else if (terminalCommandScenario && !scenario.startsWith('command-terminal-prior')) {
             notify('error', { turnId, willRetry: true, error: { message: 'Synthetic retry is not terminal.' } });
             notify('error', { turnId: 'foreign-turn', willRetry: false, error: { message: 'Foreign terminal error.' } });
             afterMarker('release-command-failure', () => {
@@ -215,8 +217,13 @@ input.on('line', line => {
               fence(turnId, 1_001);
             });
           }
-          else if (scenario === 'command-background' || scenario.startsWith('command-late-') || scenario === 'command-compaction' || scenario === 'command-terminal-prior') {
+          else if (scenario === 'command-background' || scenario.startsWith('command-late-') || scenario === 'command-compaction' || scenario.startsWith('command-terminal-prior')) {
             completeTurn(turnId); fence(turnId, 1_001);
+            if (scenario.startsWith('command-terminal-prior')) afterMarker('release-prior-command', () => {
+              commandDelta(turnId, ' earlier command finished');
+              command(turnId, 'completed', { aggregatedOutput: 'earlier authoritative completion', exitCode: 0 });
+              commandProcesses.delete('4321');
+            });
             if (scenario.startsWith('command-late-')) afterMarker('release-late-command', () => {
               commandDelta('wrong-turn', 'UNOWNED_LATE_OUTPUT');
               command('wrong-turn', 'completed', { aggregatedOutput: 'UNOWNED_LATE_FINAL', exitCode: 0 });

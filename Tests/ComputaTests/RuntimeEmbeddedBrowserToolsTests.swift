@@ -23,8 +23,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertNotEqual(request.taskID, prepared.taskID,
                               "API and website admission canonicalize UUIDs; Core retains the original task ID")
             let before = await harness.backend.counts()
-            let initial = try await harness.runtime.browserToolAvailabilityForFixture(request)
+            let initial = try await harness.runtime.browserAPIToolStateForFixture(request)
             XCTAssertEqual(initial, .unbound)
+            XCTAssertTrue(initial.isValid)
             let after = await harness.backend.counts()
             XCTAssertEqual(after, before)
             XCTAssertTrue(harness.audit.approvals.isEmpty)
@@ -37,15 +38,30 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 .init(taskID: request.taskID, threadID: request.threadID, turnID: "foreign", preparationID: request.preparationID),
                 .init(taskID: request.taskID, threadID: request.threadID, turnID: request.turnID, preparationID: UUID()),
             ] {
-                do { _ = try await harness.runtime.browserToolAvailabilityForFixture(invalid); XCTFail("Foreign admission") }
+                do { _ = try await harness.runtime.browserAPIToolStateForFixture(invalid); XCTFail("Foreign admission") }
                 catch { XCTAssertTrue(error is CancellationError) }
             }
             try Data().write(to: harness.root.appendingPathComponent("native-binding-continue"))
             for (index, expected) in [EmbeddedBrowserToolAvailability.unbound, .bound, .unbound, .bound].enumerated() {
                 try await self.waitFor { harness.rowCount == index + 1 }
                 let previous = await harness.backend.counts()
-                let availability = try await harness.runtime.browserToolAvailabilityForFixture(request)
-                XCTAssertEqual(availability, expected)
+                let state = try await harness.runtime.browserAPIToolStateForFixture(request)
+                XCTAssertTrue(state.isValid)
+                XCTAssertEqual(state.availability, expected)
+                let websiteAvailability = try await harness.runtime.browserToolAvailabilityForFixture(request)
+                XCTAssertEqual(websiteAvailability, state.availability)
+                if index == 1 {
+                    XCTAssertFalse(state.references.clickReferences.isEmpty)
+                    XCTAssertFalse(state.references.fillReferences.isEmpty)
+                    let published = try XCTUnwrap(harness.rows().last?["text"] as? String)
+                    for reference in state.references.clickReferences + state.references.fillReferences {
+                        XCTAssertTrue(published.contains(reference), "Only actually published references enter the API catalog")
+                    }
+                } else {
+                    XCTAssertEqual(state.references, .empty)
+                }
+                let repeated = try await harness.runtime.browserAPIToolStateForFixture(request)
+                XCTAssertEqual(repeated, state)
                 let current = await harness.backend.counts()
                 XCTAssertEqual(current, previous, "Catalog queries must not observe or operate a tab")
                 if index == 2 { await harness.backend.failNextRead() }
@@ -56,7 +72,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertTrue((rows.last?["text"] as? String)?.contains("unavailable") == true,
                           "A successful open stays bound even when its separate capture fails")
             try await harness.runtime.interrupt(taskID: Harness.taskID)
-            do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("Stopped preparation") }
+            do { _ = try await harness.runtime.browserAPIToolStateForFixture(request); XCTFail("Stopped preparation") }
             catch { XCTAssertTrue(error is CancellationError) }
             try await self.waitFor { harness.audit.status != .running }
             let cleanup = try XCTUnwrap(harness.websiteCleanupReceipts().last)
@@ -77,9 +93,9 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             let next = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
             XCTAssertNotEqual(next.turnID, request.turnID)
             XCTAssertNotEqual(next.preparationID, request.preparationID)
-            let nextAvailability = try await harness.runtime.browserToolAvailabilityForFixture(next)
-            XCTAssertEqual(nextAvailability, .unbound)
-            do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("Previous turn") }
+            let nextState = try await harness.runtime.browserAPIToolStateForFixture(next)
+            XCTAssertEqual(nextState, .unbound)
+            do { _ = try await harness.runtime.browserAPIToolStateForFixture(request); XCTFail("Previous turn") }
             catch { XCTAssertTrue(error is CancellationError) }
             let final = await harness.backend.counts()
             XCTAssertEqual(final.created, 1); XCTAssertEqual(final.ownedClosed, 1)
@@ -96,12 +112,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 if configured {
                     let query = Task {
                         withUnsafeCurrentTask { $0?.cancel() }
-                        return try await harness.runtime.browserToolAvailabilityForFixture(request)
+                        return try await harness.runtime.browserAPIToolStateForFixture(request)
                     }
                     do { _ = try await query.value; XCTFail("Cancelled query") }
                     catch { XCTAssertTrue(error is CancellationError) }
                 } else {
-                    do { _ = try await harness.runtime.browserToolAvailabilityForFixture(request); XCTFail("No controller") }
+                    do { _ = try await harness.runtime.browserAPIToolStateForFixture(request); XCTFail("No controller") }
                     catch { XCTAssertTrue(error is CancellationError) }
                 }
                 let counts = await harness.backend.counts()

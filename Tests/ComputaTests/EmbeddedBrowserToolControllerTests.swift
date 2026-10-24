@@ -8,6 +8,82 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     private struct PublishedTarget { let role: String; let label: String?; let clickRef: String?; let fillRef: String? }
     private var publishedTargets = [String: [Int: PublishedTarget]]()
 
+    private func assertProjectedReference(_ reference: String, controller: EmbeddedBrowserToolController,
+                                          fill: Bool = false, expected: Bool = true,
+                                          file: StaticString = #filePath, line: UInt = #line) async throws {
+        let state = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(state.availability, .bound, file: file, line: line)
+        XCTAssertTrue(state.isValid, file: file, line: line)
+        XCTAssertEqual((fill ? state.references.fillReferences : state.references.clickReferences).contains(reference),
+                       expected, file: file, line: line)
+    }
+
+    func testAPIToolStateExportsPublishedKindsAndConsumesNoAuthority() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let initial = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(initial, .unbound)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let metadataOnly = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(metadataOnly, .init(availability: .bound, references: .empty))
+        let page = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(page)
+        let fill = try XCTUnwrap(publishedTargets[id]?[0]?.fillRef)
+        let click = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+        let before = await backend.counts(), inventoryBefore = await backend.inventoryReadCount()
+        let countsBefore = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        let first = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(first.references.fillReferences, [fill]); XCTAssertTrue(first.references.clickReferences.contains(click))
+        XCTAssertFalse(first.references.clickReferences.contains(fill)); XCTAssertFalse(first.references.fillReferences.contains(click))
+        for _ in 0..<3 {
+            let repeated = try await controller.apiToolState(taskKey: "turn-a")
+            XCTAssertEqual(repeated, first, "Export cannot reorder or mint tokens")
+        }
+        let foreign = try await controller.apiToolState(taskKey: "turn-b")
+        XCTAssertEqual(foreign, .unbound)
+        let after = await backend.counts(), inventoryAfter = await backend.inventoryReadCount()
+        XCTAssertEqual(after, before); XCTAssertEqual(inventoryAfter, inventoryBefore)
+        let countsAfter = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        XCTAssertEqual(countsAfter.current, countsBefore.current); XCTAssertEqual(countsAfter.retired, countsBefore.retired)
+        _ = try await controller.executeResult(taskKey: "turn-a", tool: "browser_fill",
+            arguments: argumentData(["fill_ref": fill, "text": "UA 1842"]))
+        try await assertProjectedReference(fill, controller: controller, fill: true, expected: false)
+        try await assertProjectedReference(click, controller: controller, expected: false)
+        _ = try await call(controller, "browser_close")
+        let closed = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(closed, .unbound)
+        _ = await controller.shutdown()
+    }
+
+    func testAPIToolStateExcludesExpiredReferencesWithoutRetiringOrRefreshingThem() async throws {
+        let backend = EmbeddedBrowserFixtureBackend()
+        let controller = EmbeddedBrowserToolController(transport: backend, readLifetime: .milliseconds(100))
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        _ = try await call(controller, "browser_read", ["view": "all"])
+        let current = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertFalse(current.references.fillReferences.isEmpty); XCTAssertFalse(current.references.clickReferences.isEmpty)
+        let before = await backend.counts(), registryBefore = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        try await Task.sleep(for: .milliseconds(120))
+        let expired = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(expired, .init(availability: .bound, references: .empty))
+        let after = await backend.counts(), registryAfter = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
+        XCTAssertEqual(before, after); XCTAssertEqual(registryBefore.current, registryAfter.current)
+        XCTAssertEqual(registryBefore.retired, registryAfter.retired)
+        _ = await controller.shutdown()
+    }
+
+    func testAPIToolStateValuesRejectOversizedDuplicateAndUnboundReferences() {
+        XCTAssertTrue(EmbeddedBrowserAPIToolState.unbound.isValid)
+        XCTAssertTrue(EmbeddedBrowserCurrentActionReferences(clickReferences: ["opaque"], fillReferences: []).isValid)
+        for refs in [EmbeddedBrowserCurrentActionReferences(clickReferences: ["same"], fillReferences: ["same"]),
+                     .init(clickReferences: [""], fillReferences: []),
+                     .init(clickReferences: ["bad\nref"], fillReferences: []),
+                     .init(clickReferences: [String(repeating: "é", count: 65)], fillReferences: []),
+                     .init(clickReferences: (0..<121).map(String.init), fillReferences: [])] {
+            XCTAssertFalse(refs.isValid)
+        }
+        XCTAssertFalse(EmbeddedBrowserAPIToolState(availability: .unbound,
+            references: .init(clickReferences: ["opaque"], fillReferences: [])).isValid)
+    }
+
     func testToolAvailabilityReadsOnlyCurrentBindingStateWithoutBackendWork() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         let initial = await backend.counts()
@@ -41,6 +117,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let before = await backend.counts()
         let availability = try await controller.toolAvailability(taskKey: "turn-a")
         XCTAssertEqual(availability, .bound)
+        let state = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(state.references, .empty)
         let after = await backend.counts()
         XCTAssertEqual(after, before)
         _ = await controller.shutdown()
@@ -65,21 +143,21 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     func testToolAvailabilityRejectsBusyRetiredClosedAndInvalidKeys() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         for key in ["", " ", "turn\ninvalid", String(repeating: "a", count: 4_097)] {
-            do { _ = try await controller.toolAvailability(taskKey: key); XCTFail("Invalid key") }
+            do { _ = try await controller.apiToolState(taskKey: key); XCTFail("Invalid key") }
             catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
         }
         await backend.holdNextCreate()
         let opening = Task { try await self.call(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
         await backend.waitUntilCreateHeld()
-        do { _ = try await controller.toolAvailability(taskKey: "turn-a"); XCTFail("Busy key") }
+        do { _ = try await controller.apiToolState(taskKey: "turn-a"); XCTFail("Busy key") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
         _ = await controller.releaseReport(taskKey: "turn-a")
-        do { _ = try await controller.toolAvailability(taskKey: "turn-a"); XCTFail("Retired key") }
+        do { _ = try await controller.apiToolState(taskKey: "turn-a"); XCTFail("Retired key") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
         await backend.resumeCreate()
         do { _ = try await opening.value; XCTFail("Retired open") } catch { }
         _ = await controller.shutdown()
-        do { _ = try await controller.toolAvailability(taskKey: "new-turn"); XCTFail("Closed controller") }
+        do { _ = try await controller.apiToolState(taskKey: "new-turn"); XCTFail("Closed controller") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
     }
 
@@ -962,6 +1040,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let before = await backend.counts()
             let content = try await call(controller, "browser_read", ["view": "content"])
             XCTAssertFalse(content.contains(ref), "The current content view does not falsely publish the control")
+            try await assertProjectedReference(ref, controller: controller, fill: fill)
             let observed = await backend.counts()
             XCTAssertEqual(observed.observes - before.observes, 1, "Corroboration uses the existing capture")
             let firstProof = try await controller.prepareMutation(taskKey: "turn-a", tool: tool, arguments: data)
@@ -990,6 +1069,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let consumed = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click",
                 arguments: argumentData(["click_ref": oldButton]))
             XCTAssertNil(consumed.canonicalArguments)
+            try await assertProjectedReference(oldButton, controller: controller, expected: false)
             _ = await controller.shutdown()
         }
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -1008,9 +1088,11 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             await backend.exposeCommittedDocumentIdentity()
             _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
             let first = try await call(controller, "browser_read", ["view": "all"]), id = try snapshotID(first)
-            let data = try argumentData(["click_ref": XCTUnwrap(publishedTargets[id]?[1]?.clickRef)])
+            let reference = try XCTUnwrap(publishedTargets[id]?[1]?.clickRef)
+            let data = try argumentData(["click_ref": reference])
             try await Task.sleep(for: .milliseconds(220))
             _ = try await call(controller, "browser_read", ["view": "content"])
+            try await assertProjectedReference(reference, controller: controller)
             let prepared = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: data)
             XCTAssertNotNil(prepared.canonicalArguments)
             if boundary == "enqueue" {
@@ -1023,6 +1105,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
             } else {
                 try await Task.sleep(for: .milliseconds(220))
+                try await assertProjectedReference(reference, controller: controller, expected: false)
                 do {
                     try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: prepared)
                     XCTFail("The old reference expires before the new capture")
@@ -1076,12 +1159,17 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         for _ in 0..<2 { _ = try await call(controller, "browser_read", ["view": "content"]) }
         let stillOldest = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": oldest]))
         XCTAssertNotNil(stillOldest.canonicalArguments)
+        try await assertProjectedReference(oldest, controller: controller)
+        let full = try await controller.apiToolState(taskKey: "turn-a")
+        XCTAssertEqual(full.references.clickReferences.count + full.references.fillReferences.count, 120)
         await backend.setLink("http://localhost:8123/new", label: "New observed link")
         _ = try await call(controller, "browser_read", ["view": "links"])
         let evicted = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": oldest]))
         let retained = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": extra]))
         XCTAssertNil(evicted.canonicalArguments, "Repeated corroboration never moves the oldest token to the FIFO tail")
         XCTAssertNotNil(retained.canonicalArguments)
+        try await assertProjectedReference(oldest, controller: controller, expected: false)
+        try await assertProjectedReference(extra, controller: controller)
         counts = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
         XCTAssertEqual(counts.current, 120); XCTAssertLessThanOrEqual(counts.retired, 256)
         let inputs = await backend.counts(); XCTAssertEqual(inputs.presses, 0); XCTAssertEqual(inputs.fills, 0)
@@ -1110,6 +1198,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             _ = try await call(controller, "browser_read", ["view": "content"], scope: scope)
             let prior = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": ref]))
             XCTAssertNil(prior.canonicalArguments, "A later capture cannot revive a failed read's old authority: \(failure)")
+            try await assertProjectedReference(ref, controller: controller, expected: false)
             let counts = await backend.counts(); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
             _ = await controller.shutdown()
         }
@@ -1159,6 +1248,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let currentRef = try XCTUnwrap(publishedTargets[nextID]?.values.compactMap(\.clickRef).first)
         let current = try await controller.prepareMutation(taskKey: "turn-a", tool: "browser_click", arguments: argumentData(["click_ref": currentRef]))
         XCTAssertNotNil(current.canonicalArguments)
+        try await assertProjectedReference(firstRef, controller: controller)
+        try await assertProjectedReference(currentRef, controller: controller)
         _ = await controller.shutdown()
     }
 
@@ -1246,6 +1337,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         }
         let finalCounts = await controller.actionReferenceCountsForTesting(taskKey: "turn-a")
         XCTAssertEqual(finalCounts.current, 120)
+        try await assertProjectedReference(ref, controller: controller, expected: false)
         do {
             _ = try await controller.executeResult(taskKey: "turn-a", tool: "browser_click", arguments: data, prepared: frozen)
             XCTFail("An approval cannot retain a FIFO-evicted witness outside the registry")

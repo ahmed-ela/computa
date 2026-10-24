@@ -9,11 +9,12 @@ final class APIModelResponseCodecTests: XCTestCase {
     private var tools: [[String: Any]] { [["type": "namespace", "name": "files", "tools": [function]], ["type": "custom", "name": "apply_patch", "description": "Apply patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /.+/"]]] }
     private func request(_ changes: [String: Any] = [:], provider customProvider: APIProviderDefinition? = nil,
                          toolNaming: APIModelResponseCodec.ToolNaming = .legacy,
-                         browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> APIModelResponseCodec.Request {
+                         browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
+                         browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil) throws -> APIModelResponseCodec.Request {
         let p = customProvider ?? provider
         var object: [String: Any] = ["model": APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id), "input": [["role": "user", "content": "read it"]], "instructions": "Use the native tools.", "tools": tools, "store": false, "stream": true]
         object.merge(changes) { _, new in new }
-        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules, toolNaming: toolNaming, browserToolAvailability: browserToolAvailability)
+        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules, toolNaming: toolNaming, browserToolAvailability: browserToolAvailability, browserActionReferences: browserActionReferences)
     }
     private func decode(_ message: [String: Any], finish: String = "stop", request: APIModelResponseCodec.Request? = nil, model: String = "fixture-model") throws -> APIModelResponseCodec.Reply {
         let data = try JSONSerialization.data(withJSONObject: ["id": "remote1", "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": ["prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20, "completion_tokens_details": ["reasoning_tokens": 3]]])
@@ -515,6 +516,156 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(corrected.allowedTools, prepared.allowedTools)
         XCTAssertFalse(corrected.tools.contains { $0.name == "browser_click" })
         XCTAssertEqual(try wireFunctions(corrected) as NSArray, try wireFunctions(prepared) as NSArray)
+    }
+
+    func testCurrentReferencesNarrowOnlyWholeRecognizedNativeMutationDefinitions() throws {
+        let refs = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_first", "bclick_prior-page"], fillReferences: ["bfill_current"])
+        func project(_ definitions: [[String: Any]], refs supplied: EmbeddedBrowserCurrentActionReferences? = nil) -> [[String: Any]] {
+            ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: "fixture",
+                browserToolAvailability: .bound, browserActionReferences: supplied ?? refs)
+        }
+        for name in ["browser_click", "browser_fill"] {
+            let field = name == "browser_click" ? "click_ref" : "fill_ref"
+            let canonical = try nativeBrowserTool(name)
+            let current = try XCTUnwrap(canonical["parameters"] as? [String: Any])
+            for schema in [legacyBrowserMutationSchema(name), assertedBrowserMutationSchema(name), current] {
+                for namespace in [nil, "functions"] as [String?] {
+                    let definition: [String: Any] = ["type": "function", "name": name, "parameters": schema, "inputSchema": schema]
+                    let catalog = namespace.map { [["type": "namespace", "name": $0, "tools": [definition]]] } ?? [definition]
+                    let visible = project(catalog)
+                    let tool = try XCTUnwrap(namespace == nil ? visible.first : (visible.first?["tools"] as? [[String: Any]])?.first)
+                    var expected = current
+                    var fields = try XCTUnwrap(expected["properties"] as? [String: [String: Any]])
+                    fields[field]?["enum"] = name == "browser_click" ? refs.clickReferences : refs.fillReferences
+                    expected["properties"] = fields
+                    for key in ["parameters", "inputSchema"] { XCTAssertEqual(tool[key] as? NSDictionary, expected as NSDictionary) }
+                    XCTAssertTrue(project(catalog, refs: .empty).isEmpty)
+                }
+            }
+            var modified: [[String: Any]] = []
+            for constraint in [["enum": ["custom-only"]], ["minLength": 9_999], ["minLength": true]] as [[String: Any]] {
+                var schema = current, fields = try XCTUnwrap(current["properties"] as? [String: [String: Any]])
+                fields[field]?.merge(constraint) { _, value in value }; schema["properties"] = fields
+                var tool = canonical; tool["parameters"] = schema; modified.append(tool)
+            }
+            var extra = current, fields = try XCTUnwrap(current["properties"] as? [String: [String: Any]])
+            fields["custom"] = ["type": "string"]; extra["properties"] = fields
+            var extraTool = canonical; extraTool["parameters"] = extra; modified.append(extraTool)
+            var dual = canonical; dual["inputSchema"] = extra; modified.append(dual)
+            dual = extraTool; dual["inputSchema"] = current; modified.append(dual)
+            modified.append(["type": "custom", "name": name, "format": ["type": "text"]])
+            for tool in modified {
+                XCTAssertEqual(project([tool]) as NSArray, [tool] as NSArray)
+                XCTAssertEqual(project([tool], refs: .empty) as NSArray, [tool] as NSArray)
+            }
+            let foreign: [[String: Any]] = [["type": "namespace", "name": "mcp_external", "tools": [canonical]]]
+            XCTAssertEqual(project(foreign) as NSArray, foreign as NSArray)
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions([canonical], modelID: "fixture") as NSArray,
+                           [canonical] as NSArray, "Website/default callers receive no API-only enum")
+        }
+        let onlyClick = project([try nativeBrowserTool("browser_click"), try nativeBrowserTool("browser_fill")],
+            refs: .init(clickReferences: refs.clickReferences, fillReferences: []))
+        XCTAssertEqual(onlyClick.compactMap { $0["name"] as? String }, ["browser_click"])
+    }
+
+    func testCurrentReferenceEnumsPreserveHistoricalArgumentsAndStableNamesOnBothWires() throws {
+        let refs = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_current"], fillReferences: ["bfill_current"])
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wire, models: provider.models)
+            for name in ["browser_click", "browser_fill"] {
+                let key = name == "browser_click" ? "click_ref" : "fill_ref"
+                let current = name == "browser_click" ? refs.clickReferences[0] : refs.fillReferences[0]
+                let other = name == "browser_click" ? refs.fillReferences[0] : refs.clickReferences[0]
+                let suffix = name == "browser_fill" ? ", \"text\" : \"  e\\u0301 🧭\\n\" " : ""
+                let old = " { \"\(key)\" : \"retired-token\"\(suffix) } "
+                let valid = " { \"\(key)\" : \"\(current)\"\(suffix) } "
+                for schema in [legacyBrowserMutationSchema(name), assertedBrowserMutationSchema(name), try XCTUnwrap(nativeBrowserTool(name)["parameters"] as? [String: Any])] {
+                    let catalog: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [function,
+                        ["type": "function", "name": name, "parameters": schema]]]]
+                    let history: [[String: Any]] = [["type": "function_call", "name": name, "namespace": "functions", "call_id": "old", "arguments": old],
+                        ["type": "function_call_output", "call_id": "old", "output": "Historical action; outcome unverified."],
+                        ["role": "user", "content": "Continue with the current target."]]
+                    let unrestricted = try request(["tools": catalog, "input": history], provider: p)
+                    let prepared = try request(["tools": catalog, "input": history], provider: p, browserToolAvailability: .bound, browserActionReferences: refs)
+                    XCTAssertEqual(prepared.tools.map(\.wireName), unrestricted.tools.map(\.wireName))
+                    let a = try XCTUnwrap(JSONSerialization.jsonObject(with: unrestricted.body) as? [String: Any])
+                    let b = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+                    XCTAssertEqual(a[wire == .responses ? "input" : "messages"] as? NSArray, b[wire == .responses ? "input" : "messages"] as? NSArray)
+                    let reply = try browserMutationReply(valid, request: prepared, toolName: name)
+                    let call = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+                    XCTAssertEqual((call["arguments"] as? String).map { Data($0.utf8) }, Data(valid.utf8))
+                    for token in ["retired-token", other, ""] {
+                        XCTAssertThrowsError(try browserMutationReply("{\"\(key)\":\"\(token)\"\(suffix)}", request: prepared, toolName: name)) {
+                            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                        }
+                    }
+                    let next = try request(["tools": catalog, "input": history + [call, ["type": "function_call_output", "call_id": "new-ref-call", "output": "Dispatched once."]]],
+                        provider: p, browserToolAvailability: .bound, browserActionReferences: .empty)
+                    XCTAssertEqual(next.tools.map(\.name), ["read"])
+                    XCTAssertEqual(next.historyCallIDs, ["old", "new-ref-call"])
+                }
+            }
+        }
+    }
+
+    func testCurrentReferenceCorrectionIsAtomicGenericAndFrozen() throws {
+        let click = try nativeBrowserTool("browser_click"), fill = try nativeBrowserTool("browser_fill")
+        let refs = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_current"], fillReferences: [])
+        let prepared = try request(["tools": [click, fill]], browserToolAvailability: .bound, browserActionReferences: refs)
+        let valid: [String: Any] = ["id": "valid", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": #"{"click_ref":"bclick_current"}"#]]
+        guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(
+            correctionResult(prepared, arguments: #"{"click_ref":"retired"}"#, additionalCalls: [valid]), request: prepared) else {
+            return XCTFail("A rejected enum must prevent the entire reply from publishing")
+        }
+        XCTAssertEqual(details.count, 1)
+        XCTAssertNil(details[0].location, "Dynamic enums must not broaden the finite native schema recognizer")
+        let corrected = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: details)
+        XCTAssertEqual(try wireFunctions(corrected) as NSArray, try wireFunctions(prepared) as NSArray)
+        XCTAssertEqual(corrected.allowedTools, prepared.allowedTools)
+        for choice in [["type": "function", "name": "browser_fill"], "required"] as [Any] {
+            XCTAssertThrowsError(try request(["tools": [fill], "tool_choice": choice], browserToolAvailability: .bound, browserActionReferences: refs)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        XCTAssertThrowsError(try request(["tools": [click, click]], browserToolAvailability: .bound, browserActionReferences: .empty))
+        XCTAssertThrowsError(try request(["tools": [click], "input": [["type": "function_call", "name": "browser_click", "call_id": "orphan", "arguments": #"{"click_ref":"old"}"#]]],
+            browserToolAvailability: .bound, browserActionReferences: .empty))
+    }
+
+    func testCurrentReferenceProjectionKeepsExistingSetAndEncodedRequestBounds() throws {
+        let catalog = [try nativeBrowserTool("browser_click"), try nativeBrowserTool("browser_fill")]
+        let tokens = (0..<120).map { String(format: "%03d", $0) + String(repeating: "x", count: 125) }
+        let refs = EmbeddedBrowserCurrentActionReferences(clickReferences: Array(tokens.prefix(60)), fillReferences: Array(tokens.suffix(60)))
+        XCTAssertTrue(refs.isValid)
+        for invalid in [EmbeddedBrowserCurrentActionReferences(clickReferences: tokens + ["extra"], fillReferences: []),
+                        .init(clickReferences: ["same"], fillReferences: ["same"]), .init(clickReferences: [""], fillReferences: []),
+                        .init(clickReferences: [String(repeating: "x", count: 129)], fillReferences: []), .init(clickReferences: ["line\nbreak"], fillReferences: [])] {
+            XCTAssertThrowsError(try request(["tools": catalog], browserToolAvailability: .bound, browserActionReferences: invalid)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidRequest)
+            }
+        }
+        XCTAssertThrowsError(try request(["tools": catalog], browserToolAvailability: .unbound, browserActionReferences: refs))
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wire, models: provider.models)
+            let nativeRefs = EmbeddedBrowserCurrentActionReferences(
+                clickReferences: (0..<60).map { "bclick_00000000-0000-4000-8000-" + String(format: "%012d", $0) },
+                fillReferences: (0..<60).map { "bfill_00000000-0000-4000-8000-" + String(format: "%012d", $0) })
+            XCTAssertTrue(nativeRefs.isValid)
+            XCTAssertTrue(nativeRefs.clickReferences.allSatisfy { $0.utf8.count == 43 })
+            XCTAssertTrue(nativeRefs.fillReferences.allSatisfy { $0.utf8.count == 42 })
+            let unprojected = try request(["tools": catalog], provider: p, browserToolAvailability: .bound)
+            let projected = try request(["tools": catalog], provider: p, browserToolAvailability: .bound, browserActionReferences: nativeRefs)
+            print("CURRENT_REFERENCE_PAYLOAD wire=\(wire.rawValue) before=\(unprojected.body.count) after=\(projected.body.count) added=\(projected.body.count - unprojected.body.count)")
+            XCTAssertGreaterThan(projected.body.count, unprojected.body.count)
+            func sized(_ count: Int) throws -> APIModelResponseCodec.Request {
+                try request(["tools": catalog, "input": [["role": "user", "content": String(repeating: "x", count: count)]]],
+                    provider: p, browserToolAvailability: .bound, browserActionReferences: refs)
+            }
+            let base = try sized(0), padding = 2_000_000 - base.body.count
+            XCTAssertGreaterThan(padding, 0)
+            XCTAssertEqual(try sized(padding).body.count, 2_000_000)
+            XCTAssertThrowsError(try sized(padding + 1)) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidRequest) }
+        }
     }
 
     func testSeparateContinuationUsesOnlyRegisteredNativeCapabilityAndKeepsForeignContracts() throws {

@@ -23,13 +23,15 @@ private actor APIHeldReply {
 }
 private actor APIBrowserAvailabilityFixture {
     var state: EmbeddedBrowserToolAvailability = .unbound
+    var references = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_fixture-current"], fillReferences: ["bfill_fixture-current"])
+    func setReferences(_ value: EmbeddedBrowserCurrentActionReferences) { references = value }
     private(set) var calls: [EmbeddedBrowserToolAvailabilityRequest] = []
     private var waiters: [CheckedContinuation<Void, Never>] = []
     func set(_ value: EmbeddedBrowserToolAvailability) { state = value }
-    func read(_ request: EmbeddedBrowserToolAvailabilityRequest) -> EmbeddedBrowserToolAvailability {
+    func read(_ request: EmbeddedBrowserToolAvailabilityRequest) -> EmbeddedBrowserAPIToolState {
         calls.append(request)
         waiters.forEach { $0.resume() }; waiters.removeAll()
-        return state
+        return .init(availability: state, references: state == .bound ? references : .empty)
     }
     func waitUntilCalled() async {
         guard calls.isEmpty else { return }
@@ -268,7 +270,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
             let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
                 wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
-            let server = try server(); await server.setBrowserToolAvailabilityProvider { _ in .bound }
+            let server = try server(); await server.setBrowserToolStateProvider { _ in .init(availability: .bound, references: .empty) }
             try await server.updateProviders([p])
             await server.setUserProjectionObserverForTesting { diagnostics.record($0) }
             let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
@@ -393,7 +395,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(), wireAPI: wire,
                 models: [.init(id: "fixture-model", name: "Fixture")])
             let server = try server(); try await server.updateProviders([p])
-            await server.setBrowserToolAvailabilityProvider { request in await availability.read(request) }
+            await server.setBrowserToolStateProvider { request in await availability.read(request) }
             let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
                 turn = UUID().uuidString.lowercased(), preparation = UUID()
             try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
@@ -436,7 +438,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(pulls, Array(repeating: .init(taskID: task, threadID: thread, turnID: turn, preparationID: preparation), count: 3))
 
             // An empty maintenance catalog does not need controller state.
-            await server.setBrowserToolAvailabilityProvider(nil)
+            await server.setBrowserToolStateProvider(nil)
             raw["tools"] = [Any](); raw["input"] = [["role": "user", "content": "Compact the retained history."]]
             raw["client_metadata"] = ["x-codex-turn-metadata": String(decoding: try JSONSerialization.data(withJSONObject:
                 ["thread_id": thread, "turn_id": turn, "request_kind": "compaction"]), as: UTF8.self)]
@@ -450,17 +452,23 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     }
 
     func testAvailabilityAdmissionRejectsMissingFailedForeignAndRetiredStateBeforeProvider() async throws {
-        for mode in ["missing", "failed", "query_busy", "foreign", "retired", "provider_replaced"] {
+        for mode in ["missing", "failed", "query_busy", "foreign", "retired", "provider_replaced", "invalid_references", "unbound_references"] {
             let records = APIRequestRecorder(), availability = APIBrowserAvailabilityFixture(), held = APIHeldReply()
             let reply = response()
             let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
             let p = provider(try await remote.start()), server = try server()
             try await server.updateProviders([p])
             if mode != "missing" {
-                await server.setBrowserToolAvailabilityProvider { request in
+                await server.setBrowserToolStateProvider { request in
                     let state = await availability.read(request)
                     if mode == "failed" { throw CancellationError() }
                     if mode == "query_busy" { throw BrowserTabBrokerError.operationInProgress }
+                    if mode == "invalid_references" {
+                        return .init(availability: .bound, references: .init(clickReferences: ["duplicate"], fillReferences: ["duplicate"]))
+                    }
+                    if mode == "unbound_references" {
+                        return .init(availability: .unbound, references: .init(clickReferences: ["not-bound"], fillReferences: []))
+                    }
                     if mode == "retired" || mode == "provider_replaced" { await held.wait() }
                     return state
                 }
@@ -489,13 +497,13 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     await held.release()
                     await cancellation.value
                 } else {
-                    await server.setBrowserToolAvailabilityProvider(nil)
+                    await server.setBrowserToolStateProvider(nil)
                     await held.release()
                 }
             }
             let (bytes, response) = try await pending.value
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400, mode)
-            if mode == "failed" || mode == "query_busy" {
+            if ["failed", "query_busy", "invalid_references", "unbound_references"].contains(mode) {
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
                 XCTAssertEqual((body["error"] as? [String: Any])?["code"] as? String, "inference_context_required")
                 XCTAssertEqual((body["error"] as? [String: Any])?["x-computa-retryable"] as? Bool, false)
@@ -517,7 +525,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
             capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
         try await server.updateProviders([p])
-        await server.setBrowserToolAvailabilityProvider { request in await availability.read(request) }
+        await server.setBrowserToolStateProvider { request in await availability.read(request) }
         await server.setBeforeCorrectionDispatchForTesting { await availability.set(.bound) }
         let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
             turn = UUID().uuidString.lowercased(), preparation = UUID()
@@ -544,6 +552,93 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let accounting = try correctionRecords(directory)
         XCTAssertEqual(accounting.filter { $0.phase == "second_claimed" }.count, 1)
         await server.shutdown()
+    }
+
+    func testCurrentReferencesFreezeForCorrectionAndRefreshOnNextInferenceOnBothWires() async throws {
+        for wire in APIProviderDefinition.WireAPI.allCases {
+            let records = APIRequestRecorder(), availability = APIBrowserAvailabilityFixture(), directory = try namingRoot()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let first = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_admitted"], fillReferences: [])
+            let next = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_next"], fillReferences: ["bfill_next"])
+            await availability.set(.bound); await availability.setReferences(first)
+            let remote = try APILoopbackFixture { request in
+                await records.record(request)
+                let count = await records.count()
+                if count == 1 { await availability.setReferences(next) }
+                let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+                let tools = body["tools"] as! [[String: Any]]
+                let tool = wire == .responses ? tools[0] : tools[0]["function"] as! [String: Any]
+                let token = count == 1 ? "retired" : (wire == .chatCompletions && count == 2 ? "bclick_admitted" : "bclick_next")
+                let arguments = " { \"click_ref\" : \"\(token)\" } "
+                let response: [String: Any]
+                if wire == .responses {
+                    response = ["id": "ref-response-\(count)", "object": "response", "status": "completed", "model": "fixture-model",
+                        "output": [["id": "ref-item-\(count)", "type": "function_call", "status": "completed", "call_id": "ref-call-\(count)",
+                                    "name": tool["name"]!, "arguments": arguments]]]
+                } else {
+                    response = ["id": "ref-response-\(count)", "model": "fixture-model", "choices": [["index": 0, "finish_reason": "tool_calls",
+                        "message": ["role": "assistant", "tool_calls": [["id": "ref-call-\(count)", "type": "function",
+                            "function": ["name": tool["name"]!, "arguments": arguments]]]]]],
+                        "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]]
+                }
+                return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: response))
+            }; defer { remote.stop() }
+            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(), wireAPI: wire,
+                models: [.init(id: "fixture-model", name: "Fixture")])
+            let server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+            try await server.updateProviders([p])
+            await server.setBrowserToolStateProvider { request in await availability.read(request) }
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
+                turn = UUID().uuidString.lowercased(), preparation = UUID()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let catalog = try browserAvailabilityCatalog()
+            raw["tools"] = ["browser_click", "browser_fill", "browser_tabs"].compactMap { name in catalog.first { $0["name"] as? String == name } }
+            let oldArguments = " { \"click_ref\" : \"retired-é\" } "
+            raw["input"] = [["type": "function_call", "name": "browser_click", "call_id": "old", "arguments": oldArguments],
+                ["type": "function_call_output", "call_id": "old", "output": "Historical dispatch only."],
+                ["role": "user", "content": "Use the current control once."]]
+            raw["stream"] = false; request.httpBody = try JSONSerialization.data(withJSONObject: raw)
+            let (firstBytes, firstResponse) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, wire == .chatCompletions ? 200 : 400)
+            if wire == .responses {
+                let error = try XCTUnwrap(JSONSerialization.jsonObject(with: firstBytes) as? [String: Any])
+                XCTAssertNil(error["output"], "No rejected call is published")
+            }
+            let (_, nextResponse) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((nextResponse as? HTTPURLResponse)?.statusCode, 200)
+            let upstream = await records.snapshot(), pulls = await availability.calls
+            XCTAssertEqual(pulls.count, 2)
+            XCTAssertEqual(upstream.count, wire == .chatCompletions ? 3 : 2)
+            let bodies = try upstream.map { try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any]) }
+            func wireTools(_ body: [String: Any]) throws -> [[String: Any]] {
+                let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+                return try tools.map { wire == .responses ? $0 : try XCTUnwrap($0["function"] as? [String: Any]) }
+            }
+            let names = try upstream.map(availabilityWireNames)
+            XCTAssertEqual(names.first, wire == .responses ? ["browser_click", "browser_tabs"] : ["computa_tool_0", "computa_tool_2"])
+            XCTAssertEqual(names.last, wire == .responses ? ["browser_click", "browser_fill", "browser_tabs"] : ["computa_tool_0", "computa_tool_1", "computa_tool_2"])
+            for (index, body) in bodies.enumerated() {
+                let tools = try wireTools(body)
+                let schema = try XCTUnwrap(tools[0]["parameters"] as? [String: Any])
+                let fields = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+                XCTAssertEqual(fields["click_ref"]?["enum"] as? [String], index == bodies.count - 1 ? next.clickReferences : first.clickReferences)
+                let history = try XCTUnwrap(body[wire == .responses ? "input" : "messages"] as? [[String: Any]])
+                let args = wire == .responses ? history.compactMap { $0["arguments"] as? String }
+                    : history.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }.compactMap { ($0["function"] as? [String: Any])?["arguments"] as? String }
+                XCTAssertEqual(args.map { Data($0.utf8) }, [Data(oldArguments.utf8)])
+            }
+            if wire == .chatCompletions {
+                XCTAssertEqual(try wireTools(bodies[0]) as NSArray, try wireTools(bodies[1]) as NSArray)
+                XCTAssertEqual(try correctionRecords(directory).filter { $0.phase == "second_claimed" }.count, 1)
+            } else {
+                XCTAssertTrue(try correctionRecords(directory).isEmpty)
+            }
+            await server.shutdown()
+        }
     }
 
     private func namingRoot() throws -> URL {
@@ -788,7 +883,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                     wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
                 let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)),
                     correctionAccountingDirectory: accounting)
-                await server.setBrowserToolAvailabilityProvider { _ in .bound }
+                await server.setBrowserToolStateProvider { _ in .init(availability: .bound, references: .empty) }
             try await server.updateProviders([provider])
                 let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString,
                     turn = UUID().uuidString, preparation = UUID()
@@ -912,7 +1007,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)),
                     correctionAccountingDirectory: accounting)
                 do {
-                    await server.setBrowserToolAvailabilityProvider { _ in .bound }
+                    await server.setBrowserToolStateProvider { _ in .init(availability: .bound, references: .empty) }
             try await server.updateProviders([provider])
                     let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
                         turn = UUID().uuidString.lowercased(), preparation = UUID()
@@ -1057,7 +1152,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
         let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
             turn = UUID().uuidString.lowercased(), prep = UUID()
-        await server.setBrowserToolAvailabilityProvider { _ in .bound }
+        await server.setBrowserToolStateProvider { _ in .init(availability: .bound, references: .empty) }
             try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
         try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
         var request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)

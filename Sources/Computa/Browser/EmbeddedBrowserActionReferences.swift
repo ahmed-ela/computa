@@ -200,13 +200,41 @@ struct EmbeddedBrowserActionReferences: Sendable {
     /// publication may reuse the token, but cannot replace this frozen witness;
     /// FIFO eviction also revokes a prepared-but-not-dispatched action.
     func admits(_ prepared: Prepared, snapshot: BrowserTabSnapshot?) -> Bool {
-        guard let target = prepared.target, current[prepared.reference] == target,
-              let snapshot, snapshot.id == publishedPageID,
+        guard let target = prepared.target else { return false }
+        return currentTarget(prepared.reference, snapshot: snapshot) == target
+    }
+
+    private func currentTarget(_ reference: String, snapshot: BrowserTabSnapshot?) -> Target? {
+        guard let target = current[reference], let snapshot, snapshot.id == publishedPageID,
               snapshot.actionSelectionID == selectionID,
               snapshot.readReceipt?.sourceID == sourceID,
               target.witness.authoritySelectionID == selectionID,
-              target.witness.authoritySourceID == sourceID else { return false }
-        return true
+              target.witness.authoritySourceID == sourceID else { return nil }
+        return target
+    }
+
+    /// A synchronous catalog projection, never a capture or registry update.
+    /// Keep issuance order and original deadlines, including prior pages and
+    /// freshly corroborated exposures. Tombstones grant no offered reference.
+    func exportCurrent(snapshot: BrowserTabSnapshot?, binding: BrowserTabBinding) -> EmbeddedBrowserCurrentActionReferences {
+        guard let snapshot, snapshot.tabHandle == binding.handle,
+              binding.handle == bindingHandle, snapshot.documentEpoch == binding.documentEpoch else { return .empty }
+        var clicks = [String](), fills = [String]()
+        for reference in currentOrder {
+            guard let target = currentTarget(reference, snapshot: snapshot),
+                  target.bindingHandle == binding.handle, target.instance == binding.targetInstanceToken,
+                  target.epoch == binding.documentEpoch, target.loaderID == snapshot.loaderID,
+                  target.url == snapshot.documentURL,
+                  target.committedDocumentID == snapshot.evidenceDocument?.committedDocumentID,
+                  target.element.isEnabled else { continue }
+            do { try target.witness.checkCaptureAge() } catch { continue }
+            switch target.kind {
+            case .click where target.element.supportsPress: clicks.append(reference)
+            case .fill where target.element.supportsSetText: fills.append(reference)
+            default: continue
+            }
+        }
+        return .init(clickReferences: clicks, fillReferences: fills)
     }
 
     func prepare(taskKey: String, contextID: UUID, tool: String, arguments: [String: Any],

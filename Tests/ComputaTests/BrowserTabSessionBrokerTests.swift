@@ -2884,6 +2884,51 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(inputs, 1)
     }
 
+    func testActionReferenceExportRequiresExactCurrentPublicationAndBindingWithoutMutation() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let page = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(view: .all))
+        var registry = EmbeddedBrowserActionReferences()
+        let suffixes = registry.publish(snapshot: page.snapshot, binding: page.binding)
+        let exported = registry.exportCurrent(snapshot: page.snapshot, binding: page.binding)
+        XCTAssertTrue(exported.isValid)
+        XCTAssertFalse(exported.clickReferences.isEmpty); XCTAssertFalse(exported.fillReferences.isEmpty)
+        for token in exported.clickReferences + exported.fillReferences {
+            XCTAssertTrue(suffixes.values.contains { $0.contains(token) })
+        }
+        let before = registry.countsForTesting
+        let captures = await fixture.transport.readinessRequests()
+        for _ in 0..<3 {
+            XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: page.binding), exported)
+        }
+        XCTAssertEqual(registry.exportCurrent(snapshot: nil, binding: page.binding), .empty)
+        XCTAssertEqual(registry.exportCurrent(snapshot: fixture.observation.snapshot, binding: page.binding), .empty)
+        var otherSelection = page.snapshot
+        otherSelection.actionSelectionID = UUID()
+        XCTAssertEqual(registry.exportCurrent(snapshot: otherSelection, binding: page.binding), .empty)
+        var otherDocument = page.snapshot
+        otherDocument.evidenceDocument?.committedDocumentID = UUID()
+        XCTAssertEqual(registry.exportCurrent(snapshot: otherDocument, binding: page.binding), .empty)
+        let binding = page.binding
+        for mismatch in ["handle", "instance", "epoch"] {
+            let foreign = BrowserTabBinding(handle: mismatch == "handle" ? UUID() : binding.handle,
+                taskKey: binding.taskKey, browserGeneration: binding.browserGeneration, targetID: binding.targetID,
+                targetInstanceToken: mismatch == "instance" ? "other-incarnation" : binding.targetInstanceToken,
+                processIdentifier: binding.processIdentifier,
+                documentEpoch: mismatch == "epoch" ? UUID() : binding.documentEpoch,
+                ownership: binding.ownership, lifetime: binding.lifetime,
+                committedDocumentID: binding.committedDocumentID)
+            XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: foreign), .empty, mismatch)
+        }
+        let after = registry.countsForTesting
+        XCTAssertEqual(before.current, after.current); XCTAssertEqual(before.retired, after.retired)
+        let capturesAfter = await fixture.transport.readinessRequests()
+        XCTAssertEqual(capturesAfter, captures)
+        registry.retireCurrent()
+        XCTAssertEqual(registry.exportCurrent(snapshot: page.snapshot, binding: page.binding), .empty)
+        await fixture.assertNoInput()
+    }
+
     func testRepublishedOldestReferenceCannotBeEvictedByLaterRowsOnItsCurrentPage() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         let nodes = (0..<220).map { semanticNode($0, role: "button", name: "Control \($0)") }
@@ -2924,11 +2969,15 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         let suffixes = registry.publish(snapshot: mixed, binding: first.binding)
         XCTAssertEqual(try renderedJSONField("click_ref", in: XCTUnwrap(suffixes[0])), oldest)
         XCTAssertTrue(registry.admits(frozen, snapshot: mixed))
+        let projected = registry.exportCurrent(snapshot: mixed, binding: first.binding)
+        XCTAssertTrue(projected.clickReferences.contains(oldest))
+        XCTAssertEqual(projected.clickReferences.count, 120)
         for suffix in suffixes.values {
             let token = try renderedJSONField("click_ref", in: suffix)
             let prepared = try registry.prepare(taskKey: "task-a", contextID: contextID, tool: "browser_click",
                 arguments: ["click_ref": token], snapshot: mixed)
             XCTAssertTrue(registry.admits(prepared, snapshot: mixed))
+            XCTAssertTrue(projected.clickReferences.contains(token))
         }
         XCTAssertEqual(registry.countsForTesting.current, 120)
         // A later publication can evict that old token: republication did not
@@ -2936,6 +2985,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         mixed.presentation = .init(snapshotID: mixed.id, rows: [presentation.rows[2]])
         _ = registry.publish(snapshot: mixed, binding: first.binding)
         XCTAssertFalse(registry.admits(frozen, snapshot: mixed))
+        XCTAssertFalse(registry.exportCurrent(snapshot: mixed, binding: first.binding).clickReferences.contains(oldest))
         await fixture.assertNoInput()
     }
 

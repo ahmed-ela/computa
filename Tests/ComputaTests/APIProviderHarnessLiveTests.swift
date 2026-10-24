@@ -58,7 +58,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                 for await event in runtime.events() {
                     audit.receive(event)
                     if case .approvalRequested(let request) = event {
-                        let allowed = request.taskID == taskID && ["browser_open", "browser_navigate"].contains(request.summary)
+                        let allowed = request.taskID == taskID && ["browser_open", "browser_navigate", "browser_fill", "browser_click"].contains(request.summary)
                         if !allowed { audit.errors.append("Unexpected lifecycle fixture approval") }
                         do { try await runtime.resolveApproval(requestID: request.id, approved: allowed) }
                         catch { audit.errors.append("Lifecycle fixture approval failed"); audit.terminal = true }
@@ -66,21 +66,24 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                 }
             }
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
-            try await runtime.submit(prompt: "List and bind the existing synthetic browser tab, then open https://example.invalid/lifecycle and navigate only that task tab to https://example.invalid/lifecycle/next. List tabs once more and report the recorded lifecycle observations. Do not press or fill page controls.",
+            try await runtime.submit(prompt: "List and bind the existing synthetic browser tab, then open https://example.invalid/lifecycle and navigate only that task tab to https://example.invalid/lifecycle/next. List tabs once more, read the task page, fill Search flights with UA 123, and press Find flight once. Report the recorded synthetic observations. Leave the existing human tab unchanged.",
                 toTaskID: taskID, modelID: modelID)
             try await waitForTerminal(audit)
             XCTAssertEqual(audit.status, .completed); XCTAssertEqual(audit.errors, [])
-            XCTAssertEqual(audit.approvals, 2); XCTAssertEqual(audit.finalTexts.last, "LIFECYCLE_OBSERVED")
+            XCTAssertEqual(audit.approvals, 4); XCTAssertEqual(audit.finalTexts.last, "LIFECYCLE_OBSERVED")
             let trace = try AppServerWireTrace.load(firstTrace)
             XCTAssertEqual(trace.parseFailures, [])
             let threadID = try threadStarted(in: trace)
             let proofs = trace.messages.compactMap { ($0.object["result"] as? [String: Any])?["nativeBrowserRead"] as? String }
-            XCTAssertEqual(proofs, ["inventory_v1", "inventory_v1"], "Lifecycle operations must never acquire successful-read ledger proof")
+            XCTAssertEqual(proofs, ["inventory_v1", "inventory_v1", "read_v1"], "Lifecycle/input operations must never acquire successful-read ledger proof")
             let firstReceipt = await inference.receipt()
-            XCTAssertEqual(firstReceipt.ordinaryRequests, 6)
-            XCTAssertEqual(firstReceipt.maintenanceRequests, 4, "Existing auto-compaction must actually execute after the synthetic usage reports")
+            XCTAssertEqual(firstReceipt.ordinaryRequests, 9)
+            XCTAssertEqual(firstReceipt.maintenanceRequests, 5, "Existing auto-compaction must actually execute after lifecycle and input usage reports")
             XCTAssertEqual(firstReceipt.completeKinds, Set(["bind", "open", "navigate"]))
-            XCTAssertEqual(firstReceipt.latestChecksAfterCompaction, 4)
+            XCTAssertEqual(firstReceipt.latestChecksAfterCompaction, 5)
+            XCTAssertEqual(firstReceipt.currentReferenceChecks, 7)
+            XCTAssertEqual(firstReceipt.unboundActionChecks, 2)
+            XCTAssertEqual(firstReceipt.consumedReferenceChecks, 2)
             XCTAssertEqual(firstReceipt.failures, [])
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
@@ -102,11 +105,12 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(resumedAudit.status, .completed); XCTAssertEqual(resumedAudit.errors, [])
             XCTAssertEqual(resumedAudit.approvals, 0); XCTAssertEqual(resumedAudit.finalTexts.last, "LIFECYCLE_OBSERVED")
             let finalReceipt = await inference.receipt()
-            XCTAssertEqual(finalReceipt.ordinaryRequests, 7); XCTAssertEqual(finalReceipt.maintenanceRequests, 4)
+            XCTAssertEqual(finalReceipt.ordinaryRequests, 10); XCTAssertEqual(finalReceipt.maintenanceRequests, 5)
+            XCTAssertEqual(finalReceipt.unboundActionChecks, 3, "Cold resume must not reoffer historical action references")
             XCTAssertTrue(finalReceipt.coldResumePreserved); XCTAssertEqual(finalReceipt.failures, [])
             let counts = await backend.counts()
             XCTAssertEqual(counts.inventories, 2); XCTAssertEqual(counts.created, 1)
-            XCTAssertEqual(counts.navigations, 1); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            XCTAssertEqual(counts.navigations, 1); XCTAssertEqual(counts.presses, 1); XCTAssertEqual(counts.fills, 1)
             XCTAssertEqual(counts.ownedClosed, 1); XCTAssertEqual(counts.activations, 0)
             XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
             let stopped = await resumed.shutdown()
@@ -123,7 +127,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                     if let ledger = object["native_completed_reads"] {
                         let bytes = try JSONSerialization.data(withJSONObject: ledger, options: [.sortedKeys])
                         let text = String(decoding: bytes, as: UTF8.self)
-                        for id in ["lifecycle-bind", "lifecycle-open", "lifecycle-navigate"] {
+                        for id in ["lifecycle-bind", "lifecycle-open", "lifecycle-navigate", "lifecycle-fill", "lifecycle-click"] {
                             XCTAssertFalse(text.contains(id), "A lifecycle call must remain a genuine ordinary call/output pair")
                         }
                     }
@@ -140,7 +144,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                     try inspect(JSONSerialization.jsonObject(with: Data(line)))
                 }
             }
-            XCTAssertGreaterThan(rolloutCount, 0); XCTAssertGreaterThanOrEqual(compactedRecords, 4)
+            XCTAssertGreaterThan(rolloutCount, 0); XCTAssertGreaterThanOrEqual(compactedRecords, 5)
             guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Lifecycle compaction/cold-resume invariants failed.") }
             await upstream.stop()
             try FileManager.default.removeItem(at: root)
@@ -1360,6 +1364,9 @@ private actor APIHarnessBrowserLifecycleInference {
         var maintenanceRequests = 0
         var completeKinds = Set<String>()
         var latestChecksAfterCompaction = 0
+        var currentReferenceChecks = 0
+        var unboundActionChecks = 0
+        var consumedReferenceChecks = 0
         var coldResumePreserved = false
         var failures = [String]()
     }
@@ -1367,6 +1374,9 @@ private actor APIHarnessBrowserLifecycleInference {
     private var observations = Receipt()
     private var calls = [String: (name: String, arguments: String)]()
     private var completeOutputs = [String: String]()
+    private var inputOutputs = [String: String]()
+    private var currentReferences = [String: Set<String>]()
+    private var actionAliases = [String: String]()
     private let marker = #"{"retention":"complete_browser_observation_v1"}"#
     init(expectedKey: String) { self.expectedKey = expectedKey }
     func receipt() -> Receipt { observations }
@@ -1390,15 +1400,63 @@ private actor APIHarnessBrowserLifecycleInference {
             func cue(_ kind: String) -> String {
                 "{\"completed\":true,\"kind\":\"\(kind)\",\"outcome\":\"unverified\"}"
             }
+            func offered(_ nativeName: String) -> [[String: Any]] {
+                tools.compactMap { $0["function"] as? [String: Any] }.filter {
+                    $0["name"] as? String == nativeName
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
+                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
+                }
+            }
+            func verifyUnbound() throws {
+                for name in ["browser_read", "browser_continue", "browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_close"] {
+                    guard offered(name).isEmpty else { throw APIHarnessFailure("lifecycle_unbound_action_offered") }
+                }
+                guard ["browser_tabs", "browser_open", "browser_bind"].allSatisfy({ offered($0).count == 1 }) else {
+                    throw APIHarnessFailure("lifecycle_binding_tools_missing")
+                }
+                observations.unboundActionChecks += 1
+            }
+            func verifyReferences(_ page: String, consumed: Bool = false) throws {
+                var published = [String: Set<String>]()
+                for (kind, field) in [("click", "click_ref"), ("fill", "fill_ref")] {
+                    let pattern = try NSRegularExpression(pattern: #"\b"# + field + #"="([^"]+)""#)
+                    let ns = page as NSString
+                    let tokens = Set(pattern.matches(in: page, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) })
+                    let definitions = offered("browser_" + kind)
+                    guard !tokens.isEmpty, definitions.count == 1, let name = definitions[0]["name"] as? String,
+                          let schema = definitions[0]["parameters"] as? [String: Any],
+                          let properties = schema["properties"] as? [String: [String: Any]],
+                          let values = properties[field]?["enum"] as? [String],
+                          values.count == Set(values).count, Set(values) == tokens else {
+                        throw APIHarnessFailure("lifecycle_current_reference_enum_not_exact")
+                    }
+                    if let previous = actionAliases[kind], previous != name { throw APIHarnessFailure("lifecycle_action_alias_changed") }
+                    actionAliases[kind] = name
+                    if consumed, let previous = currentReferences[kind], !previous.isDisjoint(with: tokens) {
+                        throw APIHarnessFailure("lifecycle_consumed_reference_reoffered")
+                    }
+                    published[kind] = tokens
+                }
+                currentReferences = published
+                observations.currentReferenceChecks += 1
+                if consumed { observations.consumedReferenceChecks += 1 }
+            }
             func verifyIdentities() throws {
                 let allCalls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
-                for (id, expected) in calls where id != "lifecycle-inventory-first" && id != "lifecycle-inventory-last" {
+                for (id, expected) in calls where !["lifecycle-inventory-first", "lifecycle-inventory-last", "lifecycle-read"].contains(id) {
                     let found = allCalls.filter { $0["id"] as? String == id }
                     guard found.count == 1, let function = found[0]["function"] as? [String: Any],
                           function["name"] as? String == expected.name,
                           function["arguments"] as? String == expected.arguments else { throw APIHarnessFailure("lifecycle_call_identity_changed") }
                     let kind = String(id.dropFirst("lifecycle-".count))
-                    guard try output(id).contains(cue(kind)) else { throw APIHarnessFailure("lifecycle_completion_cue_lost") }
+                    if ["bind", "open", "navigate"].contains(kind) {
+                        guard try output(id).contains(cue(kind)) else { throw APIHarnessFailure("lifecycle_completion_cue_lost") }
+                    } else {
+                        let text = try output(id)
+                        guard text.contains("\"dispatched\":true"), text.contains("\"kind\":\"\(kind)\"") else {
+                            throw APIHarnessFailure("lifecycle_input_dispatch_cue_lost")
+                        }
+                    }
                 }
             }
             func verifyComplete(_ kind: String, save: Bool) throws {
@@ -1431,13 +1489,30 @@ private actor APIHarnessBrowserLifecycleInference {
                 } else {
                     guard let previous = completeOutputs[kind], Data(previous.utf8) == Data(text.utf8) else { throw APIHarnessFailure("lifecycle_latest_page_not_atomic") }
                 }
+                if !maintenance { try verifyReferences(page) }
+            }
+            func verifyInput(_ kind: String, save: Bool, consumed: Bool = false) throws {
+                let text = try output("lifecycle-" + kind)
+                guard text.hasPrefix(marker) else { throw APIHarnessFailure("lifecycle_input_marker_lost") }
+                let rest = text.dropFirst(marker.count)
+                // This fixture's closed dispatch cue has a simple literal label.
+                guard let end = rest.firstIndex(of: "}"),
+                      let dispatch = try JSONSerialization.jsonObject(with: Data(rest[...end].utf8)) as? [String: Any],
+                      dispatch["kind"] as? String == kind, dispatch["dispatched"] as? Bool == true,
+                      dispatch["outcome"] as? String == "unverified",
+                      let body = try JSONSerialization.jsonObject(with: Data(rest[rest.index(after: end)...].utf8)) as? [String: Any],
+                      body["input_kind"] as? String == kind, body["no_replay"] as? Bool == true,
+                      body["result_verified"] as? Bool == false,
+                      let current = body["current_observation"] as? [String: Any], current["status"] as? String == "available",
+                      let page = current["text"] as? String,
+                      text.utf8.count <= BrowserCompleteObservation.maximumTextBytes else { throw APIHarnessFailure("lifecycle_input_observation_shape") }
+                guard page.contains(kind == "fill" ? "UA 123" : "UA 123 departs at 14:35") else { throw APIHarnessFailure("lifecycle_input_result_missing") }
+                if save { inputOutputs[kind] = text }
+                else if inputOutputs[kind].map({ Data($0.utf8) }) != Data(text.utf8) { throw APIHarnessFailure("lifecycle_input_page_not_atomic") }
+                if !maintenance, observations.ordinaryRequests != 10 { try verifyReferences(page, consumed: consumed) }
             }
             func call(_ nativeName: String, id: String, arguments: [String: Any]) throws -> [String: Any] {
-                let found = tools.compactMap { $0["function"] as? [String: Any] }.filter {
-                    $0["name"] as? String == nativeName
-                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: \(nativeName).\n")
-                        || ($0["description"] as? String ?? "").hasPrefix("Native tool: functions.\(nativeName).\n")
-                }
+                let found = offered(nativeName)
                 guard found.count == 1, let name = found[0]["name"] as? String else { throw APIHarnessFailure("lifecycle_tool_not_registered") }
                 let raw = String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]), as: UTF8.self)
                 calls[id] = (name, raw)
@@ -1449,17 +1524,20 @@ private actor APIHarnessBrowserLifecycleInference {
             if maintenance {
                 observations.maintenanceRequests += 1
                 let expected = observations.maintenanceRequests
-                guard (1...4).contains(expected), observations.ordinaryRequests == expected + 1 else { throw APIHarnessFailure("lifecycle_unexpected_compaction") }
+                guard (1...5).contains(expected), observations.ordinaryRequests == (expected == 5 ? 7 : expected + 1) else { throw APIHarnessFailure("lifecycle_unexpected_compaction") }
                 try verifyIdentities()
-                try verifyComplete(expected == 1 ? "bind" : expected == 2 ? "open" : "navigate", save: true)
-                delta = ["role": "assistant", "content": "Historical notes: the requested browser lifecycle operations are recorded in genuine tool receipts. No page controls were pressed or filled."]
+                if expected == 5 { try verifyInput("fill", save: true) }
+                else { try verifyComplete(expected == 1 ? "bind" : expected == 2 ? "open" : "navigate", save: true) }
+                delta = ["role": "assistant", "content": "Historical notes: genuine receipts record the browser operations. Preserve their exact outcomes and the current task; do not replay inputs."]
                 finish = "stop"
             } else {
                 observations.ordinaryRequests += 1
                 switch observations.ordinaryRequests {
                 case 1:
+                    try verifyUnbound()
                     delta = try call("browser_tabs", id: "lifecycle-inventory-first", arguments: [:]); finish = "tool_calls"
                 case 2:
+                    try verifyUnbound()
                     guard try output("lifecycle-inventory-first").contains(InertRuntimeBrowser.humanID) else { throw APIHarnessFailure("lifecycle_inventory") }
                     delta = try call("browser_bind", id: "lifecycle-bind", arguments: ["tab_id": InertRuntimeBrowser.humanID]); finish = "tool_calls"; highUsage = true
                 case 3...6:
@@ -1476,11 +1554,32 @@ private actor APIHarnessBrowserLifecycleInference {
                         delta = try call("browser_tabs", id: "lifecycle-inventory-last", arguments: [:]); finish = "tool_calls"; highUsage = true
                     default:
                         _ = try output("lifecycle-inventory-last")
-                        delta = ["role": "assistant", "content": "LIFECYCLE_OBSERVED"]; finish = "stop"
+                        delta = try call("browser_read", id: "lifecycle-read", arguments: ["view": "all"]); finish = "tool_calls"
                     }
                 case 7:
-                    try verifyIdentities(); try verifyComplete("navigate", save: false)
-                    guard observations.maintenanceRequests == 4 else { throw APIHarnessFailure("lifecycle_cold_resume_replayed") }
+                    try verifyIdentities()
+                    let text = try output("lifecycle-read")
+                    guard text.hasPrefix(marker) else { throw APIHarnessFailure("lifecycle_read_marker_lost") }
+                    try verifyReferences(String(text.dropFirst(marker.count)))
+                    guard let references = currentReferences["fill"], references.count == 1, let reference = references.first else {
+                        throw APIHarnessFailure("lifecycle_fill_target_not_unique")
+                    }
+                    delta = try call("browser_fill", id: "lifecycle-fill", arguments: ["fill_ref": reference, "text": "UA 123"])
+                    finish = "tool_calls"; highUsage = true
+                case 8:
+                    guard observations.maintenanceRequests == 5 else { throw APIHarnessFailure("lifecycle_input_compaction_missing") }
+                    try verifyIdentities(); try verifyInput("fill", save: false, consumed: true)
+                    observations.latestChecksAfterCompaction += 1
+                    guard let references = currentReferences["click"], references.count == 1, let reference = references.first else {
+                        throw APIHarnessFailure("lifecycle_click_target_not_unique")
+                    }
+                    delta = try call("browser_click", id: "lifecycle-click", arguments: ["click_ref": reference]); finish = "tool_calls"
+                case 9:
+                    try verifyIdentities(); try verifyInput("click", save: true, consumed: true)
+                    delta = ["role": "assistant", "content": "LIFECYCLE_OBSERVED"]; finish = "stop"
+                case 10:
+                    try verifyIdentities(); try verifyInput("click", save: false); try verifyUnbound()
+                    guard observations.maintenanceRequests == 5 else { throw APIHarnessFailure("lifecycle_cold_resume_replayed") }
                     observations.coldResumePreserved = true
                     delta = ["role": "assistant", "content": "LIFECYCLE_OBSERVED"]; finish = "stop"
                 default: throw APIHarnessFailure("lifecycle_unexpected_replay")
