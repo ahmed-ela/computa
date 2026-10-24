@@ -40,6 +40,7 @@ import OSLog
         let cookies: [HTTPCookie]
         let eligibleCookieCount: Int
         let excludedConversationCookieCount: Int
+        let ignoredOutOfScopeDuplicateCount: Int
     }
     enum Failure: Error, LocalizedError, Equatable {
         case unavailable, bounds, invalidSource, destinationNotEmpty, verificationFailed, deadline
@@ -212,6 +213,7 @@ import OSLog
             receive(ticket) {
                 diagnosticPhase = .sourceSelection; sourceCount = cookies.count
                 let selection = try Self.select(cookies, now: Date(), onFailure: { self.selectionFailure = $0 })
+                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount)")
                 selected = selection.cookies
                 selectionCounts = Summary(sourceCookieCount: cookies.count, eligibleCookieCount: selection.eligibleCookieCount,
                     excludedConversationCookieCount: selection.excludedConversationCookieCount, seededCookieCount: selected.count,
@@ -301,7 +303,7 @@ import OSLog
     /// guessed: all other eligible ChatGPT cookies retain their exact objects.
     static func select(_ cookies: [HTTPCookie], now: Date, onFailure: ((FailureDiagnostic) -> Void)? = nil) throws -> Selection {
         var bytes = 0, identities = Set<Data>(), selected: [HTTPCookie] = []
-        var eligible = 0, excluded = 0
+        var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0
         func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason) -> Failure {
             onFailure?(FailureDiagnostic(phase: .sourceSelection, code: FailureDiagnostic.code(for: failure), reason: reason,
                 sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes))
@@ -318,15 +320,22 @@ import OSLog
             }
             guard !cookie.domain.contains("\0"), !cookie.path.contains("\0"), !cookie.name.contains("\0"),
                   cookie.properties != nil else { throw reject(.invalidSource, .invalidFields) }
+            var host = cookie.domain.lowercased()
+            if host.hasPrefix(".") { host.removeFirst() }
+            let inScope = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
             let identity = Data((cookie.domain + "\0" + cookie.path + "\0" + cookie.name).utf8)
-            guard identities.insert(identity).inserted else { throw reject(.invalidSource, .duplicateIdentity) }
+            if !identities.insert(identity).inserted {
+                // The shared source contains unrelated websites. Their identity
+                // ambiguity cannot affect this fresh ChatGPT-only destination.
+                // Keep in-scope rejection before expiry, as in the original policy.
+                guard !inScope else { throw reject(.invalidSource, .duplicateIdentity) }
+                ignoredOutOfScopeDuplicates += 1
+            }
             if let expiry = cookie.expiresDate {
                 guard expiry.timeIntervalSince1970.isFinite else { throw reject(.invalidSource, .nonfiniteExpiry) }
                 if expiry <= now { continue }
             }
-            var host = cookie.domain.lowercased()
-            if host.hasPrefix(".") { host.removeFirst() }
-            guard host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") else { continue }
+            guard inScope else { continue }
             let labels = host.split(separator: ".", omittingEmptySubsequences: false)
             guard host.utf8.count <= 253, labels.allSatisfy({ label in
                 !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
@@ -342,7 +351,8 @@ import OSLog
             guard selected.count < 512 else { throw reject(.bounds, .selectedCount) }
             selected.append(cookie)
         }
-        return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded)
+        return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded,
+            ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates)
     }
 }
 

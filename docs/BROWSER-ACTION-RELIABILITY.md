@@ -2124,3 +2124,25 @@ sources were unchanged. The 155 distinct tests have passing latest results, not
 a full rerun after the fixture correction. Independent production review found
 no blocker. Private receipts: `swift255-startup`, `swift255-cookie-refinement`
 and `swift255-latest-results`.
+
+### Build 256: scope cookie identity checks to the destination
+
+Installed build 255 localized the prewarm failure to `source_selection`,
+`invalid_source`, `duplicate_identity`: 354 source cookies, no selected cookies
+and no destination writes. No prompt was submitted in this diagnostic. The
+selector checked identity ambiguity across every website before filtering for
+ChatGPT, although only ChatGPT cookies can enter the isolated destination.
+
+Build 256 makes duplicate identities from unrelated sites nonfatal and records
+only their bounded count. ChatGPT duplicates, including expired and excluded
+conversation cookies, still fail before expiry filtering. All global field/count/
+byte limits, malformed-field checks, original-object copying, source immutability
+and exact destination readback remain unchanged. This fixes a concrete scope
+defect; causal attribution to the live profile requires a positive ignored-
+duplicate count followed by separately verified destination seeding.
+
+All 45 cookie tests passed with unchanged sources, including three new scoped
+regressions and the existing failure/cancellation/readback coverage. Independent
+review found no blocker. Private receipt: `swift256-cookie-scope-result.json`.
+ChatGPT task qualification and live startup verification remain pending at this
+source checkpoint. Cerebras HTTP 402 remains a separate account-access blocker.
