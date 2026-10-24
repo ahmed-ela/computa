@@ -1300,6 +1300,8 @@ private extension CodexAppServerRuntime {
         private var commandItemTurns: [AgentTask.ID: [String: String]] = [:]
         private var ownedCommandProcesses: [AgentTask.ID: [String: String]] = [:]
         private var commandCleanupTasks: Set<AgentTask.ID> = []
+        private var terminalCommandCleanups: [AgentTask.ID: (id: UUID, task: Task<[String], Never>)] = [:]
+        private var commandCleanupWaiters: [AgentTask.ID: [AsyncStream<[String]>.Continuation]] = [:]
         private var completedReasoningItems: [AgentTask.ID: Set<String>] = [:]
         private var compactionTracker = AppServerCompactionTracker()
         private var compactionProgress = AppServerCompactionProgressGuard()
@@ -1736,6 +1738,7 @@ private extension CodexAppServerRuntime {
         private func prepareCommandShutdown() async {
             for cleanup in Array(manualWebCleanupTasks.values) { _ = await cleanup.value }
             let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            for cleanup in Array(terminalCommandCleanups.values) { _ = await cleanup.task.value }
             let taskIDs = Set(ownedCommandItems.keys).union(threadForTask.keys.filter { turnIdentity.activeTurnID(for: $0) != nil })
             for taskID in taskIDs.sorted() {
                 guard let threadID = threadForTask[taskID] else { continue }
@@ -2532,19 +2535,22 @@ private extension CodexAppServerRuntime {
         }
 
         private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool,
-                                           cleanupCause: WebModelCleanupCause = .cancelled) {
+                                           cleanupCause: WebModelCleanupCause = .cancelled,
+                                           failedCommandTurnID: String? = nil) {
             let generation = serverGeneration
             let turnID = turnIdentity.latestTurnID(for: taskID)
             let submission = latestSubmissionClaims[taskID]
             let browserCleanup = embeddedBrowserTaskCleanups[taskID].flatMap { $0.turnID == turnID ? $0.task : nil }
             let inferenceCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled, cleanupCause: cleanupCause)
-            guard browserCleanup != nil || inferenceCleanup != nil else {
+            let commandCleanup = failedCommandTurnID.flatMap { scheduleTerminalCommandCleanup(taskID: taskID, turnID: $0) }
+            guard browserCleanup != nil || inferenceCleanup != nil || commandCleanup != nil else {
                 events.yield(.taskStatusChanged(taskID: taskID, status: status))
                 return
             }
             Task {
                 var issues = await browserCleanup?.value ?? []
                 issues += await inferenceCleanup?.value ?? []
+                issues += await commandCleanup?.value ?? []
                 guard generation == serverGeneration,
                       submission == latestSubmissionClaims[taskID],
                       turnIdentity.latestTurnID(for: taskID) == turnID else { return }
@@ -2774,6 +2780,9 @@ private extension CodexAppServerRuntime {
         }
 
         func compact(taskID: AgentTask.ID) async throws {
+            guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
+                throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
+            }
             guard !isConfiguringAPIProviders else {
                 throw RuntimeError.serverError("Wait for API provider configuration to finish.")
             }
@@ -2845,6 +2854,11 @@ private extension CodexAppServerRuntime {
         }
 
         func interrupt(taskID: AgentTask.ID, acknowledgmentTimeout: Duration? = nil) async throws {
+            if let cleanup = terminalCommandCleanups[taskID] {
+                let issues = await cleanup.task.value
+                if !issues.isEmpty { throw RuntimeError.serverError(issues.joined(separator: "; ")) }
+                return
+            }
             let webCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             if let claim = turnSubmissionClaims[taskID] { cancelledSubmissions.insert(claim) }
             if inferenceSelectionTaskID == taskID { inferenceSelectionTask?.cancel() }
@@ -2853,13 +2867,15 @@ private extension CodexAppServerRuntime {
             if let threadID = threadForTask[taskID], turnIdentity.activeTurnID(for: taskID) == nil,
                !(ownedCommandItems[taskID] ?? []).isEmpty {
                 commandCleanupTasks.insert(taskID)
-                defer { commandCleanupTasks.remove(taskID) }
+                var commandCleanupIssues: [String] = []
+                defer { finishCommandCleanup(taskID: taskID, issues: commandCleanupIssues) }
                 finishCommandPresentation(taskID: taskID, reason: "Interrupted; final exit status unconfirmed", interrupted: true)
                 do {
                     let count = try await terminateOwnedCommandSessions(taskID: taskID, threadID: threadID, turnID: "completed-turn")
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
                         title: "Command cleanup", body: "The engine confirmed cleanup of \(count) task-owned command session(s); none of those owned sessions remain listed. This does not verify command success.")))
                 } catch {
+                    commandCleanupIssues = [error.localizedDescription]
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
                         title: "Command cleanup unconfirmed", body: "Background command cleanup could not be confirmed. " + error.localizedDescription)))
                     throw error
@@ -2874,7 +2890,8 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.serverError("This task has no active turn to stop.")
             }
             commandCleanupTasks.insert(taskID)
-            defer { commandCleanupTasks.remove(taskID) }
+            var commandCleanupIssues: [String] = []
+            defer { finishCommandCleanup(taskID: taskID, issues: commandCleanupIssues) }
             commandStoppedTurns[taskID] = turnID
             finishCommandPresentation(taskID: taskID, reason: "Interrupted; final exit status unconfirmed", interrupted: true)
             // Revocation precedes both the RPC and every cleanup await.
@@ -2896,6 +2913,7 @@ private extension CodexAppServerRuntime {
                             title: "Command cleanup", body: "The engine confirmed termination of \(count) task-owned command session(s); none of those owned sessions remain listed. This does not verify command success.")))
                     }
                 } catch {
+                    commandCleanupIssues = [error.localizedDescription]
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
                         title: "Command cleanup unconfirmed", body: "The turn was interrupted, but its background command cleanup could not be confirmed. " + error.localizedDescription)))
                     throw error
@@ -2904,14 +2922,75 @@ private extension CodexAppServerRuntime {
             if let interruptFailure, turnIdentity.activeTurnID(for: taskID) != nil { throw interruptFailure }
         }
 
+        private func finishCommandCleanup(taskID: AgentTask.ID, issues: [String] = []) {
+            commandCleanupTasks.remove(taskID)
+            for waiter in commandCleanupWaiters.removeValue(forKey: taskID) ?? [] {
+                waiter.yield(issues)
+                waiter.finish()
+            }
+        }
+
+        /// A failed native turn cannot leave its exec_command sessions running
+        /// behind an idle UI. Successful earlier turns retain their own sessions.
+        private func scheduleTerminalCommandCleanup(taskID: AgentTask.ID, turnID: String) -> Task<[String], Never>? {
+            if let existing = terminalCommandCleanups[taskID] { return existing.task }
+            guard let threadID = threadForTask[taskID] else { return nil }
+            // Explicit Stop already owns the same bounded cleanup. Wait for its
+            // result/presentation rather than terminating the same session twice.
+            if commandCleanupTasks.contains(taskID) {
+                let result = AsyncStream<[String]>.makeStream(bufferingPolicy: .bufferingNewest(1))
+                commandCleanupWaiters[taskID, default: []].append(result.continuation)
+                return Task {
+                    for await issues in result.stream { return issues }
+                    return ["Command cleanup ended without a confirmed result."]
+                }
+            }
+            let items = Set((ownedCommandItems[taskID] ?? []).filter { commandItemTurns[taskID]?[$0] == turnID })
+            guard !items.isEmpty else { return nil }
+            let id = UUID(), generation = serverGeneration
+            let submission = latestSubmissionClaims[taskID]
+            commandCleanupTasks.insert(taskID)
+            commandStoppedTurns[taskID] = turnID
+            let cleanup = Task<[String], Never> {
+                defer {
+                    if terminalCommandCleanups[taskID]?.id == id {
+                        terminalCommandCleanups.removeValue(forKey: taskID)
+                        finishCommandCleanup(taskID: taskID)
+                    }
+                }
+                do {
+                    let count = try await terminateOwnedCommandSessions(taskID: taskID, threadID: threadID,
+                        turnID: turnID, ownedItemIDs: items)
+                    guard generation == serverGeneration, submission == latestSubmissionClaims[taskID],
+                          turnIdentity.latestTurnID(for: taskID) == turnID else { throw CancellationError() }
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                        title: "Command cleanup", body: "The engine confirmed cleanup of \(count) failed-turn command session(s); none of those owned sessions remain listed. This does not verify command success.")))
+                    return []
+                } catch {
+                    let message = "Failed-turn command cleanup could not be confirmed. " + error.localizedDescription
+                    if generation == serverGeneration, submission == latestSubmissionClaims[taskID],
+                       turnIdentity.latestTurnID(for: taskID) == turnID {
+                        events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                            title: "Command cleanup unconfirmed", body: message)))
+                    }
+                    return [message]
+                }
+            }
+            terminalCommandCleanups[taskID] = (id, cleanup)
+            return cleanup
+        }
+
         private func terminateOwnedCommandSessions(taskID: AgentTask.ID, threadID: String, turnID: String,
+                                                   ownedItemIDs: Set<String>? = nil,
                                                    budgetDeadline: ContinuousClock.Instant? = nil) async throws -> Int {
             let generation = serverGeneration
             let deadline = budgetDeadline ?? ContinuousClock.now.advanced(by: .seconds(10))
-            let ownedItems = ownedCommandItems[taskID] ?? []
+            let taskOwnedItems = ownedCommandItems[taskID] ?? []
+            let ownedItems = taskOwnedItems.intersection(ownedItemIDs ?? taskOwnedItems)
             let expectedProcesses = ownedCommandProcesses[taskID] ?? [:]
             guard !ownedItems.isEmpty else { return 0 }
             func validate() throws {
+                try Task.checkCancellation()
                 guard generation == serverGeneration, !isShuttingDown,
                       threadForTask[taskID] == threadID,
                       turnIdentity.activeTurnID(for: taskID) == nil || turnIdentity.activeTurnID(for: taskID) == turnID,
@@ -3330,6 +3409,7 @@ private extension CodexAppServerRuntime {
                 let wasContextStopped = contextStoppedTurns[taskID] == turn?["id"] as? String
                 let wasNativeStopped = nativeStoppedTurns[taskID] == turn?["id"] as? String
                 var completionStatus: TaskStatus = wasContextStopped || wasNativeStopped ? .waiting : AppServerTurnCompletionContract.status(for: turn)
+                let commandTurnFailed = completionStatus != .completed
                 if completionStatus == .waiting, let turnID = turn?["id"] as? String {
                     let rawMessage = (turn?["error"] as? [String: Any])?["message"] as? String
                     let savedMessage = rawMessage.flatMap { !$0.isEmpty && $0.utf8.count <= 8_192 ? $0 : nil }
@@ -3382,7 +3462,8 @@ private extension CodexAppServerRuntime {
                 publishTerminalStatus(taskID: taskID, status: completionStatus,
                     cancelled: completionStatus != .completed,
                     cleanupCause: AppServerTurnCompletionContract.cleanupCause(for: turn,
-                        wasNativeStopped: wasNativeStopped, wasContextStopped: wasContextStopped))
+                        wasNativeStopped: wasNativeStopped, wasContextStopped: wasContextStopped),
+                    failedCommandTurnID: commandTurnFailed ? turn?["id"] as? String : nil)
 
             case "thread/tokenUsage/updated":
                 if observeResumingContext(taskID: taskID, params: params) { return }
@@ -3689,7 +3770,7 @@ private extension CodexAppServerRuntime {
                 publishAgentError(taskID: taskID, turnID: failedTurnID, message: message)
                 publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true,
                     cleanupCause: nativeStoppedTurns[taskID] == failedTurnID || contextStoppedTurns[taskID] == failedTurnID
-                        ? .cancelled : .failedTurn)
+                        ? .cancelled : .failedTurn, failedCommandTurnID: failedTurnID)
 
             default:
                 break
@@ -7929,7 +8010,16 @@ private extension CodexAppServerRuntime {
                 finishCommandPresentation(taskID: taskID, reason: "Runtime disconnected; final exit status unconfirmed", interrupted: true)
             }
             commandStoppedTurns.removeAll()
+            for cleanup in terminalCommandCleanups.values { cleanup.task.cancel() }
+            terminalCommandCleanups.removeAll()
             commandCleanupTasks.removeAll()
+            for waiters in commandCleanupWaiters.values {
+                for waiter in waiters {
+                    waiter.yield(["Runtime disconnected; command cleanup is unconfirmed."])
+                    waiter.finish()
+                }
+            }
+            commandCleanupWaiters.removeAll()
             tasksWithCommands.removeAll()
             if !isPreparingCommandShutdown {
                 for taskID in ownedCommandItems.keys.sorted() {

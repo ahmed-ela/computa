@@ -291,12 +291,6 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 body["tools"] = kind == "compaction" ? [Any]() : [["type": "function", "name": "browser_read", "parameters": try XCTUnwrap(read["inputSchema"])]]
                 body["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: indices, texts: texts, kind: kind)
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let selection = try XCTUnwrap(APIProviderCatalog.selection(for: XCTUnwrap(body["model"] as? String), providers: [p]))
-                let unchanged = try APIModelResponseCodec.prepare(XCTUnwrap(request.httpBody), selection: selection,
-                    threadID: thread, capsules: .init(key: Data(repeating: 1, count: 32)), browserToolAvailability: .bound)
-                let unchangedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: unchanged.body) as? [String: Any])
-                let historyKey = wire == .chatCompletions ? "messages" : "input"
-                let unchangedHistory = try XCTUnwrap(unchangedBody[historyKey] as? [[String: Any]])
                 let count = await records.count()
                 let (_, response) = try await URLSession.shared.data(for: request)
                 XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
@@ -306,28 +300,19 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 XCTAssertNil(forwarded["client_metadata"])
                 XCTAssertFalse(String(decoding: actual.body, as: UTF8.self).contains("current_user_text_v1"))
                 XCTAssertFalse(String(decoding: actual.body, as: UTF8.self).contains("sha256"))
-                let actualHistory = try XCTUnwrap(forwarded[historyKey] as? [[String: Any]])
-                let retainedPrefix = kind == "compaction" ? Array(unchangedHistory.dropLast()) : unchangedHistory
-                XCTAssertEqual(Array(actualHistory.prefix(retainedPrefix.count)) as NSArray, retainedPrefix as NSArray,
-                    "Reminder projection must preserve the entire original translated history; maintenance alone keeps its existing final-tail placement")
-                return actualHistory
+                return try XCTUnwrap(forwarded[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
             }
             func text(_ message: [String: Any]) -> String? {
                 message["content"] as? String ?? (message["content"] as? [[String: Any]])?.first?["text"] as? String
             }
             func assertOrdinary(_ messages: [[String: Any]], expected: [String], lastCall: String) throws {
-                let hostIndex = messages.count - expected.count - 1
-                XCTAssertEqual(messages[hostIndex]["role"] as? String, "developer")
-                let host = try XCTUnwrap(text(messages[hostIndex]))
+                XCTAssertEqual(messages.last?["role"] as? String, "developer")
+                let host = try XCTUnwrap(messages.last.flatMap(text))
                 XCTAssertTrue(host.contains("APP_RUNTIME_EXECUTION_CHECKPOINT")); XCTAssertTrue(host.contains("Fixed native policy."))
-                XCTAssertTrue(host.contains("following user messages repeat")); XCTAssertTrue(host.contains("not a new turn"))
-                XCTAssertTrue(host.contains("Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical."))
-                XCTAssertFalse(host.contains(original))
-                XCTAssertTrue(messages.suffix(expected.count).allSatisfy { $0["role"] as? String == "user" })
-                XCTAssertEqual(messages.suffix(expected.count).compactMap(text).map { Data($0.utf8) }, expected.map { Data($0.utf8) })
+                XCTAssertFalse(host.contains("following user messages repeat")); XCTAssertFalse(host.contains(original))
                 XCTAssertEqual(messages.filter { $0["role"] as? String == "user" }.compactMap(text).map { Data($0.utf8) },
-                    (["Earlier ongoing user restriction."] + expected + expected).map { Data($0.utf8) })
-                let lastEvidence = messages[hostIndex - 1]
+                    (["Earlier ongoing user restriction."] + expected).map { Data($0.utf8) })
+                let lastEvidence = messages[messages.count - 2]
                 XCTAssertEqual(lastEvidence[wire == .chatCompletions ? "tool_call_id" : "call_id"] as? String, lastCall)
                 XCTAssertEqual(lastEvidence[wire == .chatCompletions ? "role" : "type"] as? String,
                     wire == .chatCompletions ? "tool" : "function_call_output")
@@ -357,127 +342,14 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(logs.count, requestCount, "One content-free projection record per admitted dispatch")
             XCTAssertEqual(logs.map { $0.components(separatedBy: " reason=").last! },
                 ["matched", "invalid_proof", "matched", "invalid_proof", "matched", "ineligible_kind"])
-            XCTAssertTrue(logs[0].contains("proof_accepted=true reminders_omitted=false input_count=1 reminder_count=1"))
-            XCTAssertTrue(logs[4].contains("proof_accepted=true reminders_omitted=false input_count=3 reminder_count=3"))
+            XCTAssertTrue(logs[0].contains("proof_accepted=true reminders_omitted=true input_count=1 reminder_count=0"))
+            XCTAssertTrue(logs[4].contains("proof_accepted=true reminders_omitted=true input_count=3 reminder_count=0"))
             XCTAssertTrue(logs[5].contains("proof_accepted=false reminders_omitted=false input_count=3 reminder_count=3"))
             for log in logs {
                 XCTAssertLessThan(log.utf8.count, 180)
                 for privateValue in [original, steer, thread, turn, task, "fixture-secret", "sha256", "current_user_text_v1"] {
                     XCTAssertFalse(log.contains(privateValue))
                 }
-            }
-            await server.shutdown()
-        }
-    }
-    func testFollowupGuidancePreservesUserTopicAndExplicitDestinationChangesOnBothWires() async throws {
-        let reminderPolicy = "The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical. A maintenance prompt or historical summary does not replace this active request."
-        let prior = "In my work mailbox for account fixture-account, inspect course Alpha. Keep all actions read-only."
-        let requests = ["  What about course Be\u{301}ta announcements?  ",
-            "Use the public catalog at https://catalog.example.invalid/ for course Gamma instead of that mailbox."]
-        // This checks delivery and authority, not whether a model resolves the
-        // elliptical request or obeys the explicit destination change.
-        for wire in APIProviderDefinition.WireAPI.allCases {
-            let records = APIRequestRecorder()
-            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
-                status: "200 OK", headers: ["Content-Type": "application/json"],
-                body: Data(#"{"id":"followup-reply","object":"response","status":"completed","model":"fixture-model","output":[{"id":"followup-message","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}]}"#.utf8))
-            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
-            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
-                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
-            let server = try server(); try await server.updateProviders([p])
-            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString
-            for current in requests {
-                let turn = UUID().uuidString, preparation = UUID()
-                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation,
-                    executionPolicy: "Current native permissions remain binding.", userRequest: current)
-                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
-                var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
-                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
-                body["input"] = [nativeUserMessage(prior), nativeUserMessage("Earlier lookup completed.", role: "assistant"), nativeUserMessage(current)]
-                body["tools"] = [Any]()
-                body["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: [2], texts: [current])
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let selection = try XCTUnwrap(APIProviderCatalog.selection(for: XCTUnwrap(body["model"] as? String), providers: [p]))
-                let baseline = try APIModelResponseCodec.prepare(XCTUnwrap(request.httpBody), selection: selection,
-                    threadID: thread, capsules: .init(key: Data(repeating: 1, count: 32)))
-                let historyKey = wire == .chatCompletions ? "messages" : "input"
-                let baselineBody = try XCTUnwrap(JSONSerialization.jsonObject(with: baseline.body) as? [String: Any])
-                let baselineHistory = try XCTUnwrap(baselineBody[historyKey] as? [[String: Any]])
-                let (_, response) = try await URLSession.shared.data(for: request)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-                let sent = await records.snapshot(), last = try XCTUnwrap(sent.last)
-                let forwarded = try XCTUnwrap(JSONSerialization.jsonObject(with: last.body) as? [String: Any])
-                let history = try XCTUnwrap(forwarded[historyKey] as? [[String: Any]])
-                XCTAssertEqual(Array(history.prefix(baselineHistory.count)) as NSArray, baselineHistory as NSArray)
-                XCTAssertEqual(history.count, baselineHistory.count + 2, "Only a host checkpoint and one separate user reminder are added")
-                func text(_ item: [String: Any]) -> String? {
-                    item["content"] as? String ?? (item["content"] as? [[String: Any]])?.first?["text"] as? String
-                }
-                let hostItem = history[baselineHistory.count], host = try XCTUnwrap(text(hostItem))
-                XCTAssertEqual(hostItem["role"] as? String, "developer")
-                XCTAssertTrue(host.hasSuffix(reminderPolicy))
-                XCTAssertTrue(host.contains("Preserve the user's constraints and follow the current host policy."))
-                XCTAssertTrue(host.contains("Current native permissions remain binding."))
-                XCTAssertFalse(host.contains(prior)); XCTAssertFalse(host.contains(current))
-                XCTAssertEqual(history.filter { $0["role"] as? String == "user" }.compactMap(text).map { Data($0.utf8) },
-                    [prior, current, current].map { Data($0.utf8) }, "Both possible follow-ups retain exact user authority and history")
-                XCTAssertEqual(history.last?["role"] as? String, "user")
-                XCTAssertNil(forwarded["client_metadata"])
-                await server.finish(taskID: task)
-            }
-            let count = await records.count(); XCTAssertEqual(count, requests.count)
-            await server.shutdown()
-        }
-    }
-
-    func testMatchedUserProofDoesNotBypassReminderProjectionByteLimitOnBothWires() async throws {
-        for wire in APIProviderDefinition.WireAPI.allCases {
-            let records = APIRequestRecorder()
-            let reply: APILoopbackFixture.Response = wire == .chatCompletions ? response() : .init(
-                status: "200 OK", headers: ["Content-Type": "application/json"],
-                body: Data(#"{"id":"bounded-reply","object":"response","status":"completed","model":"fixture-model","output":[{"id":"bounded-message","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}]}"#.utf8))
-            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
-            let p = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: try await remote.start(),
-                wireAPI: wire, models: [.init(id: "fixture-model", name: "Fixture")])
-            let server = try server(); try await server.updateProviders([p])
-            let base = try await server.start()
-            for byteCount in [990_000, 1_000_000] {
-                let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
-                let original = String(repeating: "x", count: byteCount)
-                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: original)
-                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
-                var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
-                var body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
-                body["input"] = [nativeUserMessage(original)]; body["tools"] = [Any]()
-                body["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: [0], texts: [original])
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                XCTAssertLessThan(try XCTUnwrap(request.httpBody).count, 2_000_000)
-                let selection = try XCTUnwrap(APIProviderCatalog.selection(for: XCTUnwrap(body["model"] as? String), providers: [p]))
-                let translated = try APIModelResponseCodec.prepare(XCTUnwrap(request.httpBody), selection: selection,
-                    threadID: thread, capsules: .init(key: Data(repeating: 1, count: 32)))
-                XCTAssertTrue(APIModelServer.hasExactCurrentUserTextProof(body, translated: translated,
-                    threadID: thread, turnID: turn, requestKind: "turn", expected: [Data(original.utf8)]))
-                let before = await records.count()
-                let (bytes, response) = try await URLSession.shared.data(for: request)
-                let accepted = byteCount == 990_000
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, accepted ? 200 : 400)
-                let upstream = await records.snapshot()
-                XCTAssertEqual(upstream.count, before + (accepted ? 1 : 0), "Oversized reminder projection must fail before provider access")
-                if accepted {
-                    let forwarded = try XCTUnwrap(upstream.last)
-                    XCTAssertLessThanOrEqual(forwarded.body.count, 2_000_000)
-                    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: forwarded.body) as? [String: Any])
-                    let history = try XCTUnwrap(object[wire == .chatCompletions ? "messages" : "input"] as? [[String: Any]])
-                    let users = history.filter { $0["role"] as? String == "user" }.compactMap { message in
-                        message["content"] as? String ?? (message["content"] as? [[String: Any]])?.first?["text"] as? String
-                    }
-                    XCTAssertEqual(users.map { Data($0.utf8) }, [Data(original.utf8), Data(original.utf8)],
-                        "Do not truncate either the original user item or its separate reminder to fit")
-                } else {
-                    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-                    XCTAssertEqual((object["error"] as? [String: Any])?["code"] as? String, "invalid_request")
-                }
-                await server.finish(taskID: task)
             }
             await server.shutdown()
         }
@@ -649,8 +521,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         await server.setBeforeCorrectionDispatchForTesting { await availability.set(.bound) }
         let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(),
             turn = UUID().uuidString.lowercased(), preparation = UUID()
-        let currentInput = "  Inspect cafe\u{301} form.\nDo not submit.  "
-        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation, userRequest: currentInput)
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
         try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
         var request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
         var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
@@ -658,8 +529,6 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         raw["tools"] = originalCatalog
         let clickIndex = try XCTUnwrap(originalCatalog.firstIndex { $0["name"] as? String == "browser_click" })
         let clickWireName = "computa_tool_\(clickIndex)"
-        raw["input"] = [nativeUserMessage(currentInput)]
-        raw["client_metadata"] = try nativeUserProofMetadata(thread: thread, turn: turn, indices: [0], texts: [currentInput])
         request.httpBody = try JSONSerialization.data(withJSONObject: raw)
         for _ in 0..<2 {
             let (_, response) = try await URLSession.shared.data(for: request)
@@ -672,19 +541,6 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(names[1].contains(clickWireName))
         XCTAssertTrue(names[2].contains(clickWireName))
         XCTAssertEqual(names[2], originalCatalog.indices.map { "computa_tool_\($0)" })
-        let messages = try upstream.map { request in
-            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
-            return try XCTUnwrap(body["messages"] as? [[String: Any]])
-        }
-        for projection in messages {
-            XCTAssertEqual(projection.filter { $0["role"] as? String == "user" }.compactMap { $0["content"] as? String }
-                .map { Data($0.utf8) }, [Data(currentInput.utf8), Data(currentInput.utf8)],
-                "Keep the genuine history item and one separate reminder, including during correction")
-            XCTAssertEqual(projection.last?["role"] as? String, "user")
-            XCTAssertEqual((projection.last?["content"] as? String).map { Data($0.utf8) }, Data(currentInput.utf8))
-        }
-        XCTAssertEqual(Array(messages[0].dropFirst()) as NSArray, Array(messages[1].dropFirst()) as NSArray,
-            "Correction may extend the initial system feedback only; it cannot add another reminder or rewrite retained history")
         let accounting = try correctionRecords(directory)
         XCTAssertEqual(accounting.filter { $0.phase == "second_claimed" }.count, 1)
         await server.shutdown()

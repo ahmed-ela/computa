@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import XCTest
@@ -299,42 +300,14 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let sessions = home.appendingPathComponent("sessions", isDirectory: true)
             let files = FileManager.default.enumerator(at: sessions, includingPropertiesForKeys: [.isRegularFileKey])
             var compactions = 0
-            let humanPrompts = [APIHarnessBrowserContinuationInference.priorPrompt,
-                APIHarnessBrowserContinuationInference.currentPrompt, APIHarnessBrowserContinuationInference.resumedPrompt]
-            var originalHumanCounts = [Int](repeating: 0, count: humanPrompts.count)
-            func exactHumanText(_ item: [String: Any]) -> String? {
-                guard item["role"] as? String == "user",
-                      let content = item["content"] as? [[String: Any]], content.count == 1,
-                      content[0]["type"] as? String == "input_text" else { return nil }
-                return content[0]["text"] as? String
-            }
             while let file = files?.nextObject() as? URL {
                 guard file.pathExtension == "jsonl" else { continue }
                 for line in try Data(contentsOf: file).split(separator: 0x0A) {
                     let row = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
-                    guard let payload = row?["payload"] as? [String: Any] else { continue }
-                    if row?["type"] as? String == "response_item", let human = exactHumanText(payload),
-                       let index = humanPrompts.firstIndex(where: { Data($0.utf8) == Data(human.utf8) }) {
-                        originalHumanCounts[index] += 1
-                    }
-                    if row?["type"] as? String == "compacted" {
-                        compactions += 1
-                        let history = try XCTUnwrap(payload["replacement_history"] as? [[String: Any]])
-                        let humans = history.compactMap(exactHumanText).map { Data($0.utf8) }
-                        XCTAssertEqual(humans.filter { $0 == Data(humanPrompts[0].utf8) }.count, 1)
-                        XCTAssertEqual(humans.filter { $0 == Data(humanPrompts[1].utf8) }.count, 1)
-                        XCTAssertFalse(humans.contains(Data(humanPrompts[2].utf8)))
-                        XCTAssertFalse(history.contains { item in
-                            (item["content"] as? [[String: Any]] ?? []).contains {
-                                ($0["text"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n")
-                            }
-                        }, "The API checkpoint and reminders must not enter replacement history")
-                    }
+                    if row?["type"] as? String == "compacted" { compactions += 1 }
                 }
             }
             XCTAssertEqual(compactions, 3, "The real engine must persist all three forced maintenance results")
-            XCTAssertEqual(originalHumanCounts, [1, 1, 1],
-                "Each submitted human request is persisted once; repeated API reminders are wire-only")
             guard (testRun?.failureCount ?? 0) == failuresBefore else { throw APIHarnessFailure("Browser continuation invariants failed.") }
             await upstream.stop()
             try FileManager.default.removeItem(at: root)
@@ -452,7 +425,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(firstReceipt.commandOutputMatched)
             XCTAssertTrue(firstReceipt.reasoningRoundtripped)
             XCTAssertTrue(firstReceipt.ordinaryHumanInputsPreserved,
-                          "The original user request stays before tool results, with exactly one wire-only user reminder after the checkpoint")
+                          "Native proof must preserve one exact user request before later tool results, without reminder duplication")
             XCTAssertTrue(firstReceipt.semanticNamingStable,
                           "Actual Core thread/start must opt the fresh chat into semantic naming before the provider receives its tools")
             XCTAssertEqual(firstReceipt.failures, [])
@@ -545,6 +518,146 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             firstPump?.cancel(); reopenedPump?.cancel()
             await upstream.stop()
             print("syntheticAPIHarnessFailureArtifacts=\(root.path)")
+            throw error
+        }
+    }
+
+    func testBundledEngineFailedTurnCleansOnlyItsRunningCommandBeforeWaiting() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
+            "Enable the isolated bundled API harness qualification.")
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-15")
+        let failuresBefore = testRun?.failureCount ?? 0
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appendingPathComponent("ComputaAPICommandCleanup-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let fakeKey = "SYNTHETIC_ONLY_API_KEY_" + UUID().uuidString
+        let credentials = APIHarnessCredentials(providerID: "fixture-command-cleanup", value: fakeKey)
+        let inference = APIHarnessCommandCleanupInference(project: project, expectedKey: fakeKey)
+        let upstream = try APIHarnessHTTPFixture { await inference.respond($0) }
+        var ownedRuntime: CodexAppServerRuntime?
+        var pump: Task<Void, Never>?
+        do {
+            let model = APIModelDefinition(id: "fixture-command-cleanup", name: "Synthetic Command Cleanup", contextWindow: 65_536)
+            let provider = APIProviderDefinition(id: "fixture-command-cleanup", name: "Synthetic Loopback",
+                baseURL: try await upstream.start(), wireAPI: .chatCompletions, models: [model])
+            let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            let traceURL = root.appendingPathComponent("native-protocol.jsonl")
+            var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
+            configuration.executable = .bundled
+            configuration.model = modelID
+            configuration.codexHomePath = home.path
+            configuration.workspacePath = project.path
+            configuration.protocolTracePath = traceURL.path
+            configuration.apiModelServerForTesting = APIModelServer(credentials: credentials,
+                capsules: try APIReasoningCapsules(key: Data(repeating: 0x71, count: 32)))
+            let runtime = CodexAppServerRuntime(configuration: configuration, visualGrounder: APIHarnessNoVisualGrounder())
+            ownedRuntime = runtime
+            let taskID = UUID().uuidString
+            let audit = APIHarnessEventAudit(taskID: taskID)
+            var livenessAtWaiting: (prior: Bool, failed: Bool)?
+            pump = Task {
+                for await event in runtime.events() {
+                    // Observe the process state at the actual UI-status boundary,
+                    // not after shutdown or an independent cleanup by the test.
+                    if case .taskStatusChanged(let id, .waiting) = event, id == taskID, audit.began {
+                        livenessAtWaiting = (
+                            APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "prior"),
+                            APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "failed"))
+                    }
+                    audit.receive(event)
+                }
+            }
+            try await runtime.configureAPIProviders([provider])
+            let tasks = try await runtime.loadTasks()
+            XCTAssertTrue(tasks.isEmpty)
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
+            try await runtime.submit(prompt: "Start the prior temporary fixture child once and leave it running in the background. Report that it started.",
+                                     toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertEqual(audit.errors, [])
+            XCTAssertEqual(audit.finalTexts, ["PRIOR_CHILD_RUNNING"])
+            XCTAssertTrue(APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "prior"))
+            audit.began = false; audit.terminal = false; audit.status = nil
+            try await runtime.submit(prompt: "Start the separate failed-turn temporary fixture child once. Leave the prior background child untouched.",
+                                     toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .waiting)
+            let boundary = try XCTUnwrap(livenessAtWaiting)
+            XCTAssertTrue(boundary.prior, "Successful earlier-turn background work must survive this failure.")
+            XCTAssertFalse(boundary.failed, "The failed-turn child must be gone before Waiting is published.")
+            XCTAssertTrue(audit.errors.joined(separator: "\n").contains("No request was replayed."))
+            XCTAssertEqual(audit.finalTexts, ["PRIOR_CHILD_RUNNING"], "A terminal provider failure cannot produce a successful final answer.")
+            XCTAssertEqual(audit.approvals, 0)
+            XCTAssertTrue(audit.fileEntries.isEmpty)
+            let receipt = await inference.receipt()
+            XCTAssertEqual(receipt.requests, 4, "Two command dispatches, one successful final, and one terminal HTTP failure; no replay.")
+            XCTAssertEqual(receipt.failures, [])
+            let priorSession = try XCTUnwrap(receipt.priorSession)
+            let failedSession = try XCTUnwrap(receipt.failedSession)
+            XCTAssertNotEqual(priorSession, failedSession)
+            XCTAssertTrue(receipt.bothChildrenAliveBeforeFailure)
+            for name in ["prior", "failed"] {
+                XCTAssertEqual(try String(contentsOf: project.appendingPathComponent(name + ".starts"), encoding: .utf8), "started\n")
+            }
+            // Snapshot before shutdown, which legitimately cleans the earlier child.
+            let trace = try AppServerWireTrace.load(traceURL)
+            XCTAssertEqual(trace.parseFailures, [])
+            let threadID = try threadStarted(in: trace)
+            let starts = trace.messages.filter { $0.direction == .serverToClient && $0.method == "item/started" }
+                .compactMap { $0.object["params"] as? [String: Any] }
+                .filter { ($0["item"] as? [String: Any])?["type"] as? String == "commandExecution" }
+            XCTAssertEqual(starts.count, 2)
+            let priorStart = try XCTUnwrap(starts.first { ($0["item"] as? [String: Any])?["id"] as? String == "cleanup-prior-command" })
+            let failedStart = try XCTUnwrap(starts.first { ($0["item"] as? [String: Any])?["id"] as? String == "cleanup-failed-command" })
+            XCTAssertNotEqual(priorStart["turnId"] as? String, failedStart["turnId"] as? String)
+            XCTAssertTrue(starts.allSatisfy { $0["threadId"] as? String == threadID })
+            let terminations = trace.messages.filter { $0.direction == .clientToServer && $0.method == "thread/backgroundTerminals/terminate" }
+            XCTAssertEqual(terminations.count, 1)
+            let termination = try XCTUnwrap(terminations.first)
+            let params = try XCTUnwrap(termination.object["params"] as? [String: Any])
+            XCTAssertEqual(params["threadId"] as? String, threadID)
+            XCTAssertEqual(params["processId"] as? String, failedSession)
+            let lists = trace.messages.filter { $0.direction == .clientToServer && $0.method == "thread/backgroundTerminals/list" }
+            XCTAssertEqual(lists.count, 2, "The real engine must confirm both inventory and post-termination inventory.")
+            func inventory(_ request: AppServerWireTrace.Message) throws -> [[String: Any]] {
+                let reply = try XCTUnwrap(trace.messages.first { $0.direction == .serverToClient && $0.identifier == request.identifier && $0.object["result"] != nil })
+                return try XCTUnwrap((reply.object["result"] as? [String: Any])?["data"] as? [[String: Any]])
+            }
+            let initial = try inventory(XCTUnwrap(lists.first))
+            let remaining = try inventory(XCTUnwrap(lists.last))
+            XCTAssertTrue(initial.contains { $0["processId"] as? String == failedSession && $0["itemId"] as? String == "cleanup-failed-command" })
+            XCTAssertTrue(initial.contains { $0["processId"] as? String == priorSession && $0["itemId"] as? String == "cleanup-prior-command" })
+            XCTAssertEqual(remaining.count, 1)
+            XCTAssertEqual(remaining.first?["processId"] as? String, priorSession)
+            XCTAssertLessThan(try XCTUnwrap(lists.first).sequence, termination.sequence)
+            XCTAssertGreaterThan(try XCTUnwrap(lists.last).sequence, termination.sequence)
+            assertNoPrivateState(in: trace, fakeKey: fakeKey, reasoning: [])
+            let shutdown = await runtime.shutdown()
+            XCTAssertTrue(shutdown.succeeded, shutdown.issues.joined(separator: "; "))
+            XCTAssertFalse(APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "prior"))
+            XCTAssertFalse(APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "failed"))
+            pump?.cancel()
+            guard (testRun?.failureCount ?? 0) == failuresBefore else {
+                throw APIHarnessFailure("The bundled failed-turn command cleanup invariants failed.")
+            }
+            let proof = XCTAttachment(string: "actualBundledEngine=true\nproviderRequests=4\ncommandDispatches=2\nfailedChildGoneBeforeWaiting=true\npriorSuccessfulChildSurvived=true\nshutdownClean=true\n")
+            proof.name = "Failed-turn native command cleanup"
+            proof.lifetime = .keepAlways
+            add(proof)
+            await upstream.stop()
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            if let ownedRuntime { _ = await ownedRuntime.shutdown() }
+            pump?.cancel()
+            await upstream.stop()
+            print("syntheticAPICommandCleanupFailureArtifacts=\(root.path)")
             throw error
         }
     }
@@ -749,8 +862,6 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(receipt.rejectedBatchHadNoEffectsAtCorrection)
             XCTAssertTrue(receipt.firstUsageDurableBeforeCorrection)
             XCTAssertTrue(receipt.correctiveRequestPreservedOriginal)
-            XCTAssertEqual(receipt.userReminderChecks, 4,
-                "The correction reuses exactly one reminder, and later native inferences do not accumulate it")
             XCTAssertTrue(receipt.acceptedToolHistoryOnly)
             XCTAssertEqual(receipt.failures, [])
             XCTAssertEqual(credentials.counts().reads, 3, "The correction retains the already admitted credential; native rounds still read independently.")
@@ -935,6 +1046,114 @@ private final class APIHarnessCredentials: APIProviderCredentials, @unchecked Se
     func counts() -> (reads: Int, mutations: Int) { lock.withLock { (reads, mutations) } }
 }
 
+private actor APIHarnessCommandCleanupInference {
+    struct Receipt: Sendable {
+        var requests = 0
+        var priorSession: String?
+        var failedSession: String?
+        var bothChildrenAliveBeforeFailure = false
+        var failures: [String] = []
+    }
+    private let project: URL
+    private let expectedKey: String
+    private var observations = Receipt()
+    init(project: URL, expectedKey: String) { self.project = project; self.expectedKey = expectedKey }
+    func receipt() -> Receipt { observations }
+
+    static func childIsAlive(project: URL, name: String) -> Bool {
+        guard let text = try? String(contentsOf: project.appendingPathComponent(name + ".pid"), encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    func respond(_ request: APIModelServer.HTTPRequest) -> APIHarnessHTTPFixture.Response {
+        observations.requests += 1
+        do {
+            guard request.method == "POST", request.path == "/v1/chat/completions",
+                  request.headers["authorization"] == "Bearer " + expectedKey,
+                  let body = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                  body["model"] as? String == "fixture-command-cleanup", body["stream"] as? Bool == true,
+                  let tools = body["tools"] as? [[String: Any]], let messages = body["messages"] as? [[String: Any]] else {
+                throw APIHarnessFailure("request_contract")
+            }
+            func runningSession(_ name: String) throws -> String {
+                let id = "cleanup-" + name + "-command"
+                let outputs = messages.filter { $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == id }
+                guard outputs.count == 1, let text = outputs[0]["content"] as? String,
+                      text.contains(name.uppercased() + "_CHILD_STARTED"),
+                      let line = text.split(separator: "\n").first(where: { $0.hasPrefix("Process running with session ID ") }),
+                      let session = line.split(separator: " ").last, Int32(session) != nil,
+                      Self.childIsAlive(project: project, name: name) else { throw APIHarnessFailure("missing_live_" + name + "_session") }
+                return String(session)
+            }
+            let message: [String: Any]
+            let finish: String
+            switch observations.requests {
+            case 1, 3:
+                let name = observations.requests == 1 ? "prior" : "failed"
+                if name == "failed" {
+                    guard Self.childIsAlive(project: project, name: "prior") else { throw APIHarnessFailure("prior_child_ended_early") }
+                }
+                let candidates = tools.compactMap { item -> String? in
+                    guard let function = item["function"] as? [String: Any],
+                          let schema = function["parameters"] as? [String: Any],
+                          let properties = schema["properties"] as? [String: Any], properties["cmd"] != nil else { return nil }
+                    return function["name"] as? String
+                }
+                guard candidates.count == 1 else { throw APIHarnessFailure("command_not_offered") }
+                // The unique private cwd owns these markers. A finite self-exit
+                // bounds even a broken cleanup path; no user files/processes are used.
+                let command = "exec /usr/bin/python3 -c 'import os,time; from pathlib import Path; "
+                    + "Path(\"\(name).pid\").write_text(str(os.getpid())); "
+                    + "Path(\"\(name).starts\").open(\"a\").write(\"started\\n\"); "
+                    + "print(\"\(name.uppercased())_CHILD_STARTED\",flush=True); time.sleep(120)'"
+                let arguments: [String: Any] = ["cmd": command, "workdir": project.path,
+                    "yield_time_ms": 1_000, "max_output_tokens": 1_000]
+                let call: [String: Any] = ["id": "cleanup-" + name + "-command", "type": "function",
+                    "function": ["name": candidates[0], "arguments": String(decoding:
+                        try JSONSerialization.data(withJSONObject: arguments, options: .sortedKeys), as: UTF8.self)]]
+                message = ["role": "assistant", "content": NSNull(), "tool_calls": [call]]
+                finish = "tool_calls"
+            case 2:
+                observations.priorSession = try runningSession("prior")
+                message = ["role": "assistant", "content": "PRIOR_CHILD_RUNNING"]
+                finish = "stop"
+            case 4:
+                observations.failedSession = try runningSession("failed")
+                guard Self.childIsAlive(project: project, name: "prior") else { throw APIHarnessFailure("prior_child_lost_before_failure") }
+                observations.bothChildrenAliveBeforeFailure = true
+                return .init(status: "429 Too Many Requests", body: Data("{\"error\":{\"message\":\"Synthetic terminal provider failure.\"}}".utf8), contentType: "application/json")
+            default: throw APIHarnessFailure("unexpected_provider_replay")
+            }
+            let id = "chatcmpl-command-cleanup-\(observations.requests)"
+            func frame(_ delta: [String: Any], finishReason: Any = NSNull()) -> [String: Any] {
+                ["id": id, "object": "chat.completion.chunk", "model": "fixture-command-cleanup",
+                 "choices": [["index": 0, "delta": delta, "finish_reason": finishReason]]]
+            }
+            var frames = [frame(["role": "assistant"])]
+            if let content = message["content"] as? String { frames.append(frame(["content": content])) }
+            if let calls = message["tool_calls"] as? [[String: Any]] {
+                for (index, original) in calls.enumerated() {
+                    var call = original; call["index"] = index
+                    frames.append(frame(["tool_calls": [call]]))
+                }
+            }
+            frames.append(frame([:], finishReason: finish))
+            frames.append(["id": id, "object": "chat.completion.chunk", "model": "fixture-command-cleanup",
+                "choices": [], "usage": ["prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120]])
+            var data = Data()
+            for value in frames {
+                data.append(Data("data: ".utf8)); data.append(try JSONSerialization.data(withJSONObject: value)); data.append(Data("\n\n".utf8))
+            }
+            data.append(Data("data: [DONE]\n\n".utf8))
+            return .init(status: "200 OK", body: data)
+        } catch {
+            observations.failures.append((error as? APIHarnessFailure)?.message ?? "command_fixture_failed")
+            return .init(status: "400 Bad Request", body: Data("{\"error\":{\"code\":\"fixture_contract_rejected\"}}".utf8), contentType: "application/json")
+        }
+    }
+}
+
 private actor APIHarnessRateLimitObservations {
     private var requests = 0
     private var streaming = false
@@ -1019,21 +1238,15 @@ private actor APIHarnessInference {
                 if bytes == originalPrompt { originalPositions.append(index) }
                 if bytes == resumedPrompt { resumedPositions.append(index) }
             }
-            guard originalPositions.count == (count == 4 ? 1 : 2), resumedPositions.count == (count == 4 ? 2 : 0),
+            guard originalPositions.count == 1, resumedPositions.count == (count == 4 ? 1 : 0),
                   body["client_metadata"] == nil,
                   !String(decoding: request.body, as: UTF8.self).contains("current_user_text_v1") else {
                 throw APIHarnessFailure("active_user_projection")
             }
-            let activePositions = count == 4 ? resumedPositions : originalPositions
-            guard activePositions.last == messages.count - 1, messages.count >= 2,
-                  messages[messages.count - 2]["role"] as? String == "developer",
-                  (messages[messages.count - 2]["content"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n") else {
-                throw APIHarnessFailure("active_user_reminder_authority")
-            }
             if count == 2 || count == 3 {
                 guard let lastTool = messages.lastIndex(where: { $0["role"] as? String == "tool" }),
-                      originalPositions[0] < lastTool, lastTool < originalPositions[1],
-                      messages.suffix(from: lastTool + 1).filter({ $0["role"] as? String == "user" }).count == 1 else {
+                      originalPositions[0] < lastTool,
+                      !messages.suffix(from: lastTool + 1).contains(where: { $0["role"] as? String == "user" }) else {
                     throw APIHarnessFailure("active_user_reordered_after_tool")
                 }
                 observations.ordinaryHumanInputsPreserved = true
@@ -1347,20 +1560,6 @@ private actor APIHarnessBrowserContinuationInference {
                   !text(host).contains(Self.resumedPrompt), body["client_metadata"] == nil else {
                 throw APIHarnessFailure("continuation_checkpoint_authority")
             }
-            let activePrompt = stage == 0 ? Self.priorPrompt : stage == 1 ? Self.currentPrompt : Self.resumedPrompt
-            let reminderIndex = messages.count - (maintenance ? 2 : 1)
-            guard reminderIndex > 0, messages[reminderIndex]["role"] as? String == "user",
-                  Data(text(messages[reminderIndex]).utf8) == Data(activePrompt.utf8),
-                  text(messages[reminderIndex - 1]) == text(host) else {
-                throw APIHarnessFailure("continuation_exact_active_reminder_tail")
-            }
-            if !maintenance {
-                guard text(host).contains("not a new turn or a request to restart, repeat completed actions or replay uncertain input"),
-                      text(host).contains("Resolve follow-ups in the user's service/account/topic unless changed."),
-                      text(host).contains("Past actions remain historical.") else {
-                    throw APIHarnessFailure("continuation_reminder_no_replay_guidance")
-                }
-            }
             let currentTurnID = turnID.uuidString.lowercased()
             if observations.hostTurnIDs.count == stage { observations.hostTurnIDs.append(currentTurnID) }
             guard observations.hostTurnIDs.count == stage + 1,
@@ -1372,7 +1571,7 @@ private actor APIHarnessBrowserContinuationInference {
                 let prior = messages.indices.filter { text(messages[$0]) == Self.priorPrompt }
                 let completed = messages.indices.filter { text(messages[$0]) == "PRIOR_TASK_COMPLETE" }
                 let current = messages.indices.filter { text(messages[$0]) == Self.currentPrompt }
-                guard prior.count == 1, completed.count == 1, current.count == 2,
+                guard prior.count == 1, completed.count == 1, current.count == (maintenance ? 2 : 1),
                       messages[prior[0]]["role"] as? String == "user",
                       messages[completed[0]]["role"] as? String == "assistant",
                       current.allSatisfy({ messages[$0]["role"] as? String == "user" }),
@@ -1390,10 +1589,9 @@ private actor APIHarnessBrowserContinuationInference {
                     }
                     observations.currentTaskMaintenanceChecks += 1
                 } else {
-                    guard current.last == messages.count - 1,
-                          text(messages[messages.count - 2]) == text(host) else { throw APIHarnessFailure("continuation_ordinary_tail") }
+                    guard text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_ordinary_tail") }
                     for index in messages.indices where (messages[index]["tool_call_id"] as? String ?? "").hasPrefix("continuation-") {
-                        guard current[0] < index, index < current[1] else { throw APIHarnessFailure("continuation_user_after_tool_evidence") }
+                        guard current[0] < index else { throw APIHarnessFailure("continuation_user_after_tool_evidence") }
                     }
                     observations.currentTaskOrdinaryChecks += 1
                     if observations.maintenanceRequests > 0 {
@@ -1411,16 +1609,8 @@ private actor APIHarnessBrowserContinuationInference {
             } else if !maintenance {
                 let prompt = stage == 0 ? Self.priorPrompt : Self.resumedPrompt
                 let current = messages.filter { text($0) == prompt }
-                guard current.count == 2, current.allSatisfy({ $0["role"] as? String == "user" }),
-                      text(messages.last!) == prompt,
-                      text(messages[messages.count - 2]) == text(host) else { throw APIHarnessFailure("continuation_other_turn_order") }
-                if stage == 2 {
-                    for oldPrompt in [Self.priorPrompt, Self.currentPrompt] {
-                        guard messages.filter({ text($0) == oldPrompt }).count == 1 else {
-                            throw APIHarnessFailure("continuation_completed_task_reminded")
-                        }
-                    }
-                }
+                guard current.count == 1, current[0]["role"] as? String == "user",
+                      text(messages.last!) == text(host) else { throw APIHarnessFailure("continuation_other_turn_order") }
             } else { throw APIHarnessFailure("continuation_maintenance_wrong_task") }
             func matches(_ function: [String: Any], _ nativeName: String) -> Bool {
                 function["name"] as? String == nativeName
@@ -1560,7 +1750,6 @@ private actor APIHarnessCorrectionInference {
         var rejectedBatchHadNoEffectsAtCorrection = false
         var firstUsageDurableBeforeCorrection = false
         var correctiveRequestPreservedOriginal = false
-        var userReminderChecks = 0
         var acceptedToolHistoryOnly = false
         var failures = [String]()
     }
@@ -1586,18 +1775,6 @@ private actor APIHarnessCorrectionInference {
                   let tools = body["tools"] as? [[String: Any]], let messages = body["messages"] as? [[String: Any]] else {
                 throw APIHarnessFailure("request_contract")
             }
-            let originalMessages = originalBody?["messages"] as? [[String: Any]] ?? messages
-            guard let prompt = originalMessages.last?["content"] as? String,
-                  messages.last?["role"] as? String == "user",
-                  let lastText = messages.last?["content"] as? String,
-                  Data(lastText.utf8) == Data(prompt.utf8), messages.count >= 2,
-                  messages[messages.count - 2]["role"] as? String == "developer",
-                  (messages[messages.count - 2]["content"] as? String ?? "").hasPrefix("APP_RUNTIME_EXECUTION_CHECKPOINT\n"),
-                  messages.filter({ item in
-                      guard item["role"] as? String == "user", let text = item["content"] as? String else { return false }
-                      return Data(text.utf8) == Data(prompt.utf8)
-                  }).count == 2 else { throw APIHarnessFailure("correction_user_reminder_duplicated_or_changed") }
-            observations.userReminderChecks += 1
             let patchName = try toolName(tools, property: "input", descriptionContains: "patch")
             let commandName = try toolName(tools, property: "cmd")
             let message: [String: Any], finish: String, usage: [String: Any]

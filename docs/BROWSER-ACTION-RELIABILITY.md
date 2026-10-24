@@ -1615,3 +1615,78 @@ confirmed the complete reminder paragraph shrank from 432 to 429 UTF-8 bytes.
 The new both-wire test verifies exact delivery for a same-service new-topic
 follow-up and an explicit destination change; it does not prove model compliance.
 Version validation passed for 0.7.0 (250). Installed qualification follows.
+
+
+Installed build250 matched source `efb8125` and unchanged runtime15; all eleven
+signed-build checks passed. The same local mailbox read took 2.319 seconds with
+three calls and no errors. Same-chat and fresh sends took 4.388 and 3.850 seconds,
+each with six calls, no errors and exactly one POST carrying the requested fields.
+The same-chat final omitted fields/receipt rather than misquoting them; the fresh
+final copied its receipt and subject but changed recipient/body typography.
+Neither user prompt required a verbatim echo of delivered fields.
+
+The real attachment lookup did not finish: 27.138 seconds, 33 calls (32 completed,
+one rejected), two compactions and the unchanged completed-call guard. Repeated
+clicks reopened a collapsed sender row; the last click reused a consumed reference.
+The ODE follow-up reached a genuine announcement in 18.274 seconds with 21 calls,
+zero tool failures and two compactions. Its final answer nevertheless combined
+attachments from separate individual messages, invented a primary attachment,
+changed filename punctuation and claimed an exhaustive negative from partial
+observations. Tool completion is not semantic task success.
+
+All five owned test tabs were closed and composers were empty. The local mailbox
+server was stopped and its listener verified closed. No explicit real-mail send,
+forward, download or deletion was observed; opening messages may affect read state.
+The earlier direct account-session probe changed sign-in state before these trials,
+so these runs do not support a causal speed or semantic improvement claim.
+
+## Build 251: clean failed-turn commands and revert unqualified prompt experiments
+
+The separate build249 read-only diagnostic stopped at the existing compaction
+receipt-fit guard after 41.437 seconds and 25 calls, without a final answer. Its
+broad shell searches produced large receipts and left one recursive grep pipeline
+running after the app showed Waiting. Root verified the exact owned process group,
+terminated only that group and verified it exited. This is distinct from normal
+no-match grep results or an unavailable CLI; none establishes a settings diagnosis.
+
+The cause was in terminal-status handling: native errors and failed/interrupted
+turn completions waited for browser/inference cleanup but did not terminate their
+surviving unified_exec sessions. Explicit Stop and shutdown already had bounded,
+identity-checked native session cleanup. Terminal handling now uses that existing
+list/terminate/re-list path for command items owned by the failed turn, before
+publishing Waiting. Successful earlier-turn background sessions survive. Stop
+shares an overlapping cleanup result, shutdown awaits pending cleanup, and failure
+remains visible and retryable without inventing a process exit or command success.
+No OS-wide process discovery, command replay, runtime rebuild or cap increase was
+introduced.
+
+A new regression failed first against unchanged production, then the first green
+run passed 72 cases with zero failures or skips and stable source hashes. Mocked
+fixtures cover native error, failed/interrupted completion, previous-turn session
+preservation, unconfirmed cleanup retry and Stop overlap. The real bundled engine
+started two isolated unified_exec children, completed the first turn, then injected
+a provider failure on the second. Its failed child was absent before Waiting while
+the earlier successful child remained alive; exact native identity and clean
+shutdown were verified. This is actual-engine evidence, not yet installed-UI proof.
+
+The API reminder and wording experiments from builds249/250 are reverted together
+to the build248 behavior. Their tests proved delivery but their installed trials
+did not establish a semantic improvement, and basic synthetic delivery already
+worked on248. The revert does not claim that those experiments caused the errors
+or that reverting repairs model reasoning. Their commits and failed results remain
+in history. Native command cleanup and earlier browser/identity fixes are retained.
+
+
+After reverting the experiments, 128 tests passed with no failures or skips and
+stable source hashes, including all six actual-engine cases. Review then found a
+public manual-compaction entry point could supersede the submission while command
+cleanup was pending. A held-inventory regression reproduced that race against
+unchanged production; compact now uses the same command-cleanup/shutdown admission
+guard as submit. The final source cohort is recorded separately after that guard.
+
+
+Final source validation after that guard passed 129 tests with zero failures or
+skips and stable source hashes: 56 API-server, six actual-engine, 40 context,
+two shutdown and 25 streaming tests. Both red reproductions and intermediate green
+runs are preserved. This cohort covers the final rollback plus cleanup source.
+Installed build validation follows separately.

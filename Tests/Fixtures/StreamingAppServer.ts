@@ -20,6 +20,7 @@ let currentTurn = '';
 let savedName: string | null = null;
 let firstPreview = '';
 const commandProcesses = new Set(['4321', '4322', '9999']);
+const terminalCommandScenario = scenario.startsWith('command-terminal-');
 const timers = new Set<ReturnType<typeof setInterval>>();
 
 function afterMarker(name: string, action: () => void) {
@@ -142,7 +143,14 @@ input.on('line', line => {
       }
       result(request.id, { turn: { id: turnId, status: 'inProgress' } });
       notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
-      if (turnCount > 1) {
+      if (scenario === 'command-terminal-prior' && turnCount > 1) {
+        command(turnId, 'inProgress', { processId: '4322' }, 'command-item-two');
+        fence(turnId, 1_002);
+        afterMarker('release-command-failure', () => {
+          notify('error', { turnId, willRetry: false, error: { message: 'Synthetic second-turn failure.' } });
+          completeTurn(turnId, 'failed'); fence(turnId, 1_003);
+        });
+      } else if (turnCount > 1) {
         reasoningDelta('streaming-turn-1', 'STALE_REASONING_MUST_NOT_APPEAR');
         delta('streaming-turn-1', 'STALE_PREVIOUS_TURN_MUST_NOT_APPEAR');
         delta(turnId, 'New turn');
@@ -194,7 +202,20 @@ input.on('line', line => {
             fence(turnId, 1_001);
           });
           else if (scenario === 'command-disconnect') afterMarker('release-command', () => process.exit(0));
-          else if (scenario === 'command-background' || scenario.startsWith('command-late-') || scenario === 'command-compaction') {
+          else if (terminalCommandScenario && scenario !== 'command-terminal-prior') {
+            notify('error', { turnId, willRetry: true, error: { message: 'Synthetic retry is not terminal.' } });
+            notify('error', { turnId: 'foreign-turn', willRetry: false, error: { message: 'Foreign terminal error.' } });
+            afterMarker('release-command-failure', () => {
+              if (scenario !== 'command-terminal-failed' && scenario !== 'command-terminal-interrupted') {
+                notify('error', { turnId, willRetry: false, error: { message: 'Synthetic local compaction evidence-fit failure.' } });
+              }
+              completeTurn(turnId, scenario === 'command-terminal-interrupted' ? 'interrupted' : 'failed');
+              commandDelta(turnId, 'LATE_FAILED_TURN_OUTPUT');
+              command(turnId, 'completed', { aggregatedOutput: 'LATE_FAILED_TURN_FINAL', exitCode: 0 });
+              fence(turnId, 1_001);
+            });
+          }
+          else if (scenario === 'command-background' || scenario.startsWith('command-late-') || scenario === 'command-compaction' || scenario === 'command-terminal-prior') {
             completeTurn(turnId); fence(turnId, 1_001);
             if (scenario.startsWith('command-late-')) afterMarker('release-late-command', () => {
               commandDelta('wrong-turn', 'UNOWNED_LATE_OUTPUT');
@@ -403,6 +424,15 @@ input.on('line', line => {
     }
     case 'thread/backgroundTerminals/list': {
       if (request.params.threadId !== threadId) throw new Error('Cross-thread command cleanup');
+      if (terminalCommandScenario && !existsSync(join(root, 'release-command-cleanup'))) {
+        mark('command-cleanup-requested');
+        afterMarker('release-command-cleanup', () => {
+          const ids = [...commandProcesses].sort();
+          result(request.id, { data: ids.map(processId => ({ processId,
+            itemId: processId === '4321' ? 'command-item' : processId === '4322' ? 'command-item-two' : 'unrelated-item' })), nextCursor: null });
+        });
+        break;
+      }
       const ids = [...commandProcesses].sort();
       const selected = request.params.cursor ? ids.slice(1) : ids.slice(0, 1);
       result(request.id, { data: selected.map(processId => ({ processId, itemId: processId === '4321' ? 'command-item' : processId === '4322' ? 'command-item-two' : 'unrelated-item',
@@ -412,6 +442,11 @@ input.on('line', line => {
     }
     case 'thread/backgroundTerminals/terminate': {
       if (request.params.threadId !== threadId) throw new Error('Cross-thread command cleanup');
+      if ((scenario === 'command-terminal-refused' || scenario === 'command-terminal-stop-refused') && !existsSync(join(root, 'termination-refused'))) {
+        mark('termination-refused');
+        result(request.id, { terminated: false });
+        break;
+      }
       const terminated = commandProcesses.delete(request.params.processId);
       mark(`terminated-${request.params.processId}`);
       result(request.id, { terminated });

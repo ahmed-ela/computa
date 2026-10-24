@@ -374,6 +374,134 @@ final class RuntimeStreamingTests: XCTestCase {
         }
     }
 
+    func testTerminalCommandFailureCleansOwnedSessionBeforePublishingWaiting() async throws {
+        for scenario in ["command-terminal-error", "command-terminal-failed", "command-terminal-interrupted"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+                XCTAssertEqual(harness.audit.status, .running)
+                XCTAssertFalse(harness.markerExists("command-cleanup-requested"), "Retrying and foreign-turn errors cannot revoke a command")
+                try harness.release("release-command-failure")
+                try await self.waitFor("terminal error processed") { harness.audit.measuredTokens == 1_001 }
+                try await self.waitFor("cleanup admission or premature idle") {
+                    harness.markerExists("command-cleanup-requested") || harness.audit.status == .waiting
+                }
+                XCTAssertEqual(harness.audit.status, .running, "A terminal error must await owned command cleanup before exposing an idle task")
+                let requested = harness.markerExists("command-cleanup-requested")
+                XCTAssertTrue(requested, "Terminal errors must inventory surviving native exec_command sessions")
+                XCTAssertFalse(harness.markerExists("terminated-4321"))
+                if requested {
+                    do { try await harness.submit(); XCTFail("New input must wait for failed-turn command cleanup") }
+                    catch { XCTAssertTrue(error.localizedDescription.contains("command cleanup")) }
+                }
+                try harness.release("release-command-cleanup")
+                if requested {
+                    try await self.waitFor("terminal command cleanup") { harness.audit.systemTitles.contains("Command cleanup") }
+                    try await self.waitFor("waiting after command cleanup") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.markerExists("terminated-4321"))
+                    XCTAssertFalse(harness.markerExists("terminated-4322"))
+                    XCTAssertFalse(harness.markerExists("terminated-9999"))
+                    XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("Exit code: 0") == true })
+                    let trace = try harness.trace()
+                    XCTAssertEqual(trace.messages.filter { $0.method == "thread/backgroundTerminals/terminate" }.count, 1,
+                        "An error followed by turn/completed must not terminate twice")
+                }
+            }
+        }
+    }
+
+    func testCompactionCannotSupersedeHeldFailedTurnCommandCleanup() async throws {
+        try await withHarness(scenario: "command-terminal-error") { harness in
+            try await harness.submit()
+            try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("held failed-turn cleanup") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            // If admission regresses, keep the artificial maintenance finite so
+            // the negative test can record the unexpected RPC and shut down.
+            try harness.release("release-maintenance")
+            do {
+                try await harness.runtime.compact(taskID: harness.taskID)
+                XCTFail("Compaction must wait for failed-turn command cleanup")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("command cleanup"), error.localizedDescription)
+            }
+            XCTAssertFalse(try harness.trace().messages.contains { $0.method == "thread/compact/start" },
+                "Rejected maintenance cannot replace the failed turn's cleanup identity")
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("cleanup completion") { harness.audit.status == .waiting }
+        }
+    }
+
+    func testFailedTurnCommandCleanupPreservesSuccessfulPriorTurnSession() async throws {
+        try await withHarness(scenario: "command-terminal-prior") { harness in
+            try await harness.submit()
+            try await self.waitFor("successful background turn") { harness.audit.measuredTokens == 1_001 }
+            XCTAssertFalse(harness.markerExists("command-cleanup-requested"))
+            try await harness.submit()
+            try await self.waitFor("new turn command") { harness.audit.measuredTokens == 1_002 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("failed-turn inventory held") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("failed-turn cleanup done") { harness.audit.status == .waiting }
+            XCTAssertTrue(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-4321"), "The failed turn cannot terminate a successful earlier turn's background session")
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            XCTAssertTrue(harness.markerExists("terminated-4321"), "Explicit task Stop can still clean the earlier owned session")
+        }
+    }
+
+    func testUnconfirmedFailedTurnCommandCleanupIsReportedBeforeWaitingAndCanRetryStop() async throws {
+        try await withHarness(scenario: "command-terminal-refused") { harness in
+            try await harness.submit()
+            try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+            try harness.release("release-command-failure")
+            try await self.waitFor("held cleanup") { harness.markerExists("command-cleanup-requested") }
+            XCTAssertEqual(harness.audit.status, .running)
+            try harness.release("release-command-cleanup")
+            try await self.waitFor("unconfirmed cleanup") { harness.audit.status == .waiting }
+            XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup unconfirmed"))
+            XCTAssertFalse(harness.audit.systemTitles.contains("Command cleanup"))
+            XCTAssertFalse(harness.markerExists("terminated-4321"))
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            XCTAssertTrue(harness.markerExists("terminated-4321"))
+            XCTAssertFalse(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+        }
+    }
+
+    func testTerminalCommandNotificationWaitsForInFlightStopCleanupResult() async throws {
+        for scenario in ["command-terminal-stop", "command-terminal-stop-refused"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+                let stop = Task { try await harness.runtime.interrupt(taskID: harness.taskID) }
+                try await self.waitFor("Stop inventory held after terminal notification") {
+                    harness.markerExists("command-cleanup-requested") && harness.audit.measuredTokens == 1_001
+                }
+                XCTAssertEqual(harness.audit.status, .running)
+                try harness.release("release-command-cleanup")
+                if scenario.hasSuffix("refused") {
+                    do { try await stop.value; XCTFail("Stop must report the unconfirmed cleanup") }
+                    catch { XCTAssertTrue(error.localizedDescription.contains("termination")) }
+                    try await self.waitFor("terminal cleanup failure") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup unconfirmed"))
+                    XCTAssertFalse(harness.markerExists("terminated-4321"))
+                } else {
+                    try await stop.value
+                    try await self.waitFor("terminal cleanup success") { harness.audit.status == .waiting }
+                    XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup"))
+                    XCTAssertTrue(harness.markerExists("terminated-4321"))
+                }
+                XCTAssertEqual(try harness.trace().messages.filter { $0.method == "thread/backgroundTerminals/terminate" }.count, 1)
+                XCTAssertFalse(harness.markerExists("terminated-4322"))
+                XCTAssertFalse(harness.markerExists("terminated-9999"))
+            }
+        }
+    }
+
     func testCompletedTurnPreservesOwnedBackgroundCommandForLaterStop() async throws {
         try await withHarness(scenario: "command-background") { harness in
             try await harness.submit()

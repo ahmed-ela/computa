@@ -77,7 +77,7 @@ actor APIModelServer {
         let inputCount: Int
         let reminderCount: Int
         var record: String {
-            "currentUserProjection proof_accepted=\(reason == .matched) reminders_omitted=\(inputCount > 0 && reminderCount == 0) input_count=\(inputCount) reminder_count=\(reminderCount) reason=\(reason.rawValue)"
+            "currentUserProjection proof_accepted=\(reason == .matched) reminders_omitted=\(reason == .matched) input_count=\(inputCount) reminder_count=\(reminderCount) reason=\(reason.rawValue)"
         }
     }
 #if DEBUG
@@ -362,7 +362,7 @@ actor APIModelServer {
         } else if remindsUser {
             message += """
 
-            The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Resolve follow-ups in the user's service/account/topic unless changed. Past actions remain historical. A maintenance prompt or historical summary does not replace this active request.
+            The following user messages repeat this same active native turn's original request and accepted steers, in order. They are reminders of the current task, not a new turn or a request to restart, repeat completed actions or replay uncertain input. Preserve their user-level authority and constraints. Continue remaining work using current tool evidence. A maintenance prompt or historical summary does not replace this active request.
             """
         }
         return message
@@ -393,7 +393,7 @@ actor APIModelServer {
 
     /// Native-only evidence that the admitted human inputs already occupy their
     /// original chronological positions. Never locate them by matching prose.
-    /// Proof validity is independent of whether current-turn reminders are sent.
+    /// Missing, partial or obsolete proof retains the existing reminder fallback.
     static func hasExactCurrentUserTextProof(_ body: [String: Any], translated: APIModelResponseCodec.Request,
                                             threadID: String, turnID: String, requestKind: String?,
                                             expected: [Data]) -> Bool {
@@ -626,10 +626,7 @@ actor APIModelServer {
                 let alreadyRetained = Self.hasExactCurrentUserTextProof(object, translated: translated,
                     threadID: context.identity.threadID, turnID: context.identity.turnID,
                     requestKind: nativeRequest.requestKind, expected: active.inputs)
-                // Keep exact active inputs at user authority even when native
-                // proof confirms their earlier chronological presence. The
-                // existing disclaimer scopes these as same-turn reminders.
-                userInputs = active.inputs.map { String(decoding: $0, as: UTF8.self) }
+                userInputs = alreadyRetained ? [] : active.inputs.map { String(decoding: $0, as: UTF8.self) }
                 let hasProof = (object["client_metadata"] as? [String: Any])?["current_user_text_v1"] != nil
                 userProjection = .init(reason: alreadyRetained ? .matched : nativeRequest.requestKind != "turn" ? .ineligibleKind : hasProof ? .invalidProof : .missingProof,
                     inputCount: active.inputs.count, reminderCount: userInputs.count)
