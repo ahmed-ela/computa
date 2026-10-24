@@ -2267,3 +2267,54 @@ asserts zero picker/editor input before release, then verifies one Send, complet
 response and owned cleanup. These tests cover the mechanism, not the live cause;
 installed qualification remains pending. Private receipts: `bun258-model-adapters-
 result.json` and `swift258-header-readiness-result.json`.
+
+### Installed 258: nonempty unrecognized header still blocks submission
+
+Installed source `e4d6c899` and executable `0ed89f7644dc…` matched the recorded
+build258 artifact. The unchanged diagnostic prompt failed in 747 ms, before
+website submission, tools, compaction or a final response. Cookie preparation
+verified 25 seeded cookies from 361 source cookies, with zero source mutations.
+The owned session started, then failed model verification; its saved cleanup
+receipt reported `closed/not_created`. All five fixture files, modes and the
+file set remained unchanged. Diagnostic task semantics were not exercised.
+
+The final picker diagnostic recorded a nonempty, unrecognized closed header:
+rendered text length 24 (normalized 23), DOM text length 22, neither canonical
+nor generic. Its span and SVG children were not visible, and no selection click
+or readiness record was present. This run therefore did not exercise the
+empty-header wait; it does not establish hydration as the failure's cause or
+reveal the header's exact text. Browser/send cases remain unstarted. Four task
+directory slots remained under the unchanged 256 limit. The next diagnostic is
+explicitly planned in this failed task with a new turn to conserve slots, not
+as a matched fresh-chat sample or a replacement for this failure. Private
+receipts: `chatgpt258/installed-association.json`, `startup-model-logs.json`,
+`diagnostic-binding.json`, `diagnostic-finite-audit.json` and
+`diagnostic-review.json`.
+
+
+### Build259: exact composite ChatGPT header support
+
+The initial closed-header parser now accepts a canonical power label or the
+exact rendered composition `Thinking effort` followed by that label. It does not
+accept arbitrary substrings, family names, duplicated labels or DOM textContent
+as positive evidence. All actual Power, checked-family, ownership, deadline and
+submission checks remain required. A finite presentation enum distinguishes this
+composition in live diagnostics; build258's length match alone is still only a
+hypothesis until that enum is observed.
+
+The same parser checks negative header drift. Bounded historical reconstruction
+also recognizes the exact compact composition when layout whitespace was lost;
+that branch supplies rejection only. Accessibility-hidden or inert descendants
+inside the exact header no longer erase negative mutation evidence. Current CSS
+is not used to discard historical records. Outside-header lineage remains
+excluded, and no historical text can grant input or model authority.
+
+All 704 adapter tests passed on unchanged Scripts and browser-model resources;
+the separate Swift test file was being prepared in parallel. All ten focused
+real-WebKit cases then passed on unchanged native source. The new native case
+reproduces the rendered/concatenated label distinction and verifies one Send,
+response and cleanup. Private results: `bun259-model-adapters-result.json` and
+`swift259-header-composition-result.json`. Installed259 acceptance remains
+pending. Duplicate generated256/257 app copies were removed only after exact
+whole-bundle and signature equality with preserved backups; source and all
+receipts remain (`duplicate-build-output-cleanup259.json`).

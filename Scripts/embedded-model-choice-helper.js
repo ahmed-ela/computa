@@ -118,20 +118,34 @@ function websiteChatResolvedSelectionEqual(left, right) {
     && left.family.key === right.family.key && left.family.label === right.family.label
     && left.power.key === right.power.key && left.power.label === right.power.label;
 }
+function websiteChatHeaderPresentation(value, negativeCompact = false) {
+  if (typeof value !== 'string' || value.length > 128) return { kind: 'unknown', power: null };
+  const normalized = websiteModelNormalize(value);
+  const canonical = websiteChatPowers.find(power => power.label === normalized);
+  if (canonical) return { kind: 'canonical', power: canonical };
+  const composite = websiteChatPowers.find(power => 'Thinking effort ' + power.label === normalized);
+  if (composite) return { kind: 'generic_power', power: composite };
+  // Historical textContent reconstruction can lose rendered block separators.
+  // This exact compact grammar is negative evidence only, never model proof.
+  const compact = negativeCompact && websiteChatPowers.find(power => 'Thinking effort' + power.label === normalized);
+  if (compact) return { kind: 'generic_power_compact', power: compact };
+  return { kind: normalized === '' ? 'empty' : normalized === 'Thinking effort' ? 'generic' : 'unknown', power: null };
+}
 function websiteChatHeaderPower(trigger) {
-  const value = trigger?.innerText;
-  return typeof value === 'string' && value.length <= 128
-    ? websiteChatPowers.find(power => power.label === websiteModelNormalize(value)) || null : null;
+  return websiteChatHeaderPresentation(trigger?.innerText).power;
 }
 function websiteChatHeaderTextShape(value) {
   const present = typeof value === 'string';
   const normalized = present && value.length <= 512 ? websiteModelNormalize(value) : null;
   const ordinal = present && value.length <= 128
     ? websiteChatPowers.findIndex(power => power.label === normalized) : -1;
+  const presentation = websiteChatHeaderPresentation(value);
   return { present, length: present ? Math.min(value.length, 513) : 0,
     normalizedLength: normalized === null ? null : Math.min(normalized.length, 512),
     empty: normalized === '', over128: present && value.length > 128,
-    canonicalOrdinal: ordinal < 0 ? null : ordinal, generic: normalized === 'Thinking effort' };
+    canonicalOrdinal: ordinal < 0 ? null : ordinal, generic: normalized === 'Thinking effort',
+    presentation: presentation.kind,
+    powerOrdinal: presentation.power ? websiteChatPowers.findIndex(power => power.key === presentation.power.key) : null };
 }
 // Generic chrome carries no model value. This predicate supplies only negative
 // continuity after a full associated-menu proof on this exact owned header.
@@ -144,8 +158,10 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
 }
 function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   if (!trigger || !expected) return false;
-  const different = value => typeof value === 'string' && value.length <= 128
-    && websiteChatPowers.some(power => power.label === websiteModelNormalize(value) && power.key !== expected.key);
+  const different = value => {
+    const power = websiteChatHeaderPresentation(value, true).power;
+    return !!power && power.key !== expected.key;
+  };
   if (different(trigger.innerText)) return true;
   // Current ancestry loses an attached header child that changed and detached
   // before delivery. Undo structural records, then replay their exact lineage.
@@ -172,9 +188,11 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
     }
     if (parents.size + text.size > 4_096) return true;
   }
+  const suppressed = node => node === trigger && node.nodeType === 1
+    && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null);
   const headerTarget = node => {
     for (let depth = 0; node && depth < 64; depth++, node = parent(node)) {
-      if (node.nodeType === 1 && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null)) return false;
+      if (suppressed(node)) return false;
       if (node === trigger) return true;
     }
     return node ? null : false;
@@ -182,7 +200,9 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
     if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
     if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
-    if (node.nodeType !== 1 || node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null) return '';
+    // AX suppression below the header does not hide rendered innerText. These
+    // bounded records can only reject a pin, including after a node detaches.
+    if (node.nodeType !== 1 || suppressed(node)) return '';
     const current = [...(node.childNodes || [])];
     if (current.length > 128) return null;
     const candidates = new Set([...current, ...(children.get(node) || [])]);
@@ -1181,6 +1201,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
     };
     diagnostic.chatHeader = { canonicalRecognized: !!state.headerPower, closed: state.closedPresentation,
       openPresentationRecognized: state.headerPresentation,
+      presentation: websiteChatHeaderPresentation(state.trigger?.innerText).kind,
       ordinal: state.headerPower ? websiteChatPowers.findIndex(power => power.key === state.headerPower.key) : null,
       menuMode: ['power', 'family', 'unknown', 'closed'].includes(state.mode) ? state.mode : 'unknown' };
     const header = state.trigger;

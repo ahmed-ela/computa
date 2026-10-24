@@ -53,7 +53,7 @@ export class Element {
 // Selector fixtures mirror the observed native picker semantics. They qualify
 // selection/ownership behavior; live DOM diagnostics separately qualify shape.
 export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini' | 'claude', Node: any = Element,
-  behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
+  behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; closedCompositeHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
     escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) {
   if (provider === 'chatgpt') return installObservedChatPowerPicker(f, Node, behavior);
   const initial = provider === 'chatgpt' ? 'GPT-5.6 Sol' : provider === 'gemini' ? '3.1 Pro' : 'Sonnet 5.5';
@@ -176,7 +176,8 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
 function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   const labels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
   let powerIndex = 1, selectedFamily = 'GPT-6';
-  const closedLabel = () => behavior.closedGenericHeader ? 'Thinking effort' : labels[powerIndex];
+  const closedLabel = () => behavior.closedGenericHeader ? 'Thinking effort'
+    : behavior.closedCompositeHeader ? 'Thinking effort\n\n' + labels[powerIndex] : labels[powerIndex];
   let primary = new Node('SPAN', {}, closedLabel());
   let trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
     'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'model-picker-menu' });

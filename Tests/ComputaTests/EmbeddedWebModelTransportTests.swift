@@ -6792,6 +6792,62 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTCompositeHeaderRequiresRenderedPowerProofThroughSendAndResponse() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let page = Self.modelChoicePage(.chatgpt, initiallySelectTarget: true)
+            .replacingOccurrences(of: "</body>", with: """
+                <script>
+                window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '0');
+                window.fixtureModelUpdateHeader = () => {
+                  const header = document.getElementById('fixture-model-header');
+                  header.setAttribute('aria-hidden', 'true');
+                  header.replaceChildren();
+                  if (document.getElementById('fixture-model-trigger').getAttribute('aria-expanded') === 'true') {
+                    header.textContent = 'Thinking effort';
+                    return;
+                  }
+                  const prefix = document.createElement('span'), power = document.createElement('span');
+                  prefix.style.display = power.style.display = 'block';
+                  prefix.textContent = 'Thinking effort';
+                  power.textContent = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'][Number(window.fixtureChatPowerThumb.getAttribute('aria-valuenow'))];
+                  header.append(prefix, power);
+                };
+                window.fixtureModelUpdateHeader();
+                </script></body>
+                """)
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let header = try await evaluate(view, #"""
+            const trigger = document.getElementById('fixture-model-trigger');
+            const label = document.getElementById('fixture-model-header');
+            return {rendered: trigger.innerText.replace(/\s+/g, ' ').trim(),
+              text: label.textContent, suppressed: label.getAttribute('aria-hidden'),
+              opens: window.fixtureModelTriggerClicks, powerInputs: window.fixturePowerKeyEvents};
+            """#) as? [String: Any]
+        XCTAssertEqual(header?["rendered"] as? String, "Thinking effort Instant")
+        XCTAssertEqual(header?["text"] as? String, "Thinking effortInstant")
+        XCTAssertEqual(header?["suppressed"] as? String, "true")
+        XCTAssertGreaterThan(header?["opens"] as? Int ?? 0, 0, "The rendered composite cannot replace associated menu proof")
+        XCTAssertEqual(header?["powerInputs"] as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let prompt = "Synthetic rendered composite-header request"
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertTrue(prompts == [prompt] || prompts == [prompt + "\n"], "Only the existing terminal editor line break may differ")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTEmptyInitialHeaderHydratesBeforeAnyPickerInputThenVerifiesSendAndResponse() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true))

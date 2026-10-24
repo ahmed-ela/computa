@@ -9,7 +9,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     ? { key: 'chat/latest/' + (label === 'GPT-6 Pro' ? 'pro' : label.toLowerCase().replace(' ', '-')), label }
     : { key: label, label };
   const selectionSource = provider === 'chatgpt' ? 'selected_model_indicator' : 'checked_model_option';
-  const setup = (owned = false, behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
+  const setup = (owned = false, behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; closedCompositeHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
     geminiMenuitemMarkers?: boolean; escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) => {
     const f = make(owned);
     if (provider === 'chatgpt') f.composer.focus = () => { f.document.activeElement = f.composer; };
@@ -2794,6 +2794,94 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
           expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
           expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+        }
+      });
+      test('exact rendered composite headers preserve all five Power and checked family proofs', async () => {
+        for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true });
+          picker.primary.values['aria-hidden'] = 'true';
+          const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic.chatHeader;
+          expect(diagnostic.presentation).toBe('generic_power');
+          expect(diagnostic.textShape.innerText).toMatchObject({ presentation: 'generic_power', powerOrdinal: 1 });
+          const result = await f.run('selectModel', { modelChoice: choice(label) });
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice(label));
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
+          expect((await f.run('verifyModel', { expectedModelChoice: choice(label) })).modelEvidence.selected).toEqual(choice(label));
+          expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
+        }
+      });
+      test('composite positive grammar rejects compact duplicate unknown and family text without textContent authority', async () => {
+        for (const label of ['Thinking effortInstant', 'Thinking effort Instant Pro', 'Thinking effort Thinking effort Instant',
+          'Thinking effort GPT-6', 'Thinking effort GPT-6 Pro', 'Prefix Thinking effort Instant', 'Thinking effort Instant suffix',
+          'thinking effort Instant', 'Thinking effort PRIVATE_POWER']) {
+          const { f, picker } = setup(); picker.primary.text = label;
+          const result = await f.run('selectModel', { modelChoice: choice(initial) });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.chatHeader.presentation).toBe('unknown');
+          expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+        const { f, picker } = setup(); picker.primary.text = 'Thinking effort Instant';
+        Object.defineProperty(picker.trigger, 'innerText', { get: () => 'PRIVATE_RENDERED_UNKNOWN' });
+        const result = await f.run('selectModel', { modelChoice: choice('Instant') });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.textShape.textContent.presentation).toBe('generic_power');
+        expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      });
+      test('composite current power contradicting the actual menu or pinned power is never repaired', async () => {
+        const first = setup(false, { closedCompositeHeader: true });
+        first.picker.primary.text = 'Thinking effort\n\nInstant'; // Actual slider remains Medium.
+        const rejected = await first.f.run('selectModel', { modelChoice: choice('Instant') });
+        expect(rejected.error).toBe('model_unverified'); noSelection(first.f, first.picker);
+        const later = setup(false, { closedCompositeHeader: true }); later.picker.selected('Instant');
+        expect((await later.f.run('selectModel', { modelChoice: choice('Instant') })).selected).toBe(true);
+        const opens = later.picker.trigger.clicks; later.picker.primary.text = 'Thinking effort\n\nPro';
+        expect((await later.f.run('verifyModel', { expectedModelChoice: choice('Instant') })).error).toBe('model_mismatch');
+        expect(later.picker.trigger.clicks).toBe(opens); noSelection(later.f, later.picker);
+      });
+      test('composite suppressed header text drift restored in one batch invalidates its pin', async () => {
+        for (const attribute of ['aria-hidden', 'inert']) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
+          picker.primary.values[attribute] = attribute === 'inert' ? '' : 'true';
+          expect((await f.run('selectModel', { modelChoice: choice('Instant') })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, opens = picker.trigger.clicks;
+          pin.headerObserver.callback([{ type: 'characterData', target: { nodeType: 3,
+            parentElement: picker.primary, textContent: 'Thinking effort\n\nInstant' }, oldValue: 'Thinking effort\n\nPro' }]);
+          expect(pin.invalidationReason).toBe('header_mutation');
+          expect((await f.run('verifyModel', { expectedModelChoice: choice('Instant') })).error).toBe('model_mismatch');
+          expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
+        }
+      });
+      test('split composite subtree drift retains detached header lineage but ignores a foreign subtree', async () => {
+        for (const attribute of ['aria-hidden', 'inert']) for (const foreign of [false, true]) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
+          expect((await f.run('selectModel', { modelChoice: choice('Instant') })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, original = picker.primary;
+          const parent = foreign ? f.body : picker.trigger;
+          const wrong = new Node('SPAN', { [attribute]: attribute === 'inert' ? '' : 'true' });
+          wrong.append(new Node('SPAN', {}, 'Thinking effort'), new Node('SPAN', {}, 'Pro'));
+          expect(wrong.textContent).toBe('Thinking effortPro');
+          // The current DOM is restored; only ordered childList records retain
+          // the temporary composite's exact original header ancestry.
+          const records: any[] = [];
+          if (!foreign) {
+            parent.children = []; original.parentElement = null;
+            records.push({ type: 'childList', target: parent, addedNodes: [], removedNodes: [original] });
+          }
+          parent.append(wrong); records.push({ type: 'childList', target: parent, addedNodes: [wrong], removedNodes: [] });
+          parent.children = parent.children.filter((node: any) => node !== wrong); wrong.parentElement = null; wrong.connected = false;
+          records.push({ type: 'childList', target: parent, addedNodes: [], removedNodes: [wrong] });
+          if (!foreign) {
+            parent.append(original); records.push({ type: 'childList', target: parent, addedNodes: [original], removedNodes: [] });
+          }
+          pin.headerObserver.callback(records);
+          expect(pin.invalidated === true).toBe(!foreign);
+          const result = await f.run('verifyModel', { expectedModelChoice: choice('Instant') });
+          if (foreign) expect(result.modelEvidence.selected).toEqual(choice('Instant'));
+          else expect(result.error).toBe('model_mismatch');
+          noSelection(f, picker);
         }
       });
       const pendingEmptyHeader = async (generic = false) => {
