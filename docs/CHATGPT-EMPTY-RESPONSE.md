@@ -20,6 +20,18 @@ asset/module identifiers had changed. The decoder method's verified source
 remained unchanged. This disabled the event shortcut and explains fallback use;
 it does not establish why ChatGPT produced no assistant message.
 
+Build 272's scoped inspection exposed another discovery problem: only 64–74
+recent resource records remained, with no startup runtime record. The website's
+loader clears resource timings when its buffer fills. Its loaded assets also use
+`link` initiators, which the observer's script-only filter rejected. Looking up
+startup assets only when a prompt is submitted cannot survive that lifecycle.
+
+A separate instrumented long-response diagnostic returned content outside the
+required response envelope. The runtime translated that local format error into
+a generic "high demand" error; that generic text is not evidence of a provider
+outage. Computa's current UI retained the specific local diagnosis, but the
+failure-history allowlist did not persist the new error classification.
+
 A later fresh greeting failed before provider dispatch because both local
 transaction stores had reached their 256-task active limit. Finally, terminal
 provider errors were projected into the same `Waiting` state as interruptions.
@@ -30,15 +42,20 @@ provider errors were projected into the same `Waiting` state as interruptions.
   Explicit relay instructions keep drafts in `message.text` and actions in
   Computa's offered tools. Native card/prose output is rejected without an
   automatic correction request or action replay.
-- Locate the one completed, observed current runtime resource and inspect its
-  bounded initialized module cache. Wrap only the uniquely verified decoder
-  method. Unsupported or ambiguous runtimes retain the normal fallback.
+- Retain a bounded set of completed runtime resource observations from document
+  start, including module preloads, across the website's timing-buffer clears.
+  Locate the one observed runtime and inspect its bounded initialized module
+  cache. Wrap only the uniquely verified decoder method. Unsupported or
+  ambiguous runtimes retain the normal fallback; finite diagnostic reasons
+  identify the discovery, import, cache or identity check that failed.
 - Recognize exact-prompt-owned terminal empty/error streams. A failure receipt
   must pass fresh document, session, submission, model and empty-DOM checks.
   An idle page, first HTTP error, missing event or diagnostic alone cannot end
   a request. Late content revokes the empty-stream receipt. No request is replayed.
 - Display terminal errors as `Failed`, including restored history. User and
   native safety interruptions retain their distinct waiting behavior.
+- Persist the exact canonical ChatGPT response-format failure so reopening a
+  chat retains the specific diagnosis instead of a generic runtime error.
 - Preserve closed journals in a durable SQLite archive before removing them
   from the bounded active set. Recover interrupted retirement under the shared
   writer lock, retain historical identity checks, and protect unresolved or

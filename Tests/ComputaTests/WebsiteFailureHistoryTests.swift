@@ -3,6 +3,60 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testUnsupportedChatGPTResponseSurvivesStoreRecreationWithExactHistoryReplacementIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaUnsupportedWebsiteReply-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let error = try XCTUnwrap(object["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "unsupported_website_response")
+        XCTAssertNil(error["retryable"], "Persist the exact existing native envelope without inventing retry authority")
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: turnID, modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, [record], "A fresh store must retain the exact local classification")
+        let entry = try XCTUnwrap(restored.first?.entry)
+        let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.body.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: persisted).isEqual(to: object))
+        XCTAssertEqual(entry.turnID, turnID)
+        XCTAssertEqual(entry.title, "Agent error")
+        XCTAssertFalse(entry.body.contains("high demand"))
+
+        // The runtime replaces the generic engine entry by this exact stable
+        // identity after reloading the store; it must never target another turn.
+        let generic = "We’re currently experiencing high demand, which may cause temporary errors."
+        let raw = try history([turn(turnID, status: "failed", error: ["message": generic])])
+        let entries = try AppServerThreadHistoryContract.entries(from: raw,
+            excludingAssistantTurns: Set(restored.map(\.turnID)))
+        XCTAssertEqual(entries.last?.id, entry.id)
+        XCTAssertEqual(entries.last?.body, generic)
+        XCTAssertFalse(entries.contains { $0.kind == .assistant })
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+            rejectedTurns: Set(restored.map(\.turnID)), failedTurns: Set(restored.map(\.turnID))), .failed)
+    }
+
+    func testUnsupportedChatGPTResponseStoreRejectsForgedTextRetryFieldsAndOtherProviders() throws {
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        for modelID in ["browser/gemini", "browser/claude", "api/cerebras/model/fixture"] {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: modelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [["message": "PRIVATE_PROVIDER_REPLY_CANARY"], ["retryable": false],
+            ["retryable": true], ["retryable": 0], ["type": "server_error"], ["code": "internal_error"],
+            ["required_action": "retry_send"], ["pageText": "PRIVATE_PROVIDER_REPLY_CANARY"], ["param": "input"]]
+        for mutation in mutations {
+            var changed = original, error = try XCTUnwrap(original["error"] as? [String: Any])
+            mutation.forEach { error[$0.key] = $0.value }; changed["error"] = error
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: syntheticChatGPTModelID,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)))
+        }
+    }
+
     func testNativeBrowserFailuresSurviveStoreRecreationWithExactTaskAndTurn() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserStartupError-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

@@ -4,6 +4,54 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+    func testUnsupportedChatGPTProseCapturesOnlyForExactOptInAndPreservesTerminalFailure() async throws {
+        let reply = "Hello, this is ordinary synthetic prose with a planet called Blue Meadow."
+        for mode in ["no_arm", "other_task", "exact_task", "unconfigured"] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), thread = UUID()
+            if mode != "no_arm" { try fixture.arm(mode == "other_task" ? UUID() : task) }
+            let transport = RejectedReplyTransport(reply: reply)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: mode == "unconfigured" ? nil : fixture.directory)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport,
+                defaultChatChoice: syntheticChatGPTChoice))
+            let input = try encoded(["model": syntheticChatGPTModelID, "input": "request-only-secret",
+                                     "tools": [], "tool_choice": "none", "stream": false])
+            do {
+                _ = try await server.fixtureInfer(input, taskID: task.uuidString, threadID: thread.uuidString)
+                XCTFail("Private capture must not admit the rejected prose")
+            } catch {
+                XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse, mode)
+                XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "unsupported_website_response", mode)
+            }
+            let beforeCleanup = await transport.operations()
+            XCTAssertEqual(beforeCleanup, ["webProviderStart", "webProviderSend", "webProviderPoll"], mode)
+            if mode == "exact_task" {
+                let value = try fixture.record()
+                XCTAssertEqual(value["replyText"] as? String, reply)
+                XCTAssertEqual(value["taskID"] as? String, task.uuidString.lowercased())
+                XCTAssertEqual(value["threadID"] as? String, thread.uuidString.lowercased())
+                XCTAssertEqual(value["provider"] as? String, "chatgpt")
+                XCTAssertEqual(value["automaticReplay"] as? Bool, false)
+                let diagnostic = try XCTUnwrap(value["diagnostic"] as? [String: Any])
+                XCTAssertEqual(diagnostic["reason"] as? String, "unsupported_website_response")
+                XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count)
+                XCTAssertEqual(try fixture.permissions(fixture.output), 0o600)
+                XCTAssertFalse(fixture.exists(fixture.armFile))
+                XCTAssertFalse(String(decoding: try Data(contentsOf: fixture.output), as: UTF8.self).contains("request-only-secret"))
+            } else {
+                XCTAssertFalse(fixture.exists(fixture.output), mode)
+                XCTAssertEqual(fixture.exists(fixture.armFile), mode != "no_arm", mode)
+            }
+            let issues = await server.fixtureFinish(taskID: task.uuidString)
+            XCTAssertTrue(issues.isEmpty, mode)
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"],
+                           "Capture must not resend or change the existing terminal cleanup handoff: \(mode)")
+            _ = await server.shutdown()
+        }
+    }
+
     func testPrivateCapturePreservesFiniteFinalWidgetAncestryWithoutUnknownContent() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(), thread = UUID()

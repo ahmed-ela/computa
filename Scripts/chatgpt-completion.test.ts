@@ -20,14 +20,14 @@ const binding = () => ({ correlationID, sequence: 1, inputSHA256: hash(inputText
 const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0)); };
 
 function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean;
-  resources?: any[]; moduleID?: string; configureRuntime?: (runtime: any) => void;
+  resources?: any[]; observeResources?: boolean; moduleID?: string; configureRuntime?: (runtime: any) => void;
   loadRuntime?: () => Promise<unknown> } = {}) {
   let clock = 100, imports = 0, timerID = 0, throwOriginal: unknown = null;
   // Retain all wire packets; the original authority regressions deliberately
   // inspect only the unchanged terminal/invalidated schemas.
   const allPosts: any[] = [], posts: any[] = [], diagnostics: any[] = [];
   const timers = new Map<number, () => void>(), documentEvents = new Map<string, Function>();
-  const windowEvents = new Map<string, Function>(), observers: any[] = [], pendingDigests: { bytes: Uint8Array; resolve: Function; reject: Function }[] = [];
+  const windowEvents = new Map<string, Set<Function>>(), resourceObservers: ResourceObserver[] = [], observers: any[] = [], pendingDigests: { bytes: Uint8Array; resolve: Function; reject: Function }[] = [];
   const O = new Function('T', 'return class O {recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}}')({
     safeParse(value: any) { if (throwOriginal) throw throwOriginal; return { success: !!value?.type, data: value }; },
   });
@@ -39,8 +39,8 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
   const window: any = { webkit: { messageHandlers: { computaChatGPTCompletion: { postMessage(record: any) {
     allPosts.push(record); (record.kind === 'diagnostic' ? diagnostics : posts).push(record);
   } } } },
-    addEventListener(name: string, listener: Function) { windowEvents.set(name, listener); },
-    removeEventListener(name: string, listener: Function) { if (windowEvents.get(name) === listener) windowEvents.delete(name); } };
+    addEventListener(name: string, listener: Function) { if (!windowEvents.has(name)) windowEvents.set(name, new Set()); windowEvents.get(name)!.add(listener); },
+    removeEventListener(name: string, listener: Function) { windowEvents.get(name)?.delete(listener); if (!windowEvents.get(name)?.size) windowEvents.delete(name); } };
   window.top = window;
   const button: any = { isConnected: true, disabled: false, getClientRects: () => [{}], getAttribute: () => null,
     closest(selector: string) { return (options.sendLabelOnly ? selector.includes('button[aria-label="Send"]')
@@ -55,6 +55,14 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
     observe() { this.active = true; }
     disconnect() { this.active = false; }
   }
+  class ResourceObserver {
+    active = false; pending: any = []; options: any;
+    constructor(readonly callback: Function) { resourceObservers.push(this); }
+    observe(options: any) { this.options = options; this.active = true; }
+    disconnect() { this.active = false; }
+    takeRecords() { const value = this.pending; this.pending = []; return value; }
+    deliver(entries: any) { if (this.active) this.callback({ getEntries: () => entries }); }
+  }
   const cryptoFixture = { subtle: { digest(_name: string, bytes: Uint8Array) {
     if (options.delayedDigest) return new Promise((resolve, reject) => pendingDigests.push({ bytes, resolve, reject }));
     return Promise.resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer);
@@ -63,22 +71,22 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
     : Promise.resolve(options.unsupported ? {} : runtime); };
   expect(source.split(runtimeImport)).toHaveLength(2);
   const execute = new Function('window', 'document', 'location', 'performance', 'crypto', 'MutationObserver',
-    'getComputedStyle', 'setTimeout', 'clearTimeout', 'loadRuntime', source
+    'getComputedStyle', 'setTimeout', 'clearTimeout', 'loadRuntime', 'PerformanceObserver', source
       .replace('__COMPUTA_COMPLETION_CONFIG__', JSON.stringify({ key, handlerName: 'computaChatGPTCompletion' }))
       .replace(runtimeImport, 'loadRuntime(runtimeURL)'));
   execute(window, document, location, { now: () => clock, getEntriesByType: (type: string) => type === 'resource' ? resources : [] }, cryptoFixture, Observer, () => ({ visibility: 'visible' }),
-    (callback: () => void) => { timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime);
+    (callback: () => void) => { timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime, options.observeResources ? ResourceObserver : undefined);
   const receiver = new O();
-  return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, resources, importedURLs, runtime, imports: () => imports,
+  return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, resourceObservers, resources, importedURLs, runtime, imports: () => imports,
     api: window[key], O, receiver, original,
     send: () => documentEvents.get('click')?.({ target: button }),
     stopClick: () => documentEvents.get('click')?.({ target: { closest: (s: string) => s.includes('stop-button') ? {} : null } }),
     decode: (payload: any, instance = receiver) => instance.recordCompletion(payload),
     tick: (value: number) => { clock = 100 + value; }, mutate: () => observers.filter(o => o.active).forEach(o => o.callback()),
-    pagehide: () => windowEvents.get('pagehide')?.(), throwOriginal: (error: unknown) => { throwOriginal = error; },
+    pagehide: () => [...(windowEvents.get('pagehide') ?? [])].forEach(callback => callback()), throwOriginal: (error: unknown) => { throwOriginal = error; },
     resolveDigests: () => pendingDigests.splice(0).forEach(({ bytes, resolve }) => resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer)),
     rejectDigests: () => pendingDigests.splice(0).forEach(({ reject }) => reject(new Error('private digest error'))),
-    listeners: () => documentEvents.size + windowEvents.size,
+    listeners: () => documentEvents.size + [...windowEvents.values()].reduce((n, set) => n + set.size, 0),
   };
 }
 function input(text = inputText, extra: any = {}) {
@@ -113,9 +121,9 @@ describe('ChatGPT current-response completion admission', () => {
     }
   });
 
-  test('missing, ambiguous, incomplete, foreign and non-script runtime observations never import a fallback', async () => {
+  test('missing, ambiguous, incomplete, foreign and unrelated runtime observations never import a fallback', async () => {
     for (const resources of [[], [runtimeResource(), runtimeResource('https://chatgpt.com/cdn/assets/633146.012345abcd.js')],
-      [{ ...runtimeResource(), initiatorType: 'link' }], [{ ...runtimeResource(), responseEnd: 0 }],
+      [{ ...runtimeResource(), initiatorType: 'fetch' }], [{ ...runtimeResource(), responseEnd: 0 }],
       [{ ...runtimeResource(), responseEnd: 101 }], [{ ...runtimeResource(), startTime: 51 }],
       [{ ...runtimeResource(), responseStatus: 404 }], [runtimeResource(runtimeURL + '?stale=1')],
       [runtimeResource(runtimeURL + '#fragment')], [runtimeResource(runtimeURL.replace('chatgpt.com', 'other.test'))],
@@ -124,8 +132,71 @@ describe('ChatGPT current-response completion admission', () => {
       expect(await f.api.arm(binding())).toEqual({ armed: false });
       expect(f.importedURLs).toEqual([]); expect(f.posts).toEqual([]);
       expect(f.O.prototype.recordCompletion).toBe(f.original.value);
-      expect(f.diagnostics[0].reason).toBe('runtime_unsupported');
+      expect(f.diagnostics[0].reason).toBe('runtime_resources_unavailable');
     }
+  });
+
+  test('document-start link observations survive website timing clear and queued callback delivery', async () => {
+    for (const queued of [false, true]) {
+      const f = fixture({ observeResources: true, resources: [] });
+      const observer = f.resourceObservers[0], record = { ...runtimeResource(), initiatorType: 'link' };
+      expect(observer.options).toEqual({ type: 'resource', buffered: true });
+      if (queued) observer.pending.push(record); else observer.deliver([record]);
+      // The website global timing buffer no longer contains startup assets.
+      f.resources.push(runtimeResource('https://chatgpt.com/cdn/assets/87162.8221492420.js'));
+      await ready(f); complete(f); expect(f.importedURLs).toEqual([runtimeURL]);
+      expect(f.posts[0]).toMatchObject({ kind: 'terminal', text: 'HI' });
+      f.api.stop(correlationID); f.pagehide();
+      expect(observer.active).toBe(false); expect(f.listeners()).toBe(0); expect(f.timers.size).toBe(0);
+    }
+  });
+
+  test('the resource inventory copies only URLs and expires with its document instead of granting a new lease', async () => {
+    const copied = fixture({ observeResources: true, resources: [] });
+    const entry = { ...runtimeResource(), initiatorType: 'link' };
+    copied.resourceObservers[0].deliver([entry]); entry.name = 'https://private.invalid/arbitrary';
+    await ready(copied); expect(copied.importedURLs).toEqual([runtimeURL]); copied.api.stop(correlationID); copied.pagehide();
+    for (const mode of ['expiry', 'pagehide']) {
+      const f = fixture({ observeResources: true });
+      if (mode === 'expiry') { f.tick(600001); [...f.timers.values()][0](); } else f.pagehide();
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(f.importedURLs).toEqual([]); expect(f.resourceObservers[0].active).toBe(false);
+      expect(f.listeners()).toBe(0); expect(f.timers.size).toBe(0);
+    }
+  });
+
+  test('observer ambiguity, malformed batches and finite inventory overflow fail closed without imports', async () => {
+    for (const mode of ['ambiguous', 'malformed', 'throwing_entry', 'overflow']) {
+      const f = fixture({ observeResources: true, resources: [] }), observer = f.resourceObservers[0];
+      observer.deliver([{ ...runtimeResource(), initiatorType: 'link' }]);
+      if (mode === 'ambiguous') observer.pending.push(runtimeResource('https://chatgpt.com/cdn/assets/633146.012345abcd.js'));
+      if (mode === 'malformed') observer.pending = { unexpected: 'not read or retained' };
+      if (mode === 'throwing_entry') observer.pending.push(Object.defineProperty({}, 'initiatorType', { get() { throw Error('private'); } }));
+      if (mode === 'overflow') observer.pending.push(...Array.from({ length: 9 }, (_, i) => runtimeResource('https://chatgpt.com/cdn/assets/633146.' + String(i).padStart(10,'0') + '.js')));
+      expect(await f.api.arm(binding())).toEqual({ armed: false }); expect(f.importedURLs).toEqual([]);
+      expect(f.diagnostics[0].reason).toBe('runtime_resources_unavailable');
+      expect(JSON.stringify(f.allPosts)).not.toContain('private'); f.pagehide();
+    }
+  });
+
+  test('captured observer methods cannot be replaced and a late callback cannot revive an expired inventory', async () => {
+    const f = fixture({ observeResources: true, resources: [] }), observer = f.resourceObservers[0];
+    observer.pending.push({ ...runtimeResource(), initiatorType: 'link' });
+    observer.takeRecords = () => { throw Error('replaced method must not run'); };
+    await ready(f); expect(f.importedURLs).toEqual([runtimeURL]);
+    f.api.stop(correlationID); f.pagehide();
+    observer.callback({ getEntries: () => [runtimeResource()] });
+    expect(await f.api.arm(binding())).toEqual({ armed: false });
+    expect(f.importedURLs).toEqual([runtimeURL]); expect(f.listeners()).toBe(0); expect(f.timers.size).toBe(0);
+  });
+
+  test('runtime diagnostic stages distinguish import, cache and changed observation without response content', async () => {
+    const rejected = fixture({ loadRuntime: async () => { throw Error('private network details'); } });
+    expect(await rejected.api.arm(binding())).toEqual({ armed: false });
+    expect(rejected.diagnostics[0].reason).toBe('runtime_import_failed');
+    const unsupported = fixture({ unsupported: true }); expect(await unsupported.api.arm(binding())).toEqual({ armed: false });
+    expect(unsupported.diagnostics[0].reason).toBe('runtime_cache_unsupported');
+    expect(JSON.stringify(rejected.allPosts)).not.toContain('private');
   });
 
   test('a runtime observation changing across the import cannot install a decoder wrapper', async () => {
@@ -136,7 +207,22 @@ describe('ChatGPT current-response completion admission', () => {
     resolve(f.runtime);
     expect(await arming).toEqual({ armed: false });
     expect(f.importedURLs).toEqual([runtimeURL]); expect(f.listeners()).toBe(0);
+    expect(f.diagnostics[0].reason).toBe('runtime_identity_changed');
     expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+  });
+
+  test('a throwing approved getter cannot hide a unique initialized decoder or initialize one', async () => {
+    for (const hasDecoder of [true, false]) {
+      const f = fixture({ configureRuntime(runtime) {
+        const partial = { exports: Object.defineProperty({}, 'c', {
+          get: new Function('return ()=>O')(), enumerable: true, configurable: false }) };
+        runtime.__webpack_require__.c = { partial, ...(hasDecoder ? runtime.__webpack_require__.c : {}) };
+      } });
+      expect(await f.api.arm(binding())).toEqual({ armed: hasDecoder });
+      if (hasDecoder) { f.send(); f.decode(input()); await flush(); complete(f); expect(f.posts[0].kind).toBe('terminal'); }
+      else expect(f.diagnostics[0].reason).toBe('runtime_cache_unsupported');
+      f.api.stop(correlationID);
+    }
   });
 
   test('cache discovery never invokes require, factories, cache accessors or unapproved export getters', async () => {
@@ -392,7 +478,7 @@ describe('ChatGPT current-response completion admission', () => {
     const unavailable = fixture({ unsupported: true });
     expect(await unavailable.api.arm(binding())).toEqual({ armed: false });
     expect(unavailable.allPosts).toEqual([{ version: 1, kind: 'diagnostic', correlationID, sequence: 1,
-      inputSHA256: hash(inputText), reason: 'runtime_unsupported', calls: 0, instances: 0 }]);
+      inputSHA256: hash(inputText), reason: 'runtime_cache_unsupported', calls: 0, instances: 0 }]);
     expect(unavailable.O.prototype.recordCompletion).toBe(unavailable.original.value);
     expect(unavailable.listeners()).toBe(0); expect(unavailable.timers.size).toBe(0);
     const successful = fixture(); await ready(successful); complete(successful); successful.api.stop(correlationID);

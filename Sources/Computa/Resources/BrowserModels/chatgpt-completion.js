@@ -17,7 +17,8 @@
   const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
-  const diagnosticReasons = Object.freeze(['runtime_unsupported', 'call_limit', 'decoder_limit', 'route_changed',
+  const diagnosticReasons = Object.freeze(['runtime_unsupported', 'runtime_resources_unavailable', 'runtime_import_failed',
+    'runtime_cache_unsupported', 'runtime_identity_changed', 'call_limit', 'decoder_limit', 'route_changed',
     'wrapper_changed', 'input_shape', 'input_hash', 'owner_conflict', 'parent_changed', 'parent_limit', 'ancestry_missing',
     'final_status', 'final_changed', 'terminal_order', 'terminal_opaque', 'error', 'send_changed', 'expired', 'observer_exception']);
   let lease = null;
@@ -31,24 +32,63 @@
       return prototype === Object.prototype || prototype === null ? undefined : unknown;
     } catch { return unknown; }
   }
-  function observedRuntimeURL() {
-    // A fetch observation is not proof of ESM evaluation. Import only the one
-    // completed runtime script observed in this document; never fetch a pinned
-    // predecessor or try candidate URLs. ESM reuses an evaluated exact URL.
-    if (!resourceEntries) return null;
-    const entries = resourceEntries('resource');
-    if (!Array.isArray(entries) || entries.length > 4096) return null;
-    const candidates = new Set();
-    for (const entry of entries) {
-      if (!entry || entry.initiatorType !== 'script' || typeof entry.name !== 'string'
-        || !/^https:\/\/chatgpt\.com\/cdn\/assets\/633146\.[a-f0-9]{10}\.js$/.test(entry.name)
-        || !Number.isFinite(entry.startTime) || entry.startTime < 0
-        || !Number.isFinite(entry.responseEnd) || entry.responseEnd <= 0
-        || entry.responseEnd < entry.startTime || entry.responseEnd > now()) continue;
-      if (entry.responseStatus !== undefined && entry.responseStatus !== 0 && entry.responseStatus !== 200) continue;
-      candidates.add(entry.name);
+  // Website telemetry clears its global resource timing buffer after startup.
+  // Retain only up to eight completed exact runtime URLs in this document; no
+  // request bodies, headers, arbitrary URLs or resource payloads are retained.
+  const runtimeResources = new Set(), inventoryDeadline = now() + 600000;
+  let resourceObserver = null, resourceTakeRecords = null, resourceDisconnect = null;
+  let inventoryInvalid = false, inventoryTimer = null, inventoryPagehide = null;
+  function stopRuntimeInventory() {
+    inventoryInvalid = true; runtimeResources.clear();
+    bestEffort(() => resourceDisconnect?.());
+    bestEffort(() => { if (inventoryTimer !== null) clearTimeout(inventoryTimer); });
+    bestEffort(() => { if (inventoryPagehide) window.removeEventListener('pagehide', inventoryPagehide); });
+    resourceObserver = null; resourceTakeRecords = null; resourceDisconnect = null; inventoryTimer = null; inventoryPagehide = null;
+  }
+  function collectRuntimeResources(entries) {
+    if (inventoryInvalid) return;
+    if (document !== initialDocument || window !== window.top || location.origin !== 'https://chatgpt.com'
+      || now() >= inventoryDeadline || !Array.isArray(entries) || entries.length > 4096) {
+      stopRuntimeInventory(); return;
     }
-    return candidates.size === 1 ? [...candidates][0] : null;
+    try {
+      for (const entry of entries) {
+        if (!entry || !['script', 'link'].includes(entry.initiatorType) || typeof entry.name !== 'string'
+          || !/^https:\/\/chatgpt\.com\/cdn\/assets\/633146\.[a-f0-9]{10}\.js$/.test(entry.name)
+          || !Number.isFinite(entry.startTime) || entry.startTime < 0
+          || !Number.isFinite(entry.responseEnd) || entry.responseEnd <= 0
+          || entry.responseEnd < entry.startTime || entry.responseEnd > now()) continue;
+        if (entry.responseStatus !== undefined && entry.responseStatus !== 0 && entry.responseStatus !== 200) continue;
+        if (!runtimeResources.has(entry.name) && runtimeResources.size >= 8) { stopRuntimeInventory(); return; }
+        runtimeResources.add(entry.name);
+      }
+    } catch { stopRuntimeInventory(); }
+  }
+  // Install before website startup. Observer records are independent of the
+  // website's clearResourceTimings(); draining them avoids a delivery race.
+  try {
+    if (typeof PerformanceObserver === 'function') {
+      resourceObserver = new PerformanceObserver(list => {
+        try { collectRuntimeResources(list.getEntries()); } catch { stopRuntimeInventory(); }
+      });
+      resourceTakeRecords = resourceObserver.takeRecords.bind(resourceObserver);
+      resourceDisconnect = resourceObserver.disconnect.bind(resourceObserver);
+      resourceObserver.observe({ type: 'resource', buffered: true });
+      inventoryPagehide = () => stopRuntimeInventory();
+      window.addEventListener('pagehide', inventoryPagehide);
+      inventoryTimer = setTimeout(stopRuntimeInventory, Math.max(0, inventoryDeadline - now()));
+    }
+    if (resourceEntries) collectRuntimeResources(resourceEntries('resource'));
+  } catch { stopRuntimeInventory(); }
+  function observedRuntimeURL() {
+    // Observation proves a completed fetch, not ESM evaluation. Import only the
+    // unique same-document observed URL, never a guessed or pinned predecessor.
+    try {
+      if (resourceTakeRecords) collectRuntimeResources(resourceTakeRecords());
+      if (resourceEntries) collectRuntimeResources(resourceEntries('resource'));
+    } catch { stopRuntimeInventory(); }
+    return !inventoryInvalid && now() < inventoryDeadline && runtimeResources.size === 1
+      ? [...runtimeResources][0] : null;
   }
   function initializedDecoder(runtime) {
     // Website chunk/module IDs change independently. Inspect bounded initialized
@@ -65,7 +105,11 @@
       if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
         || exported.enumerable !== true || exported.configurable !== false
         || apply(functionSource, exported.get, []) !== '()=>O') continue;
-      const Decoder = apply(exported.get, exports, []), target = data(Decoder, 'prototype');
+      // A different cached module can expose the same literal getter while its
+      // binding is not initialized yet. It supplies no decoder evidence.
+      let Decoder;
+      try { Decoder = apply(exported.get, exports, []); } catch { continue; }
+      const target = data(Decoder, 'prototype');
       const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
       if (!original || typeof original.value !== 'function' || original.writable !== true
         || original.configurable !== true || original.enumerable !== false
@@ -328,11 +372,15 @@
         if (!route(current)) {
           bestEffort(() => diagnostic(current, now() >= current.deadline ? 'expired' : 'route_changed')); throw unknown;
         }
+        current.armFailureReason = 'runtime_resources_unavailable';
         const runtimeURL = observedRuntimeURL();
         if (!runtimeURL) throw unknown;
+        current.armFailureReason = 'runtime_import_failed';
         const runtime = await import(runtimeURL);
         if (!live(current)) return { armed: false };
+        current.armFailureReason = 'runtime_identity_changed';
         if (observedRuntimeURL() !== runtimeURL) throw unknown;
+        current.armFailureReason = 'runtime_cache_unsupported';
         const found = initializedDecoder(runtime), { target, original } = found;
         const wrapper = function (...args) {
           let result;
@@ -341,6 +389,7 @@
           try { observe(current, this, result); } catch { restore(current, true, 'observer_exception'); }
           return result;
         };
+        current.armFailureReason = 'runtime_identity_changed';
         const currentExport = descriptor(found.exports, 'c'), currentMethod = descriptor(target, 'recordCompletion');
         if (!live(current) || observedRuntimeURL() !== runtimeURL
           || data(found.cache, found.key) !== found.cached || data(found.cached, 'exports') !== found.exports
@@ -374,7 +423,7 @@
         window.addEventListener('hashchange', current.pathchange);
         current.timer = setTimeout(() => restore(current, true, 'expired'), Math.max(0, current.deadline - now()));
         return { armed: true };
-      } catch { restore(current, false, 'runtime_unsupported'); return { armed: false }; }
+      } catch { restore(current, false, current.armFailureReason || 'runtime_unsupported'); return { armed: false }; }
     },
     stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); }
   });

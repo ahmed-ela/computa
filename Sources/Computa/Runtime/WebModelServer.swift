@@ -1130,6 +1130,9 @@ actor WebModelServer {
                             if case .unknownTool = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unofferedTool, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .unsupportedWebsiteResponse = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .unsupportedWebsiteResponse, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             }
                             throw error
                         }
@@ -1413,6 +1416,7 @@ actor WebModelServer {
     private enum RejectedReplyDiagnostic {
         case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         case unofferedTool
+        case unsupportedWebsiteResponse
     }
 
     private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
@@ -1431,6 +1435,8 @@ actor WebModelServer {
                                 "fenced": value.fenced]
         case .unofferedTool:
             diagnosticFields = ["reason": "unoffered_tool", "utf8Bytes": text.utf8.count]
+        case .unsupportedWebsiteResponse:
+            diagnosticFields = ["reason": "unsupported_website_response", "utf8Bytes": text.utf8.count]
         }
         var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
                                     "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),

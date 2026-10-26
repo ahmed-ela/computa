@@ -12,6 +12,8 @@ final class ChatGPTResponseCompletion {
 
     enum DiagnosticReason: String, CaseIterable {
         case runtimeUnsupported = "runtime_unsupported", callLimit = "call_limit", decoderLimit = "decoder_limit"
+        case runtimeResourcesUnavailable = "runtime_resources_unavailable", runtimeImportFailed = "runtime_import_failed"
+        case runtimeCacheUnsupported = "runtime_cache_unsupported", runtimeIdentityChanged = "runtime_identity_changed"
         case routeChanged = "route_changed", wrapperChanged = "wrapper_changed"
         case inputShape = "input_shape", inputHash = "input_hash", ownerConflict = "owner_conflict"
         case parentChanged = "parent_changed", parentLimit = "parent_limit", ancestryMissing = "ancestry_missing"

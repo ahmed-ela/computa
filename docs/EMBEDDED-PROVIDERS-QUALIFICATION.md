@@ -2715,3 +2715,46 @@ unchanged evidence-store task cap, the completed synthetic journals were
 reversibly archived with exact copies; native chat history was retained.
 The greeting capture arm was consumed, no renderer diagnostic expiry remained,
 and Safari's developer setting remained restored to off. No release or merge.
+
+### Build 272: empty-response fixes and remaining discovery failure
+
+Signed, non-notarized Computa 0.7.0 (272), source `3b29d76`, completed these
+normal ChatGPT Chat/Instant cases without diagnostic arms:
+
+| Controlled task | Native duration | Verified responses | Successful native tools |
+| --- | ---: | ---: | ---: |
+| Literal `hi` | 6.855 s | 1 | 0 |
+| Unsent `example.invalid` email draft | 6.922 s | 1 | 0 |
+| Two separate terminal commands | 21.086 s | 3 | 2 |
+| 24,576-byte local mailbox request | 50.303 s | 7 | 6 |
+
+All 12 inferences retained full ownership/model/lifecycle verification and
+saved closed website-session receipts, with zero corrections or failed tools.
+The draft used the exact prompt that previously produced a native website
+email card, and returned an ordinary local draft without external actions.
+Both terminal commands exited zero and returned the expected marker and 437.
+The mailbox fixture recorded exactly one POST with the expected fields and
+receipt `LOCAL-62b674b4e1b40c25`, independently matched to the browser read and
+final answer. No real email was sent.
+
+These passes used the verified completion fallback: the new runtime discovery
+still reported `runtime_unsupported`. Two subsequent long synthetic rendering
+diagnostics failed the response-envelope check; neither is counted as a pass.
+Their generic runtime "high demand" text was not evidence of a provider outage.
+Scoped Inspector reads showed missing startup resource records, while retained
+provider source installs a resource-timing buffer-clear handler. This discovery
+gap and persistence of the new response-format error require another candidate.
+
+The exact-byte journal audit preserved all 564 pre-install files: 530 remained
+active and 34 were archived, with five completed retirements, no pending work
+and a healthy SQLite archive. The active 256-task cap was unchanged. The local
+fixture process stopped, port 62240 was free, inspection arms were consumed,
+and Safari's developer setting was restored to off.
+
+Before installation, 670 of 671 unique native cases passed across the broad and
+targeted repair runs; one existing opt-in microbenchmark was skipped. This was
+not a single clean full-suite run: all nine initial failing cases were mapped
+to subsequent passes, including the final fixture-only rerun. JavaScript
+validation passed 567 tests across eight files, and the Web UI passed eight
+tests, type checking and its build. Build 271 was built but never installed.
+The original upstream cause of the empty real-user reply remains unproven.
