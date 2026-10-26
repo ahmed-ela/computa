@@ -14,6 +14,33 @@ return (() => {
   const boolean = value => typeof value === 'boolean' ? value : null;
   const finiteStage = value => stages.has(value) ? value : value == null ? null : 'other';
   const label = 'This response couldn’t load';
+  const regexProjection = () => {
+    try {
+      const state = own(window, '__computaRendererRegexDiagnosticV1'), expiry = own(state, 'expiresAtUnixSeconds');
+      const records = own(state, 'records'), stopReason = own(state, 'stopReason'), now = Date.now() / 1000;
+      if (own(state, 'version') !== 1 || typeof expiry !== 'number' || !Number.isFinite(expiry)
+        || expiry <= now || expiry > now + 600 || !Array.isArray(records) || records.length > 4
+        || !['active', 'expired', 'pagehide', 'limit', 'replaced'].includes(stopReason)) return undefined;
+      const projected = [];
+      for (let index = 0; index < records.length; index++) {
+        const record = own(records, String(index)), patternHash = own(record, 'patternHash'), patternLength = own(record, 'patternLength');
+        const inputLength = own(record, 'inputLength'), flags = own(record, 'flags'), startEpochMs = own(record, 'startEpochMs');
+        const durationMs = own(record, 'durationMs'), publicStack = own(record, 'publicStack');
+        if (typeof patternHash !== 'string' || !/^[0-9a-f]{8}$/.test(patternHash)
+          || !Number.isSafeInteger(patternLength) || patternLength < 0 || patternLength > 16384
+          || inputLength !== null && (!Number.isSafeInteger(inputLength) || inputLength < 0 || inputLength > 1e9)
+          || typeof flags !== 'string' || !/^d?g?i?m?s?u?v?y?$/.test(flags) || flags.includes('u') && flags.includes('v')
+          || typeof startEpochMs !== 'number' || !Number.isFinite(startEpochMs) || startEpochMs < 0 || startEpochMs > 1e15
+          || typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 100 || durationMs > 600000
+          || typeof publicStack !== 'string' || publicStack.length > 256) return undefined;
+        const frames = publicStack === '' ? [] : publicStack.split('\n');
+        if (frames.length > 2 || frames.some(frame => !/^https:\/\/(?:chatgpt\.com\/cdn\/assets\/(?:async\/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com\/deployments\/dil\/v[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}$/.test(frame))) return undefined;
+        projected.push({ patternHash, patternLength, inputLength, flags, startEpochMs, durationMs, publicStack });
+      }
+      const result = { version: 1, stopReason, records: projected };
+      return new TextEncoder().encode(JSON.stringify(result)).length <= 2048 ? result : undefined;
+    } catch { return undefined; }
+  };
   const startupProjection = iframe => {
     try {
       const state = own(window, '__computaRendererStartupDiagnosticV1'), expiry = own(state, 'expiresAtUnixSeconds');
@@ -202,9 +229,10 @@ return (() => {
       && own(moduleError, 'protocolVersion') === 14 && [undefined, true].includes(own(moduleError, 'policyDenied'));
     if (document.URL !== input.expectedURL || !leaf.isConnected || !copy.isConnected || body.textContent !== label
       || own(runner, 'snapshot') !== snapshot || own(snapshot, 'error') !== error) return unavailable('state_changed');
-    const startup = startupProjection(own(frame, 'iframe'));
+    const startup = startupProjection(own(frame, 'iframe')), regex = regexProjection();
     return { version: 1, status: 'captured', ancestorDepth: depth, snapshotVersion: version, treeIsNull: true,
       ...(startup === undefined ? {} : { startup }),
+      ...(regex === undefined ? {} : { regex }),
       error: { name: errorName(error), message, messageTruncated: typeof rawMessage === 'string' && (rawMessage.length > 512 || new TextEncoder().encode(rawMessage.slice(0, 512)).length > 512),
         publicStack: publicFrames.join('\n'), stage: finiteStage(own(error, 'stage')) },
       lifecycle: { failureStage: finiteStage(own(lifecycle, 'failureStage')),

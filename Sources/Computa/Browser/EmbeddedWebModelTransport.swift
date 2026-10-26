@@ -5210,7 +5210,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return value
         }
         let capturedKeys = ["version", "status", "ancestorDepth", "snapshotVersion", "treeIsNull", "error", "lifecycle", "runnerDisposed", "frame"]
-        guard status == "captured", keys(value, capturedKeys + (value["startup"] == nil ? [] : ["startup"])),
+        let optionalKeys = ["startup", "regex"].filter { value[$0] != nil }
+        guard status == "captured", keys(value, capturedKeys + optionalKeys),
               integer(value["ancestorDepth"], 0...15), integer(value["snapshotVersion"], 1...1_000_000),
               boolean(value["treeIsNull"]), value["treeIsNull"] as? Bool == true, nullableBoolean(value["runnerDisposed"]),
               let error = value["error"] as? [String: Any], keys(error, ["name", "message", "messageTruncated", "publicStack", "stage"]),
@@ -5231,7 +5232,40 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
         guard frames.count <= 4, frames.allSatisfy({ $0.range(of: publicFrame, options: .regularExpression) != nil }) else { return nil }
         if let startup = value["startup"], !validRendererStartupDiagnostic(startup) { return nil }
+        if let regex = value["regex"], !validRendererRegexDiagnostic(regex) { return nil }
         return value
+    }
+
+    /// Optional troubleshooting attribution: hashes and public code locations
+    /// only. Neither regex source nor its input may cross this boundary.
+    nonisolated static func validRendererRegexDiagnostic(_ raw: Any) -> Bool {
+        func number(_ raw: Any?, maximum: Double, minimum: Double = 0, integral: Bool = false) -> Bool {
+            guard let numeric = raw as? NSNumber, CFGetTypeID(numeric) != CFBooleanGetTypeID() else { return false }
+            let value = numeric.doubleValue
+            return value.isFinite && value >= minimum && value <= maximum && (!integral || value.rounded() == value)
+        }
+        let reasons: Set<String> = ["active", "expired", "pagehide", "limit", "replaced"]
+        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "stopReason", "records"],
+              number(value["version"], maximum: 1, minimum: 1, integral: true),
+              let reason = value["stopReason"] as? String, reasons.contains(reason),
+              let records = value["records"] as? [[String: Any]], records.count <= 4 else { return false }
+        let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
+        let valid = records.allSatisfy { record in
+            guard Set(record.keys) == ["patternHash", "patternLength", "inputLength", "flags", "startEpochMs", "durationMs", "publicStack"],
+                  let hash = record["patternHash"] as? String, hash.range(of: #"\A[0-9a-f]{8}\z"#, options: .regularExpression) != nil,
+                  number(record["patternLength"], maximum: 16_384, integral: true),
+                  record["inputLength"] is NSNull || number(record["inputLength"], maximum: 1e9, integral: true),
+                  let flags = record["flags"] as? String, flags.range(of: #"\Ad?g?i?m?s?u?v?y?\z"#, options: .regularExpression) != nil,
+                  !(flags.contains("u") && flags.contains("v")),
+                  number(record["startEpochMs"], maximum: 1e15),
+                  number(record["durationMs"], maximum: 600_000, minimum: 100),
+                  let stack = record["publicStack"] as? String, stack.utf8.count <= 256 else { return false }
+            let frames = stack.isEmpty ? [] : stack.components(separatedBy: "\n")
+            return frames.count <= 2 && frames.allSatisfy { $0.range(of: publicFrame, options: .regularExpression) != nil }
+        }
+        guard valid, JSONSerialization.isValidJSONObject(value),
+              let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 2_048 else { return false }
+        return true
     }
 
     /// A finite startup trace is troubleshooting data only. Never accept site

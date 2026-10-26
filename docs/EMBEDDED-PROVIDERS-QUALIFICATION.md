@@ -149,6 +149,24 @@ remaining investigation to the full page and its integration; they do not
 qualify a repaired installed task. Build265 adds opt-in, content-free timing of
 Computa's synchronous adapter work to distinguish it from awaited/provider work.
 
+Installed265 reproduced the failure in 38.095s with no released tools. Its 13
+measured synchronous stages were short: the longest observer callback took 15ms;
+70 callbacks totaled 124ms. The measurements did not saturate. An independently
+sampled, correlated WebContent process spent 473 of 539 main-thread samples in
+JavaScriptCore's regular-expression interpreter while its worker waited. These
+are sampling proportions, not a conversion to wall duration, and sampling itself
+can perturb timing. The calling JavaScript function was not symbolicated.
+Offline system-JavaScriptCore tests of exact adapter helpers up to 180KB did not
+reproduce seconds-scale or quadratic behavior. The provider's `gKmr` validator
+also has only a bounded component-name expression. The hot regex remains
+unattributed; this is not a passing repair or a quota diagnosis.
+
+Build266 adds a controlled, expiring main-page regex attribution probe to identify
+that caller. It retains only slow-call timings, lengths, pattern hashes, flags
+and bounded public asset locations, never pattern or input text. Replacing a
+builtin can perturb fast paths, so its timing is diagnostic rather than a latency
+benchmark. The existing verified failure remains the only persistence gate.
+
 ## Candidate148: one bounded ChatGPT format correction
 
 A verified ChatGPT reply that fails strict JSON parsing can receive one fresh

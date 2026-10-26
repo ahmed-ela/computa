@@ -13149,6 +13149,93 @@ extension EmbeddedWebModelTransportTests {
         }
     }
 
+    private func rendererRegexDiagnosticFixture() -> [String: Any] {
+        ["version": 1, "stopReason": "active", "records": [[
+            "patternHash": "09abcdef", "patternLength": 80, "inputLength": 120_000,
+            "flags": "gim", "startEpochMs": 1_792_980_000_000, "durationMs": 5_000.5,
+            "publicStack": "https://chatgpt.com/cdn/assets/async/123456.0123456789.js:1:456"]]]
+    }
+
+    private func rendererStateWithRegexFixture(_ regex: Any) -> [String: Any] {
+        ["version": 1, "status": "captured", "ancestorDepth": 0, "snapshotVersion": 1,
+         "treeIsNull": true, "runnerDisposed": false,
+         "error": ["name": "Error", "message": NSNull(), "messageTruncated": false,
+                   "publicStack": "", "stage": "worker_timeout"],
+         "lifecycle": ["failureStage": "worker_timeout", "frameReady": true, "frameRecovering": false,
+                       "workerReady": false, "firstSnapshotSucceeded": false],
+         "frame": ["readyResolved": true, "disposed": false, "retired": true,
+                   "retriedPreReadyFrame": false, "moduleErrorPresent": false, "policyDenied": NSNull()],
+         "regex": regex]
+    }
+
+    func testRendererRegexDiagnosticBoundsAndPrivateContent() throws {
+        let valid = rendererRegexDiagnosticFixture()
+        let record = try XCTUnwrap((valid["records"] as? [[String: Any]])?.first)
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(valid))
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(rendererStateWithRegexFixture(valid)))
+        for reason in ["active", "expired", "pagehide", "limit", "replaced"] {
+            XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(
+                ["version": 1, "stopReason": reason, "records": []]))
+        }
+        let unknownInput = record.merging(["inputLength": NSNull(), "flags": "", "publicStack": ""], uniquingKeysWith: { _, next in next })
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(
+            ["version": 1, "stopReason": "limit", "records": Array(repeating: unknownInput, count: 4)]))
+        for change: [String: Any] in [
+            ["patternHash": "PRIVATE_SENTINEL"], ["patternHash": "09ABCDEF"],
+            ["patternLength": true], ["patternLength": -1], ["patternLength": 1.5], ["patternLength": 16_385],
+            ["inputLength": "PRIVATE_SENTINEL"], ["inputLength": true], ["inputLength": 1.5], ["inputLength": 1_000_000_001],
+            ["flags": "gg"], ["flags": "ig"], ["flags": "uv"], ["flags": "x"],
+            ["startEpochMs": true], ["startEpochMs": -1], ["startEpochMs": Double.nan], ["startEpochMs": 1e16],
+            ["durationMs": 99.9], ["durationMs": Double.infinity], ["durationMs": 600_001],
+            ["publicStack": "PRIVATE_SENTINEL"], ["publicStack": "https://chatgpt.com/c/private:1:2"],
+            ["publicStack": "https://chatgpt.com/cdn/assets/123456.0123456789.js?private=1:1:2"],
+            ["publicStack": Array(repeating: record["publicStack"] as! String, count: 3).joined(separator: "\n")],
+            ["input": "PRIVATE_SENTINEL"], ["pattern": "PRIVATE_SENTINEL"]
+        ] {
+            let mutated: [String: Any] = ["version": 1, "stopReason": "active",
+                "records": [record.merging(change, uniquingKeysWith: { _, next in next })]]
+            XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(mutated), "Mutation keys: \(change.keys)")
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(rendererStateWithRegexFixture(mutated)))
+        }
+        for change: [String: Any] in [["version": true], ["version": 0], ["stopReason": "PRIVATE_SENTINEL"],
+            ["records": Array(repeating: record, count: 5)], ["records": ["PRIVATE_SENTINEL"]], ["source": "PRIVATE_SENTINEL"]] {
+            XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(valid.merging(change, uniquingKeysWith: { _, next in next })))
+        }
+    }
+
+    func testRendererRegexDiagnosticCapturePreservesFailureAndSinglePageRead() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Private regex attribution must not authorize output")
+        defer { fixture.shutdown() }
+        try await installRendererRecoveryFailureFixture(view)
+        let suite = "ComputaRendererRegexTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "ComputaRendererFailureDiagnosticExpiresAt"
+        defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
+        let projection = rendererStateWithRegexFixture(rendererRegexDiagnosticFixture())
+        let encoded = try JSONSerialization.data(withJSONObject: projection, options: [.sortedKeys])
+        let literal = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        var captures: [Data] = []
+        fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+            source: "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; return \(literal);") { captures.append($0) }
+        for _ in 0..<2 {
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Renderer failure must remain terminal") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseRenderingFailed) }
+        }
+        XCTAssertEqual(captures.count, 1)
+        XCTAssertNil(defaults.object(forKey: key))
+        let capture = try XCTUnwrap(captures.first)
+        XCTAssertLessThanOrEqual(capture.count, 16_384)
+        let persisted = try XCTUnwrap((JSONSerialization.jsonObject(with: capture) as? [String: Any])?["projection"] as? [String: Any])
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(persisted))
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(try XCTUnwrap(persisted["regex"])))
+        let calls = try await evaluate(view, "return window.fixtureRendererDiagnosticCalls||0;") as? Int
+        XCTAssertEqual(calls, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testRendererWorkDiagnosticExpiryClearsCacheWithoutChangingResponse() async throws {
         let (fixture, token, _) = try await boundInspectionFixture(prompt: "Finite timing never changes response authority")
         defer { fixture.shutdown() }
