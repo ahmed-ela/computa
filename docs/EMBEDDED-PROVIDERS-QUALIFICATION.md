@@ -2785,3 +2785,49 @@ runtime used its thread ID as the task ID; it would not have captured a failure.
 Both unused arms were disarmed and retained locally. The first fresh-chat arm
 was correctly scoped. No real email, new fixture server or Inspector session
 was used for these build273 diagnostics.
+
+### Build 274: installed qualification
+
+Signed, non-notarized Computa 0.7.0 (274), source `669b7ff`, completed four fresh
+normal ChatGPT Chat/Instant tasks with the same native prompts as build272:
+
+| Controlled task | Native duration | Verified responses | Successful native tools |
+| --- | ---: | ---: | ---: |
+| Literal `hi` | 7.751 s | 1 | 0 |
+| Unsent `example.invalid` email draft | 7.978 s | 1 | 0 |
+| Two separate terminal commands | 24.035 s | 3 | 2 |
+| 24,576-byte local mailbox request | 51.439 s | 7 | 6 |
+
+All 12 inferences completed full ownership/model/lifecycle verification and
+saved closed website-session receipts. There were zero failed inferences,
+failed tools or corrections. The terminal results matched both exact commands
+with exit code zero. The mailbox fixture recorded exactly one POST with all
+requested fields and receipt `LOCAL-5c848aadbdcb79a7`, independently matched to
+the subsequent browser read and final answer. No real email was sent.
+
+A separate retained-context follow-up requested exactly three fictional entries
+in the chat whose earlier summary had preserved an older 180-entry task. Automatic
+maintenance completed in 11.025 seconds and the queued user turn in 8.179 seconds.
+It returned exactly three numbered, nonempty one-sentence entries, with no extra
+items, tools, errors or corrections. Both inference sessions were verified and
+closed. This bounded check exercises newer-request precedence after compaction.
+
+All 12 completion observers armed. They reached the strict final/message-terminal
+path but could not prove the additional system-only ancestry walk; each used the
+normal verified quiet fallback. This is a remaining successful-response latency
+limitation, not evidence of a failed task. The empty/error-stream classifier uses
+separate exact-input ownership and terminal checks and does not depend on that
+final ancestry walk. Deterministic JavaScript and real-WebKit tests cover its
+empty/error receipts, rejection cases and no-replay behavior; these successful
+live tasks do not constitute a live empty/error-stream test.
+
+The final partial-metadata observer suite passed 48 tests / 667 assertions;
+the focused native completion/history/capture suites passed 47 tests, and the
+instruction suite passed 50. Broader earlier regression results remain recorded
+above rather than being represented as one new full-suite run.
+
+All 564 original journal files remained byte-exact after the mailbox case:
+520 active and 44 archived, no pending retirement, SQLite integrity healthy.
+The fixture process stopped and port 62240 was free. All scoped diagnostic arms
+were absent, Safari's developer setting was reverified off and its owned settings
+window closed. Existing user browser tabs were preserved. No release or merge.
