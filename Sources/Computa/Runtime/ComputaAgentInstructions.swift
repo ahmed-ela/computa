@@ -197,9 +197,11 @@ enum ComputaAgentInstructions {
     /// Model adherence still needs live qualification; this grants no authority.
     static let taskCompletion = """
     Verify every requested outcome against its source and all user constraints.
-    If an observed, authorized control or offered tool can reveal a missing
-    result, use it and inspect the output. An intermediate page or unopened
-    detail is not a blocker. Respect access denials, Stop and recovery limits.
+    Continue remaining authorized work with offered tools and matching results;
+    partial progress is not completion. An intermediate page or unopened detail
+    is not a blocker. Stop for an observed blocker, necessary
+    clarification or governing-rule refusal. Respect denied actions, Stop and
+    recovery limits; never replay uncertain actions.
     """
 
     static let literalIdentifiers = """
@@ -212,7 +214,7 @@ enum ComputaAgentInstructions {
     /// was completed. Actual tool authority and evidence checks stay separate.
     static let finalResponse = """
     A final reply ends your work; it schedules no next step. For requested results,
-    continue useful authorized exploration. Promises to inspect or search later are
+    continue remaining authorized work. Promises to inspect or act later are
     progress narration, not results. If you can take that next step now, use the available
     tools instead. Do not repeat unchanged attempts. Answer with the observed result
     and source, or explain the specific remaining uncertainty or observed blocker.
@@ -622,8 +624,9 @@ enum ComputaAgentInstructions {
         Request permitted commands/file actions as JSON for local execution.
         Await matching output before any execution claim.
         """ : ""
-        // This handoff follows canonical history. Do not deduplicate its current
-        // command rules against an earlier native instruction inside that history.
+        // This handoff follows canonical history. Keep current command and
+        // task-completion rules fresh even when the native contract is retained
+        // earlier in that history; a progress summary does not end an action task.
         let commandHandoff = offeredToolNames.contains {
             !customToolNames.contains($0) && ["exec_command", "write_stdin"].contains(String($0.split(separator: ".").last ?? ""))
         } ? commandChecks : ""
@@ -656,10 +659,11 @@ enum ComputaAgentInstructions {
         Computa validates names, arguments, local permissions and approvals before execution.
         Use matching function_call_output/custom_tool_call_output to verify execution;
         never invent results or reuse historical receipts.
-        \(instructionAlreadyIncluded(taskCompletion, in: includedInstructionText) ? "" : taskCompletion)
-        When outputs suffice for the requested result, return message.
-        Use message for general/self-contained answers, plans/summaries, clarification,
-        verified completion, limitations or governing-rule refusals.
+        \(taskCompletion)
+        A message ends this turn; return it when outputs verify the requested outcomes.
+        Use message for general/self-contained answers, user-requested plans/summaries
+        or partial observations, necessary clarification, verified completion,
+        observed limitations or governing-rule refusals.
         Progress: optional tool_calls.commentary string with next calls, never outside
         the envelope or a final answer.
         No tools means no tool call.

@@ -2909,3 +2909,47 @@ The diagnostic changes passed 193 focused codec/catalog tests and eight bounded
 collector tests. The next candidate aligns cumulative byte bounds with the
 existing finite inference and per-request limits, preserving actual-byte
 accounting, ownership verification, correction limits and no-replay behavior.
+
+
+### Build 278: byte-budget regression passes; premature final remains
+
+Installed signed, non-notarized 0.7.0 (278), source `73455ad`, retained the same
+frozen task prompts and independent fixture checks:
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Identify attachment and send its name | 136.311 s | 11 | 10 | Pass |
+| Read schedule and send the fact | 61.388 s | 8 | 7 | Pass |
+| Read library hours and send the fact | 55.807 s | 7 | 6 | Incomplete |
+| Two separate terminal commands | 22.356 s | 3 | 2 | Pass |
+
+The attachment task exercised the exact previous byte-budget failure: its first
+ten prompts used 934,397 bytes, and its final response required 131,032 more.
+The 1,065,429 total exceeded the former cap by 16,853 bytes but fit the derived
+finite allowance. It delivered exactly once and returned the matching receipt
+`LOCAL-d377f9c5e5a7e138`. All eleven sessions passed verification and closed.
+The schedule task also recorded one exact delivery and matching final receipt;
+both terminal commands returned their actual expected output with exit zero.
+
+The library task stopped after filling recipient and subject. Its final answer
+truthfully reported that the body was unfilled and the message unsent; no POST
+occurred. The exact final inference had all ten native browser functions offered
+and allowed, `auto` policy and a current bound page. The last native observation
+exposed a writable body field and enabled Send button. There was no tool error,
+permission denial or budget failure. This is a semantic premature final, not a
+missing-tool or transport failure. Its cause inside the model is not observable.
+The failure remains in the denominator and was not resumed or silently retried.
+
+All 29 inferences passed transport/model/ownership verification and closed;
+there were no failed tool calls or correction attempts. Every observer armed,
+using the verified quiet fallback. All three fixture processes and task tabs
+were closed, including the failed case. No real email was sent.
+
+The byte-budget/history changes passed 26 focused native/real-WebKit regressions,
+including a final response after ten completed actions, all sixteen permitted
+large requests, rejection before a seventeenth insertion, correction counting,
+cancellation, marker overhead and exact error persistence through reload.
+The next instruction candidate addresses an actual presentation ambiguity:
+the fresh response handoff allowed unqualified plans/summaries as final messages,
+while completion guidance could be deduplicated into earlier canonical history.
+That is an improvement hypothesis, not proof of the model's internal cause.
