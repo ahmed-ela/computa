@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 
-const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-renderer-startup-diagnostic.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-regex-diagnostic.js', import.meta.url), 'utf8');
 function fixture(origin = 'https://chatgpt.com', subframe = false) {
   const context = createContext({ URL, URLSearchParams, TextEncoder });
   const run = (code: string) => runInContext(code, context);
@@ -35,7 +35,7 @@ function fixture(origin = 'https://chatgpt.com', subframe = false) {
   if (subframe) run('globalThis.top = {}');
   const install = (config: any = { expiresAtUnixSeconds: 1100 }) => {
     (context as any).providedConfig = config;
-    run(source.replace('__COMPUTA_RENDERER_STARTUP_DIAGNOSTIC_CONFIG__', 'providedConfig'));
+    run(source.replace('__COMPUTA_RENDERER_REGEX_DIAGNOSTIC_CONFIG__', 'providedConfig'));
   };
   return { run, install, state: () => run('globalThis.__computaRendererRegexDiagnosticV1') };
 }
@@ -107,11 +107,35 @@ describe('private slow RegExp attribution probe', () => {
     f.run('execDuration = Infinity; /a/.exec("a")');
     expect(f.state().records).toHaveLength(1);
   });
+  test('aggregates many short calls and original throws without retaining their input or pattern', () => {
+    const f = fixture(); f.install(); f.run('execDuration = 25; for(let index=0;index<200;index++) /private/.exec("private input")');
+    const snapshot = f.run('__computaRendererRegexDiagnosticV1.snapshot()');
+    expect(snapshot).toEqual({version:2,stopReason:'active',records:[],callCount:200,totalDurationMs:5000,maxDurationMs:25,saturated:false});
+    f.run('throwSentinel = true; try { /private/.exec("private input") } catch {}');
+    expect(f.run('__computaRendererRegexDiagnosticV1.snapshot().callCount')).toBe(201);
+    expect(f.run('__computaRendererRegexDiagnosticV1.snapshot().totalDurationMs')).toBe(5025);
+    expect(JSON.stringify(snapshot)).not.toContain('private');
+    snapshot.callCount = 0; expect(f.state().callCount).toBe(201);
+  });
+  test('bounds aggregate count/time, fails closed for nonfinite clocks, and isolates each realm', () => {
+    for (const change of ['__computaRendererRegexDiagnosticV1.callCount = 1000000',
+      '__computaRendererRegexDiagnosticV1.totalDurationMs = 1e9', 'execDuration = Infinity']) {
+      const f = fixture(); f.install(); f.run('execDuration = 10; ' + change + '; /a/.exec("a")');
+      expect(f.state().saturated).toBe(true); expect(f.state().stopReason).toBe('limit');
+      expect(f.run('RegExp.prototype.exec === original')).toBe(true);
+    }
+    const page = fixture(), isolated = fixture(); page.install(); isolated.install();
+    page.run('execDuration = 25; /a/.exec("a")'); isolated.run('execDuration = 75; /b/.exec("b"); /b/.exec("b")');
+    expect(page.state().callCount).toBe(1); expect(page.state().totalDurationMs).toBe(25);
+    expect(isolated.state().callCount).toBe(2); expect(isolated.state().totalDurationMs).toBe(150);
+    isolated.run('globalThis.document = {}'); expect(isolated.run('__computaRendererRegexDiagnosticV1.snapshot()')).toBeNull();
+    expect(page.run('__computaRendererRegexDiagnosticV1.snapshot()').callCount).toBe(1);
+  });
   test('caps four slow calls, stops at expiry, and never overwrites a site replacement', () => {
     const f = fixture(); f.install(); f.run('execDuration = 100; for(let i=0;i<10;i++) /a/.exec("a")');
     expect(f.state().records).toHaveLength(4); expect(f.state().stopReason).toBe('limit');
     expect(f.run('RegExp.prototype.exec === original')).toBe(true);
-    expect(new TextEncoder().encode(JSON.stringify({version:1,stopReason:f.state().stopReason,records:f.state().records})).length).toBeLessThanOrEqual(2048);
+    expect(new TextEncoder().encode(JSON.stringify(f.run('__computaRendererRegexDiagnosticV1.snapshot()'))).length).toBeLessThanOrEqual(2304);
     const expired = fixture(); expired.install(); expired.run('epoch = 1100001; /a/.exec("a")');
     expect(expired.state().stopReason).toBe('expired'); expect(expired.run('RegExp.prototype.exec === original')).toBe(true);
     const replaced = fixture(); replaced.install();

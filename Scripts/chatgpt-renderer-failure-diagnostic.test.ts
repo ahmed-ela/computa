@@ -77,10 +77,10 @@ describe('private ChatGPT renderer failure diagnostic', () => {
     const record: any = { patternHash: '0123abcd', patternLength: 32, inputLength: 180000, flags: 'gim',
       startEpochMs: 1234567, durationMs: 5430, publicStack: 'https://chatgpt.com/cdn/assets/87162.8221492420.js:120:9',
       input: 'private input', pattern: 'private pattern' };
-    const state: any = { version: 1, expiresAtUnixSeconds: Date.now() / 1000 + 100, stopReason: 'limit', records: [record] };
+    const state: any = { version: 2, expiresAtUnixSeconds: Date.now() / 1000 + 100, stopReason: 'limit', records: [record], callCount: 100, totalDurationMs: 5500, maxDurationMs: 5430, saturated: false };
     Object.defineProperty(f.window, '__computaRendererRegexDiagnosticV1', { value: state });
     const result = f.run(); expect(result.status).toBe('captured');
-    expect(result.regex).toEqual({ version: 1, stopReason: 'limit', records: [{ patternHash: '0123abcd', patternLength: 32,
+    expect(result.regex).toEqual({ version: 2, stopReason: 'limit', callCount: 100, totalDurationMs: 5500, maxDurationMs: 5430, saturated: false, records: [{ patternHash: '0123abcd', patternLength: 32,
       inputLength: 180000, flags: 'gim', startEpochMs: 1234567, durationMs: 5430,
       publicStack: 'https://chatgpt.com/cdn/assets/87162.8221492420.js:120:9' }] });
     expect(JSON.stringify(result.regex)).not.toContain('private');
@@ -91,10 +91,13 @@ describe('private ChatGPT renderer failure diagnostic', () => {
       const previous = record[key]; record[key] = value; expect(f.run().regex).toBeUndefined();
       expect(f.run().status).toBe('captured'); record[key] = previous;
     }
+    for (const [key, value] of [['callCount',0],['totalDurationMs',1],['maxDurationMs',Infinity],['saturated','yes']]) {
+      const previous = state[key]; state[key] = value; expect(f.run().regex).toBeUndefined(); state[key] = previous;
+    }
     state.records = Array(5).fill(record); expect(f.run().regex).toBeUndefined(); state.records = [record];
     let reads = 0; Object.defineProperty(record, 'patternHash', { get() { reads++; return '0123abcd'; } });
     expect(f.run().regex).toBeUndefined(); expect(reads).toBe(0);
-    state.records = []; expect(f.run().regex).toEqual({ version: 1, stopReason: 'limit', records: [] });
+    state.records = []; expect(f.run().regex).toEqual({ version: 2, stopReason: 'limit', callCount: 100, totalDurationMs: 5500, maxDurationMs: 5430, saturated: false, records: [] });
     state.expiresAtUnixSeconds = Date.now() / 1000 - 1; expect(f.run().regex).toBeUndefined();
   });
   test('includes only current finite startup records and keeps an unarmed capture unchanged', () => {

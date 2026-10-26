@@ -13150,7 +13150,8 @@ extension EmbeddedWebModelTransportTests {
     }
 
     private func rendererRegexDiagnosticFixture() -> [String: Any] {
-        ["version": 1, "stopReason": "active", "records": [[
+        ["version": 2, "callCount": 128, "totalDurationMs": 5_500.5, "maxDurationMs": 5_000.5,
+         "saturated": false, "stopReason": "active", "records": [[
             "patternHash": "09abcdef", "patternLength": 80, "inputLength": 120_000,
             "flags": "gim", "startEpochMs": 1_792_980_000_000, "durationMs": 5_000.5,
             "publicStack": "https://chatgpt.com/cdn/assets/async/123456.0123456789.js:1:456"]]]
@@ -13175,11 +13176,11 @@ extension EmbeddedWebModelTransportTests {
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(rendererStateWithRegexFixture(valid)))
         for reason in ["active", "expired", "pagehide", "limit", "replaced"] {
             XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(
-                ["version": 1, "stopReason": reason, "records": []]))
+                valid.merging(["stopReason": reason, "records": []], uniquingKeysWith: { _, next in next })))
         }
         let unknownInput = record.merging(["inputLength": NSNull(), "flags": "", "publicStack": ""], uniquingKeysWith: { _, next in next })
         XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(
-            ["version": 1, "stopReason": "limit", "records": Array(repeating: unknownInput, count: 4)]))
+            valid.merging(["stopReason": "limit", "records": Array(repeating: unknownInput, count: 4)], uniquingKeysWith: { _, next in next })))
         for change: [String: Any] in [
             ["patternHash": "PRIVATE_SENTINEL"], ["patternHash": "09ABCDEF"],
             ["patternLength": true], ["patternLength": -1], ["patternLength": 1.5], ["patternLength": 16_385],
@@ -13192,15 +13193,21 @@ extension EmbeddedWebModelTransportTests {
             ["publicStack": Array(repeating: record["publicStack"] as! String, count: 3).joined(separator: "\n")],
             ["input": "PRIVATE_SENTINEL"], ["pattern": "PRIVATE_SENTINEL"]
         ] {
-            let mutated: [String: Any] = ["version": 1, "stopReason": "active",
-                "records": [record.merging(change, uniquingKeysWith: { _, next in next })]]
+            let mutated = valid.merging(["records": [record.merging(change, uniquingKeysWith: { _, next in next })]], uniquingKeysWith: { _, next in next })
             XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(mutated), "Mutation keys: \(change.keys)")
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(rendererStateWithRegexFixture(mutated)))
         }
-        for change: [String: Any] in [["version": true], ["version": 0], ["stopReason": "PRIVATE_SENTINEL"],
+        for change: [String: Any] in [["version": true], ["version": 0], ["version": 1], ["stopReason": "PRIVATE_SENTINEL"],
+            ["callCount": true], ["callCount": -1], ["callCount": 1.5], ["callCount": 1_000_001], ["callCount": 0],
+            ["totalDurationMs": Double.infinity], ["totalDurationMs": 1e10], ["totalDurationMs": -1],
+            ["maxDurationMs": Double.nan], ["maxDurationMs": 600_001], ["maxDurationMs": 5_501], ["saturated": 1],
             ["records": Array(repeating: record, count: 5)], ["records": ["PRIVATE_SENTINEL"]], ["source": "PRIVATE_SENTINEL"]] {
             XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(valid.merging(change, uniquingKeysWith: { _, next in next })))
         }
+        let work: [String: Any] = ["version": 1, "invocationCount": 1, "stages": Array(repeating: [0, 0, 0], count: 13),
+            "slowSpans": [], "saturated": false, "regex": valid]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(work))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(work.merging(["regex": ["input": "PRIVATE_SENTINEL"]], uniquingKeysWith: { _, next in next })))
     }
 
     func testRendererRegexDiagnosticCapturePreservesFailureAndSinglePageRead() async throws {
@@ -13211,10 +13218,16 @@ extension EmbeddedWebModelTransportTests {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let key = "ComputaRendererFailureDiagnosticExpiresAt"
-        defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
+        let expiry = Date().timeIntervalSince1970 + 60
+        defaults.set(expiry, forKey: key)
         let projection = rendererStateWithRegexFixture(rendererRegexDiagnosticFixture())
         let encoded = try JSONSerialization.data(withJSONObject: projection, options: [.sortedKeys])
         let literal = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        let regexLiteral = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: rendererRegexDiagnosticFixture()), encoding: .utf8))
+        _ = try await evaluate(view, """
+            Object.defineProperty(globalThis, '__computaRendererRegexDiagnosticV1', {value:{
+              expiresAtUnixSeconds:\(expiry), snapshot:()=> (\(regexLiteral))}}); return true;
+            """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
         var captures: [Data] = []
         fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
             source: "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; return \(literal);") { captures.append($0) }
@@ -13226,9 +13239,13 @@ extension EmbeddedWebModelTransportTests {
         XCTAssertNil(defaults.object(forKey: key))
         let capture = try XCTUnwrap(captures.first)
         XCTAssertLessThanOrEqual(capture.count, 16_384)
-        let persisted = try XCTUnwrap((JSONSerialization.jsonObject(with: capture) as? [String: Any])?["projection"] as? [String: Any])
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: capture) as? [String: Any])
+        let persisted = try XCTUnwrap(envelope["projection"] as? [String: Any])
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(persisted))
         XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(try XCTUnwrap(persisted["regex"])))
+        let work = try XCTUnwrap(envelope["work"] as? [String: Any])
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(try XCTUnwrap(work["regex"])),
+            "Private-world metadata must reach the same capture through the existing owned adapter result")
         let calls = try await evaluate(view, "return window.fixtureRendererDiagnosticCalls||0;") as? Int
         XCTAssertEqual(calls, 1)
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)

@@ -2086,7 +2086,16 @@ function chatGPTObservationDiagnosticResult(observed) {
 function chatGPTPreparationResult(observed) {
   try {
     const work = chatGPTRendererWorkDiagnostic?.snapshot();
-    if (work && observed && typeof observed === 'object') observed = { ...observed, rendererWorkDiagnostic: work };
+    if (work && observed && typeof observed === 'object') {
+      const state = Object.getOwnPropertyDescriptor(globalThis, '__computaRendererRegexDiagnosticV1')?.value;
+      const expiry = state && Object.getOwnPropertyDescriptor(state, 'expiresAtUnixSeconds')?.value;
+      const snapshot = state && Object.getOwnPropertyDescriptor(state, 'snapshot')?.value;
+      if (expiry === input.rendererWorkDiagnosticExpiresAtUnixSeconds && typeof snapshot === 'function') {
+        const regex = snapshot();
+        if (regex) work.regex = regex;
+      }
+      observed = { ...observed, rendererWorkDiagnostic: work };
+    }
   } catch { /* Private profiling cannot change an observation. */ }
   observed = chatGPTMatchedBenchmarkResult(observed);
   if (input.matchedObservationDiagnostic != null) observed = chatGPTObservationDiagnosticResult(observed);

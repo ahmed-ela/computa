@@ -531,11 +531,14 @@ final class EmbeddedBrowserSession {
                 // scheduling; it grants no browser or model authority.
                 configuration.preferences.inactiveSchedulingPolicy = .none
             }
-            if modelOwned, isolatedChatGPTStore != nil,
-               let script = Self.rendererStartupDiagnosticScript(
-                armedUntil: defaults.object(forKey: "ComputaRendererFailureDiagnosticExpiresAt"),
-                source: Self.rendererStartupDiagnosticSource) {
-                configuration.userContentController.addUserScript(script)
+            if modelOwned, isolatedChatGPTStore != nil {
+                let arm = defaults.object(forKey: "ComputaRendererFailureDiagnosticExpiresAt")
+                if let script = Self.rendererStartupDiagnosticScript(armedUntil: arm, source: {
+                    Self.rendererDiagnosticSource(named: "chatgpt-renderer-startup-diagnostic")
+                }) { configuration.userContentController.addUserScript(script) }
+                for script in Self.rendererRegexDiagnosticScripts(armedUntil: arm, source: {
+                    Self.rendererDiagnosticSource(named: "chatgpt-regex-diagnostic")
+                }) { configuration.userContentController.addUserScript(script) }
             }
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
@@ -1136,14 +1139,30 @@ final class EmbeddedBrowserSession {
             injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
     }
 
-    private static func rendererStartupDiagnosticSource() -> String? {
+    static func rendererRegexDiagnosticScripts(armedUntil: Any?, now: TimeInterval = Date().timeIntervalSince1970,
+                                               source: () -> String?) -> [WKUserScript] {
+        guard let expiry = armedUntil as? NSNumber, CFGetTypeID(expiry) != CFBooleanGetTypeID(),
+              expiry.doubleValue.isFinite, expiry.doubleValue > now, expiry.doubleValue <= now + 600,
+              let source = source(), source.utf8.count <= 65_536,
+              source.components(separatedBy: "__COMPUTA_RENDERER_REGEX_DIAGNOSTIC_CONFIG__").count == 2,
+              let data = try? JSONSerialization.data(withJSONObject: ["expiresAtUnixSeconds": expiry.doubleValue]),
+              let config = String(data: data, encoding: .utf8) else { return [] }
+        let script = source.replacingOccurrences(of: "__COMPUTA_RENDERER_REGEX_DIAGNOSTIC_CONFIG__", with: config)
+        // The two realms have separate RegExp intrinsics and diagnostic state.
+        // Both probes precede any provider or adapter code in this owned view.
+        return [WKContentWorld.page, WKContentWorld.world(name: "computa-chatgpt-model-v1")].map {
+            WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: $0)
+        }
+    }
+
+    private static func rendererDiagnosticSource(named name: String) -> String? {
         #if SWIFT_PACKAGE
         let bundles = [Bundle.module, Bundle.main]
         #else
         let bundles = [Bundle.main]
         #endif
         for bundle in bundles {
-            if let url = bundle.url(forResource: "chatgpt-renderer-startup-diagnostic", withExtension: "js", subdirectory: "BrowserModels"),
+            if let url = bundle.url(forResource: name, withExtension: "js", subdirectory: "BrowserModels"),
                let source = try? String(contentsOf: url, encoding: .utf8) { return source }
         }
         return nil

@@ -5173,7 +5173,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return count > 0 || total == 0 && maximum == 0
         }
         guard let value = raw as? [String: Any],
-              Set(value.keys) == ["version", "invocationCount", "stages", "slowSpans", "saturated"],
+              Set(value.keys) == Set(["version", "invocationCount", "stages", "slowSpans", "saturated"] + (value["regex"] == nil ? [] : ["regex"])),
               number(value["version"], maximum: 1, integral: true) == 1,
               number(value["invocationCount"], maximum: 256, integral: true) != nil,
               let stages = value["stages"] as? [Any], stages.count == 13, stages.allSatisfy(summary),
@@ -5184,7 +5184,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         number(span[1], maximum: 1e15) != nil,
                         let duration = number(span[2], maximum: 600_000), duration >= 10 else { return false }
                   return true
-              }), JSONSerialization.isValidJSONObject(value),
+              }), value["regex"].map(validRendererRegexDiagnostic) ?? true, JSONSerialization.isValidJSONObject(value),
               let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 4_096 else { return nil }
         return value
     }
@@ -5245,8 +5245,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return value.isFinite && value >= minimum && value <= maximum && (!integral || value.rounded() == value)
         }
         let reasons: Set<String> = ["active", "expired", "pagehide", "limit", "replaced"]
-        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "stopReason", "records"],
-              number(value["version"], maximum: 1, minimum: 1, integral: true),
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["version", "stopReason", "records", "callCount", "totalDurationMs", "maxDurationMs", "saturated"],
+              number(value["version"], maximum: 2, minimum: 2, integral: true),
+              number(value["callCount"], maximum: 1_000_000, integral: true),
+              number(value["totalDurationMs"], maximum: 1e9), number(value["maxDurationMs"], maximum: 600_000),
+              let total = value["totalDurationMs"] as? NSNumber, let maximum = value["maxDurationMs"] as? NSNumber,
+              maximum.doubleValue <= total.doubleValue,
+              (value["callCount"] as? NSNumber)?.intValue != 0 || total.doubleValue == 0 && maximum.doubleValue == 0,
+              let saturated = value["saturated"] as? NSNumber, CFGetTypeID(saturated) == CFBooleanGetTypeID(),
               let reason = value["stopReason"] as? String, reasons.contains(reason),
               let records = value["records"] as? [[String: Any]], records.count <= 4 else { return false }
         let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
@@ -5264,7 +5271,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return frames.count <= 2 && frames.allSatisfy { $0.range(of: publicFrame, options: .regularExpression) != nil }
         }
         guard valid, JSONSerialization.isValidJSONObject(value),
-              let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 2_048 else { return false }
+              let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 2_304 else { return false }
         return true
     }
 

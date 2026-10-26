@@ -2562,3 +2562,19 @@ Installed build106 ChatGPT's first outbound claim contained 54,223 UTF16 units a
 The build108 diagnostic candidate records bounded public Resource Timing observations for ChatGPT conversation and preparation requests. It preserves the exact private send mark, current view/document/sequence guards and original deadlines. It never intercepts requests or records URLs, bodies or headers; response byte counts are not upload sizes. Missing entries, missing status support and status zero remain inconclusive. All 482 browser-adapter tests and five selected native WebKit/privacy/deadline tests passed with unchanged source, and independent review was clear. Installed diagnosis remains pending.
 
 Installed build108 repeated the same ChatGPT failure: its first inference completed and opened the fixture page; its second verified submission but timed out after 298.169 seconds. The full task failed after 318.321 seconds with one tool. Outbound claims again measured 54,223 and 55,369 UTF16 units/UTF8 bytes. The first completed inference had one ended conversation fetch and one preparation fetch, while the second deadline scan had no matching ended entry among 112 untruncated resource entries. HTTP status was unavailable. Missing entries do not establish that no request was dispatched or that the backend rejected it. Both temporary pages closed with saved receipts; the unfinished task's fixture-tab close was not verified. The original failed task and website receipts remain preserved.
+
+### Build 266: main-page regex attribution remains inconclusive
+
+The same preserved maintenance case failed after 41.570 seconds with
+`worker_timeout`; one inference began, no response or tool calls were released,
+and its owned session closed. The queued synthetic mailbox prompt did not
+enter a user turn. The armed main-page regex probe was active but recorded no
+single intercepted call lasting at least 100 ms. This excludes neither many
+short calls nor the isolated adapter realm, cached native methods, or other
+realms. A static audit of the exact public iframe module found only bounded
+diagnostic regexes and no compiled-response text parsing on its main thread.
+The fixture server and diagnostic queue entry were cleaned up.
+
+Build 267 extends the same default-off, expiring measurement to the isolated
+adapter realm and records aggregate intercepted regex time. This is an
+attribution experiment, not a fix or a reliability pass.

@@ -264,13 +264,16 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
             constructionScript = configuration.userContentController.userScripts.first
             return WKWebView(frame: .zero, configuration: configuration)
         }
-        XCTAssertEqual(constructionScriptCount, 1)
+        XCTAssertEqual(constructionScriptCount, 3)
         let script = try XCTUnwrap(constructionScript)
         XCTAssertFalse(script.isForMainFrameOnly)
         XCTAssertEqual(script.injectionTime, .atDocumentStart)
         XCTAssertTrue(script.source.contains("__computaRendererStartupDiagnosticV1"))
         XCTAssertFalse(script.source.contains("__COMPUTA_RENDERER_STARTUP_DIAGNOSTIC_CONFIG__"))
         let model = try XCTUnwrap(session.webView(for: modelID))
+        let regexScripts = model.configuration.userContentController.userScripts.filter { $0.source.contains("__computaRendererRegexDiagnosticV1") }
+        XCTAssertEqual(regexScripts.count, 2)
+        XCTAssertTrue(regexScripts.allSatisfy { $0.isForMainFrameOnly && $0.injectionTime == .atDocumentStart })
         XCTAssertFalse(model.configuration.websiteDataStore.isPersistent)
         XCTAssertFalse(model.isInspectable)
         XCTAssertNil(model.url)
@@ -278,12 +281,47 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.selectedTabID, humanID)
         for id in [humanID, discoveryID, toolID] {
             XCTAssertFalse(try XCTUnwrap(session.webView(for: id)).configuration.userContentController.userScripts
-                .contains { !$0.isForMainFrameOnly }, "Human, tool and nonisolated discovery views must receive no startup diagnostic")
+                .contains { $0.source.contains("__computaRenderer") }, "Human, tool and nonisolated discovery views must receive no diagnostic")
         }
         defaults.removeObject(forKey: key)
         let unarmedID = try session.createUnloadedModelTabForTesting(isolatedChatGPTProfile: true)
         XCTAssertFalse(try XCTUnwrap(session.webView(for: unarmedID)).configuration.userContentController.userScripts
-            .contains { !$0.isForMainFrameOnly })
+            .contains { $0.source.contains("__computaRenderer") })
+    }
+
+    func testRendererRegexDiagnosticInstallsOnlyWithValidArmInSeparateTopFrameWorlds() async throws {
+        let now: TimeInterval = 1_800_000_000
+        let template = "globalThis.__computaRegexRealmProbe=(globalThis.__computaRegexRealmProbe||0)+1; void __COMPUTA_RENDERER_REGEX_DIAGNOSTIC_CONFIG__;"
+        var reads = 0
+        for arm: Any? in [nil, true, now, now - 1, now + 601, Double.infinity, Double.nan, String(now + 60)] {
+            XCTAssertTrue(EmbeddedBrowserSession.rendererRegexDiagnosticScripts(armedUntil: arm, now: now) {
+                reads += 1; return template
+            }.isEmpty)
+        }
+        XCTAssertEqual(reads, 0)
+        for source in [nil, "missing", template + template, String(repeating: "x", count: 65_536) + template] {
+            XCTAssertTrue(EmbeddedBrowserSession.rendererRegexDiagnosticScripts(armedUntil: now + 60, now: now) { source }.isEmpty)
+        }
+        let scripts = EmbeddedBrowserSession.rendererRegexDiagnosticScripts(armedUntil: now + 60.5, now: now) { template }
+        XCTAssertEqual(scripts.count, 2)
+        XCTAssertEqual(scripts.first?.source, scripts.last?.source)
+        XCTAssertTrue(scripts.allSatisfy { $0.isForMainFrameOnly && $0.injectionTime == .atDocumentStart
+            && $0.source.contains("1800000060.5") && !$0.source.contains("__COMPUTA_RENDERER_REGEX_DIAGNOSTIC_CONFIG__") })
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.preferences.inactiveSchedulingPolicy = .none
+        scripts.forEach { configuration.userContentController.addUserScript($0) }
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 480), configuration: configuration)
+        defer { view.stopLoading() }
+        try await loadDiagnosticFixture(view, host: "example.test")
+        let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        let pageCount = try await script(view, "return globalThis.__computaRegexRealmProbe;")
+        let privateCount = try await script(view, "return globalThis.__computaRegexRealmProbe;", world: privateWorld)
+        XCTAssertEqual(pageCount, Data("1".utf8))
+        XCTAssertEqual(privateCount, Data("1".utf8))
+        _ = try await script(view, "globalThis.__computaRegexRealmProbe=7; return true;", world: privateWorld)
+        let unchangedPage = try await script(view, "return globalThis.__computaRegexRealmProbe;")
+        XCTAssertEqual(unchangedPage, Data("1".utf8), "The page and adapter probes must have independent realm state")
     }
 
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {

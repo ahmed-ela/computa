@@ -77,6 +77,27 @@ describe('private synchronous renderer work diagnostic', () => {
     f.expire(); expect(api.now()).toBeNull(); expect(api.snapshot()).toBeNull();
     const g = fixture(), other = g.install(); g.context.document = {}; expect(other.snapshot()).toBeNull(); expect(g.install()).toBeNull();
   });
+  test('harvests only the matching isolated regex snapshot behind current work ownership', () => {
+    const begin = source.indexOf('function chatGPTPreparationResult(');
+    const end = source.indexOf('function websiteChatProvisionalHeaderRecords(', begin);
+    for (const invalidation of ['owner', 'document', 'expiry']) {
+      const f = fixture(); f.context.chatGPTRendererWorkDiagnostic = f.install();
+      f.context.input = f.context.request;
+      runInContext(`let snapshots = 0;
+        globalThis.__computaRendererRegexDiagnosticV1 = {expiresAtUnixSeconds:1100,snapshot:()=>{snapshots++;return {version:2,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false}}};
+        const chatGPTMatchedBenchmarkResult = value => value;
+        const chatGPTPreparationTimingEnabled = false;` + source.slice(begin,end), f.context);
+      const read = () => runInContext('chatGPTPreparationResult({text:"unchanged"})', f.context);
+      expect(read().rendererWorkDiagnostic.regex).toEqual({version:2,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false});
+      f.context.__computaRendererRegexDiagnosticV1.expiresAtUnixSeconds = 1101;
+      expect(read().rendererWorkDiagnostic.regex).toBeUndefined();
+      f.context.__computaRendererRegexDiagnosticV1.expiresAtUnixSeconds = 1100;
+      if (invalidation === 'owner') f.context.__computaModelOwner = 'different';
+      else if (invalidation === 'document') f.context.document = {};
+      else f.expire();
+      expect(read()).toEqual({text:'unchanged'}); expect(runInContext('snapshots',f.context)).toBe(1);
+    }
+  });
   test('provider-only shared-function wrappers preserve this, arguments, returns and throws', () => {
     const begin = source.indexOf('function chatGPTProfileSynchronousWork(');
     const end = source.indexOf('if (chatGPTRendererWorkDiagnostic)',begin);

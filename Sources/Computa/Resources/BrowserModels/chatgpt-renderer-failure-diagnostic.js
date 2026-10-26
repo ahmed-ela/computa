@@ -18,9 +18,16 @@ return (() => {
     try {
       const state = own(window, '__computaRendererRegexDiagnosticV1'), expiry = own(state, 'expiresAtUnixSeconds');
       const records = own(state, 'records'), stopReason = own(state, 'stopReason'), now = Date.now() / 1000;
-      if (own(state, 'version') !== 1 || typeof expiry !== 'number' || !Number.isFinite(expiry)
+      if (own(state, 'version') !== 2 || typeof expiry !== 'number' || !Number.isFinite(expiry)
         || expiry <= now || expiry > now + 600 || !Array.isArray(records) || records.length > 4
         || !['active', 'expired', 'pagehide', 'limit', 'replaced'].includes(stopReason)) return undefined;
+      const callCount = own(state, 'callCount'), totalDurationMs = own(state, 'totalDurationMs');
+      const maxDurationMs = own(state, 'maxDurationMs'), saturated = own(state, 'saturated');
+      if (!Number.isSafeInteger(callCount) || callCount < 0 || callCount > 1000000
+        || typeof totalDurationMs !== 'number' || !Number.isFinite(totalDurationMs) || totalDurationMs < 0 || totalDurationMs > 1e9
+        || typeof maxDurationMs !== 'number' || !Number.isFinite(maxDurationMs) || maxDurationMs < 0 || maxDurationMs > 600000
+        || maxDurationMs > totalDurationMs || callCount === 0 && (totalDurationMs !== 0 || maxDurationMs !== 0)
+        || typeof saturated !== 'boolean') return undefined;
       const projected = [];
       for (let index = 0; index < records.length; index++) {
         const record = own(records, String(index)), patternHash = own(record, 'patternHash'), patternLength = own(record, 'patternLength');
@@ -37,8 +44,8 @@ return (() => {
         if (frames.length > 2 || frames.some(frame => !/^https:\/\/(?:chatgpt\.com\/cdn\/assets\/(?:async\/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com\/deployments\/dil\/v[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}$/.test(frame))) return undefined;
         projected.push({ patternHash, patternLength, inputLength, flags, startEpochMs, durationMs, publicStack });
       }
-      const result = { version: 1, stopReason, records: projected };
-      return new TextEncoder().encode(JSON.stringify(result)).length <= 2048 ? result : undefined;
+      const result = { version: 2, stopReason, records: projected, callCount, totalDurationMs, maxDurationMs, saturated };
+      return new TextEncoder().encode(JSON.stringify(result)).length <= 2304 ? result : undefined;
     } catch { return undefined; }
   };
   const startupProjection = iframe => {
