@@ -71,6 +71,12 @@
         }
         const record = own(data, 'record'), realm = own(record, 'realm'), operation = own(record, 'operation'), phase = own(record, 'phase');
         if (!realms.has(realm) || !operations.has(operation) || !phases.has(phase)) return;
+        const sourceReason = own(record, 'reason');
+        // These routine queue operations can flood the handoff timeline when a
+        // first snapshot resets all pending commands to their ordinary deadlines.
+        if (operation === 'request_timer' && ['cancelled', 'rearmed'].includes(phase)
+          || operation === 'health_probe' && phase === 'cancelled'
+          || operation === 'worker_control' && ['execution_started', 'execution_finished'].includes(sourceReason)) return;
         const projected = { realm, operation, phase };
         for (const key of numeric) {
           const value = own(record, key);
@@ -84,7 +90,7 @@
         if (typeof artifact === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(artifact)) projected.artifactId = artifact;
         const name = own(own(record, 'fault'), 'name');
         if (names.has(name)) projected.errorName = name;
-        const reason = own(record, 'reason');
+        const reason = sourceReason;
         if (reasons.has(reason)) projected.reason = reason;
         let entry = state.frames.find(value => value.iframe === matches[0]);
         if (!entry) {
@@ -93,6 +99,13 @@
           Object.defineProperty(entry, 'iframe', { value: matches[0] });
           state.frames.push(entry);
         }
+        const key = [realm, operation, phase, projected.workerGeneration, projected.sessionGeneration,
+          projected.startupAttempt, projected.reason].join('|');
+        Object.defineProperty(projected, 'key', { value: key });
+        const matching = entry.events.flatMap((value, index) => value.key === key ? [index] : []);
+        // The first and latest occurrence retain stage timing without letting
+        // repeated snapshots or resource observations evict startup milestones.
+        if (matching.length >= 2) { entry.events.splice(matching.at(-1), 1); drop(entry); }
         entry.events.push(projected);
         // At most four frames; each retains only early and recent finite evidence.
         const size = () => new TextEncoder().encode(JSON.stringify({ version: 1, events: entry.events, dropped: entry.dropped })).length;

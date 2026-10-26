@@ -85,7 +85,7 @@ describe('private ChatGPT renderer startup diagnostic', () => {
   test('preserves initial and latest evidence within count and byte bounds', () => {
     const f = fixture(); f.install();
     for (let index = 0; index < 100; index++) f.send({ realm: 'worker', operation: 'worker_control', phase: 'received',
-      localTimeMs: index, timeOriginMs: 1e15, elapsedMs: 1e15, budgetMs: 1e15, workerGeneration: 1000000,
+      localTimeMs: index, timeOriginMs: 1e15, elapsedMs: 1e15, budgetMs: 1e15, workerGeneration: index,
       sessionGeneration: 1000000, startupAttempt: 1000000, artifactId: 'a'.repeat(64), fault: { name: 'ReferenceError' } });
     expect(f.buffer().events.length).toBeLessThanOrEqual(64); expect(f.buffer().dropped).toBeGreaterThan(0);
     expect(f.buffer().events[0].localTimeMs).toBe(0); expect(f.buffer().events[15].localTimeMs).toBe(15);
@@ -105,7 +105,7 @@ describe('private ChatGPT renderer startup diagnostic', () => {
     f.frames.push(second, third, fourth);
     for (const frame of f.frames) {
       for (let index = 0; index < 80; index++) f.send({ realm: 'worker', operation: 'worker_control', phase: 'received',
-        localTimeMs: index, timeOriginMs: 1e15, elapsedMs: 1e15, budgetMs: 1e15, workerGeneration: 1000000,
+        localTimeMs: index, timeOriginMs: 1e15, elapsedMs: 1e15, budgetMs: 1e15, workerGeneration: index,
         sessionGeneration: 1000000, startupAttempt: 1000000, artifactId: 'a'.repeat(64), fault: { name: 'ReferenceError' },
         reason: 'csp_violation' }, { source: frame.contentWindow });
     }
@@ -124,5 +124,26 @@ describe('private ChatGPT renderer startup diagnostic', () => {
     const f = fixture(); f.install();
     for (let index = 0; index < 1025; index++) f.send({ realm: 'worker', operation: 'worker_ready', phase: 'sent' });
     expect(f.state().saturated).toBe(true); expect(f.listeners.size).toBe(0); expect(f.buffer().dropped).toBeGreaterThan(0);
+  });
+  test('preserves initial hardening and handoff timings through normal queue and snapshot churn', () => {
+    const f = fixture(); f.install();
+    const record = (operation: string, phase: string, time: number, extra: any = {}) =>
+      f.send({ realm: 'iframe', operation, phase, localTimeMs: time, workerGeneration: 1, sessionGeneration: 2, startupAttempt: 1, ...extra });
+    record('harden_worker', 'returned', 10); record('runner_create', 'received', 20); record('worker_ready', 'sent', 30);
+    record('request_timer', 'armed', 31, { budgetMs: 4000 });
+    for (let index = 0; index < 100; index++) {
+      record('request_timer', 'cancelled', 40 + index); record('request_timer', 'rearmed', 40 + index);
+      record('health_probe', 'cancelled', 40 + index);
+      record('worker_control', 'received', 40 + index, { reason: 'execution_started' });
+      record('worker_control', 'received', 40 + index, { reason: 'execution_finished' });
+      record('snapshot_receive', 'received', 40 + index); record('snapshot_forward', 'sent', 40 + index);
+    }
+    const events = f.buffer().events;
+    expect(events.find((event: any) => event.operation === 'harden_worker').localTimeMs).toBe(10);
+    expect(events.find((event: any) => event.operation === 'runner_create').localTimeMs).toBe(20);
+    expect(events.find((event: any) => event.operation === 'worker_ready').localTimeMs).toBe(30);
+    expect(events.find((event: any) => event.operation === 'request_timer').phase).toBe('armed');
+    expect(events.filter((event: any) => event.operation === 'snapshot_forward').map((event: any) => event.localTimeMs)).toEqual([40, 139]);
+    expect(events.length).toBe(8); expect(JSON.stringify(events)).not.toContain('"key"');
   });
 });

@@ -121,7 +121,17 @@ retains only bounded startup stages, timings, artifact identifiers and finite
 error categories from that iframe. No Worker/MessagePort hook, prompt, response,
 program, URL or free-form diagnostic message is captured. The existing verified
 failure capture remains the sole persistence gate; this trace grants no tool or
-response authority and is inactive by default. Installed diagnosis remains pending.
+response authority and is inactive by default.
+
+Installed263 reproduced the maintenance failure in 37.457s. Its exact failed-frame
+trace confirms artifact `DrCNBd66`, a worker snapshot received and forwarded by
+the iframe, and a parent runner still reporting no readiness when its watchdog
+expired. This narrows the mismatch to readiness timing or delivery/acceptance;
+it does not prove the snapshot arrived before the watchdog. Repetitive timer
+bookkeeping evicted the intervening startup timestamps from the bounded trace.
+Build264 filters those diagnostic-only bookkeeping events while retaining
+startup, readiness, snapshot and timer-firing milestones. Response verification,
+provider execution and timeouts are unchanged. Root-cause diagnosis is ongoing.
 
 ## Candidate148: one bounded ChatGPT format correction
 
