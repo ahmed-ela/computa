@@ -2664,3 +2664,54 @@ projected back to that original outbound string; altered payload lexemes,
 extra/hidden structure and node replacement during verification are rejected.
 Raw optimistic echoes and existing bounded expansion remain supported.
 No provider timeout, response authority, tool admission or size limit changes.
+
+
+The existing nonce-scoped synthetic capture then retained the exact 54,655-byte
+first native Instant payload. Removing only the paired eight request-fence
+bytes produced a controlled baseline. In three fresh uninstrumented system
+JavaScriptCore contexts per form, the complete public `drbS.g` mention path
+measured 2,807/2,822/2,826 ms baseline versus 38/38/38 ms fenced. The lexer alone
+measured 2,810/2,812/2,831 ms versus 38/58/62 ms. Every completed lexer rejoined
+the exact input text; the enclosed 42,213-byte JSON and all surrounding bytes
+were unchanged. These are isolated parser measurements on the actual harness
+payload, not total provider latency. The old optional browser benchmark's raw
+innerText witness does not support fenced DOM; it was not used to qualify
+post-send timing or response authority.
+
+
+### Build 270: installed qualification passed
+
+Signed, non-notarized Computa 0.7.0 (270), source `c800f2b`, ran the following
+normal ChatGPT Chat/Instant cases with renderer profiling disabled. The greeting
+used only the existing scoped pre-insertion synthetic payload capture; no
+post-send benchmark witness or regex wrapper was armed.
+
+| Controlled task | Native duration | Verified responses | Successful native tools |
+| --- | ---: | ---: | ---: |
+| Exact synthetic greeting | 6.843 s | 1 | 0 |
+| 61,440-byte read-only browser request | 24.739 s | 2 | 1 browser open |
+| 24,576-byte local mailbox request | 49.192 s | 7 | 6 browser actions |
+| Same-chat terminal follow-up | 27.634 s | 3 | 2 separate commands |
+
+All 13 responses retained complete lifecycle verification and saved closed
+website-session receipts. There were no failed inferences, native tool errors
+or correction retries. The large read observed the current `Local mailbox`
+heading. The mailbox case produced exactly one local POST with the exact
+requested fields and receipt `LOCAL-b689a2a40e2a1ea9`, observed by the browser
+and included in the final answer. The terminal follow-up returned the unique
+marker and `437`; both commands exited zero. These are four bounded passing
+cases, not a universal reliability or external-mail-delivery guarantee.
+
+Source validation passed 552 JavaScript tests across eight files, focused
+codec/instruction/server/correction suites, four real-WebKit transport cases,
+four official Open Responses conformance cases and the bundled-runtime
+ChatGPT two-command continuation. The existing Gemini bundled-runtime
+output-ID assertion still failed with its previous fixture decoder; no Gemini
+behavior or assertion was changed to make this ChatGPT result pass.
+
+Both owned local fixture processes stopped and TCP port 62240 was free. The
+app closed task-created browser tabs and preserved existing user tabs. At the
+unchanged evidence-store task cap, the completed synthetic journals were
+reversibly archived with exact copies; native chat history was retained.
+The greeting capture arm was consumed, no renderer diagnostic expiry remained,
+and Safari's developer setting remained restored to off. No release or merge.
