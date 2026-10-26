@@ -66,7 +66,7 @@ actor WebModelServer {
             switch self {
             case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
-            case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
+            case .turnLimit: "The website turn limit was reached. Earlier actions may have completed. Review their results before continuing; no prompt or action was replayed."
             case .busy: "This browser model already has a request running."
             case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. This website inference was not submitted."
@@ -87,9 +87,12 @@ actor WebModelServer {
     }
 
     // Native-turn bounds survive physical website-page replacement. Every
-    // inference still receives the complete canonical local request.
+    // inference is charged its complete canonical prompt, including repeated
+    // history and any correction reminder. The byte budget admits every legal
+    // request in the finite inference budget instead of imposing an earlier,
+    // history-size-dependent stop after already-completed native actions.
     static let maximumTurnInferences = 16
-    static let maximumTurnPromptUTF8Bytes = 1_048_576
+    static let maximumTurnPromptUTF8Bytes = maximumTurnInferences * WebModelResponseCodec.maximumPromptBytes
     private static func requiresNativeContinuationProof(provider: String) -> Bool {
         provider == "gemini" || provider == "chatgpt"
     }

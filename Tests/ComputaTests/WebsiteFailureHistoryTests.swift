@@ -3,6 +3,69 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testWebsiteTurnLimitSurvivesReloadWithPriorActionWarningAndExactFailureIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaWebsiteTurnLimit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let serverData = try WebModelServer.errorBody(for: WebModelServer.Failure.turnLimit)
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: serverData) as? [String: Any])
+        let error = try XCTUnwrap(expected["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "website_turn_limit")
+        XCTAssertEqual(error["type"] as? String, "invalid_request")
+        XCTAssertNil(error["retryable"], "Preserve the native envelope without inventing retry authority")
+        XCTAssertNil(error["required_action"])
+        let message = try XCTUnwrap(error["message"] as? String)
+        XCTAssertTrue(message.contains("Earlier actions may have completed"))
+        XCTAssertTrue(message.contains("Review their results before continuing"))
+        XCTAssertFalse(message.contains("start a new task"))
+
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let failures: [any Error] = [WebModelServer.Failure.turnLimit, EmbeddedWebModelTransport.Failure.turnLimit]
+        for failure in failures {
+            let native = try WebModelServer.errorBody(for: failure)
+            let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: actual).isEqual(to: expected), "Both budget boundaries must preserve the same warning")
+            let turnID = UUID().uuidString.lowercased()
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turnID, modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+            let saved = try XCTUnwrap(restored.first { $0.turnID == turnID })
+            XCTAssertEqual(saved, record)
+            XCTAssertEqual(saved.taskID, task.lowercased())
+            XCTAssertEqual(saved.threadID, thread.lowercased())
+            XCTAssertEqual(saved.entry.title, "Agent error")
+            XCTAssertEqual(saved.entry.id, "agent-error:" + turnID)
+            let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.entry.body.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: persisted).isEqual(to: expected))
+            let raw = try history([turn(turnID, status: "failed", error: ["message": "Generic engine failure"])])
+            let entries = try AppServerThreadHistoryContract.entries(from: raw,
+                excludingAssistantTurns: Set(restored.map(\.turnID)))
+            XCTAssertEqual(entries.last?.id, saved.entry.id, "Reload must replace the exact engine error, never another turn")
+            XCTAssertFalse(entries.contains { $0.kind == .assistant })
+            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+                rejectedTurns: Set(restored.map(\.turnID)), failedTurns: Set(restored.map(\.turnID))), .failed)
+        }
+    }
+
+    func testWebsiteTurnLimitStoreRejectsChangedWarningsAndReplayMetadata() throws {
+        let native = try WebModelServer.errorBody(for: WebModelServer.Failure.turnLimit)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        let mutations: [[String: Any]] = [["message": "PRIVATE_ACTION_RESULT"], ["retryable": false],
+            ["retryable": true], ["retryable": 0], ["required_action": "retry_send"],
+            ["type": "server_error"], ["code": "internal_error"], ["param": "input"],
+            ["pageText": "PRIVATE_ACTION_RESULT"]]
+        for mutation in mutations {
+            var changed = original, error = try XCTUnwrap(original["error"] as? [String: Any])
+            mutation.forEach { error[$0.key] = $0.value }; changed["error"] = error
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: syntheticChatGPTModelID,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)))
+        }
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+            modelID: "api/cerebras/model/fixture", diagnosticText: String(decoding: native, as: UTF8.self)))
+    }
+
     func testUnsupportedChatGPTResponseSurvivesStoreRecreationWithExactHistoryReplacementIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaUnsupportedWebsiteReply-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

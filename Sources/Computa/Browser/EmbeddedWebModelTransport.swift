@@ -248,7 +248,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var errorDescription: String? {
             switch self {
             case .invalidRequest: "The built-in browser model request could not be validated."
-            case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
+            case .turnLimit: "The website turn limit was reached. Earlier actions may have completed. Review their results before continuing; no prompt or action was replayed."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
             case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
             case .cookieMaintenancePending: "ChatGPT's previous browser session is still closing. Wait briefly before starting another task."
@@ -817,19 +817,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "webProviderSend":
                 guard !session.isDiscovery else { throw Failure.invalidRequest }
                 try Task.checkCancellation()
-                guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= 180_000,
+                guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= Self.maximumSubmissionUTF8Bytes,
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
                 browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
-                // These pilot limits bound duplicated website context; they
-                // are engineering guards, not measured provider context sizes.
+                // Count the full outbound bytes, including the ownership marker.
+                // These are finite engineering bounds, not provider context sizes.
                 let submissionMarker = session.submitted && session.usesSubmissionOwnership
                     ? UUID().uuidString.lowercased() : session.firstUserMarker
                 let outbound = !session.submitted || session.usesSubmissionOwnership
                     ? "\(prompt)\n\nComputa session marker: \(submissionMarker)" : prompt
                 let outboundBytes = outbound.utf8.count
-                guard outboundBytes <= 180_000 else { throw Failure.invalidRequest }
+                guard outboundBytes <= Self.maximumSubmissionUTF8Bytes else { throw Failure.invalidRequest }
                 if session.usesBoundedTurn {
                     guard session.sequence < Self.maximumTurnSubmissions,
                           outboundBytes <= Self.maximumTurnUTF8Bytes - session.submittedUTF8Count else {
@@ -4818,7 +4818,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     static let turnContinuationCapability = "per_submission_ownership_v1"
     static let maximumTurnSubmissions = 16
-    static let maximumTurnUTF8Bytes = 1_048_576
+    static let maximumSubmissionUTF8Bytes = 180_000
+    // Physical retained sessions count marker-inclusive outbound bytes. The
+    // server separately bounds canonical prompt bytes across replaced pages.
+    static let maximumTurnUTF8Bytes = maximumTurnSubmissions * maximumSubmissionUTF8Bytes
 
     nonisolated static func promptFingerprint(_ prompt: String) -> String {
         SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()

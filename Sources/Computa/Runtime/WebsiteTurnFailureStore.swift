@@ -37,7 +37,7 @@ struct WebsiteTurnFailureStore: Sendable {
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
             // These fixed local errors have no retry metadata. Only their
             // exact generated envelopes can pass the canonical equality below.
-            if code != "browser_model_error" && code != "unsupported_website_response" {
+            if code != "browser_model_error" && code != "unsupported_website_response" && code != "website_turn_limit" {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
             }
@@ -52,6 +52,7 @@ struct WebsiteTurnFailureStore: Sendable {
             case "unsupported_website_response":
                 guard provider == "chatgpt" else { return nil }
                 nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+            case "website_turn_limit": nativeError = WebModelServer.Failure.turnLimit
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,
                       let reason = WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason(rawValue: rawReason),

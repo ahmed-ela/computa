@@ -2860,7 +2860,7 @@ filled the recipient and subject, then stopped with an unsupported statement
 that local browser relay actions were unavailable. Its last successful native
 result exposed a fresh, writable Message field and enabled Send button. The
 fixture recorded zero POSTs. There was no browser error, compaction, observed
-permission denial, eight-call limit or expired binding. Matching tool-byte
+permission denial, eight-call limit or reported binding expiry. Matching tool-byte
 counts do not prove which exact tools and policy were offered; build277 adds
 finite post-projection catalog diagnostics to resolve that remaining evidence
 gap. This failure remains in the denominator and was not silently retried.
@@ -2876,3 +2876,36 @@ JavaScript observer tests with 885 assertions, and 28 native completion/WebKit
 tests. These results repair the observed decoder-recognition defect and improve
 capability instructions; they do not establish the upstream cause of the
 uncaptured original build270 empty response or general task reliability.
+
+
+### Build 277: reproduced post-action missing answer and identified byte cap
+
+Signed, non-notarized 0.7.0 (277), source `28a4cd9`, repeated the exact frozen
+attachment prompt in a fresh ChatGPT Chat/Instant task. Ten browser calls
+succeeded, including identifying the staff attachment, filling the correct
+message and submitting it exactly once. The local fixture recorded one correct
+POST and receipt `LOCAL-4aa82205f7251349`, independently visible in the native
+browser observation. All ten inference sessions passed ownership/model/lifecycle
+verification and closed. Every observer armed and used verified quiet fallback.
+
+The task nevertheless failed after 78.118 seconds without a final answer.
+Computa rejected inference 11 before website startup with `website_turn_limit`.
+The first ten full canonical prompts consumed 934,397 cumulative UTF-8 bytes.
+The next request required 131,032 bytes: 1,065,429 total, exceeding the 1,048,576
+byte cap by 16,853. It was below both the per-request 160 KiB bound and the
+16-inference count bound. The final projected catalog remained bound, with all
+ten browser functions offered and allowed under `auto`.
+
+This is a confirmed app-side cause for this missing answer, distinct from the
+uncaptured original build270 empty provider reply and build276's premature
+semantic final. The initial catalog collector conservatively marked the overall
+record incomplete because it expected started inferences only; the extra log
+was the exact journaled pre-admission rejection, not unrelated traffic. That
+original report is preserved separately from the causal audit.
+
+The failed test is not counted as a pass. No send was replayed. Its task-created
+tab, website sessions and fixture process were closed, with the listener absent.
+The diagnostic changes passed 193 focused codec/catalog tests and eight bounded
+collector tests. The next candidate aligns cumulative byte bounds with the
+existing finite inference and per-request limits, preserving actual-byte
+accounting, ownership verification, correction limits and no-replay behavior.

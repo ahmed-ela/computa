@@ -60,6 +60,24 @@ deferred by that binding state and the currently offered entry operations.
 Successful open/bind refreshes the next callable catalog. The notice does not
 make a deferred tool callable or grant action permission.
 
+A build276 attachment fixture stopped after filling recipient and subject,
+claiming local relay actions were unavailable despite a current writable body
+field and enabled Send button. No POST occurred. The exact offered catalog was
+not retained for that attempt, so its semantic cause is unresolved. Finite
+per-inference diagnostics now record native browser capability masks and parsed
+policy after projection, without prompts, page contents or schema text.
+
+The exact same controlled task in build277 exposed a confirmed app-side cause
+of a missing final answer: the local message was delivered exactly once, but
+Computa rejected inference 11 before provider startup. Ten complete canonical
+prompts had consumed 934,397 bytes; the next 131,032-byte request exceeded the
+old 1 MiB cumulative limit by 16,853 bytes. Its current browser tools were
+present and allowed. The request was within the existing 160 KiB individual
+limit and 16-inference allowance. This cumulative budget charged repeated full
+history and could terminate legitimate work after an irreversible action.
+The delivery was not replayed. This reproduction is distinct from the original
+build270 empty provider response and build276's unsupported capability claim.
+
 A separate instrumented long-response diagnostic returned content outside the
 required response envelope. The runtime translated that local format error into
 a generic "high demand" error; that generic text is not evidence of a provider
@@ -90,6 +108,12 @@ provider errors were projected into the same `Waiting` state as interruptions.
   native safety interruptions retain their distinct waiting behavior.
 - Persist the exact canonical ChatGPT response-format failure so reopening a
   chat retains the specific diagnosis instead of a generic runtime error.
+- Derive the cumulative byte budget from the existing finite count and
+  per-request limits: 16 × 160 KiB for canonical prompts, and 16 × 180,000 bytes
+  for the transport's marker-inclusive submissions. Every actual byte and
+  correction attempt remains charged. Keep ownership, cancellation, correction
+  deadlines and no-replay checks. A limit still stops execution; its persistent
+  error tells the user to review earlier actions before continuing.
 - Preserve closed journals in a durable SQLite archive before removing them
   from the bounded active set. Recover interrupted retirement under the shared
   writer lock, retain historical identity checks, and protect unresolved or

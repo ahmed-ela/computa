@@ -567,13 +567,13 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testRendererRecoveryConsumesUnchangedInferenceAndCumulativePromptBudgets() async throws {
-        for byteLimit in [false, true] {
+        for largePrompts in [false, true] {
             let base = FormatCorrectionFixtureTransport(replies: Array(repeating: valid, count: 20),
                 pollFailures: [1: .responseRenderingFailed])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
-            let task = "renderer-budget-\(byteLimit)"
-            var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command"]]
+            let task = "renderer-budget-\(largePrompts)"
+            var input: [[String: Any]] = [["role": "user", "content": largePrompts ? String(repeating: "A", count: 90_000) : "Use the offered fixture command"]]
             var accepted = 0, reached = false
             for _ in 0..<18 {
                 let data = try request(input: input)
@@ -586,14 +586,18 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
                     let response = try XCTUnwrap(JSONSerialization.jsonObject(with: output) as? [String: Any])
                     let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
                     input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
-                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed fixture result"]]
+                        "output": "Observed fixture result"]]
                 } catch {
                     XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
                     let prompts = await base.prompts()
                     XCTAssertEqual(prompts.count, accepted + 1, "The failed renderer inference spends one normal slot")
-                    XCTAssertTrue(byteLimit
-                        ? prompts.reduce(0) { $0 + $1.utf8.count } + nextPromptBytes > WebModelServer.maximumTurnPromptUTF8Bytes
-                        : prompts.count == WebModelServer.maximumTurnInferences)
+                    XCTAssertEqual(prompts.count, WebModelServer.maximumTurnInferences)
+                    XCTAssertEqual(accepted, WebModelServer.maximumTurnInferences - 1)
+                    let actualBytes = prompts.reduce(0) { $0 + $1.utf8.count }
+                    XCTAssertLessThanOrEqual(actualBytes, WebModelServer.maximumTurnPromptUTF8Bytes)
+                    XCTAssertLessThanOrEqual(nextPromptBytes, WebModelResponseCodec.maximumPromptBytes)
+                    XCTAssertGreaterThan(prompts[1].utf8.count, prompts[0].utf8.count, "The correction reminder is charged as actual bytes")
+                    if largePrompts { XCTAssertGreaterThan(actualBytes, 1_048_576) }
                     reached = true
                     break
                 }

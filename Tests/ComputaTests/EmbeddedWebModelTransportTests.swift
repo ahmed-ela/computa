@@ -10240,7 +10240,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChatTurnPilotLimitsRejectBeforeAnotherInsertionAndKeepCleanupOwned() async throws {
-        for byteLimit in [false, true] {
+        for largePrompts in [false, true] {
             let fixture = try Fixture()
             defer { fixture.shutdown() }
             let started = try await fixturePhaseProbe("start") { try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]) }
@@ -10249,8 +10249,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
             try await fixturePhaseProbe("wait_fixture") { try await waitForFixture(view) }
             _ = try await fixturePhaseProbe("ready") { try await waitForState("ready", fixture.transport, token: token) }
-            let accepted = byteLimit ? 6 : 16
-            let prompt = byteLimit ? String(repeating: "A", count: 170_000) : "Exact bounded round"
+            let accepted = EmbeddedWebModelTransport.maximumTurnSubmissions
+            let prompt = largePrompts ? String(repeating: "A", count: 170_000) : "Exact bounded round"
+            XCTAssertEqual(EmbeddedWebModelTransport.maximumTurnUTF8Bytes,
+                           EmbeddedWebModelTransport.maximumTurnSubmissions * EmbeddedWebModelTransport.maximumSubmissionUTF8Bytes)
+            if largePrompts { XCTAssertGreaterThan(accepted * prompt.utf8.count, 1_048_576) }
             for _ in 0..<accepted {
                 _ = try await fixturePhaseProbe("send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
                 _ = try await fixturePhaseProbe("complete") { try await waitForState("complete", fixture.transport, token: token) }
