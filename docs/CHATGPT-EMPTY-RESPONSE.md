@@ -40,6 +40,26 @@ loader clears resource timings when its buffer fills. Its loaded assets also use
 `link` initiators, which the observer's script-only filter rejected. Looking up
 startup assets only when a prompt is submitted cannot survive that lifecycle.
 
+Later on October 26, build 274 completed a new Instant task through the quiet
+fallback while both inference observers reported `runtime_cache_unsupported`.
+A separate controlled built-in ChatGPT tab exposed one initialized decoder in
+the observed public runtime. Its `recordCompletion` method had the same body,
+but the validator identifier had changed from `T` to `x`. The literal source
+comparison rejected that minifier-only change. Recognition now permits only
+consistent identifier renaming in the exact complete method grammar; method
+shape, operations, descriptors, unique identity and input ownership remain
+required. Finite cache-stage diagnostics distinguish this guard from cache,
+getter and ambiguity failures. This explains the later observer failure, not
+the upstream cause of the original blank reply.
+
+That new task also stopped after an empty browser inventory, claiming compose
+controls were unavailable. The native catalog intentionally withheld page
+operations until a page was bound, but the inference contract did not explain
+the transition. A separate notice now identifies only registered native tools
+deferred by that binding state and the currently offered entry operations.
+Successful open/bind refreshes the next callable catalog. The notice does not
+make a deferred tool callable or grant action permission.
+
 A separate instrumented long-response diagnostic returned content outside the
 required response envelope. The runtime translated that local format error into
 a generic "high demand" error; that generic text is not evidence of a provider

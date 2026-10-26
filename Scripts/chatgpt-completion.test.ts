@@ -21,14 +21,15 @@ const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0))
 
 function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean;
   resources?: any[]; observeResources?: boolean; moduleID?: string; configureRuntime?: (runtime: any) => void;
-  loadRuntime?: () => Promise<unknown> } = {}) {
+  loadRuntime?: () => Promise<unknown>; methodSource?: string; validatorName?: string } = {}) {
   let clock = 100, imports = 0, timerID = 0, throwOriginal: unknown = null;
   // Retain all wire packets; the original authority regressions deliberately
   // inspect only the unchanged terminal/invalidated schemas.
   const allPosts: any[] = [], posts: any[] = [], diagnostics: any[] = [];
   const timers = new Map<number, () => void>(), documentEvents = new Map<string, Function>();
   const windowEvents = new Map<string, Set<Function>>(), resourceObservers: ResourceObserver[] = [], observers: any[] = [], pendingDigests: { bytes: Uint8Array; resolve: Function; reject: Function }[] = [];
-  const O = new Function('T', 'return class O {recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}}')({
+  const methodSource = options.methodSource ?? 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
+  const O = new Function(options.validatorName ?? 'T', 'return class O {' + methodSource + '}')({
     safeParse(value: any) { if (throwOriginal) throw throwOriginal; return { success: !!value?.type, data: value }; },
   });
   const original = Object.getOwnPropertyDescriptor(O.prototype, 'recordCompletion')!;
@@ -108,6 +109,87 @@ async function ready(f: ReturnType<typeof fixture>) {
 function complete(f: ReturnType<typeof fixture>, text = 'HI') { f.decode(system()); f.decode(final(text)); f.decode(terminal()); }
 
 describe('ChatGPT current-response completion admission', () => {
+  test('exact decoder grammar permits only consistent distinct identifier renaming', () => {
+    const declaration = source.match(/function completionMethodMatches\(source\) \{[\s\S]*?\n  \}/)?.[0];
+    expect(declaration).toBeDefined();
+    const matches = new Function('return (' + declaration + ')')();
+    const method = (input: string, local: string, validator: string) =>
+      `recordCompletion(${input}){let ${local}=${validator}.safeParse(${input});return ${local}.success&&"message_stream_complete"===${local}.data.type&&(this.messageStreamCompleted=!0),${input}}`;
+    const original = method('e', 't', 'T');
+    for (const names of [['e', 't', 'T'], ['e', 't', 'x'], ['payload', 'parsed', 'validator'], ['$input', '_parsed', '$schema']]) {
+      expect(matches(method(names[0], names[1], names[2]))).toBe(true);
+    }
+    const rejected = [
+      method('e', 'e', 'T'), method('e', 't', 'e'), method('e', 't', 't'),
+      method('e', 't', 'x'.repeat(65)), method('é', 't', 'T'), method('\\u0065', 't', 'T'),
+      original.replace('safeParse(e)', 'safeParse(payload)'), original.replace('t.success', 'other.success'),
+      original.replace('t.data.type', 'other.data.type'), original.replace(',e}', ',t}'),
+      original.replace('message_stream_complete', 'main_stream_complete'),
+      original.replace('messageStreamCompleted', 'differentFlag'), original.replace('!0', '!1'),
+      original.replace('safeParse(e)', 'safeParse(e.content)'), original.replace('safeParse(e)', 'parse(e)'),
+      original.replace('let t=', 'const t='), original.replace('return t.success', 'sideEffect();return t.success'),
+      original.replace(',e}', ',sideEffect(),e}'), original.replace('(e)', '(e,extra)'),
+      original.replace('recordCompletion', 'otherMethod'), original.replace('.data.type', '?.data.type'),
+      original.replace('"message_stream_complete"', "'message_stream_complete'"),
+      ' ' + original, original + '\n', original + ';', original.replace('let t=', 'let  t='),
+    ];
+    for (const candidate of rejected) expect(matches(candidate)).toBe(false);
+    for (const reserved of ['this', 'super', 'arguments', 'eval', 'await', 'yield', 'null', 'true', 'false', 'let', 'class', 'static']) {
+      for (const candidate of [method(reserved, 't', 'T'), method('e', reserved, 'T'), method('e', 't', reserved)]) {
+        expect(matches(candidate)).toBe(false);
+      }
+    }
+  });
+
+  test('old and renamed decoder bindings preserve terminal success, empty failure, return identity and original throws', async () => {
+    for (const [input, local, validatorName] of [['e', 't', 'T'], ['e', 't', 'x'], ['payload', 'parsed', 'validator']]) {
+      const methodSource = `recordCompletion(${input}){let ${local}=${validatorName}.safeParse(${input});return ${local}.success&&"message_stream_complete"===${local}.data.type&&(this.messageStreamCompleted=!0),${input}}`;
+      const valid = fixture({ methodSource, validatorName }); await ready(valid);
+      const unchanged = { type: 'metadata' }; expect(valid.decode(unchanged)).toBe(unchanged);
+      complete(valid, 'EXACT FINAL');
+      expect(valid.posts.map(p => p.kind)).toEqual(['terminal']); expect(valid.posts[0].text).toBe('EXACT FINAL');
+      expect(valid.receiver.messageStreamCompleted).toBe(true);
+      const error = new Error('original parser failure'); valid.throwOriginal(error);
+      let caught: unknown; try { valid.decode(terminal()); } catch (value) { caught = value; }
+      expect(caught).toBe(error); expect(valid.posts.map(p => p.kind)).toEqual(['terminal', 'invalidated']);
+      expect(valid.O.prototype.recordCompletion).toBe(valid.original.value);
+
+      const empty = fixture({ methodSource, validatorName }); await ready(empty);
+      empty.decode(terminal()); empty.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+      expect(empty.posts.map(p => p.kind)).toEqual(['terminal_failure']);
+      expect(empty.posts[0].reason).toBe('empty_stream'); expect(empty.posts[0].text).toBeUndefined();
+      empty.api.stop(correlationID); expect(empty.O.prototype.recordCompletion).toBe(empty.original.value);
+    }
+  });
+
+  test('renamed decoder bodies cannot relax method descriptors, name, arity or the approved export getter', async () => {
+    const methodSource = 'recordCompletion(e){let t=x.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
+    for (const mode of ['writable', 'configurable', 'enumerable', 'name', 'arity', 'getter'] as const) {
+      const f = fixture({ methodSource, validatorName: 'x', configureRuntime(runtime) {
+        const cached = runtime.__webpack_require__.c.jDdw, O = cached.exports.c;
+        if (mode === 'getter') cached.exports = Object.defineProperty({}, 'c', {
+          get: new Function('P', 'return ()=>P')(O), enumerable: true, configurable: false });
+        else if (mode === 'name' || mode === 'arity') Object.defineProperty(O.prototype.recordCompletion,
+          mode === 'name' ? 'name' : 'length', { value: mode === 'name' ? 'differentName' : 2 });
+        else Object.defineProperty(O.prototype, 'recordCompletion', { [mode]: mode === 'enumerable' });
+      } });
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(f.diagnostics[0].reason).toBe(mode === 'getter' ? 'runtime_getter_unavailable' : 'runtime_method_unsupported');
+      expect(f.posts).toEqual([]); expect(f.listeners()).toBe(0);
+    }
+  });
+
+  test('actual methods using receiver or implicit-arguments parsing are not validator binding renames', async () => {
+    for (const validator of ['this', 'arguments']) {
+      const methodSource = `recordCompletion(e){let t=${validator}.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}`;
+      const f = fixture({ methodSource });
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(f.diagnostics[0].reason).toBe('runtime_method_unsupported');
+      expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+      expect(f.posts).toEqual([]); expect(f.listeners()).toBe(0);
+    }
+  });
+
   test('the currently observed runtime and unique initialized decoder survive website asset and module ID changes', async () => {
     for (const moduleID of ['dd', 'jDdw', 'futureCachedModule']) {
       const currentURL = 'https://chatgpt.com/cdn/assets/633146.012345abcd.js';

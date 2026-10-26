@@ -14,7 +14,6 @@
   const resourceEntries = typeof performance.getEntriesByType === 'function'
     ? performance.getEntriesByType.bind(performance) : null;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
   const diagnosticReasons = Object.freeze(['runtime_unsupported', 'runtime_resources_unavailable', 'runtime_import_failed',
@@ -92,6 +91,18 @@
     return !inventoryInvalid && now() < inventoryDeadline && runtimeResources.size === 1
       ? [...runtimeResources][0] : null;
   }
+  function completionMethodMatches(source) {
+    // Minifiers rename bindings independently of behavior. Admit only the
+    // existing method grammar with three distinct, consistently used names;
+    // no added operations, changed literals, source whitespace or escapes.
+    if (typeof source !== 'string' || source.length > 1024) return false;
+    const match = /^recordCompletion\(([A-Za-z_$][A-Za-z0-9_$]{0,63})\)\{let ([A-Za-z_$][A-Za-z0-9_$]{0,63})=([A-Za-z_$][A-Za-z0-9_$]{0,63})\.safeParse\(\1\);return \2\.success&&"message_stream_complete"===\2\.data\.type&&\(this\.messageStreamCompleted=!0\),\1\}$/.exec(source);
+    // `this`, `super` and implicit `arguments` change receiver semantics, and
+    // strict bindings cannot use keywords, eval or arguments in any slot.
+    const forbidden = ' arguments eval await break case catch class const continue debugger default delete do else enum export extends false finally for function if implements import in instanceof interface let new null package private protected public return static super switch this throw true try typeof var void while with yield ';
+    return !!match && match[0] === source && new Set(match.slice(1)).size === 3
+      && match.slice(1).every(name => !forbidden.includes(' ' + name + ' '));
+  }
   function initializedDecoder(runtime, current) {
     // Website chunk/module IDs change independently. Inspect bounded initialized
     // cache entries only: no require, module factory, or unapproved export getter.
@@ -122,7 +133,7 @@
       if (!original || typeof original.value !== 'function' || original.writable !== true
         || original.configurable !== true || original.enumerable !== false
         || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
-        || apply(functionSource, original.value, []) !== completionSource) continue;
+        || !completionMethodMatches(apply(functionSource, original.value, []))) continue;
       if (found && found.target !== target) fail('runtime_decoder_ambiguous');
       found = { cache, key, cached, exports, exported, target, original };
     }
