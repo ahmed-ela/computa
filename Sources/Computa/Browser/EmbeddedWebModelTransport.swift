@@ -5090,7 +5090,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.view.callAsyncJavaScript(script, arguments: ["input": [
                         "expectedURL": url.absoluteString, "expectedUserCount": session.sequence,
                         "expectedResponseCount": session.baseline + 1]], in: nil, in: .page) { reply in
-                        guard case .success(let raw) = reply, let raw,
+                        guard case .success(let raw) = reply,
                               let safe = Self.sanitizedRendererStateDiagnostic(raw),
                               let encoded = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]),
                               encoded.count <= 8_192 else {
