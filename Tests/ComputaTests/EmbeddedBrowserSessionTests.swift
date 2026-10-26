@@ -223,6 +223,69 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testRendererStartupDiagnosticRejectsInvalidArmsAndUnavailableSource() throws {
+        let now: TimeInterval = 1_800_000_000
+        let template = "void __COMPUTA_RENDERER_STARTUP_DIAGNOSTIC_CONFIG__;"
+        let invalid: [Any?] = [nil, true, false, now - 1, now, now + 601,
+                               Double.infinity, Double.nan, String(now + 60)]
+        var sourceReads = 0
+        for arm in invalid {
+            XCTAssertNil(EmbeddedBrowserSession.rendererStartupDiagnosticScript(armedUntil: arm, now: now) {
+                sourceReads += 1; return template
+            })
+        }
+        XCTAssertEqual(sourceReads, 0, "Default and invalid arms must not even load diagnostic source")
+        for source in [nil, "no configuration placeholder", template + template, String(repeating: "x", count: 65_536) + template] {
+            XCTAssertNil(EmbeddedBrowserSession.rendererStartupDiagnosticScript(armedUntil: now + 60, now: now) { source })
+        }
+        let script = try XCTUnwrap(EmbeddedBrowserSession.rendererStartupDiagnosticScript(armedUntil: now + 60.5, now: now) { template })
+        XCTAssertEqual(script.injectionTime, .atDocumentStart)
+        XCTAssertFalse(script.isForMainFrameOnly)
+        XCTAssertTrue(script.source.contains("expiresAtUnixSeconds"))
+        XCTAssertTrue(script.source.contains("1800000060.5"))
+        XCTAssertFalse(script.source.contains("__COMPUTA_RENDERER_STARTUP_DIAGNOSTIC_CONFIG__"))
+    }
+
+    func testRendererStartupDiagnosticOnlyInstallsInArmedIsolatedInferenceBeforeConstruction() throws {
+        let suite = "ComputaRendererStartupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "ComputaRendererFailureDiagnosticExpiresAt", expiry = Date().timeIntervalSince1970 + 60
+        defaults.set(expiry, forKey: key)
+        let session = EmbeddedBrowserSession(persistent: false, defaults: defaults)
+        defer { session.shutdown() }
+        let humanID = try session.createTab()
+        let discoveryID = try session.createUnloadedModelTabForTesting()
+        let toolID = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        var constructionScriptCount: Int?
+        var constructionScript: WKUserScript?
+        let modelID = try session.createUnloadedModelTabForTesting(isolatedChatGPTProfile: true) { configuration in
+            constructionScriptCount = configuration.userContentController.userScripts.count
+            constructionScript = configuration.userContentController.userScripts.first
+            return WKWebView(frame: .zero, configuration: configuration)
+        }
+        XCTAssertEqual(constructionScriptCount, 1)
+        let script = try XCTUnwrap(constructionScript)
+        XCTAssertFalse(script.isForMainFrameOnly)
+        XCTAssertEqual(script.injectionTime, .atDocumentStart)
+        XCTAssertTrue(script.source.contains("__computaRendererStartupDiagnosticV1"))
+        XCTAssertFalse(script.source.contains("__COMPUTA_RENDERER_STARTUP_DIAGNOSTIC_CONFIG__"))
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        XCTAssertFalse(model.configuration.websiteDataStore.isPersistent)
+        XCTAssertFalse(model.isInspectable)
+        XCTAssertNil(model.url)
+        XCTAssertEqual(defaults.double(forKey: key), expiry, "Startup observation must not consume the eventual failure capture arm")
+        XCTAssertEqual(session.selectedTabID, humanID)
+        for id in [humanID, discoveryID, toolID] {
+            XCTAssertFalse(try XCTUnwrap(session.webView(for: id)).configuration.userContentController.userScripts
+                .contains { !$0.isForMainFrameOnly }, "Human, tool and nonisolated discovery views must receive no startup diagnostic")
+        }
+        defaults.removeObject(forKey: key)
+        let unarmedID = try session.createUnloadedModelTabForTesting(isolatedChatGPTProfile: true)
+        XCTAssertFalse(try XCTUnwrap(session.webView(for: unarmedID)).configuration.userContentController.userScripts
+            .contains { !$0.isForMainFrameOnly })
+    }
+
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),

@@ -99,7 +99,29 @@ lifecycle fields; no renderer methods are invoked and the diagnostic cannot
 authorize response acceptance, tools or recovery. It runs only after the existing
 full failure proof. Resource timing now also recognizes the current async chunk
 paths and modulepreloads; these observations do not prove module execution.
-The renderer root cause and installed262 qualification are still pending.
+Installed262 captured the actual renderer exception during context maintenance:
+`worker_timeout`, “Timed out waiting for the DIL runner worker.” The iframe was
+ready, but no worker readiness or first snapshot reached the host. Maintenance
+failed in 37.300s, with zero native tools and a saved closed website receipt.
+The pending synthetic email prompt never entered the provider user turn. This
+identifies the failed startup boundary, not the underlying reason it stalled.
+
+Controlled native WebKit fixtures using the exact public classic-worker source
+and its actual HTTPS CDN passed ten initializations (five behind opaque content,
+five front/focused). Worker readiness took 6–8ms. Another ten same-frame
+prewarm/dispose/new-runner cases passed, with reused worker readiness in 1–2ms.
+These controls weaken a general WebKit-version, background-host, CDN-policy or
+prewarm-reuse explanation; they do not reproduce the full ChatGPT page context.
+
+Build263 extends the private diagnostic to that remaining boundary. Only a new
+isolated model view with an explicit arm expiring within ten minutes installs
+the startup script. The exact public v14 runner iframe receives its own
+`dil-diagnostics=1` fragment opt-in before execution. The owning ChatGPT document
+retains only bounded startup stages, timings, artifact identifiers and finite
+error categories from that iframe. No Worker/MessagePort hook, prompt, response,
+program, URL or free-form diagnostic message is captured. The existing verified
+failure capture remains the sole persistence gate; this trace grants no tool or
+response authority and is inactive by default. Installed diagnosis remains pending.
 
 ## Candidate148: one bounded ChatGPT format correction
 

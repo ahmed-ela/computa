@@ -5093,7 +5093,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         guard case .success(let raw) = reply,
                               let safe = Self.sanitizedRendererStateDiagnostic(raw),
                               let encoded = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]),
-                              encoded.count <= 8_192 else {
+                              encoded.count <= 16_384 else {
                             result.complete(.failure(Failure.pageUnavailable)); return
                         }
                         result.complete(.success(encoded))
@@ -5110,7 +5110,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let record: [String: Any] = ["version": 1, "captureID": captureID.uuidString,
             "sessionID": sessionID.uuidString, "sequence": session.sequence,
             "capturedAt": ISO8601DateFormatter().string(from: Date()), "projection": projection]
-        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), encoded.count <= 8_192 else { return }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), encoded.count <= 16_384 else { return }
         #if DEBUG
         if let sink = rendererFailureDiagnosticSinkForTesting { sink(encoded); return }
         #endif
@@ -5138,7 +5138,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard keys(value, ["version", "status", "reason"]), let reason = value["reason"] as? String, reasons.contains(reason) else { return nil }
             return value
         }
-        guard status == "captured", keys(value, ["version", "status", "ancestorDepth", "snapshotVersion", "treeIsNull", "error", "lifecycle", "runnerDisposed", "frame"]),
+        let capturedKeys = ["version", "status", "ancestorDepth", "snapshotVersion", "treeIsNull", "error", "lifecycle", "runnerDisposed", "frame"]
+        guard status == "captured", keys(value, capturedKeys + (value["startup"] == nil ? [] : ["startup"])),
               integer(value["ancestorDepth"], 0...15), integer(value["snapshotVersion"], 1...1_000_000),
               boolean(value["treeIsNull"]), value["treeIsNull"] as? Bool == true, nullableBoolean(value["runnerDisposed"]),
               let error = value["error"] as? [String: Any], keys(error, ["name", "message", "messageTruncated", "publicStack", "stage"]),
@@ -5158,7 +5159,55 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let frames = stack.isEmpty ? [] : stack.components(separatedBy: "\n")
         let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
         guard frames.count <= 4, frames.allSatisfy({ $0.range(of: publicFrame, options: .regularExpression) != nil }) else { return nil }
+        if let startup = value["startup"], !validRendererStartupDiagnostic(startup) { return nil }
         return value
+    }
+
+    /// A finite startup trace is troubleshooting data only. Never accept site
+    /// payloads, URLs, free-form messages, or object identifiers in this channel.
+    nonisolated static func validRendererStartupDiagnostic(_ raw: Any) -> Bool {
+        func number(_ raw: Any?, maximum: Double, integral: Bool = false) -> Bool {
+            guard let numeric = raw as? NSNumber, CFGetTypeID(numeric) != CFBooleanGetTypeID() else { return false }
+            let value = numeric.doubleValue
+            return value.isFinite && value >= 0 && value <= maximum && (!integral || value.rounded() == value)
+        }
+        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "events", "dropped"],
+              number(value["version"], maximum: 1, integral: true), (value["version"] as? NSNumber)?.intValue == 1,
+              number(value["dropped"], maximum: 1_000_000, integral: true),
+              let events = value["events"] as? [[String: Any]], events.count <= 64 else { return false }
+        let realms: Set<String> = ["bootstrap", "iframe", "worker"]
+        let operations: Set<String> = ["observer_bootstrap", "module_load", "module_resource", "module_entry", "frame_ready", "manager_create",
+            "worker_create", "worker_control", "worker_module", "harden_worker", "runner_create", "worker_ready", "snapshot_post", "snapshot_receive",
+            "snapshot_forward", "error", "visibility", "event_loop", "frame_probe", "health_probe", "request_timer", "recovery", "quarantine", "worker_stop", "runner_dispose"]
+        let phases: Set<String> = ["begin", "returned", "threw", "reported_error", "sent", "received", "acknowledged", "resolved", "rejected",
+            "armed", "paused", "rearmed", "cancelled", "fired", "ignored", "decision"]
+        let errorNames: Set<String> = ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "URIError", "EvalError", "AggregateError", "unknown"]
+        let reasons: Set<String> = ["bundle_evaluation", "clear_all", "control_unavailable", "csp_violation", "disposed", "document_state",
+            "execution_finished", "execution_started", "overflow", "restore_transport", "runner_module_exception", "session_restart",
+            "source_changed", "stale_generation", "startup_exhausted", "startup_retry", "target_requested", "timing_unavailable",
+            "uncaught_error", "unhandled_rejection", "worker_restart", "runner_module_script_error", "other_script_error", "status_unavailable",
+            "timing_ambiguous", "timing_missing"]
+        let timingKeys: Set<String> = ["localTimeMs", "timeOriginMs", "elapsedMs", "budgetMs"]
+        let generationKeys: Set<String> = ["workerGeneration", "sessionGeneration", "startupAttempt"]
+        let required: Set<String> = ["realm", "operation", "phase"]
+        let allowed = required.union(timingKeys).union(generationKeys).union(["artifactId", "errorName", "reason"])
+        let valid = events.allSatisfy { event in
+            guard required.isSubset(of: Set(event.keys)), Set(event.keys).isSubset(of: allowed),
+                  let realm = event["realm"] as? String, realms.contains(realm),
+                  let operation = event["operation"] as? String, operations.contains(operation),
+                  let phase = event["phase"] as? String, phases.contains(phase) else { return false }
+            for key in timingKeys where event[key] != nil { if !number(event[key], maximum: 1e15) { return false } }
+            for key in generationKeys where event[key] != nil { if !number(event[key], maximum: 1_000_000, integral: true) { return false } }
+            if let raw = event["artifactId"] {
+                guard let artifact = raw as? String, artifact.range(of: #"\A[A-Za-z0-9_-]{8,64}\z"#, options: .regularExpression) != nil else { return false }
+            }
+            if let raw = event["errorName"] { guard let name = raw as? String, errorNames.contains(name) else { return false } }
+            if let raw = event["reason"] { guard let reason = raw as? String, reasons.contains(reason) else { return false } }
+            return true
+        }
+        guard valid, JSONSerialization.isValidJSONObject(value),
+              let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 10_240 else { return false }
+        return true
     }
 
     private static func saveRendererFailureDiagnostic(_ data: Data, captureID: UUID) -> Bool {

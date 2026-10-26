@@ -14,6 +14,66 @@ return (() => {
   const boolean = value => typeof value === 'boolean' ? value : null;
   const finiteStage = value => stages.has(value) ? value : value == null ? null : 'other';
   const label = 'This response couldn’t load';
+  const startupProjection = iframe => {
+    try {
+      const state = own(window, '__computaRendererStartupDiagnosticV1'), expiry = own(state, 'expiresAtUnixSeconds');
+      const frames = own(state, 'frames'), now = Date.now() / 1000;
+      if (own(state, 'version') !== 1 || typeof expiry !== 'number' || !Number.isFinite(expiry)
+        || expiry <= now || expiry > now + 600 || !Array.isArray(frames) || frames.length > 4 || !iframe) return undefined;
+      let entry;
+      for (let index = 0; index < frames.length; index++) {
+        const value = own(frames, String(index));
+        if (own(value, 'iframe') !== iframe) continue;
+        if (entry) return undefined;
+        entry = value;
+      }
+      // An armed collector with no records from this frame is useful negative evidence.
+      if (!entry && (frames.length === 4 || own(state, 'saturated') === true)) return undefined;
+      const events = entry ? own(entry, 'events') : [], dropped = entry ? own(entry, 'dropped') : 0;
+      if (!Array.isArray(events) || events.length > 64 || !Number.isSafeInteger(dropped)
+        || dropped < 0 || dropped > 1000000) return undefined;
+      const realms = new Set(['bootstrap', 'iframe', 'worker']);
+      const operations = new Set(['observer_bootstrap', 'module_load', 'module_resource', 'module_entry', 'frame_ready',
+        'manager_create', 'worker_create', 'worker_control', 'worker_module', 'harden_worker', 'runner_create',
+        'worker_ready', 'snapshot_post', 'snapshot_receive', 'snapshot_forward', 'error', 'visibility', 'event_loop',
+        'frame_probe', 'health_probe', 'request_timer', 'recovery', 'quarantine', 'worker_stop', 'runner_dispose']);
+      const phases = new Set(['begin', 'returned', 'threw', 'reported_error', 'sent', 'received', 'acknowledged',
+        'resolved', 'rejected', 'armed', 'paused', 'rearmed', 'cancelled', 'fired', 'ignored', 'decision']);
+      const names = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError',
+        'EvalError', 'AggregateError', 'unknown']);
+      const reasons = new Set(['bundle_evaluation', 'clear_all', 'control_unavailable', 'csp_violation', 'disposed',
+        'document_state', 'execution_finished', 'execution_started', 'overflow', 'restore_transport', 'runner_module_exception',
+        'session_restart', 'source_changed', 'stale_generation', 'startup_exhausted', 'startup_retry', 'target_requested',
+        'timing_unavailable', 'uncaught_error', 'unhandled_rejection', 'worker_restart', 'runner_module_script_error',
+        'other_script_error', 'status_unavailable', 'timing_ambiguous', 'timing_missing']);
+      const numeric = ['localTimeMs', 'timeOriginMs', 'elapsedMs', 'budgetMs'];
+      const generations = ['workerGeneration', 'sessionGeneration', 'startupAttempt'];
+      const projected = [];
+      for (let index = 0; index < events.length; index++) {
+        const event = own(events, String(index)), realm = own(event, 'realm'), operation = own(event, 'operation'), phase = own(event, 'phase');
+        if (!realms.has(realm) || !operations.has(operation) || !phases.has(phase)) return undefined;
+        const result = { realm, operation, phase };
+        for (const key of [...numeric, ...generations]) {
+          const value = own(event, key);
+          if (value === undefined) continue;
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 0
+            || (generations.includes(key) ? !Number.isSafeInteger(value) || value > 1000000 : value > 1e15)) return undefined;
+          result[key] = value;
+        }
+        const artifact = own(event, 'artifactId'), name = own(event, 'errorName');
+        if (artifact !== undefined) {
+          if (typeof artifact !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(artifact)) return undefined;
+          result.artifactId = artifact;
+        }
+        if (name !== undefined) { if (!names.has(name)) return undefined; result.errorName = name; }
+        const reason = own(event, 'reason');
+        if (reason !== undefined) { if (!reasons.has(reason)) return undefined; result.reason = reason; }
+        projected.push(result);
+      }
+      const result = { version: 1, events: projected, dropped };
+      return new TextEncoder().encode(JSON.stringify(result)).length <= 10240 ? result : undefined;
+    } catch { return undefined; }
+  };
   try {
     if (!input || Object.keys(input).sort().join(',') !== 'expectedResponseCount,expectedURL,expectedUserCount'
       || typeof input.expectedURL !== 'string' || input.expectedURL.length > 2048
@@ -142,7 +202,9 @@ return (() => {
       && own(moduleError, 'protocolVersion') === 14 && [undefined, true].includes(own(moduleError, 'policyDenied'));
     if (document.URL !== input.expectedURL || !leaf.isConnected || !copy.isConnected || body.textContent !== label
       || own(runner, 'snapshot') !== snapshot || own(snapshot, 'error') !== error) return unavailable('state_changed');
+    const startup = startupProjection(own(frame, 'iframe'));
     return { version: 1, status: 'captured', ancestorDepth: depth, snapshotVersion: version, treeIsNull: true,
+      ...(startup === undefined ? {} : { startup }),
       error: { name: errorName(error), message, messageTruncated: typeof rawMessage === 'string' && (rawMessage.length > 512 || new TextEncoder().encode(rawMessage.slice(0, 512)).length > 512),
         publicStack: publicFrames.join('\n'), stage: finiteStage(own(error, 'stage')) },
       lifecycle: { failureStage: finiteStage(own(lifecycle, 'failureStage')),

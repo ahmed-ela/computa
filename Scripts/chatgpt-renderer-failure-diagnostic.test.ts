@@ -54,7 +54,7 @@ function fixture(pairedTurn = false) {
   const snapshot = { error, tree: null, version: 1 };
   const lifecycle = { failureStage: 'worker_timeout', firstSnapshotSucceeded: false, frameReady: true, frameRecovering: false, workerReady: false };
   const runner: any = { snapshot, lifecycleSnapshot: lifecycle, disposed: false,
-    frame: { readyResolved: true, disposed: false, retired: true, retriedPreReadyFrame: false } };
+    frame: { iframe: {}, readyResolved: true, disposed: false, retired: true, retriedPreReadyFrame: false } };
   let calls = 0;
   runner.getSnapshot = () => { calls++; throw new Error('Never invoke runner methods'); };
   Object.defineProperty(runner, 'data', { get() { calls++; throw new Error('Never read data'); } });
@@ -68,10 +68,47 @@ function fixture(pairedTurn = false) {
   const input = { expectedURL: document.URL, expectedResponseCount: 1, expectedUserCount: 1 };
   const run = (override: Record<string, unknown> = {}) => execute({ ...input, ...override }, document, window,
     { origin: 'https://chatgpt.com' }, () => ({ display: 'block', visibility: 'visible', opacity: '1' }));
-  return { run, main, turn, body, leaf, copy, user, assistant, runner, snapshot, error, hooks, rendererFiber, hostFiber, document, calls: () => calls };
+  return { run, main, turn, body, leaf, copy, user, assistant, runner, snapshot, error, hooks, rendererFiber, hostFiber, document, window, calls: () => calls };
 }
 
 describe('private ChatGPT renderer failure diagnostic', () => {
+  test('includes only current finite startup records and keeps an unarmed capture unchanged', () => {
+    const f = fixture(); expect(f.run().startup).toBeUndefined();
+    const event = { realm: 'worker', operation: 'harden_worker', phase: 'returned', artifactId: 'DrCNBd66',
+      workerGeneration: 1, localTimeMs: 4, errorName: 'Error', payload: 'never retain' };
+    const entry: any = { iframe: f.runner.frame.iframe, events: [event], dropped: 0 };
+    const state: any = { version: 1, expiresAtUnixSeconds: Date.now() / 1000 + 100, frames: [entry] };
+    Object.defineProperty(f.window, '__computaRendererStartupDiagnosticV1', { value: state });
+    expect(f.run().startup).toEqual({ version: 1, events: [{ realm: 'worker', operation: 'harden_worker', phase: 'returned',
+      artifactId: 'DrCNBd66', workerGeneration: 1, localTimeMs: 4, errorName: 'Error' }], dropped: 0 });
+    entry.events = []; expect(f.run().startup).toEqual({ version: 1, events: [], dropped: 0 });
+    entry.events = [event]; state.expiresAtUnixSeconds = Date.now() / 1000 - 1;
+    expect(f.run().startup).toBeUndefined(); expect(f.run().status).toBe('captured');
+  });
+  test('rejects forged or accessor startup state without weakening the failure capture', () => {
+    const f = fixture(); let reads = 0;
+    const entry: any = { iframe: f.runner.frame.iframe,
+      events: [{ realm: 'worker', operation: 'private payload', phase: 'returned' }], dropped: 0 };
+    const state: any = { version: 1, expiresAtUnixSeconds: Date.now() / 1000 + 100, frames: [entry] };
+    Object.defineProperty(f.window, '__computaRendererStartupDiagnosticV1', { value: state });
+    expect(f.run().startup).toBeUndefined();
+    const event: any = { realm: 'worker', operation: 'worker_ready', phase: 'sent' };
+    Object.defineProperty(event, 'artifactId', { get() { reads++; return 'secret'; } });
+    entry.events = [event]; expect(f.run().startup.events).toEqual([{ realm: 'worker', operation: 'worker_ready', phase: 'sent' }]);
+    Object.defineProperty(event, 'realm', { get() { reads++; return 'worker'; } });
+    expect(f.run().startup).toBeUndefined(); expect(reads).toBe(0); expect(f.run().status).toBe('captured');
+  });
+  test('projects only the exact failed frame and rejects duplicate frame entries', () => {
+    const f = fixture();
+    const entry = { iframe: f.runner.frame.iframe, events: [{ realm: 'worker', operation: 'runner_create', phase: 'received', reason: 'control_unavailable' }], dropped: 2 };
+    const state: any = { version: 1, expiresAtUnixSeconds: Date.now() / 1000 + 100, frames: [
+      { iframe: {}, events: [{ realm: 'worker', operation: 'worker_ready', phase: 'sent' }], dropped: 0 }, entry] };
+    Object.defineProperty(f.window, '__computaRendererStartupDiagnosticV1', { value: state });
+    expect(f.run().startup).toEqual({ version: 1, events: entry.events, dropped: 2 });
+    state.frames = [state.frames[0]]; expect(f.run().startup).toEqual({ version: 1, events: [], dropped: 0 });
+    state.saturated = true; expect(f.run().startup).toBeUndefined(); state.saturated = false;
+    state.frames = [entry, entry]; expect(f.run().startup).toBeUndefined(); expect(f.run().status).toBe('captured');
+  });
   test('captures actual committed failure for assistant and paired-turn Copy layouts without invoking site methods', () => {
     for (const paired of [false, true]) {
       const f = fixture(paired), result = f.run();

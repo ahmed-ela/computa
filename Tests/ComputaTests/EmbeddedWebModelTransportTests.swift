@@ -13099,4 +13099,23 @@ extension EmbeddedWebModelTransportTests {
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(mutation))
         }
     }
+
+    func testRendererStartupDiagnosticAcceptsOnlyFiniteBoundedStageRecords() {
+        let event: [String: Any] = ["realm": "worker", "operation": "harden_worker", "phase": "returned",
+            "localTimeMs": 12.5, "timeOriginMs": 1_792_980_000_000, "workerGeneration": 1, "artifactId": "DrCNBd66", "reason": "bundle_evaluation"]
+        let valid: [String: Any] = ["version": 1, "events": [event], "dropped": 0]
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererStartupDiagnostic(valid))
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererStartupDiagnostic(["version": 1, "events": [], "dropped": 0]))
+        for change: [String: Any] in [["realm": "page"], ["operation": "PRIVATE_SENTINEL"], ["phase": "private"],
+            ["message": "PRIVATE_SENTINEL"], ["url": "https://example.invalid/private"], ["runnerId": "private"],
+            ["localTimeMs": true], ["localTimeMs": -1], ["localTimeMs": Double.infinity], ["localTimeMs": 1e16],
+            ["workerGeneration": 1.5], ["artifactId": "../private"], ["errorName": "PRIVATE_SENTINEL"], ["reason": "PRIVATE_SENTINEL"]] {
+            let mutated = event.merging(change, uniquingKeysWith: { _, next in next })
+            XCTAssertFalse(EmbeddedWebModelTransport.validRendererStartupDiagnostic(["version": 1, "events": [mutated], "dropped": 0]))
+        }
+        for change: [String: Any] in [["version": true], ["version": 0], ["dropped": true], ["dropped": -1],
+            ["dropped": 1_000_001], ["events": Array(repeating: event, count: 65)], ["source": "PRIVATE_SENTINEL"]] {
+            XCTAssertFalse(EmbeddedWebModelTransport.validRendererStartupDiagnostic(valid.merging(change, uniquingKeysWith: { _, next in next })))
+        }
+    }
 }
