@@ -863,6 +863,11 @@ actor WebModelServer {
                 deadline: ContinuousClock.Instant, evidence: WebsiteModelEvidence?, snapshot: [String: Any]?)?
             do {
                 try requireCurrentContext()
+                if provider == "chatgpt" {
+                    // Final native projection and parsed policy; correction attempts
+                    // retain the same request but have their own inference UUID.
+                    Self.promptLog.info("toolCatalog version=1 task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) preparation=\(context.preparationID.uuidString.lowercased(), privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(request.toolCatalogDiagnostic.logFields, privacy: .public)")
+                }
                 guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
                       selection.provider == provider else { throw Failure.invalidRequest }
                 let choice = selection.choice

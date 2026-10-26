@@ -261,6 +261,14 @@ not guess replacement URLs or run module factories. Importing an observed
 resource reuses it if already evaluated; Resource Timing alone does not prove
 evaluation. Ambiguity or an unsupported shape keeps the existing fallback.
 
+A later deployment renamed the decoder's validator binding from `T` to `x`.
+Build 276 accepts consistent renaming of the three distinct strict binding
+identifiers in the complete existing method grammar. It still rejects additional
+operations, changed literals, capture of `this`/`super`/`arguments`, inconsistent
+references and trailing content. Export-getter, descriptor, arity, unique-target,
+property-identity and ownership checks remain required. Cache failures now carry
+finite stage labels rather than only one broad compatibility error.
+
 A separate failure receipt covers an exact-owned empty or error stream only
 after both message and main terminal events, with no alternate response expected
 and no nonempty or opaque assistant content. Mixed error/content envelopes are

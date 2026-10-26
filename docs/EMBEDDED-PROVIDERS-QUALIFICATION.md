@@ -2831,3 +2831,48 @@ All 564 original journal files remained byte-exact after the mailbox case:
 The fixture process stopped and port 62240 was free. All scoped diagnostic arms
 were absent, Safari's developer setting was reverified off and its owned settings
 window closed. Existing user browser tabs were preserved. No release or merge.
+
+
+### Build 276: runtime recognition repaired; one semantic task failure
+
+Installed signed, non-notarized 0.7.0 (276), source `8ca1a07`, recognizes the
+observed decoder's equivalent minified binding rename (`T` to `x`). All 29
+observers armed across four fresh normal ChatGPT Chat/Instant tasks. Each still
+used verified quiet fallback because the additional ancestry proof was absent.
+The model and temporary-session ownership checks remained enforced.
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Read schedule and send the fact to the local fixture | 63.025 s | 8 | 7 | Pass |
+| Read library hours and send the fact to the local fixture | 67.559 s | 9 | 8 | Pass |
+| Identify an attachment and send its name to the local fixture | 124.538 s | 9 | 8 | Incomplete |
+| Two separate terminal commands | 22.030 s | 3 | 2 | Pass |
+
+The first two browser tasks each produced exactly one local POST, with the
+correct source fact and a unique delivery receipt independently matched to the
+browser read and final answer. The terminal commands returned the expected
+marker and 437, both with exit code zero. All 29 inferences passed ownership,
+model, lifecycle and saved-closed-session checks. There were no failed native
+calls, failed inferences or correction attempts. No real email was sent.
+
+The attachment task did **not** pass. It identified the correct filename and
+filled the recipient and subject, then stopped with an unsupported statement
+that local browser relay actions were unavailable. Its last successful native
+result exposed a fresh, writable Message field and enabled Send button. The
+fixture recorded zero POSTs. There was no browser error, compaction, observed
+permission denial, eight-call limit or expired binding. Matching tool-byte
+counts do not prove which exact tools and policy were offered; build277 adds
+finite post-projection catalog diagnostics to resolve that remaining evidence
+gap. This failure remains in the denominator and was not silently retried.
+
+Each fixture process was stopped and its port released. Task-created browser
+tabs and all owned website sessions were closed, including the failed case.
+All 564 original journal files remained byte-exact (506 active, 58 archived),
+with no pending retirement and a healthy archive. Safari's temporary developer
+setting was restored off. Build275 was built but never installed.
+
+Focused validation for these changes passed 190 codec/catalog tests, 53
+JavaScript observer tests with 885 assertions, and 28 native completion/WebKit
+tests. These results repair the observed decoder-recognition defect and improve
+capability instructions; they do not establish the upstream cause of the
+uncaptured original build270 empty response or general task reliability.

@@ -326,15 +326,8 @@ enum ComputaModelToolCatalog {
                 deferred.insert(qualified)
                 return
             }
-            guard definition["type"] as? String == "function", namespace == nil || namespace == "functions",
-                  ["browser_open", "browser_bind"].contains(name),
-                  let canonical = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any]
-            else { return }
-            let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
-            guard !keys.isEmpty, keys.allSatisfy({ key in
-                guard let schema = definition[key] as? [String: Any], nativeConstraintTypesAreValid(schema) else { return false }
-                return matchesNativeReadSchema(schema, canonical)
-            }) else { return }
+            guard ["browser_open", "browser_bind"].contains(name),
+                  nativeBrowserToolName(definition, namespace: namespace) != nil else { return }
             entryTools.insert(qualified)
         }
         for definition in definitions {
@@ -359,6 +352,26 @@ enum ComputaModelToolCatalog {
         Do not call a deferred tool now or infer action authority from this notice.
         END_COMPUTA_DEFERRED_BROWSER_CAPABILITIES.
         """
+    }
+
+    /// Diagnostic recognition shares the projection's exact native contracts.
+    /// It never makes an unrecognized declaration callable or changes a schema.
+    static func nativeBrowserToolName(_ definition: [String: Any], namespace: String?) -> String? {
+        guard definition["type"] as? String == "function", namespace == nil || namespace == "functions",
+              let name = definition["name"] as? String, EmbeddedBrowserTools.names.contains(name) else { return nil }
+        if !["browser_tabs", "browser_open", "browser_bind"].contains(name) {
+            return requiresBrowserBinding(definition, namespace: namespace) ? name : nil
+        }
+        let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
+        guard !keys.isEmpty, keys.allSatisfy({ key in
+            guard let schema = definition[key] as? [String: Any], nativeConstraintTypesAreValid(schema) else { return false }
+            if name == "browser_tabs" {
+                return browserCursorSchemaVariants(name: name, namespace: namespace, schema: schema) != nil
+            }
+            guard let canonical = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any] else { return false }
+            return matchesNativeReadSchema(schema, canonical)
+        }) else { return nil }
+        return name
     }
 
     /// Also applies to schemas retained by old native threads. History stays

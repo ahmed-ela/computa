@@ -376,6 +376,98 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testToolCatalogDiagnosticTracksFinalProjectionWithoutChangingRequestOrAdmission() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let body = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+            "input": "browser_fill in history is not a current capability", "tools": native])
+        let cases: [(EmbeddedBrowserToolAvailability?, WebModelResponseCodec.ToolCatalogDiagnostic.Binding, UInt16, Int)] = [
+            (nil, WebModelResponseCodec.ToolCatalogDiagnostic.Binding.unknown, UInt16(1023), 10),
+            (EmbeddedBrowserToolAvailability.unbound, .unbound, 7, 3), (.bound, .bound, 1023, 10),
+        ]
+        for (availability, binding, mask, count) in cases {
+            let prepared = try WebModelResponseCodec.prepareRequest(body, browserToolAvailability: availability)
+            let d = prepared.toolCatalogDiagnostic
+            XCTAssertEqual(d.binding, binding); XCTAssertEqual(d.choice, .auto)
+            XCTAssertEqual(d.offeredBrowserMask, mask); XCTAssertEqual(d.allowedBrowserMask, mask)
+            XCTAssertEqual(d.offeredCount, count); XCTAssertEqual(d.allowedCount, count)
+            XCTAssertFalse(d.requiresCall); XCTAssertTrue(d.parallel); XCTAssertNil(d.maxToolCalls)
+            XCTAssertEqual(prepared.continuationRequest, body)
+            XCTAssertFalse(prepared.prompt.contains("offeredBrowserMask"))
+            XCTAssertFalse(prepared.prompt.contains("toolCatalog version="))
+            if availability == .unbound {
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"browser_fill","arguments":{}}]}"#,
+                    request: prepared, requireEnvelope: true)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("browser_fill"))
+                }
+            }
+        }
+    }
+
+    func testToolCatalogDiagnosticReportsValidatedChoicesAndOnlyExactNativeFunctions() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": native],
+            ["type": "namespace", "name": "private_foreign_namespace", "tools": native],
+            ["type": "custom", "name": "browser_fill"],
+            ["type": "function", "name": "browser_read", "parameters": ["type": "object", "properties": [:]]]]
+        let selected: [String: Any] = ["type": "function", "name": "functions.browser_fill"]
+        let subset: [[String: Any]] = [selected, ["type": "function", "name": "functions.browser_read"],
+            ["type": "function", "name": "private_foreign_namespace.browser_click"], ["type": "custom", "name": "browser_fill"]]
+        let cases: [(Any, WebModelResponseCodec.ToolCatalogDiagnostic.Choice, UInt16, Int, Bool)] = [
+            (NSNull(), .auto, 1023, 22, false), ("auto", .auto, 1023, 22, false),
+            ("none", .none, 0, 0, false), ("required", .required, 1023, 22, true),
+            (selected, .selected, 128, 1, true),
+            (["type": "allowed_tools", "tools": subset], .allowedAuto, 144, 4, false),
+            (["type": "allowed_tools", "mode": "none", "tools": subset], .allowedNone, 0, 0, false),
+            (["type": "allowed_tools", "mode": "required", "tools": subset], .allowedRequired, 144, 4, true),
+            (["type": "function", "name": "private_foreign_namespace.browser_fill"], .selected, 0, 1, true),
+            (["type": "custom", "name": "browser_fill"], .selected, 0, 1, true),
+            (["type": "function", "name": "browser_read"], .selected, 0, 1, true),
+        ]
+        for (choice, mode, allowedMask, allowedCount, required) in cases {
+            let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": syntheticChatGPTModelID, "input": "PRIVATE prompt https://secret.invalid/?token=PRIVATE",
+                "tools": tools, "tool_choice": choice, "parallel_tool_calls": false, "max_tool_calls": 1,
+            ]), browserToolAvailability: .bound)
+            let d = prepared.toolCatalogDiagnostic
+            XCTAssertEqual(d.choice, mode); XCTAssertEqual(d.offeredBrowserMask, 1023)
+            XCTAssertEqual(d.allowedBrowserMask, allowedMask); XCTAssertEqual(d.offeredCount, 22)
+            XCTAssertEqual(d.allowedCount, allowedCount); XCTAssertEqual(d.requiresCall, required)
+            XCTAssertFalse(d.parallel); XCTAssertEqual(d.maxToolCalls, 1)
+            let encoded = String(decoding: try JSONEncoder().encode(d), as: UTF8.self) + d.logFields
+            for forbidden in ["PRIVATE", "secret.invalid", "private_foreign_namespace", "browser_fill", "parameters", "arguments"] {
+                XCTAssertFalse(encoded.contains(forbidden), forbidden)
+            }
+        }
+    }
+
+    func testToolCatalogDiagnosticRejectsModifiedNativeSchemasAndHasFiniteKeys() throws {
+        var fill = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_fill" })
+        fill["parameters"] = fill.removeValue(forKey: "inputSchema")
+        var dual = fill
+        dual["inputSchema"] = ["type": "object", "properties": [:]]
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": syntheticChatGPTModelID, "input": "Hi", "tools": [dual], "max_tool_calls": Int32.max,
+        ]), browserToolAvailability: .bound)
+        let d = request.toolCatalogDiagnostic
+        XCTAssertEqual(d.offeredBrowserMask, 0); XCTAssertEqual(d.allowedBrowserMask, 0)
+        XCTAssertEqual(d.offeredCount, 1); XCTAssertEqual(d.allowedCount, 1)
+        XCTAssertEqual(d.maxToolCalls, Int(Int32.max))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(d)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["binding", "choice", "offeredCount", "allowedCount", "offeredBrowserMask",
+            "allowedBrowserMask", "requiresCall", "parallel", "maxToolCalls"])
+        XCTAssertLessThan(d.logFields.utf8.count, 256)
+        for invalid in [0, -1] {
+            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": syntheticChatGPTModelID, "input": "Hi", "tools": [fill], "max_tool_calls": invalid]))) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidParameter("max_tool_calls"))
+            }
+        }
+    }
+
     func testSplitBrowserReadAndContinueContractsPreserveWebsiteHistoryAndRegisteredNames() throws {
         func function(_ name: String) throws -> [String: Any] {
             var tool = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })

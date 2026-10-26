@@ -18,6 +18,7 @@ enum WebModelResponseCodec {
         let currentUserInstructions: String
         /// Derived from validated original definitions; native admission supplies state.
         let requiresBrowserToolAvailability: Bool
+        let toolCatalogDiagnostic: ToolCatalogDiagnostic
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
@@ -37,11 +38,55 @@ enum WebModelResponseCodec {
         let namespace: String?
         let isCustom: Bool
         let browserReadMode: ComputaModelToolCatalog.BrowserReadMode?
+        let nativeBrowserBit: UInt16
     }
 
     fileprivate struct ToolPolicy: Sendable {
         let allowedNames: Set<String>
         let requiresCall: Bool
+        let mode: ToolCatalogDiagnostic.Choice
+    }
+
+    /// Finite request facts only. These fields never alter model instructions,
+    /// parser admission or native execution, and contain no client-authored text.
+    struct ToolCatalogDiagnostic: Codable, Equatable, Sendable {
+        enum Binding: String, Codable, Sendable { case unknown, unbound, bound }
+        enum Choice: String, Codable, Sendable {
+            case auto, none, required, selected
+            case allowedAuto = "allowed_auto", allowedNone = "allowed_none", allowedRequired = "allowed_required"
+        }
+        // Version 1 bit positions; do not reorder without a diagnostic version change.
+        static let browserNames = ["browser_tabs", "browser_open", "browser_bind", "browser_navigate",
+            "browser_read", "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close"]
+        let binding: Binding
+        let choice: Choice
+        let offeredCount: Int
+        let allowedCount: Int
+        let offeredBrowserMask: UInt16
+        /// tool_choice allowance only; no target/reference/permission authority.
+        let allowedBrowserMask: UInt16
+        let requiresCall: Bool
+        let parallel: Bool
+        let maxToolCalls: Int?
+
+        fileprivate init(tools: [String: OfferedTool], policy: ToolPolicy,
+                         availability: EmbeddedBrowserToolAvailability?, parallel: Bool, maxToolCalls: Int?) {
+            binding = availability.map { $0 == .bound ? .bound : .unbound } ?? .unknown
+            choice = policy.mode
+            offeredCount = tools.count
+            allowedCount = policy.allowedNames.count
+            offeredBrowserMask = tools.values.reduce(0) { $0 | $1.nativeBrowserBit }
+            allowedBrowserMask = tools.reduce(0) { mask, entry in
+                mask | (policy.allowedNames.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            requiresCall = policy.requiresCall
+            self.parallel = parallel
+            self.maxToolCalls = maxToolCalls
+        }
+
+        var logFields: String {
+            "binding=\(binding.rawValue) choice=\(choice.rawValue) offeredCount=\(offeredCount) allowedCount=\(allowedCount) offeredBrowserMask=\(offeredBrowserMask) allowedBrowserMask=\(allowedBrowserMask) requiresCall=\(requiresCall) parallel=\(parallel) maxToolCalls=\(maxToolCalls.map(String.init) ?? "unset")"
+        }
     }
 
     enum AssistantPhase: String, Equatable, Sendable {
@@ -263,6 +308,8 @@ enum WebModelResponseCodec {
         return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
+                       toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
+                           parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
@@ -612,14 +659,14 @@ enum WebModelResponseCodec {
 
     private static func toolPolicy(_ raw: Any?, tools: [String: OfferedTool]) throws -> ToolPolicy {
         let allNames = Set(tools.keys)
-        guard let raw, !(raw is NSNull) else { return .init(allowedNames: allNames, requiresCall: false) }
+        guard let raw, !(raw is NSNull) else { return .init(allowedNames: allNames, requiresCall: false, mode: .auto) }
         if let mode = raw as? String {
             switch mode {
-            case "auto": return .init(allowedNames: allNames, requiresCall: false)
-            case "none": return .init(allowedNames: [], requiresCall: false)
+            case "auto": return .init(allowedNames: allNames, requiresCall: false, mode: .auto)
+            case "none": return .init(allowedNames: [], requiresCall: false, mode: .none)
             case "required":
                 guard !allNames.isEmpty else { throw Failure.invalidToolChoice }
-                return .init(allowedNames: allNames, requiresCall: true)
+                return .init(allowedNames: allNames, requiresCall: true, mode: .required)
             default: throw Failure.invalidToolChoice
             }
         }
@@ -643,9 +690,10 @@ enum WebModelResponseCodec {
                 mode = value
             } else { mode = "auto" }
             guard ["auto", "required", "none"].contains(mode) else { throw Failure.invalidToolChoice }
-            return .init(allowedNames: mode == "none" ? [] : Set(names), requiresCall: mode == "required")
+            return .init(allowedNames: mode == "none" ? [] : Set(names), requiresCall: mode == "required",
+                mode: mode == "none" ? .allowedNone : mode == "required" ? .allowedRequired : .allowedAuto)
         }
-        return .init(allowedNames: [try toolName(choice)], requiresCall: true)
+        return .init(allowedNames: [try toolName(choice)], requiresCall: true, mode: .selected)
     }
 
     /// Website adapters have no sampler or provider-side storage controls. The
@@ -766,7 +814,10 @@ enum WebModelResponseCodec {
         let readMode = type == "function" ? (schema["parameters"] as? [String: Any]).flatMap {
             ComputaModelToolCatalog.browserReadMode(name: name, namespace: namespace, schema: $0)
         } : nil
-        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom", browserReadMode: readMode)
+        let browserBit = ComputaModelToolCatalog.nativeBrowserToolName(schema, namespace: namespace)
+            .flatMap { ToolCatalogDiagnostic.browserNames.firstIndex(of: $0) }.map { UInt16(1) << $0 } ?? 0
+        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom",
+            browserReadMode: readMode, nativeBrowserBit: browserBit)
     }
 
     private static func rejectUnsupportedModalities(in input: Any?) throws {
