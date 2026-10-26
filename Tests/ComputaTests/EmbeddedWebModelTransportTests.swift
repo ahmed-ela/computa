@@ -13074,7 +13074,7 @@ extension EmbeddedWebModelTransportTests {
         defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
         var captures: [Data] = []
         fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
-            source: "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; await new Promise(()=>{}); return null;") { captures.append($0) }
+            source: "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; await new Promise(resolve=>setTimeout(resolve,1_000)); return {version:1,status:'unavailable',reason:'read_failed'};") { captures.append($0) }
         let began = ContinuousClock.now
         do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Original renderer failure expected") }
         catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseRenderingFailed) }
