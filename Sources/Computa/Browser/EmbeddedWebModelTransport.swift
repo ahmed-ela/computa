@@ -403,6 +403,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var responseProgressInspection: ResponseProgressInspection?
         var responseProgressEmitted = false
+        // Private troubleshooting only; never part of response/model authority.
+        var rendererWorkDiagnostic: (generation: UUID, sequence: Int, expiry: Double, value: [String: Any])?
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -505,6 +507,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         rendererFailureDiagnosticDefaultsForTesting = defaults
         rendererFailureDiagnosticSourceForTesting = source
         rendererFailureDiagnosticSinkForTesting = sink
+    }
+
+    func rendererWorkDiagnosticForTesting(sessionToken: String) -> [String: Any]? {
+        sessions[sessionToken]?.rendererWorkDiagnostic?.value
     }
     #endif
 
@@ -3760,6 +3766,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let prompt { input["prompt"] = prompt }
         let operationID = UUID()
         input["operationID"] = operationID.uuidString
+        let rendererWorkExpiry = provider == .chatgpt && !session.isDiscovery ? rendererDiagnosticExpiry() : nil
+        if let rendererWorkExpiry { input["rendererWorkDiagnosticExpiresAtUnixSeconds"] = rendererWorkExpiry }
+        else { session.rendererWorkDiagnostic = nil }
         try browser.beginModelDiagnostic(tabID: session.tabID, ownerToken: session.token, operationID: operationID)
         defer { browser.endModelDiagnostic(tabID: session.tabID, operationID: operationID) }
         let firstUserEntry = firstUserNativeState(session)
@@ -3785,6 +3794,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             defer {
                 if profilePreparation {
                     preparationSpans["evaluationMs"] = Self.preparationMilliseconds(.now - evaluationStarted)
+                }
+                if let rendererWorkExpiry, Date().timeIntervalSince1970 < rendererWorkExpiry {
+                    let elapsed = Self.preparationMilliseconds(.now - evaluationStarted)
+                    if elapsed >= 200 {
+                        let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID, operationID: operationID)
+                        Self.inspectionLog.notice("rendererWorkNative version=1 action=\(action, privacy: .public) operationID=\(operationID.uuidString, privacy: .public) sequence=\(session.sequence) evaluationMs=\(elapsed) \(diagnostic, privacy: .public)")
+                    }
                 }
             }
             bytes = try await withTaskCancellationHandler {
@@ -3917,6 +3933,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        let rendererWork = observed.removeValue(forKey: "rendererWorkDiagnostic")
+        if let rendererWorkExpiry, Date().timeIntervalSince1970 < rendererWorkExpiry {
+            session.rendererWorkDiagnostic = Self.sanitizedRendererWorkDiagnostic(rendererWork).map {
+                (generation, session.sequence, rendererWorkExpiry, $0)
+            }
+        }
         // Strip this content-free diagnostic before any observation can contribute
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
@@ -5045,6 +5067,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private func rendererDiagnosticExpiry() -> Double? {
+        #if DEBUG
+        let defaults = rendererFailureDiagnosticDefaultsForTesting ?? UserDefaults.standard
+        #else
+        let defaults = UserDefaults.standard
+        #endif
+        let now = Date().timeIntervalSince1970
+        guard let expiry = defaults.object(forKey: "ComputaRendererFailureDiagnosticExpiresAt") as? NSNumber,
+              CFGetTypeID(expiry) != CFBooleanGetTypeID(), expiry.doubleValue.isFinite,
+              expiry.doubleValue > now, expiry.doubleValue <= now + 600 else { return nil }
+        return expiry.doubleValue
+    }
+
     /// Explicitly armed, single-use troubleshooting only. This projection is
     /// never response evidence and cannot change the error or recovery outcome.
     private func captureArmedRendererFailureDiagnostic(_ session: Session, deadline: ContinuousClock.Instant) async {
@@ -5054,10 +5089,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         #else
         let defaults = UserDefaults.standard
         #endif
-        let now = Date().timeIntervalSince1970
-        guard let expiry = defaults.object(forKey: key) as? NSNumber,
-              CFGetTypeID(expiry) != CFBooleanGetTypeID(), expiry.doubleValue.isFinite,
-              expiry.doubleValue > now, expiry.doubleValue <= now + 600 else { return }
+        guard let expiry = rendererDiagnosticExpiry() else { return }
         // Consume only after the caller's completed response and model proof.
         defaults.removeObject(forKey: key)
         #if DEBUG
@@ -5107,15 +5139,54 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard current(), let projection = try? JSONSerialization.jsonObject(with: data),
               let sessionID = UUID(uuidString: session.token) else { return }
         let captureID = UUID()
-        let record: [String: Any] = ["version": 1, "captureID": captureID.uuidString,
+        var record: [String: Any] = ["version": 1, "captureID": captureID.uuidString,
             "sessionID": sessionID.uuidString, "sequence": session.sequence,
             "capturedAt": ISO8601DateFormatter().string(from: Date()), "projection": projection]
+        if let work = session.rendererWorkDiagnostic, work.generation == generation,
+           work.sequence == session.sequence, work.expiry == expiry {
+            record["work"] = work.value
+        }
+        // Work timing must never crowd out the original renderer evidence.
+        if let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), encoded.count > 16_384 {
+            record.removeValue(forKey: "work")
+        }
         guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), encoded.count <= 16_384 else { return }
         #if DEBUG
         if let sink = rendererFailureDiagnosticSinkForTesting { sink(encoded); return }
         #endif
         guard Self.saveRendererFailureDiagnostic(encoded, captureID: captureID) else { return }
         Self.inspectionLog.notice("rendererStateDiagnostic version=1 status=saved captureID=\(captureID.uuidString, privacy: .public)")
+    }
+
+    nonisolated static func sanitizedRendererWorkDiagnostic(_ raw: Any?) -> [String: Any]? {
+        func number(_ raw: Any?, maximum: Double, integral: Bool = false) -> Double? {
+            guard let numeric = raw as? NSNumber, CFGetTypeID(numeric) != CFBooleanGetTypeID() else { return nil }
+            let value = numeric.doubleValue
+            guard value.isFinite, value >= 0, value <= maximum, !integral || value.rounded() == value else { return nil }
+            return value
+        }
+        func summary(_ raw: Any) -> Bool {
+            guard let tuple = raw as? [Any], tuple.count == 3,
+                  let count = number(tuple[0], maximum: 4_096, integral: true),
+                  let total = number(tuple[1], maximum: 1e9),
+                  let maximum = number(tuple[2], maximum: 600_000), maximum <= total else { return false }
+            return count > 0 || total == 0 && maximum == 0
+        }
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["version", "invocationCount", "stages", "slowSpans", "saturated"],
+              number(value["version"], maximum: 1, integral: true) == 1,
+              number(value["invocationCount"], maximum: 256, integral: true) != nil,
+              let stages = value["stages"] as? [Any], stages.count == 13, stages.allSatisfy(summary),
+              let spans = value["slowSpans"] as? [[Any]], spans.count <= 8,
+              let saturated = value["saturated"] as? NSNumber, CFGetTypeID(saturated) == CFBooleanGetTypeID(),
+              spans.allSatisfy({ span in
+                  guard span.count == 3, number(span[0], maximum: 12, integral: true) != nil,
+                        number(span[1], maximum: 1e15) != nil,
+                        let duration = number(span[2], maximum: 600_000), duration >= 10 else { return false }
+                  return true
+              }), JSONSerialization.isValidJSONObject(value),
+              let encoded = try? JSONSerialization.data(withJSONObject: value), encoded.count <= 4_096 else { return nil }
+        return value
     }
 
     nonisolated static func sanitizedRendererStateDiagnostic(_ raw: Any) -> [String: Any]? {

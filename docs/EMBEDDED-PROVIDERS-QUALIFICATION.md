@@ -133,6 +133,22 @@ Build264 filters those diagnostic-only bookkeeping events while retaining
 startup, readiness, snapshot and timer-firing milestones. Response verification,
 provider execution and timeouts are unchanged. Root-cause diagnosis is ongoing.
 
+Installed264 captured a 5,430ms interval between the iframe posting `createRunner`
+and the worker receiving it. The worker then emitted readiness immediately and
+finished its first snapshot in 6ms. The host disposed the runner before accepting
+that result. A native script evaluation lasting 5,338ms overlapped the message
+delay; evaluation lifetime includes awaits and does not by itself prove CPU work.
+The WebContent process retained its foreground assertion. No response or tool
+was released, and the failed website session has a saved closed receipt.
+
+An independent native fixture using the exact public host Runner, decoder,
+watchdog, iframe and worker passed both immediate and 45-second-idle reuse.
+The latter delivered the worker message in 1,002ms and the host snapshot in
+1,013ms. A 90-second-idle worker control also passed. These controls isolate the
+remaining investigation to the full page and its integration; they do not
+qualify a repaired installed task. Build265 adds opt-in, content-free timing of
+Computa's synchronous adapter work to distinguish it from awaited/provider work.
+
 ## Candidate148: one bounded ChatGPT format correction
 
 A verified ChatGPT reply that fails strict JSON parsing can receive one fresh

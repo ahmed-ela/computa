@@ -13056,7 +13056,11 @@ extension EmbeddedWebModelTransportTests {
                 let record = try XCTUnwrap(JSONSerialization.jsonObject(with: capture) as? [String: Any])
                 XCTAssertEqual(record["sessionID"] as? String, UUID(uuidString: token)?.uuidString)
                 XCTAssertEqual(record["sequence"] as? Int, 1)
+                XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(record["work"]),
+                    "The same armed adapter result supplies finite work without another page read")
             }
+            XCTAssertNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token),
+                "The second poll after single-use arm consumption must clear old work")
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             try await assertHumanTabIntact(fixture)
@@ -13117,5 +13121,51 @@ extension EmbeddedWebModelTransportTests {
             ["dropped": 1_000_001], ["events": Array(repeating: event, count: 65)], ["source": "PRIVATE_SENTINEL"]] {
             XCTAssertFalse(EmbeddedWebModelTransport.validRendererStartupDiagnostic(valid.merging(change, uniquingKeysWith: { _, next in next })))
         }
+    }
+
+    func testRendererWorkDiagnosticRejectsNonfiniteUnboundedAndArbitraryContent() {
+        let valid: [String: Any] = ["version": 1, "invocationCount": 2,
+            "stages": Array(repeating: [1, 20.5, 20.5], count: 13),
+            "slowSpans": [[0, 1_792_980_000_000, 20.5]], "saturated": false]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(valid))
+        for change: [String: Any] in [
+            ["version": true], ["version": 0], ["invocationCount": true], ["invocationCount": 257],
+            ["stages": Array(repeating: [1, 1, 1], count: 14)],
+            ["stages": Array(repeating: [true, 1, 1], count: 13)],
+            ["stages": Array(repeating: [1, Double.infinity, 1], count: 13)],
+            ["stages": Array(repeating: [1, Double.nan, 1], count: 13)],
+            ["stages": Array(repeating: [0, 1, 1], count: 13)],
+            ["stages": Array(repeating: [4_097, 1, 1], count: 13)],
+            ["stages": Array(repeating: [1, 1, 2], count: 13)],
+            ["slowSpans": [[13, 1, 10]]], ["slowSpans": [[0, 1, 9]]],
+            ["slowSpans": [[0, 1e16, 10]]], ["slowSpans": [[0, 1, 600_001]]],
+            ["slowSpans": Array(repeating: [0, 1, 10], count: 9)],
+            ["saturated": 1], ["prompt": "PRIVATE_SENTINEL"], ["taskDelay": [1, 1, 1]]
+        ] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(
+                valid.merging(change, uniquingKeysWith: { _, next in next })))
+        }
+    }
+
+    func testRendererWorkDiagnosticExpiryClearsCacheWithoutChangingResponse() async throws {
+        let (fixture, token, _) = try await boundInspectionFixture(prompt: "Finite timing never changes response authority")
+        defer { fixture.shutdown() }
+        let suite = "ComputaRendererWorkTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults, source: nil) { _ in XCTFail("No renderer failure") }
+        let key = "ComputaRendererFailureDiagnosticExpiresAt"
+        XCTAssertNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token))
+        defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
+        let armed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertNotNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token))
+        XCTAssertNil(armed["rendererWorkDiagnostic"])
+        defaults.set(Date().timeIntervalSince1970 - 1, forKey: key)
+        let expired = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token))
+        XCTAssertNil(expired["rendererWorkDiagnostic"])
+        XCTAssertEqual(expired["text"] as? String, armed["text"] as? String)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
     }
 }

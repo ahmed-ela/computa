@@ -13,6 +13,7 @@ function websiteModelDiagnosticPhase(phase) {
   } catch { /* An unavailable diagnostic channel must not change adapter behavior. */ }
 }
 websiteModelDiagnosticPhase('adapter_entry');
+const chatGPTRendererWorkDiagnostic = chatGPTInstallRendererWorkDiagnostic(input);
 function websiteModelNormalize(value) {
   return typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
 }
@@ -283,6 +284,11 @@ function websiteChatTrackPinnedControls(pin, state) {
     { attribute: 'aria-checked', value: String(control.choice?.key === pin.selection.family.key) });
 }
 function websiteChatObservePinnedMutations(records, pin = globalThis.__computaChatPresetPin) {
+  const started = chatGPTSyncWorkStart();
+  try { return websiteChatObservePinnedMutationsUnprofiled(records, pin); }
+  finally { chatGPTSyncWorkEnd(10, started); }
+}
+function websiteChatObservePinnedMutationsUnprofiled(records, pin) {
   if (!pin || pin.invalidated === true || !pin.controls || pin.owner !== globalThis.__computaModelOwner
     || globalThis.__computaChatPresetPin !== pin || pin.document !== document
     || window !== window.top || location.origin !== 'https://chatgpt.com') return;
@@ -305,6 +311,11 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
   }
 }
 function websiteChatPickerState() {
+  const started = chatGPTSyncWorkStart();
+  try { return websiteChatPickerStateUnprofiled(); }
+  finally { chatGPTSyncWorkEnd(5, started); }
+}
+function websiteChatPickerStateUnprofiled() {
   const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
@@ -1263,11 +1274,15 @@ function websiteModelGuard(state, expected) {
   return null;
 }
 function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null, observeEditorControls = false) {
-  if (condition()) return Promise.resolve(true);
+  const readCondition = () => {
+    const started = chatGPTSyncWorkStart();
+    try { return condition(); } finally { chatGPTSyncWorkEnd(11, started); }
+  };
+  if (readCondition()) return Promise.resolve(true);
   websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
     let finished = false, timer;
-    const observer = new MutationObserver(() => { if (condition()) finish(true); });
+    const observer = new MutationObserver(() => { if (readCondition()) finish(true); });
     const finish = changed => {
       if (finished) return;
       finished = true;
@@ -1295,7 +1310,7 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClo
       // Standalone fixtures and nonnative adapters retain the bounded fallback.
       timer = setTimeout(() => finish(false), milliseconds);
     }
-    if (condition()) finish(true); // A synchronous mount cannot fall between read and arm.
+    if (readCondition()) finish(true); // A synchronous mount cannot fall between read and arm.
   });
 }
 async function websiteModelSettleSelection(provider, attempt, freshGuard, until) {
@@ -1738,9 +1753,81 @@ function chatGPTPreparationElapsed(started) {
 function chatGPTPreparationRecord(key, started) {
   if (chatGPTPreparationTimingEnabled) chatGPTPreparationTiming[key] = chatGPTPreparationElapsed(started);
 }
+// BEGIN COMPUTA RENDERER WORK DIAGNOSTIC V1
+// Private, expiry-armed clocks only. Rows are inclusive synchronous elapsed time:
+// nested rows must not be added together, and no measured scope crosses await.
+// 0 observer binding, 1 extraction, 2 structure, 3 first body, 4 expansion candidate,
+// 5 picker, 6 product state, 7 product proof, 8 temporary verification,
+// 9 temporary outline, 10 pinned mutations, 11 wait condition, 12 deferred model.
+function chatGPTInstallRendererWorkDiagnostic(request) {
+  try {
+    const expires = request?.rendererWorkDiagnosticExpiresAtUnixSeconds;
+    if (typeof expires !== 'number' || !Number.isFinite(expires) || request.provider !== 'chatgpt'
+      || typeof request.ownerToken !== 'string' || !/^[a-f0-9-]{36}$/i.test(request.ownerToken)
+      || window !== window.top || location.origin !== 'https://chatgpt.com') return null;
+    const wall = Date.now() / 1000;
+    if (!Number.isFinite(wall) || expires <= wall || expires - wall > 600) return null;
+    const key = '__computaRendererWorkDiagnosticV1', owner = request.ownerToken;
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    if (previous) {
+      if (!Object.hasOwn(previous, 'value') || previous.value?.owner !== owner
+        || previous.value?.document !== document || previous.value?.expires !== expires) return null;
+      return previous.value.begin();
+    }
+    const origin = performance.timeOrigin;
+    if (typeof origin !== 'number' || !Number.isFinite(origin) || origin < 0 || origin > 1e15) return null;
+    const originalDocument = document;
+    const state = { version: 1, invocationCount: 0, stages: Array.from({ length: 13 }, () => [0, 0, 0]),
+      slowSpans: [], saturated: false };
+    const active = () => {
+      const now = Date.now() / 1000;
+      return document === originalDocument && window === window.top && location.origin === 'https://chatgpt.com'
+        && (globalThis.__computaModelOwner === undefined || globalThis.__computaModelOwner === owner)
+        && Number.isFinite(now) && now < expires;
+    };
+    const now = () => {
+      if (!active()) return null;
+      const value = performance.now();
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+    };
+    const round = value => Math.round(value * 1000) / 1000;
+    const record = (index, started) => {
+      if (!Number.isInteger(index) || index < 0 || index >= 13 || typeof started !== 'number'
+        || !Number.isFinite(started) || started < 0) return;
+      const ended = now(), duration = ended === null ? null : ended - started;
+      if (duration === null || duration < 0 || duration > 600000 || origin + started > 1e15) return;
+      const row = state.stages[index];
+      if (row[0] >= 4096 || row[1] + duration > 1e9) { state.saturated = true; return; }
+      row[0]++; row[1] = round(row[1] + duration); row[2] = Math.max(row[2], round(duration));
+      if (duration >= 10) {
+        state.slowSpans.push([index, round(origin + started), round(duration)]);
+        state.slowSpans.sort((a, b) => b[2] - a[2]);
+        state.slowSpans.length = Math.min(state.slowSpans.length, 8);
+      }
+    };
+    const snapshot = () => active() ? { version: 1, invocationCount: state.invocationCount,
+      stages: state.stages.map(row => [...row]), slowSpans: state.slowSpans.map(row => [...row]),
+      saturated: state.saturated } : null;
+    const api = Object.freeze({ owner, document: originalDocument, expires, begin() {
+      if (!active()) return null;
+      if (state.invocationCount >= 256) { state.saturated = true; return null; }
+      state.invocationCount++;
+      return Object.freeze({ now, record, snapshot });
+    } });
+    Object.defineProperty(globalThis, key, { value: api });
+    return api.begin();
+  } catch { return null; }
+}
+// END COMPUTA RENDERER WORK DIAGNOSTIC V1
 // No supplied callback ever executes a guard; these functions record only clocks.
-function chatGPTSyncWorkStart() { try { return globalThis.__computaObservationDiagnosticV1?.syncNow?.() ?? null; } catch { return null; } }
-function chatGPTSyncWorkEnd(index, started) { try { globalThis.__computaObservationDiagnosticV1?.recordSync?.(index, started); } catch { } }
+function chatGPTSyncWorkStart() {
+  try { return globalThis.__computaObservationDiagnosticV1?.syncNow?.() ?? chatGPTRendererWorkDiagnostic?.now() ?? null; }
+  catch { return null; }
+}
+function chatGPTSyncWorkEnd(index, started) {
+  try { if (index < 5) globalThis.__computaObservationDiagnosticV1?.recordSync?.(index, started); } catch { }
+  try { chatGPTRendererWorkDiagnostic?.record(index, started); } catch { }
+}
 // BEGIN COMPUTA MATCHED BENCHMARK PROBE V1 — diagnostic-only, shared verbatim.
 function computaInstallMatchedBenchmarkProbe(config) {
   const keys = ['schemaVersion', 'nonce', 'expectedSHA256', 'expectedCanonicalSHA256', 'expectedUTF8Bytes'];
@@ -1993,6 +2080,10 @@ function chatGPTObservationDiagnosticResult(observed) {
 }
 
 function chatGPTPreparationResult(observed) {
+  try {
+    const work = chatGPTRendererWorkDiagnostic?.snapshot();
+    if (work && observed && typeof observed === 'object') observed = { ...observed, rendererWorkDiagnostic: work };
+  } catch { /* Private profiling cannot change an observation. */ }
   observed = chatGPTMatchedBenchmarkResult(observed);
   if (input.matchedObservationDiagnostic != null) observed = chatGPTObservationDiagnosticResult(observed);
   if (!chatGPTPreparationTimingEnabled || !observed || typeof observed !== 'object') return observed;
@@ -2055,6 +2146,11 @@ function websiteChatClaimProvisionalHeader(pin, current) {
   return pin.invalidated !== true;
 }
 function websiteChatDeferredModelRead(expected, context) {
+  const started = chatGPTSyncWorkStart();
+  try { return websiteChatDeferredModelReadUnprofiled(expected, context); }
+  finally { chatGPTSyncWorkEnd(12, started); }
+}
+function websiteChatDeferredModelReadUnprofiled(expected, context) {
   if (input.deferModelVerification !== true || globalThis.__computaModelFirstSubmitted !== true
     || !['inspect', 'verifyModel', 'verifyProductMode', 'submit'].includes(input.action)
     || !['action_precheck', 'action_final_guard'].includes(context?.scope)
@@ -3195,6 +3291,11 @@ function chatGPTRenderedTemporary() {
 // Pure physical signature only. Callers must independently prove the submitted
 // user root and the acknowledged transition; this decoration grants no ownership.
 function chatGPTTemporaryOutlineForRoot(root, body) {
+  const started = chatGPTSyncWorkStart();
+  try { return chatGPTTemporaryOutlineForRootUnprofiled(root, body); }
+  finally { chatGPTSyncWorkEnd(9, started); }
+}
+function chatGPTTemporaryOutlineForRootUnprofiled(root, body) {
   try {
     const svgNamespace = 'http://www.w3.org/2000/svg';
     const excluded = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"], '
@@ -3307,6 +3408,11 @@ function chatGPTTemporaryOutlineVerified() {
 // offer the same models. Only a fresh, empty normal root may establish Chat
 // provenance, followed by this owner's actual temporary-chat transition.
 function chatGPTProductModeState() {
+  const started = chatGPTSyncWorkStart();
+  try { return chatGPTProductModeStateUnprofiled(); }
+  finally { chatGPTSyncWorkEnd(6, started); }
+}
+function chatGPTProductModeStateUnprofiled() {
   const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
@@ -3471,6 +3577,11 @@ function chatGPTObserveProductMutations(proof, state, records) {
     && works.has(record.target))) invalidate('work_selected');
 }
 function chatGPTProductModeProof() {
+  const started = chatGPTSyncWorkStart();
+  try { return chatGPTProductModeProofUnprofiled(); }
+  finally { chatGPTSyncWorkEnd(7, started); }
+}
+function chatGPTProductModeProofUnprofiled() {
   const proof = globalThis.__computaChatProductMode;
   const state = chatGPTProductModeState();
   if (!proof || proof.invalidated) return null;
@@ -3493,6 +3604,11 @@ function chatGPTProductModeProof() {
     temporaryTransition: proof.temporaryAcknowledged ? 'acknowledged' : 'not_requested' };
 }
 function chatGPTTemporaryVerified() {
+  const started = chatGPTSyncWorkStart();
+  try { return chatGPTTemporaryVerifiedUnprofiled(); }
+  finally { chatGPTSyncWorkEnd(8, started); }
+}
+function chatGPTTemporaryVerifiedUnprofiled() {
   return chatGPTRenderedTemporary() && chatGPTProductModeProof()?.temporaryTransition === 'acknowledged';
 }
 function chatGPTProductModeAction(request) {
