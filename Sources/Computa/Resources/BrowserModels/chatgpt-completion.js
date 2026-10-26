@@ -18,7 +18,9 @@
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
   const diagnosticReasons = Object.freeze(['runtime_unsupported', 'runtime_resources_unavailable', 'runtime_import_failed',
-    'runtime_cache_unsupported', 'runtime_identity_changed', 'call_limit', 'decoder_limit', 'route_changed',
+    'runtime_cache_unsupported', 'runtime_cache_shape', 'runtime_cache_empty', 'runtime_cache_limit',
+    'runtime_getter_unavailable', 'runtime_getter_failed', 'runtime_method_unsupported', 'runtime_decoder_ambiguous',
+    'runtime_identity_changed', 'call_limit', 'decoder_limit', 'route_changed',
     'wrapper_changed', 'input_shape', 'input_hash', 'owner_conflict', 'parent_changed', 'parent_limit', 'ancestry_missing',
     'final_status', 'final_changed', 'terminal_order', 'terminal_opaque', 'error', 'send_changed', 'expired', 'observer_exception']);
   let lease = null;
@@ -90,14 +92,18 @@
     return !inventoryInvalid && now() < inventoryDeadline && runtimeResources.size === 1
       ? [...runtimeResources][0] : null;
   }
-  function initializedDecoder(runtime) {
+  function initializedDecoder(runtime, current) {
     // Website chunk/module IDs change independently. Inspect bounded initialized
     // cache entries only: no require, module factory, or unapproved export getter.
+    // Stage labels explain a failed guard only; no module identity, source or
+    // website content is emitted, and every acceptance predicate stays exact.
+    const fail = reason => { current.armFailureReason = reason; throw unknown; };
     const require = data(runtime, '__webpack_require__'), cache = data(require, 'c');
-    if (!cache || typeof cache !== 'object' || ![Object.prototype, null].includes(prototypeOf(cache))) throw unknown;
+    if (!cache || typeof cache !== 'object' || ![Object.prototype, null].includes(prototypeOf(cache))) fail('runtime_cache_shape');
     const keys = ownKeys(cache);
-    if (keys.length > 16384) throw unknown;
-    let found = null;
+    if (keys.length > 16384) fail('runtime_cache_limit');
+    if (keys.length === 0) fail('runtime_cache_empty');
+    let found = null, approvedGetters = 0, returnedGetters = 0;
     for (const key of keys) {
       if (typeof key !== 'string' || key.length > 64) continue;
       const cached = data(cache, key), exports = data(cached, 'exports');
@@ -105,20 +111,23 @@
       if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
         || exported.enumerable !== true || exported.configurable !== false
         || apply(functionSource, exported.get, []) !== '()=>O') continue;
+      approvedGetters++;
       // A different cached module can expose the same literal getter while its
       // binding is not initialized yet. It supplies no decoder evidence.
       let Decoder;
       try { Decoder = apply(exported.get, exports, []); } catch { continue; }
+      returnedGetters++;
       const target = data(Decoder, 'prototype');
       const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
       if (!original || typeof original.value !== 'function' || original.writable !== true
         || original.configurable !== true || original.enumerable !== false
         || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
         || apply(functionSource, original.value, []) !== completionSource) continue;
-      if (found && found.target !== target) throw unknown;
+      if (found && found.target !== target) fail('runtime_decoder_ambiguous');
       found = { cache, key, cached, exports, exported, target, original };
     }
-    if (!found) throw unknown;
+    if (!found) fail(approvedGetters === 0 ? 'runtime_getter_unavailable'
+      : returnedGetters === 0 ? 'runtime_getter_failed' : 'runtime_method_unsupported');
     return found;
   }
   const id = value => typeof value === 'string' && uuid.test(value) ? value : null;
@@ -392,7 +401,7 @@
         current.armFailureReason = 'runtime_identity_changed';
         if (observedRuntimeURL() !== runtimeURL) throw unknown;
         current.armFailureReason = 'runtime_cache_unsupported';
-        const found = initializedDecoder(runtime), { target, original } = found;
+        const found = initializedDecoder(runtime, current), { target, original } = found;
         const wrapper = function (...args) {
           let result;
           try { result = apply(original.value, this, args); }

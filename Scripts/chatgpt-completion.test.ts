@@ -195,7 +195,7 @@ describe('ChatGPT current-response completion admission', () => {
     expect(await rejected.api.arm(binding())).toEqual({ armed: false });
     expect(rejected.diagnostics[0].reason).toBe('runtime_import_failed');
     const unsupported = fixture({ unsupported: true }); expect(await unsupported.api.arm(binding())).toEqual({ armed: false });
-    expect(unsupported.diagnostics[0].reason).toBe('runtime_cache_unsupported');
+    expect(unsupported.diagnostics[0].reason).toBe('runtime_cache_shape');
     expect(JSON.stringify(rejected.allPosts)).not.toContain('private');
   });
 
@@ -220,7 +220,7 @@ describe('ChatGPT current-response completion admission', () => {
       } });
       expect(await f.api.arm(binding())).toEqual({ armed: hasDecoder });
       if (hasDecoder) { f.send(); f.decode(input()); await flush(); complete(f); expect(f.posts[0].kind).toBe('terminal'); }
-      else expect(f.diagnostics[0].reason).toBe('runtime_cache_unsupported');
+      else expect(f.diagnostics[0].reason).toBe('runtime_getter_failed');
       f.api.stop(correlationID);
     }
   });
@@ -243,6 +243,33 @@ describe('ChatGPT current-response completion admission', () => {
     f.api.stop(correlationID);
   });
 
+  test('cache-stage diagnostics distinguish missing proof without exposing source or invoking new getters', async () => {
+    for (const mode of ['missing', 'nonplain', 'empty', 'unapproved', 'no_export', 'inspection_throw'] as const) {
+      let forbidden = 0;
+      const f = fixture({ configureRuntime(runtime) {
+        const reject = () => { forbidden++; throw new Error('PRIVATE WEBSITE DATA'); };
+        if (mode === 'missing') delete runtime.__webpack_require__.c;
+        else if (mode === 'nonplain') runtime.__webpack_require__.c = [];
+        else if (mode === 'empty') runtime.__webpack_require__.c = Object.create(null);
+        else if (mode === 'unapproved') runtime.__webpack_require__.c = { PRIVATE_MODULE_ID: {
+          exports: Object.defineProperty({}, 'c', { get: reject, enumerable: true, configurable: false }) } };
+        else if (mode === 'no_export') runtime.__webpack_require__.c = { PRIVATE_MODULE_ID: { exports: {} } };
+        else runtime.__webpack_require__.c = new Proxy({}, { ownKeys() { throw new Error('PRIVATE WEBSITE DATA'); } });
+      } });
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      const reason = { missing: 'runtime_cache_shape', nonplain: 'runtime_cache_shape', empty: 'runtime_cache_empty',
+        unapproved: 'runtime_getter_unavailable', no_export: 'runtime_getter_unavailable',
+        inspection_throw: 'runtime_cache_unsupported' }[mode];
+      expect(f.allPosts).toEqual([{ version: 1, kind: 'diagnostic', correlationID, sequence: 1,
+        inputSHA256: hash(inputText), reason, calls: 0, instances: 0 }]);
+      expect(forbidden).toBe(0);
+      expect(JSON.stringify(f.allPosts)).not.toContain('PRIVATE');
+      expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+      expect(f.posts).toEqual([]); expect(f.listeners()).toBe(0); expect(f.timers.size).toBe(0);
+      expect(f.importedURLs).toEqual([runtimeURL]);
+    }
+  });
+
   test('multiple distinct matching cached decoders, oversized cache and changed decoder source fail closed', async () => {
     for (const mode of ['ambiguous', 'oversized', 'changed', 'uninitialized'] as const) {
       let factoryCalls = 0;
@@ -261,6 +288,8 @@ describe('ChatGPT current-response completion admission', () => {
         }
       } });
       expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(f.diagnostics[0].reason).toBe({ ambiguous: 'runtime_decoder_ambiguous', oversized: 'runtime_cache_limit',
+        changed: 'runtime_method_unsupported', uninitialized: 'runtime_cache_empty' }[mode]);
       expect(factoryCalls).toBe(0); expect(f.posts).toEqual([]); expect(f.listeners()).toBe(0);
       expect(f.importedURLs).toEqual([runtimeURL]);
     }
@@ -531,7 +560,7 @@ describe('ChatGPT current-response completion admission', () => {
     const unavailable = fixture({ unsupported: true });
     expect(await unavailable.api.arm(binding())).toEqual({ armed: false });
     expect(unavailable.allPosts).toEqual([{ version: 1, kind: 'diagnostic', correlationID, sequence: 1,
-      inputSHA256: hash(inputText), reason: 'runtime_cache_unsupported', calls: 0, instances: 0 }]);
+      inputSHA256: hash(inputText), reason: 'runtime_cache_shape', calls: 0, instances: 0 }]);
     expect(unavailable.O.prototype.recordCompletion).toBe(unavailable.original.value);
     expect(unavailable.listeners()).toBe(0); expect(unavailable.timers.size).toBe(0);
     const successful = fixture(); await ready(successful); complete(successful); successful.api.stop(correlationID);

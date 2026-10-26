@@ -179,6 +179,7 @@ enum WebModelResponseCodec {
         }
         let schemas: [[String: Any]]
         let requiresBrowserToolAvailability: Bool
+        let deferredBrowserInstructions: String?
         var toolDefinitionsChanged = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
@@ -191,6 +192,8 @@ enum WebModelResponseCodec {
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
+            deferredBrowserInstructions = ComputaModelToolCatalog.deferredBrowserToolInstructions(values,
+                availability: browserToolAvailability)
             schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
                 browserToolAvailability: browserToolAvailability)
             toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
@@ -198,6 +201,7 @@ enum WebModelResponseCodec {
         } else {
             schemas = []
             requiresBrowserToolAvailability = false
+            deferredBrowserInstructions = nil
         }
         var offered: [String: OfferedTool] = [:]
         for schema in schemas {
@@ -216,8 +220,9 @@ enum WebModelResponseCodec {
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
         let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
-        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
-            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT)
+        let runtimeInstructions = [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
+            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT),
+            deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"

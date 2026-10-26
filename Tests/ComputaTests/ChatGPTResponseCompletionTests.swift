@@ -282,6 +282,28 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         XCTAssertNil(fixture.receipt())
     }
 
+    func testCacheStageDiagnosticsStayContentFreeAndCannotChangeAnOwnedReceipt() throws {
+        let fixture = try LeaseFixture()
+        XCTAssertTrue(fixture.lease.receive(fixture.packet()))
+        let receipt = try XCTUnwrap(fixture.receipt())
+        for reason in ["runtime_cache_shape", "runtime_cache_empty", "runtime_cache_limit",
+                       "runtime_getter_unavailable", "runtime_getter_failed", "runtime_method_unsupported",
+                       "runtime_decoder_ambiguous"] {
+            var packet = fixture.diagnosticPacket(reason: reason)
+            packet["calls"] = 0
+            packet["instances"] = 0
+            XCTAssertEqual(try XCTUnwrap(fixture.lease.diagnostic(packet)).reason.rawValue, reason)
+            for field in ["moduleID", "getterSource", "replyText"] {
+                var contaminated = packet
+                contaminated[field] = "PRIVATE WEBSITE DATA"
+                XCTAssertNil(fixture.lease.diagnostic(contaminated))
+            }
+            XCTAssertEqual(fixture.receipt(), receipt)
+            XCTAssertEqual(fixture.lease.revision, receipt.revision)
+            XCTAssertFalse(fixture.lease.invalidated)
+        }
+    }
+
     func testDiagnosticRejectsForeignMalformedAndUnboundedRecordsWithoutMutatingAnyAuthority() throws {
         let fixture = try LeaseFixture()
         XCTAssertTrue(fixture.lease.receive(fixture.packet()))

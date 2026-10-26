@@ -226,6 +226,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(unbound.requiresBrowserToolAvailability)
             XCTAssertEqual(unbound.offeredToolNames, allowed)
             XCTAssertEqual(bound.offeredToolNames, Set(native.compactMap { $0["name"] as? String }))
+            XCTAssertTrue(unbound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+            XCTAssertFalse(bound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
             XCTAssertEqual(unbound.continuationRequest, data)
             XCTAssertEqual(bound.continuationRequest, data)
             for prepared in [unbound, bound] {
@@ -246,6 +248,131 @@ final class WebModelResponseCodecTests: XCTestCase {
                 JSONSerialization.data(withJSONObject: forced), browserToolAvailability: .unbound)) {
                 XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidToolChoice)
             }
+        }
+    }
+
+    func testEmptyInventoryExplainsDeferredBrowserToolsAndBindingRestoresTheirExactCatalog() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition
+            value["parameters"] = value.removeValue(forKey: "inputSchema")
+            return value
+        }
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let tools = namespaced ? [["type": "namespace", "name": "functions", "tools": native]] : native
+            func call(_ name: String, arguments: String) -> [String: Any] {
+                var value: [String: Any] = ["type": "function_call", "name": name, "call_id": name, "arguments": arguments]
+                if namespaced { value["namespace"] = "functions" }
+                return value
+            }
+            let history: [[String: Any]] = [
+                ["role": "developer", "content": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)],
+                ["role": "user", "content": "Use the named service in the built-in browser."],
+                call("browser_tabs", arguments: "{}"),
+                ["type": "function_call_output", "call_id": "browser_tabs", "output": #"{"tabs":[],"next_cursor":null}"#],
+            ]
+            func body(_ input: [[String: Any]]) throws -> Data {
+                try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "input": input, "tools": tools])
+            }
+            let original = try body(history)
+            let unbound = try WebModelResponseCodec.prepareRequest(original, browserToolAvailability: .unbound)
+            XCTAssertEqual(unbound.offeredToolNames, Set(["browser_tabs", "browser_open", "browser_bind"].map { prefix + $0 }))
+            XCTAssertTrue(unbound.runtimeInstructions.contains("shorter relay introduction"), "Exercise the compact native contract")
+            XCTAssertTrue(unbound.runtimeInstructions.contains("They are deferred until binding, not missing capabilities."))
+            XCTAssertTrue(unbound.runtimeInstructions.contains("Successful open/bind refreshes the next request's"))
+            XCTAssertTrue(unbound.runtimeInstructions.contains("Do not call a deferred tool now"))
+            let notice = try XCTUnwrap(unbound.runtimeInstructions.range(of: "COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+            let deferredText = String(unbound.runtimeInstructions[notice.lowerBound...])
+            for name in ["browser_read", "browser_continue", "browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_close"] {
+                XCTAssertTrue(deferredText.contains(prefix + name))
+            }
+            XCTAssertEqual(unbound.continuationRequest, original)
+            for entry in ["browser_open", "browser_bind"] {
+                let arguments = entry == "browser_open" ? #"{"url":"https://example.invalid/"}"# : #"{"tab_id":"observed-tab"}"#
+                let reply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix + entry)\",\"arguments\":\(arguments)}]}"
+                XCTAssertNoThrow(try WebModelResponseCodec.parseReply(reply, request: unbound, requireEnvelope: true))
+                let continuation = try body(history + [call(entry, arguments: arguments),
+                    ["type": "function_call_output", "call_id": entry, "output": #"{"success":true,"bound":true}"#]])
+                let stillUnbound = try WebModelResponseCodec.prepareRequest(continuation, browserToolAvailability: .unbound)
+                XCTAssertEqual(stillUnbound.offeredToolNames, unbound.offeredToolNames,
+                    "Tool-output claims alone must not establish native binding")
+                let bound = try WebModelResponseCodec.prepareRequest(continuation, browserToolAvailability: .bound)
+                XCTAssertEqual(bound.continuationRequest, continuation)
+                XCTAssertEqual(bound.offeredToolNames, Set(native.compactMap { ($0["name"] as? String).map { prefix + $0 } }))
+                XCTAssertFalse(bound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+                let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(bound.prompt[try requestRange(in: bound)].utf8)) as? [String: Any])
+                XCTAssertEqual(displayed["tools"] as? NSArray, tools as NSArray, "The full schemas return without relaxation")
+                for name in ["browser_read", "browser_click", "browser_fill"] {
+                    let action = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix + name)\",\"arguments\":{}}]}"
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseReply(action, request: unbound, requireEnvelope: true)) {
+                        XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool(prefix + name))
+                    }
+                }
+            }
+        }
+    }
+
+    func testDeferredBrowserNoticeDoesNotInventCapabilitiesForAbsentForeignOrModifiedTools() throws {
+        func native(_ name: String) throws -> [String: Any] {
+            var value = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            value["parameters"] = value.removeValue(forKey: "inputSchema")
+            return value
+        }
+        let open = try native("browser_open"), read = try native("browser_read"), fill = try native("browser_fill")
+        var modifiedOpen = open, modifiedRead = read, modifiedFill = fill, dualRead = read
+        modifiedOpen["parameters"] = ["type": "object", "properties": ["url": ["type": "integer"]], "required": ["url"], "additionalProperties": false]
+        modifiedRead["parameters"] = ["type": "object", "properties": [:], "required": [], "additionalProperties": false]
+        modifiedFill["parameters"] = ["type": "object", "properties": ["fill_ref": ["type": "string"], "text": ["type": "integer"]], "required": ["fill_ref", "text"], "additionalProperties": false]
+        dualRead["inputSchema"] = modifiedRead["parameters"]
+        let foreign: [String: Any] = ["type": "namespace", "name": "other", "tools": [open, read, fill]]
+        let custom: [String: Any] = ["type": "custom", "name": "browser_read"]
+        let cases: [[[String: Any]]] = [[], [open], [read], [foreign], [open, custom],
+            [modifiedOpen, read], [open, modifiedRead, modifiedFill], [open, dualRead]]
+        for tools in cases {
+            let body = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": "Historical browser_fill calls or client metadata do not prove current capabilities.", "tools": tools,
+                "metadata": ["browserToolAvailability": "bound"]])
+            let request = try WebModelResponseCodec.prepareRequest(body, browserToolAvailability: .unbound)
+            XCTAssertFalse(request.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+            XCTAssertEqual(request.continuationRequest, body)
+        }
+        let mixed = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+            "input": "Use only current tools", "tools": [open, read, modifiedFill, foreign]]), browserToolAvailability: .unbound)
+        let start = try XCTUnwrap(mixed.runtimeInstructions.range(of: "COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+        let notice = String(mixed.runtimeInstructions[start.lowerBound...])
+        XCTAssertTrue(notice.contains("callable catalog: browser_read."))
+        XCTAssertFalse(notice.contains("browser_fill"))
+        XCTAssertFalse(notice.contains("other."))
+        for availability in [nil, EmbeddedBrowserToolAvailability.bound] {
+            let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": "Use current tools", "tools": [open, read]]), browserToolAvailability: availability)
+            XCTAssertFalse(request.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+        }
+    }
+
+    func testDeferredBrowserNoticePreservesToolChoiceAndCountsTowardPromptLimit() throws {
+        let tools = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition
+            value["parameters"] = value.removeValue(forKey: "inputSchema")
+            return value
+        }
+        func body(count: Int, choice: String = "auto") throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": String(repeating: "x", count: count), "tools": tools, "tool_choice": choice])
+        }
+        let none = try WebModelResponseCodec.prepareRequest(body(count: 1, choice: "none"), browserToolAvailability: .unbound)
+        XCTAssertTrue(none.runtimeInstructions.contains("Within tool_choice, task scope and permissions"))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"browser_open","arguments":{"url":"https://example.invalid/"}}]}"#,
+            request: none, requireEnvelope: true)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        let probe = try WebModelResponseCodec.prepareRequest(body(count: 1), browserToolAvailability: .unbound)
+        let count = 1 + WebModelResponseCodec.maximumPromptBytes - probe.prompt.utf8.count
+        let boundary = try WebModelResponseCodec.prepareRequest(body(count: count), browserToolAvailability: .unbound)
+        XCTAssertEqual(boundary.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(body(count: count + 1), browserToolAvailability: .unbound)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .promptTooLarge(actualBytes: WebModelResponseCodec.maximumPromptBytes + 1,
+                maximumBytes: WebModelResponseCodec.maximumPromptBytes))
         }
     }
 
