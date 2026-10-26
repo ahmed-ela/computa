@@ -84,11 +84,11 @@ describe('private synchronous renderer work diagnostic', () => {
       const f = fixture(); f.context.chatGPTRendererWorkDiagnostic = f.install();
       f.context.input = f.context.request;
       runInContext(`let snapshots = 0;
-        globalThis.__computaRendererRegexDiagnosticV1 = {expiresAtUnixSeconds:1100,snapshot:()=>{snapshots++;return {version:2,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false}}};
+        globalThis.__computaRendererRegexDiagnosticV1 = {expiresAtUnixSeconds:1100,snapshot:()=>{snapshots++;return {version:3,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false}}};
         const chatGPTMatchedBenchmarkResult = value => value;
         const chatGPTPreparationTimingEnabled = false;` + source.slice(begin,end), f.context);
       const read = () => runInContext('chatGPTPreparationResult({text:"unchanged"})', f.context);
-      expect(read().rendererWorkDiagnostic.regex).toEqual({version:2,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false});
+      expect(read().rendererWorkDiagnostic.regex).toEqual({version:3,records:[],stopReason:'active',callCount:1,totalDurationMs:25,maxDurationMs:25,saturated:false});
       f.context.__computaRendererRegexDiagnosticV1.expiresAtUnixSeconds = 1101;
       expect(read().rendererWorkDiagnostic.regex).toBeUndefined();
       f.context.__computaRendererRegexDiagnosticV1.expiresAtUnixSeconds = 1100;

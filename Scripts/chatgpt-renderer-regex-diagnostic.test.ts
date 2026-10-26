@@ -110,12 +110,30 @@ describe('private slow RegExp attribution probe', () => {
   test('aggregates many short calls and original throws without retaining their input or pattern', () => {
     const f = fixture(); f.install(); f.run('execDuration = 25; for(let index=0;index<200;index++) /private/.exec("private input")');
     const snapshot = f.run('__computaRendererRegexDiagnosticV1.snapshot()');
-    expect(snapshot).toEqual({version:2,stopReason:'active',records:[],callCount:200,totalDurationMs:5000,maxDurationMs:25,saturated:false});
+    expect(snapshot).toEqual({version:3,stopReason:'active',records:[],callCount:200,totalDurationMs:5000,maxDurationMs:25,saturated:false});
     f.run('throwSentinel = true; try { /private/.exec("private input") } catch {}');
     expect(f.run('__computaRendererRegexDiagnosticV1.snapshot().callCount')).toBe(201);
     expect(f.run('__computaRendererRegexDiagnosticV1.snapshot().totalDurationMs')).toBe(5025);
     expect(JSON.stringify(snapshot)).not.toContain('private');
     snapshot.callCount = 0; expect(f.state().callCount).toBe(201);
+  });
+  test('samples only four fixed count checkpoints without claiming their calls were slow', () => {
+    const f = fixture(); f.install(); f.run('execDuration = 1');
+    for (const count of [250000,500000,750000,1000000]) {
+      f.run(`__computaRendererRegexDiagnosticV1.callCount = ${count-2}; /a/g.exec('a')`);
+      expect(f.state().records).toHaveLength(count / 250000 - 1);
+      f.run("/a/g.exec('a')");
+      expect(f.state().records.at(-1).kind).toBe('periodic');
+      expect(f.state().records.at(-1).sampleCallCount).toBe(count);
+      expect(f.state().records.at(-1).durationMs).toBe(1);
+    }
+    expect(f.state().records).toHaveLength(4); expect(f.state().callCount).toBe(1000000);
+    expect(f.state().saturated).toBe(true); expect(f.state().stopReason).toBe('limit');
+    expect(f.run('RegExp.prototype.exec === original')).toBe(true);
+    expect(new TextEncoder().encode(JSON.stringify(f.run('__computaRendererRegexDiagnosticV1.snapshot()'))).length).toBeLessThanOrEqual(2304);
+    const slow = fixture(); slow.install(); slow.run('execDuration = 100; __computaRendererRegexDiagnosticV1.callCount = 249999; /a/.exec("a")');
+    expect(slow.state().records).toHaveLength(1); expect(slow.state().records[0].kind).toBe('slow');
+    expect(slow.state().records[0].sampleCallCount).toBe(250000);
   });
   test('bounds aggregate count/time, fails closed for nonfinite clocks, and isolates each realm', () => {
     for (const change of ['__computaRendererRegexDiagnosticV1.callCount = 1000000',

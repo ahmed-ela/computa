@@ -2578,3 +2578,21 @@ The fixture server and diagnostic queue entry were cleaned up.
 Build 267 extends the same default-off, expiring measurement to the isolated
 adapter realm and records aggregate intercepted regex time. This is an
 attribution experiment, not a fix or a reliability pass.
+
+### Build 267: page-side aggregate regex work
+
+The preserved maintenance case failed in 38.559 seconds with the same
+`worker_timeout`, before the queued mailbox prompt entered a user turn. The
+page probe reached its one-million-call cap with 2,726 ms cumulative matching
+time and a 21 ms maximum; its trace is saturated. The isolated adapter probe
+recorded 754,021 calls totaling 48 ms, maximum 1 ms, without saturation.
+Neither context recorded an individual call of at least 100 ms. These are
+instrumented aggregate times, not clean performance measurements or proof
+that any particular expression caused the worker timeout. They prioritize
+frequent page-side matching over isolated-adapter matching for attribution.
+The owned website session closed; the local fixture and queue were cleaned.
+
+Build 268 samples the current expression hash and public caller at four fixed
+call-count checkpoints. Periodic samples are explicitly distinguished from
+slow-call records; they retain the same finite diagnostic boundaries and
+provide no response or tool authority.

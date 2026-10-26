@@ -5247,7 +5247,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let reasons: Set<String> = ["active", "expired", "pagehide", "limit", "replaced"]
         guard let value = raw as? [String: Any],
               Set(value.keys) == ["version", "stopReason", "records", "callCount", "totalDurationMs", "maxDurationMs", "saturated"],
-              number(value["version"], maximum: 2, minimum: 2, integral: true),
+              number(value["version"], maximum: 3, minimum: 3, integral: true),
               number(value["callCount"], maximum: 1_000_000, integral: true),
               number(value["totalDurationMs"], maximum: 1e9), number(value["maxDurationMs"], maximum: 600_000),
               let total = value["totalDurationMs"] as? NSNumber, let maximum = value["maxDurationMs"] as? NSNumber,
@@ -5258,14 +5258,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               let records = value["records"] as? [[String: Any]], records.count <= 4 else { return false }
         let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
         let valid = records.allSatisfy { record in
-            guard Set(record.keys) == ["patternHash", "patternLength", "inputLength", "flags", "startEpochMs", "durationMs", "publicStack"],
+            guard Set(record.keys) == ["kind", "sampleCallCount", "patternHash", "patternLength", "inputLength", "flags", "startEpochMs", "durationMs", "publicStack"],
+                  let kind = record["kind"] as? String, ["slow", "periodic"].contains(kind),
+                  number(record["sampleCallCount"], maximum: 1_000_000, minimum: 1, integral: true),
+                  let sample = record["sampleCallCount"] as? NSNumber, let count = value["callCount"] as? NSNumber,
+                  sample.intValue <= count.intValue,
+                  kind == "slow" || [250_000, 500_000, 750_000, 1_000_000].contains(sample.intValue),
                   let hash = record["patternHash"] as? String, hash.range(of: #"\A[0-9a-f]{8}\z"#, options: .regularExpression) != nil,
                   number(record["patternLength"], maximum: 16_384, integral: true),
                   record["inputLength"] is NSNull || number(record["inputLength"], maximum: 1e9, integral: true),
                   let flags = record["flags"] as? String, flags.range(of: #"\Ad?g?i?m?s?u?v?y?\z"#, options: .regularExpression) != nil,
                   !(flags.contains("u") && flags.contains("v")),
                   number(record["startEpochMs"], maximum: 1e15),
-                  number(record["durationMs"], maximum: 600_000, minimum: 100),
+                  number(record["durationMs"], maximum: 600_000, minimum: kind == "slow" ? 100 : 0),
                   let stack = record["publicStack"] as? String, stack.utf8.count <= 256 else { return false }
             let frames = stack.isEmpty ? [] : stack.components(separatedBy: "\n")
             return frames.count <= 2 && frames.allSatisfy { $0.range(of: publicFrame, options: .regularExpression) != nil }

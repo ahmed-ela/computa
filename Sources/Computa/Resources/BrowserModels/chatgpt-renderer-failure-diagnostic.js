@@ -18,7 +18,7 @@ return (() => {
     try {
       const state = own(window, '__computaRendererRegexDiagnosticV1'), expiry = own(state, 'expiresAtUnixSeconds');
       const records = own(state, 'records'), stopReason = own(state, 'stopReason'), now = Date.now() / 1000;
-      if (own(state, 'version') !== 2 || typeof expiry !== 'number' || !Number.isFinite(expiry)
+      if (own(state, 'version') !== 3 || typeof expiry !== 'number' || !Number.isFinite(expiry)
         || expiry <= now || expiry > now + 600 || !Array.isArray(records) || records.length > 4
         || !['active', 'expired', 'pagehide', 'limit', 'replaced'].includes(stopReason)) return undefined;
       const callCount = own(state, 'callCount'), totalDurationMs = own(state, 'totalDurationMs');
@@ -33,18 +33,22 @@ return (() => {
         const record = own(records, String(index)), patternHash = own(record, 'patternHash'), patternLength = own(record, 'patternLength');
         const inputLength = own(record, 'inputLength'), flags = own(record, 'flags'), startEpochMs = own(record, 'startEpochMs');
         const durationMs = own(record, 'durationMs'), publicStack = own(record, 'publicStack');
-        if (typeof patternHash !== 'string' || !/^[0-9a-f]{8}$/.test(patternHash)
+        const kind = own(record, 'kind'), sampleCallCount = own(record, 'sampleCallCount');
+        if (!['slow', 'periodic'].includes(kind) || !Number.isSafeInteger(sampleCallCount)
+          || sampleCallCount < 1 || sampleCallCount > callCount
+          || kind === 'periodic' && ![250000, 500000, 750000, 1000000].includes(sampleCallCount)
+          || typeof patternHash !== 'string' || !/^[0-9a-f]{8}$/.test(patternHash)
           || !Number.isSafeInteger(patternLength) || patternLength < 0 || patternLength > 16384
           || inputLength !== null && (!Number.isSafeInteger(inputLength) || inputLength < 0 || inputLength > 1e9)
           || typeof flags !== 'string' || !/^d?g?i?m?s?u?v?y?$/.test(flags) || flags.includes('u') && flags.includes('v')
           || typeof startEpochMs !== 'number' || !Number.isFinite(startEpochMs) || startEpochMs < 0 || startEpochMs > 1e15
-          || typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 100 || durationMs > 600000
+          || typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < (kind === 'slow' ? 100 : 0) || durationMs > 600000
           || typeof publicStack !== 'string' || publicStack.length > 256) return undefined;
         const frames = publicStack === '' ? [] : publicStack.split('\n');
         if (frames.length > 2 || frames.some(frame => !/^https:\/\/(?:chatgpt\.com\/cdn\/assets\/(?:async\/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com\/deployments\/dil\/v[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}$/.test(frame))) return undefined;
-        projected.push({ patternHash, patternLength, inputLength, flags, startEpochMs, durationMs, publicStack });
+        projected.push({ kind, sampleCallCount, patternHash, patternLength, inputLength, flags, startEpochMs, durationMs, publicStack });
       }
-      const result = { version: 2, stopReason, records: projected, callCount, totalDurationMs, maxDurationMs, saturated };
+      const result = { version: 3, stopReason, records: projected, callCount, totalDurationMs, maxDurationMs, saturated };
       return new TextEncoder().encode(JSON.stringify(result)).length <= 2304 ? result : undefined;
     } catch { return undefined; }
   };

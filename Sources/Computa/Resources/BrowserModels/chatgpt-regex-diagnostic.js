@@ -32,9 +32,9 @@
       const flags = [['d', 'hasIndices'], ['g', 'global'], ['i', 'ignoreCase'], ['m', 'multiline'],
         ['s', 'dotAll'], ['u', 'unicode'], ['v', 'unicodeSets'], ['y', 'sticky']]
         .map(([letter, key]) => [letter, getDescriptor(prototype, key)?.get]);
-      const regexState = { version: 2, expiresAtUnixSeconds: expires, stopReason: 'active', records: [],
+      const regexState = { version: 3, expiresAtUnixSeconds: expires, stopReason: 'active', records: [],
         callCount: 0, totalDurationMs: 0, maxDurationMs: 0, saturated: false };
-      const projection = records => ({ version: 2, stopReason: regexState.stopReason, records,
+      const projection = records => ({ version: 3, stopReason: regexState.stopReason, records,
         callCount: regexState.callCount, totalDurationMs: regexState.totalDurationMs,
         maxDurationMs: regexState.maxDurationMs, saturated: regexState.saturated });
       const snapshot = () => {
@@ -76,7 +76,10 @@
                 regexState.totalDurationMs = Math.round((regexState.totalDurationMs + duration) * 1000) / 1000;
                 regexState.maxDurationMs = Math.max(regexState.maxDurationMs, Math.round(duration * 1000) / 1000);
               }
-              if (active && Number.isFinite(duration) && duration >= 100 && duration <= 600000
+              // Fixed count checkpoints attribute common callers without hashing every call.
+              const periodic = regexState.callCount > 0 && regexState.callCount % 250000 === 0;
+              if (active && Number.isFinite(duration) && duration >= 0 && duration <= 600000
+                && (duration >= 100 || periodic)
                 && Number.isFinite(epoch) && epoch >= 0 && epoch <= 1e15) {
                 const pattern = apply(sourceGetter, this, []);
                 if (typeof pattern === 'string' && pattern.length <= 16384) {
@@ -93,7 +96,8 @@
                       publicFrames.push(match[0]);
                     }
                   }
-                  const record = { patternHash: hash.toString(16).padStart(8, '0'), patternLength: pattern.length,
+                  const record = { kind: duration >= 100 ? 'slow' : 'periodic', sampleCallCount: regexState.callCount,
+                    patternHash: hash.toString(16).padStart(8, '0'), patternLength: pattern.length,
                     inputLength: typeof args[0] === 'string' && args[0].length <= 1e9 ? args[0].length : null,
                     flags: flagText, startEpochMs: epoch, durationMs: duration, publicStack: publicFrames.join('\n') };
                   const next = projection([...regexState.records, record]);
@@ -102,6 +106,7 @@
                   if (regexState.records.length >= 4) stopProbe('limit');
                 }
               }
+              if (regexState.callCount >= 1000000) { regexState.saturated = true; stopProbe('limit'); }
             } catch { /* No diagnostic failure may change an exec result or throw. */ }
             finally { recording = false; }
           }

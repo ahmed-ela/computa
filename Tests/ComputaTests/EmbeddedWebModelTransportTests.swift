@@ -13150,8 +13150,9 @@ extension EmbeddedWebModelTransportTests {
     }
 
     private func rendererRegexDiagnosticFixture() -> [String: Any] {
-        ["version": 2, "callCount": 128, "totalDurationMs": 5_500.5, "maxDurationMs": 5_000.5,
+        ["version": 3, "callCount": 128, "totalDurationMs": 5_500.5, "maxDurationMs": 5_000.5,
          "saturated": false, "stopReason": "active", "records": [[
+            "kind": "slow", "sampleCallCount": 128,
             "patternHash": "09abcdef", "patternLength": 80, "inputLength": 120_000,
             "flags": "gim", "startEpochMs": 1_792_980_000_000, "durationMs": 5_000.5,
             "publicStack": "https://chatgpt.com/cdn/assets/async/123456.0123456789.js:1:456"]]]
@@ -13182,6 +13183,8 @@ extension EmbeddedWebModelTransportTests {
         XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(
             valid.merging(["stopReason": "limit", "records": Array(repeating: unknownInput, count: 4)], uniquingKeysWith: { _, next in next })))
         for change: [String: Any] in [
+            ["kind": "PRIVATE_SENTINEL"], ["kind": "periodic"], ["sampleCallCount": true], ["sampleCallCount": 0],
+            ["sampleCallCount": 1.5], ["sampleCallCount": 129], ["sampleCallCount": 1_000_001],
             ["patternHash": "PRIVATE_SENTINEL"], ["patternHash": "09ABCDEF"],
             ["patternLength": true], ["patternLength": -1], ["patternLength": 1.5], ["patternLength": 16_385],
             ["inputLength": "PRIVATE_SENTINEL"], ["inputLength": true], ["inputLength": 1.5], ["inputLength": 1_000_000_001],
@@ -13197,7 +13200,7 @@ extension EmbeddedWebModelTransportTests {
             XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(mutated), "Mutation keys: \(change.keys)")
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(rendererStateWithRegexFixture(mutated)))
         }
-        for change: [String: Any] in [["version": true], ["version": 0], ["version": 1], ["stopReason": "PRIVATE_SENTINEL"],
+        for change: [String: Any] in [["version": true], ["version": 0], ["version": 1], ["version": 2], ["stopReason": "PRIVATE_SENTINEL"],
             ["callCount": true], ["callCount": -1], ["callCount": 1.5], ["callCount": 1_000_001], ["callCount": 0],
             ["totalDurationMs": Double.infinity], ["totalDurationMs": 1e10], ["totalDurationMs": -1],
             ["maxDurationMs": Double.nan], ["maxDurationMs": 600_001], ["maxDurationMs": 5_501], ["saturated": 1],
@@ -13208,6 +13211,24 @@ extension EmbeddedWebModelTransportTests {
             "slowSpans": [], "saturated": false, "regex": valid]
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(work))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(work.merging(["regex": ["input": "PRIVATE_SENTINEL"]], uniquingKeysWith: { _, next in next })))
+    }
+
+    func testRendererRegexPeriodicSamplesRequireExactCheckpointAndDistinctDurationRule() throws {
+        let valid = rendererRegexDiagnosticFixture()
+        let record = try XCTUnwrap((valid["records"] as? [[String: Any]])?.first)
+        let checkpoints = [250_000, 500_000, 750_000, 1_000_000]
+        let records = checkpoints.map { checkpoint in
+            record.merging(["kind": "periodic", "sampleCallCount": checkpoint, "durationMs": 0.5], uniquingKeysWith: { _, next in next })
+        }
+        let periodic = valid.merging(["callCount": 1_000_000, "records": records, "stopReason": "limit"], uniquingKeysWith: { _, next in next })
+        XCTAssertTrue(EmbeddedWebModelTransport.validRendererRegexDiagnostic(periodic))
+        for mutation: [String: Any] in [["sampleCallCount": 249_999], ["sampleCallCount": 500_001],
+            ["sampleCallCount": "250000"], ["durationMs": -0.1], ["durationMs": Double.nan], ["kind": "slow"]] {
+            let bad = records[0].merging(mutation, uniquingKeysWith: { _, next in next })
+            XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(periodic.merging(["records": [bad]], uniquingKeysWith: { _, next in next })))
+        }
+        XCTAssertFalse(EmbeddedWebModelTransport.validRendererRegexDiagnostic(periodic.merging(["callCount": 999_999], uniquingKeysWith: { _, next in next })),
+            "A record cannot claim a checkpoint the aggregate has not reached")
     }
 
     func testRendererRegexDiagnosticCapturePreservesFailureAndSinglePageRead() async throws {
