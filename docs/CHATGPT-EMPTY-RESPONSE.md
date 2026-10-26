@@ -6,14 +6,28 @@ The installed 0.7.0 (270) app submitted and verified the complete prompt for
 the October 26 failed email task. ChatGPT became idle without exposing an
 assistant message or a recognized error. Computa waited until its 300-second
 response deadline. No local tool ran. The owned website session closed.
-The upstream cause of that particular empty response is not established:
-an adjacent WebKit HTTP 429 lacks an endpoint and is not causal evidence.
+The upstream cause of that particular empty response is not established.
+A bounded re-query of the app-owned WebKit logs found that the adjacent HTTP
+429 resource was first scheduled at 05:18:26.432 UTC, after the adapter observed
+an idle page with no assistant at 05:18:25.983 UTC. Its endpoint and method were
+not retained, so it does not establish a failure of the initial model request.
+The original observer never armed, and request metadata capture was off; no
+decoded terminal, content, or error evidence was recovered. Closing the owned
+tab removed its observer and page state. Later passing requests cannot recover
+that evidence or establish the original upstream trigger.
 
 Separate controlled, unsent `example.invalid` email drafts reproduced another
 failure: ChatGPT rendered a native email card. Computa's ordinary-prose
 compatibility path accepted the card's controls and suggestions as the final
 answer. These reproductions establish a response-format bug, but do not prove
 that the original empty response took that path.
+
+An offline structural probe of a retained website renderer found another
+plausible explanation for zero text markers: its writing-only branch can omit
+the assistant Markdown marker. The actual card descendants and the original
+page's layout mode are unknown, so this is a hypothesis, not a reproduction.
+Opaque or widget-only content must not be classified as a proven empty stream,
+accepted as a completed action, or replayed automatically.
 
 The completion observer also rejected the current website runtime because its
 asset/module identifiers had changed. The decoder method's verified source
