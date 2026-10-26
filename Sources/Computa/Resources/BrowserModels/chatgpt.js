@@ -3022,7 +3022,7 @@ async function chatGPTFirstReplacementObservation(request, capturedCount, snapsh
     && record.fingerprint === request.expectedFirstUserFingerprint && chatGPTSubmissionPins(record)) {
     const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
     if (roots.length === capturedCount && root?.isConnected && body?.isConnected
-      && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === record.canonical)
+      && chatGPTSubmissionBodyText(body, record.canonical) === record.canonical)
       record.replacement = { root, body, oldRoot: record.root, oldBody: record.body, document, owner: state.owner };
   }
   return observed;
@@ -3049,6 +3049,69 @@ function chatGPTSubmissionCanonical(text) {
   return typeof text === 'string' && text.length <= 180_200
     ? text.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
 }
+// ChatGPT renders the known request fence as PRE/CODE and removes just its
+// two delimiter lines. Reconstruct that exact presentation, never Markdown in
+// general or parsed JSON equivalence. The complete original outbound digest
+// remains the authority. Pins last only for this invocation's awaited reads.
+const chatGPTSubmissionPresentationPins = new WeakMap();
+function chatGPTSubmissionExpectedBody(body) {
+  const roots = chatGPTMessageRoots('user'), state = globalThis.__computaChatSubmissionState;
+  for (const record of [state?.pending, state?.lastVerified]) {
+    const root = record && roots[record.sequence - 1];
+    if (root && chatGPTUserBody(root) === body) return record.canonical;
+  }
+  // A successful current-round proof advances lastVerified during this same
+  // invocation. Keep the previously captured parent's presentation stable.
+  return chatGPTSubmissionPresentationPins.get(body)?.expected
+    ?? (roots[0] && chatGPTUserBody(roots[0]) === body
+      ? chatGPTSubmissionCanonical(globalThis.__computaModelFirstPrompt) : null);
+}
+function chatGPTSubmissionBodyText(body, expected = chatGPTSubmissionExpectedBody(body)) {
+  try {
+    const raw = () => (body?.innerText || body?.textContent || '').replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const begin = 'COMPLETE_RESPONSES_REQUEST_JSON:\n', end = '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.';
+    if (typeof expected !== 'string' || expected.length > 180_200) return raw();
+    const start = expected.indexOf(begin), finish = expected.indexOf(end);
+    if (start < 0 || finish < start + begin.length || expected.indexOf(begin, start + begin.length) !== -1
+      || expected.indexOf(end, finish + end.length) !== -1) return raw();
+    const framed = expected.slice(start + begin.length, finish);
+    if (!framed.startsWith('```\n') || !framed.endsWith('\n```') || framed.slice(4, -4).includes('`')) return raw();
+    const previous = chatGPTSubmissionPresentationPins.get(body);
+    // The site's optimistic literal echo needs no reconstruction. A projected
+    // body cannot switch back to another presentation during an awaited proof.
+    if (!previous && !body.querySelector('pre')) return raw();
+    if (body.tagName !== 'DIV' || !body.classList.contains('whitespace-pre-wrap')) return null;
+    const children = [...body.childNodes];
+    if (children.length !== 2 && children.length !== 3) return null;
+    const [prefix, pre, suffix] = children;
+    if (prefix.nodeType !== 3 || prefix.parentElement !== body || pre.nodeType !== 1
+      || pre.parentElement !== body || pre.tagName !== 'PRE'
+      || pre.getAttribute('data-markdown-copy') !== 'code-block' || pre.getAttribute('data-horizontal-scroll') !== 'true'
+      || suffix && (suffix.nodeType !== 3 || suffix.parentElement !== body)) return null;
+    const contents = [...pre.childNodes], code = contents[0];
+    if (contents.length !== 1 || code.nodeType !== 1 || code.parentElement !== pre || code.tagName !== 'CODE'
+      || code.getAttribute('data-markdown-copy-content') !== 'true') return null;
+    const codeNodes = [...code.childNodes], text = codeNodes[0];
+    if (codeNodes.length !== 1 || text.nodeType !== 3 || text.parentElement !== code) return null;
+    for (const node of [body, pre, code]) {
+      const style = getComputedStyle(node);
+      if (!node.isConnected || node.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+        || !node.getClientRects().length || node.closest('[hidden], [inert], [aria-hidden="true"]')
+        || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0) return null;
+    }
+    const reconstructed = chatGPTSubmissionCanonical(prefix.textContent + '```\n' + text.textContent
+      + (suffix ? '\n```' + suffix.textContent : ''));
+    // A clipped code block is only an exact prefix eligible for the existing
+    // one-click expansion. It has no marker and cannot bind a submission.
+    if (suffix ? reconstructed !== expected : !reconstructed || reconstructed.length >= expected.length
+      || !expected.startsWith(reconstructed)) return null;
+    const nodes = [prefix, pre, code, text, suffix || null];
+    if (previous && (previous.expected !== expected || previous.nodes.some((node, index) => node !== nodes[index])
+      || previous.text !== reconstructed)) return null;
+    chatGPTSubmissionPresentationPins.set(body, { expected, nodes, text: reconstructed });
+    return reconstructed;
+  } catch { return null; }
+}
 function chatGPTSubmissionPins(record) {
   const pins = input.expectedSubmissionProofs;
   if (!Array.isArray(pins) || pins.length > 2) return false;
@@ -3069,7 +3132,7 @@ function chatGPTSubmissionBodyIntact(record, roots = chatGPTMessageRoots('user')
     && roots[record.sequence - 1] === root && chatGPTUserBody(root) === body
     && (!replacement || !record.root.isConnected && !record.body.isConnected
       && replacement.oldRoot === record.root && replacement.oldBody === record.body)
-    && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === record.canonical;
+    && chatGPTSubmissionBodyText(body, record.canonical) === record.canonical;
 }
 async function chatGPTBeginSubmission(request) {
   if (websiteChatInvocationLease == null || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease)
@@ -3145,7 +3208,7 @@ async function chatGPTExpandSubmission(state, record, root, body, rendered) {
   const model = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
     { scope: 'action_precheck', action: input.action });
   if (model.error || !intact() || !available()
-    || chatGPTSubmissionCanonical(body.innerText || body.textContent || '') !== rendered) return false;
+    || chatGPTSubmissionBodyText(body, record.canonical) !== rendered) return false;
   if (!chatGPTControlExposed(control)) {
     const rect = control.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
     const offscreen = [x, y, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0
@@ -3155,10 +3218,11 @@ async function chatGPTExpandSubmission(state, record, root, body, rendered) {
     control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
   }
   if (!intact() || !available() || !chatGPTControlExposed(control)) return false;
+  chatGPTSubmissionPresentationPins.delete(body);
   control.click();
   await websiteModelWaitForChange(Date.now() + 1_800, () => !intact()
-    || chatGPTSubmissionCanonical(body.innerText || body.textContent || '') !== rendered, 'submission_expansion');
-  return intact() && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === record.canonical;
+    || chatGPTSubmissionBodyText(body, record.canonical) !== rendered, 'submission_expansion');
+  return intact() && chatGPTSubmissionBodyText(body, record.canonical) === record.canonical;
 }
 function chatGPTPendingProductSubmission(state, record, roots, root, body, rendered, observed) {
   // A product-only recheck has no model or expansion authority. A recognized
@@ -3177,7 +3241,7 @@ function chatGPTPendingProductSubmission(state, record, roots, root, body, rende
       && product.source === 'composer_mode_control' && product.temporaryTransition === 'acknowledged'
       && typeof rendered === 'string' && rendered.length > 0 && rendered.length < record.canonical.length
       && record.canonical.startsWith(rendered) && !rendered.includes(`Computa session marker: ${record.marker}`)
-      && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === rendered;
+      && chatGPTSubmissionBodyText(body, record.canonical) === rendered;
   } catch { return false; }
 }
 function chatGPTOptimisticSubmissionPending(state, record, roots, root, body, rendered) {
@@ -3240,7 +3304,7 @@ async function chatGPTSubmissionResult(request, observed) {
     ? chatGPTSubmissionReplacement(state, record, root, body, roots) : null;
   if (!root?.isConnected || !body?.isConnected || record.phase === 'verified' && (root !== record.root || body !== record.body) && !replacement)
     return chatGPTSubmissionFailure(state, 'observe_body', record);
-  let rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || ''), expanded = false;
+  let rendered = chatGPTSubmissionBodyText(body, record.canonical), expanded = false;
   if (record === pending) {
     const optimistic = chatGPTOptimisticSubmissionPending(state, record, roots, root, body, rendered);
     if (optimistic) return optimistic;
@@ -3250,7 +3314,7 @@ async function chatGPTSubmissionResult(request, observed) {
       return { ...observed, ...capability, submissionPending: true, text: '', answerComplete: false };
     if (!await chatGPTExpandSubmission(state, record, root, body, rendered)) return chatGPTSubmissionFailure(state, 'observe_expansion', record);
     expanded = true;
-    rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
+    rendered = chatGPTSubmissionBodyText(body, record.canonical);
   }
   const markerLine = `Computa session marker: ${record.marker}`;
   if (rendered !== record.canonical || !rendered.endsWith(`\n\n${markerLine}`)
@@ -3264,7 +3328,7 @@ async function chatGPTSubmissionResult(request, observed) {
     || state.lastVerified !== capturedParent || capturedParent && !chatGPTSubmissionBodyIntact(capturedParent, currentRoots, capturedParent === record ? replacement : null)
     || currentRoots.length !== roots.length || currentRoots.some((node, index) => node !== roots[index])
     || !root.isConnected || !body.isConnected || chatGPTUserBody(root) !== body
-    || chatGPTSubmissionCanonical(body.innerText || body.textContent || '') !== rendered
+    || chatGPTSubmissionBodyText(body, record.canonical) !== rendered
     || fingerprint !== record.fingerprint || replacement && (replacement.provisional
       ? input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null || record.nativeFirstPinned === true
       : record.replacement !== replacement || input.expectedFirstUserFingerprint !== record.fingerprint)) return chatGPTSubmissionFailure(state, 'observe_digest', record);
@@ -3390,7 +3454,7 @@ function chatGPTTemporaryOutlineVerified() {
     const canonical = chatGPTSubmissionCanonical(prompt), roots = chatGPTMessageRoots('user');
     const root = roots[0], body = root && chatGPTUserBody(root);
     if (canonical == null || !root?.isConnected || !body?.isConnected || roots.length < 1 || roots.length > 16) return false;
-    const rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || ''), first = globalThis.__computaModelFirstProof;
+    const rendered = chatGPTSubmissionBodyText(body, canonical), first = globalThis.__computaModelFirstProof;
     if (!rendered) return false;
     if (input.expectedFirstUserFingerprint == null) {
       // The first claimed Send may still be clipped. Its exact prepared bytes
@@ -4750,7 +4814,7 @@ let firstUserRejectionDiagnostic;
 let chatGPTFinalResponseSnapshot = null;
 const normalizedFirstBody = node => {
   const bodyStarted = chatGPTSyncWorkStart();
-  try { return (node.innerText || node.textContent || "").replace(/\r\n?/g, "\n").normalize("NFC").trim(); }
+  try { return chatGPTSubmissionBodyText(node) || ''; }
   finally { chatGPTSyncWorkEnd(3, bodyStarted); }
 };
 function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
@@ -4865,7 +4929,9 @@ function chatGPTFramedPayloadDiagnostic(expected, rendered) {
       const start = value.indexOf(begin), finish = value.indexOf(end);
       if (start < 0 || finish < start + begin.length || value.indexOf(begin, start + begin.length) !== -1
         || value.indexOf(end, finish + end.length) !== -1) return null;
-      return { payload: value.slice(start + begin.length, finish), before: value.slice(0, start), after: value.slice(finish + end.length) };
+      let payload = value.slice(start + begin.length, finish);
+      if (payload.startsWith('```\n') && payload.endsWith('\n```') && !payload.slice(4, -4).includes('`')) payload = payload.slice(4, -4);
+      return { payload, before: value.slice(0, start), after: value.slice(finish + end.length) };
     };
     const left = frame(expected), right = frame(rendered);
     result.payloadExpectedFrameUnique = left !== null; result.payloadRenderedFrameUnique = right !== null;
@@ -5081,11 +5147,7 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   if (!Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline)
     return chatGPTRejectFirstUserExpansion(candidate, 'timeout', 'deadline');
-  const currentText = () => {
-    const value = candidate.body.innerText || candidate.body.textContent || '';
-    return typeof value === 'string' && value.length <= 180_200
-      ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
-  };
+  const currentText = () => chatGPTSubmissionBodyText(candidate.body, candidate.canonical);
   const facts = () => chatGPTFirstUserExpansionTextFacts(candidate, currentText());
   const changed = await websiteModelWaitForChange(candidate.deadline, () => {
     if (!chatGPTFirstUserExpansionContext(candidate)) return true;
@@ -5187,6 +5249,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
     candidate.deadline = Date.now() + 1_800;
+    chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
   } catch { return reject('failed'); }
@@ -5421,7 +5484,7 @@ if (input.pendingSubmissionProductRecheck != null) {
     return chatGPTSubmissionFailure(state, 'observe_product_ack', record);
   if (ownedUserCount === record.sequence) {
     const root = ownedMessages[record.sequence - 1], body = root && chatGPTUserBody(root);
-    const rendered = body && chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
+    const rendered = body && chatGPTSubmissionBodyText(body, record.canonical);
     if (!root?.isConnected || !body?.isConnected || !rendered || rendered !== record.canonical
       && (rendered.length >= record.canonical.length || !record.canonical.startsWith(rendered)
         || rendered.includes(`Computa session marker: ${record.marker}`)))

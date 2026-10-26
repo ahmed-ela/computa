@@ -2614,3 +2614,53 @@ history is preserved, but later continuations are not the identical failing
 maintenance case. Build 269 adds a separate, explicit, one-shot successful-
 response diagnostic arm to retain finite regex samples during intermittent
 success, while leaving normal response authority and failure capture intact.
+
+### Build 269: exact caller attribution and a separate budget failure
+
+The fresh 61,440-byte synthetic task completed four verified website inferences
+and four browser operations before its accumulated prompt reached 165,925 bytes,
+above the unchanged 163,840-byte limit. No oversized request was submitted and
+no mailbox delivery occurred. This task is a budget failure, not a website-load
+failure or an end-to-end pass. All four website sessions closed and the local
+fixture stopped.
+
+The one-shot success capture sampled the provider's code-region splitter
+(`drbS.f`, called by browser-skill mention extraction). Its 126,167-character
+input exactly matched the first outbound prompt, including the session marker.
+An independent system JavaScriptCore reproduction of that public function took
+6–11 ms for roughly 128–147 KB inputs, versus approximately 1 ms with an
+unlabelled fence. Structural JSON newlines did not help. The installed regex
+probe inflated this scanner's time to 101–128 ms, so its aggregate timings must
+not be treated as normal performance. This splitter alone does not establish
+the cause of the earlier multi-second renderer stall.
+
+A separate small temporary-chat probe confirmed the actual user-message DOM:
+literal prefix text, one PRE containing a CODE text node, and literal suffix
+text. Escapes, duplicate keys and a large numeric lexeme remained exact; the
+expected marker response completed. The inspector and owned tab were closed,
+and Safari's developer setting was restored to off. Build 270 tests fencing
+only the unchanged serialized request with strict planned-delimiter
+reconstruction; it remains a candidate until live qualification succeeds.
+
+
+### Build 270: literal request framing candidate
+
+Further attribution found a separate public Markdown lexer (`i6Xw.f`) called
+by the adjacent `drbS.g` path for text containing `[` — including JSON arrays.
+In fresh system JavaScriptCore contexts with no regex instrumentation, the
+exact public lexer took 403 ms for 15,935 characters of escaped record JSON
+and 6,448 ms for 63,985 characters. The same JSON inside an unlabelled fence
+took 0–3 ms. Larger unfenced inputs exceeded the experiment's 12-second bound;
+fenced 128–147 KB inputs completed in 5–6 ms. Lexical JSON newlines did not
+remove the cost. This reproduces a seconds-scale, roughly quadratic inline
+parsing path consistent with the original main-thread regex/worker-timeout
+evidence; it does not identify a single catastrophic expression or prove that
+every observed provider failure has this cause.
+
+The candidate changes only ChatGPT's request presentation: eight fence bytes
+surround the unchanged escaped JSON and count toward the original prompt
+limit and ownership fingerprint. The exact observed PRE/CODE structure is
+projected back to that original outbound string; altered payload lexemes,
+extra/hidden structure and node replacement during verification are rejected.
+Raw optimistic echoes and existing bounded expansion remain supported.
+No provider timeout, response authority, tool admission or size limit changes.

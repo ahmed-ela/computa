@@ -396,9 +396,7 @@ private actor NativePatchInferenceFixture: WebModelTransport {
         case "webProviderSend":
             let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: Any])
             let prompt = try XCTUnwrap(parameters["prompt"] as? String)
-            let start = try XCTUnwrap(prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n"))
-            let end = try XCTUnwrap(prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start.upperBound..<prompt.endIndex))
-            let data = Data(prompt[start.upperBound..<end.lowerBound].utf8)
+            let data = try WebsiteRequestFixture.json(in: prompt)
             let input = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             let request = try WebModelResponseCodec.prepareRequest(data)
             observations.requestModels.append(request.model)

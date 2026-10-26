@@ -330,6 +330,138 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
     } };
 }
 
+// Captured ChatGPT user-message presentation: direct prefix TEXT, one PRE /
+// CODE / TEXT, then direct suffix TEXT. innerText inserts an extra block break.
+function renderFencedSubmission(body: Element, outbound: string, clipped = false) {
+  const opening = 'COMPLETE_RESPONSES_REQUEST_JSON:\n```\n', closing = '\n```\nEND_COMPLETE_RESPONSES_REQUEST_JSON.';
+  const start = outbound.indexOf(opening) + opening.length, finish = outbound.indexOf(closing, start);
+  if (start < opening.length || finish < start) throw new Error('Invalid fenced fixture');
+  const textNode = (parentElement: Element, textContent: string) => ({ nodeType: 3, parentElement, textContent });
+  const prefix = textNode(body, outbound.slice(0, start - 4));
+  const pre = new Element('PRE', { 'data-markdown-copy': 'code-block', 'data-horizontal-scroll': 'true', dir: 'ltr' });
+  const code = new Element('CODE', { 'data-markdown-copy-content': 'true' });
+  const text = textNode(code, outbound.slice(start, clipped ? start + 24 : finish));
+  const suffix = textNode(body, outbound.slice(finish + 4));
+  const codeNodes: any[] = [text], preNodes: any[] = [code], bodyNodes: any[] = [prefix, pre, ...(clipped ? [] : [suffix])];
+  body.text = ''; body.children = []; body.append(pre); pre.append(code);
+  Object.defineProperties(code, {
+    childNodes: { configurable: true, get: () => codeNodes },
+    textContent: { configurable: true, get: () => codeNodes.map(node => node.textContent).join('') },
+  });
+  Object.defineProperty(pre, 'childNodes', { configurable: true, get: () => preNodes });
+  Object.defineProperties(body, {
+    childNodes: { configurable: true, get: () => bodyNodes },
+    textContent: { configurable: true, get: () => bodyNodes.map(node => node.textContent).join('') },
+    innerText: { configurable: true, get: () => bodyNodes.map(node => node.textContent + (node === pre ? '\n' : '')).join('') },
+  });
+  return { prefix, pre, code, text, suffix, codeNodes, preNodes, bodyNodes };
+}
+const fencedRequest = (payload = '{"model":"chatgpt:chat/latest/instant","input":"literal \\u005f \\u0060", "duplicate":1,"duplicate":2,"exact":9007199254740993}') =>
+  'Use the available tools.\n\nCOMPLETE_RESPONSES_REQUEST_JSON:\n```\n' + payload
+    + '\n```\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\nReturn one JSON object.';
+
+describe('ChatGPT exact fenced request presentation', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  test('three retained rounds preserve exact lexical bytes, native hashes, model proof and one send each', async () => {
+    const x = await chatTurnFixture(choice);
+    for (let index = 0; index < 3; index++) {
+      const record = await x.dispatch(fencedRequest());
+      const body = x.f.document.querySelectorAll('article[data-turn="user"]')[index].children[0];
+      const dom = renderFencedSubmission(body, record.outbound);
+      expect(body.innerText).not.toBe(record.outbound); expect(body.textContent).not.toBe(record.outbound);
+      expect(dom.text.textContent).toContain('"duplicate":1,"duplicate":2,"exact":9007199254740993');
+      x.answer('Owned result ' + index);
+      const observed = await x.observe(record);
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.submissionProof).toEqual({ sequence: index + 1, fingerprint: record.fingerprint });
+      expect(observed.modelEvidence.selected).toEqual(choice); expect(observed.answerComplete).toBe(true);
+      expect(observed.text).toContain('Owned result ' + index); expect(x.send.clicks).toBe(index + 1);
+      expect(x.f.digestInputs).toContain(record.outbound);
+    }
+  });
+
+  test('literal fenced echoes and legacy unfenced requests retain their original exact proof path', async () => {
+    for (const prompt of ['Legacy exact request', fencedRequest()]) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch(prompt); x.answer('Literal');
+      const observed = await x.observe(record);
+      expect(observed.error).toBeUndefined(); expect(observed.submissionProof?.fingerprint).toBe(record.fingerprint);
+      expect(observed.answerComplete).toBe(true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('altered payload lexemes and surrounding bytes cannot gain authority through JSON equivalence', async () => {
+    for (const mutation of ['escape', 'precision', 'duplicate', 'prefix', 'suffix', 'truncated', 'fence']) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch(fencedRequest());
+      const body = x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0];
+      const dom = renderFencedSubmission(body, record.outbound); x.answer('Unverified');
+      if (mutation === 'escape') dom.text.textContent = dom.text.textContent.replace('\\u005f', '_');
+      if (mutation === 'precision') dom.text.textContent = dom.text.textContent.replace('9007199254740993', '9007199254740992');
+      if (mutation === 'duplicate') dom.text.textContent = dom.text.textContent.replace('"duplicate":1,', '');
+      if (mutation === 'prefix') dom.prefix.textContent += 'changed';
+      if (mutation === 'suffix') dom.suffix.textContent += 'changed';
+      if (mutation === 'truncated') dom.text.textContent = dom.text.textContent.slice(0, -1);
+      if (mutation === 'fence') dom.text.textContent += '\n```';
+      const observed = await x.observe(record);
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('submissionProof');
+      expect(observed).not.toHaveProperty('answerComplete', true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('extra, hidden, nested or ambiguous DOM cannot reconstruct a known request', async () => {
+    for (const mutation of ['extra_text', 'extra_block', 'comment', 'nested_code', 'hidden_pre', 'hidden_code', 'wrong_attribute', 'wrong_body']) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch(fencedRequest());
+      const body = x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0];
+      const dom = renderFencedSubmission(body, record.outbound); x.answer('Unverified');
+      if (mutation === 'extra_text') dom.bodyNodes.push({ nodeType: 3, parentElement: body, textContent: '' });
+      if (mutation === 'extra_block') { const extra = new Element('PRE'); body.append(extra); dom.bodyNodes.push(extra); }
+      if (mutation === 'comment') dom.preNodes.push({ nodeType: 8, textContent: '', parentElement: dom.pre });
+      if (mutation === 'nested_code') dom.codeNodes[0] = new Element('SPAN', {}, dom.text.textContent);
+      if (mutation === 'hidden_pre') dom.pre.values.hidden = '';
+      if (mutation === 'hidden_code') dom.code.values['aria-hidden'] = 'true';
+      if (mutation === 'wrong_attribute') dom.code.values['data-markdown-copy-content'] = 'false';
+      if (mutation === 'wrong_body') body.values.class = 'different-body';
+      const observed = await x.observe(record);
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('submissionProof');
+      expect(observed).not.toHaveProperty('answerComplete', true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('same-byte node replacement during digest invalidates the existing physical observation', async () => {
+    for (const mutation of ['code', 'text', 'prefix', 'suffix']) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch(fencedRequest());
+      const body = x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0];
+      const dom = renderFencedSubmission(body, record.outbound); x.answer('Unverified');
+      x.f.onDigest(() => {
+        if (mutation === 'code') {
+          const replacement = new Element('CODE', { ...dom.code.values }, dom.text.textContent);
+          replacement.parentElement = dom.pre; dom.pre.children = [replacement]; dom.preNodes[0] = replacement;
+        } else if (mutation === 'text') dom.codeNodes[0] = { ...dom.text };
+        else if (mutation === 'prefix') dom.bodyNodes[0] = { ...dom.prefix };
+        else dom.bodyNodes[2] = { ...dom.suffix };
+      }, record.outbound);
+      const observed = await x.observe(record);
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('submissionProof');
+      expect(observed).not.toHaveProperty('answerComplete', true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('first and later clipped fences get only the existing authorized expansion before exact binding', async () => {
+    for (const sequence of [1, 2]) {
+      const x = await chatTurnFixture(choice);
+      if (sequence === 2) { const first = await x.dispatch(fencedRequest()); x.answer('First'); await x.observe(first); }
+      const record = await x.dispatch(fencedRequest()); x.answer('Expanded');
+      const root = x.f.document.querySelectorAll('article[data-turn="user"]')[sequence - 1], body = root.children[0];
+      renderFencedSubmission(body, record.outbound, true);
+      const more = new Element('BUTTON', { 'aria-label': 'Show more' });
+      more.onClick = () => { renderFencedSubmission(body, record.outbound); }; root.append(more);
+      const observed = await x.observe(record, { allowFirstUserExpansion: true, firstUserExpansionModelChoice: choice,
+        allowSubmissionExpansion: true });
+      expect(observed.error).toBeUndefined(); expect(observed.submissionProof?.fingerprint).toBe(record.fingerprint);
+      expect(observed.answerComplete).toBe(true); expect(more.clicks).toBe(1); expect(x.send.clicks).toBe(sequence);
+    }
+  });
+});
+
 describe('readiness-only selector observation', () => {
   test('only an exact opt-in adds the fixed editor selector attributes to the existing event waiter', async () => {
     const helper = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');

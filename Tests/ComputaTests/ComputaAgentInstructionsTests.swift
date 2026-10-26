@@ -1347,9 +1347,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                                                  expectedCurrentTools: [[String: Any]]? = nil,
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
-        let start = try XCTUnwrap(prompt.range(of: Data("COMPLETE_RESPONSES_REQUEST_JSON:\n".utf8)), file: file, line: line).upperBound
-        let terminator = Data("\nEND_COMPLETE_RESPONSES_REQUEST_JSON.".utf8)
-        let end = try XCTUnwrap(prompt.range(of: terminator, in: start..<prompt.count), file: file, line: line).lowerBound
+        let range = try WebsiteRequestFixture.range(in: request.prompt, expectedModel: request.model)
+        let start = request.prompt[..<range.lowerBound].utf8.count
+        let end = request.prompt[..<range.upperBound].utf8.count
         var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any], file: file, line: line)
         // Only explicitly declared current constraints may differ from the
         // original tools; every other request and history value stays exact.
@@ -1361,7 +1361,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
             responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay)
-        XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
+        let closingFence = LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? "\n```" : ""
+        XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
         return handoff
     }

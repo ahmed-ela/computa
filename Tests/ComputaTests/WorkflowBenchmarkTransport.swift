@@ -340,12 +340,10 @@ struct InferenceRequest {
     let input: [[String: Any]]
     init(params: Data) throws {
         guard let parameters = try JSONSerialization.jsonObject(with: params) as? [String: Any],
-              let prompt = parameters["prompt"] as? String,
-              let start = prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n"),
-              let end = prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start.upperBound..<prompt.endIndex) else {
+              let prompt = parameters["prompt"] as? String else {
             throw WorkflowBenchmarkFailure("Complete Responses request is absent")
         }
-        let data = Data(prompt[start.upperBound..<end.lowerBound].utf8)
+        let data = try WebsiteRequestFixture.json(in: prompt)
         prepared = try WebModelResponseCodec.prepareRequest(data)
         guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let input = request["input"] as? [[String: Any]] else {

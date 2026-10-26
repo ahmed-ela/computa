@@ -1612,9 +1612,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     private func canonicalRequest(in prompt: String) throws -> [String: Any] {
-        let start = try XCTUnwrap(prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n"))
-        let end = try XCTUnwrap(prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start.upperBound..<prompt.endIndex))
-        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompt)) as? [String: Any])
     }
 
     private func waitForFixtureCondition(_ condition: () async -> Bool) async throws {

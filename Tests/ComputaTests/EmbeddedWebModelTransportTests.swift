@@ -5217,6 +5217,76 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testExactFencedRequestDOMPreservesThreeNativeSubmissionProofsAndToolCallResponse() async throws {
+        let render = #"""
+            userBody.classList.add('whitespace-pre-wrap');
+            const opening = 'COMPLETE_RESPONSES_REQUEST_JSON:\n```\n';
+            const closing = '\n```\nEND_COMPLETE_RESPONSES_REQUEST_JSON.';
+            const start = prompt.indexOf(opening) + opening.length, end = prompt.indexOf(closing, start);
+            if (start < opening.length || end < start) throw new Error('Invalid synthetic request frame');
+            const pre = document.createElement('pre');
+            pre.setAttribute('data-markdown-copy', 'code-block'); pre.setAttribute('data-horizontal-scroll', 'true');
+            const code = document.createElement('code'); code.setAttribute('data-markdown-copy-content', 'true');
+            code.appendChild(document.createTextNode(prompt.slice(start, end))); pre.appendChild(code);
+            userBody.replaceChildren(document.createTextNode(prompt.slice(0, start - 4)), pre,
+              document.createTextNode(prompt.slice(end + 4)));
+            """#
+        let page = Self.modelChoicePage(.chatgpt)
+            .replacingOccurrences(of: "else userBody.textContent = prompt;", with: "else { \(render) }")
+            .replacingOccurrences(of: "answerBody.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
+                with: "answerBody.textContent = window.fixturePrompts.length === 1 ? '\(Self.fixtureToolReply)' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
+        XCTAssertTrue(page.contains(render))
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        var firstFingerprint: String?
+        for round in 1...3 {
+            let request = Data(#"{"model":"\#(syntheticChatGPTModelID)","input":"literal \u005f \u0060 \u005c", "metadata":{"duplicate":"one","duplicate":"two"},"tools":[{"type":"function","name":"fixture","parameters":{"type":"object","properties":{"exact":{"type":"integer","minimum":9007199254740993}}}}]}"#.utf8)
+            let prepared = try WebModelResponseCodec.prepareRequest(request)
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prepared.prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertEqual(complete["sequence"] as? Int, round)
+            XCTAssertEqual(complete["text"] as? String, round == 1 ? Self.fixtureToolReply : #"{"type":"message","text":"Fixture reply"}"#)
+            try assertChoiceEvidence(complete, choice: choice)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            let fingerprint = try XCTUnwrap(proof["firstUserFingerprint"] as? String)
+            let capturedPrompts = try await evaluate(view, "return window.fixturePrompts;")
+            let sentPrompts = try XCTUnwrap(capturedPrompts as? [String])
+            // The editor adds a terminal LF; ownership has always hashed the
+            // complete CRLF/NFC/trim canonical body, including its marker.
+            let firstOutbound = try XCTUnwrap(sentPrompts.first)
+            let canonicalOutbound = firstOutbound.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n").precomposedStringWithCanonicalMapping
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(fingerprint, EmbeddedWebModelTransport.promptFingerprint(canonicalOutbound))
+            XCTAssertEqual(canonicalOutbound.components(separatedBy: "\n\nComputa session marker: ").first, prepared.prompt)
+            if let firstFingerprint { XCTAssertEqual(fingerprint, firstFingerprint) } else { firstFingerprint = fingerprint }
+            let lexical = try await evaluate(view, """
+                const bodies = [...document.querySelectorAll('[data-markdown-text-style="user-message"]')];
+                return bodies.length === \(round) && bodies.every((body, index) => {
+                  const code = body.querySelector('pre[data-markdown-copy="code-block"] > code[data-markdown-copy-content="true"]');
+                  return code && code.textContent.includes('9007199254740993')
+                    && code.textContent.includes('"duplicate":"one","duplicate":"two"')
+                    && body.innerText !== window.fixturePrompts[index];
+                });
+                """) as? Bool
+            XCTAssertEqual(lexical, true)
+            try await assertChoiceLedger(view, insertions: round, sends: round, selections: 1)
+        }
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testStringPunctuationEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
         // Force +17 quote/markup, +5 markup and +2 underscore differences.
         // Modified intraword text still fails ownership; protected edge/repeated
@@ -5227,9 +5297,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 12) + String(repeating: "<tag>&", count: 5),
         ], options: [.sortedKeys])
         let prepared = try WebModelResponseCodec.prepareRequest(original)
-        let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
-        let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
-        let legacy = prepared.prompt.replacingCharacters(in: start..<end, with: String(decoding: original, as: UTF8.self))
+        let jsonRange = try WebsiteRequestFixture.range(in: prepared.prompt, expectedModel: syntheticChatGPTModelID)
+        let legacy = prepared.prompt.replacingCharacters(in: jsonRange, with: String(decoding: original, as: UTF8.self))
         let quoteOnly = prepared.prompt.replacingOccurrences(of: #"\u003c"#, with: "<")
             .replacingOccurrences(of: #"\u003e"#, with: ">")
             .replacingOccurrences(of: #"\u0026"#, with: "&")
@@ -5238,9 +5307,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             "input": String(repeating: "Owned underscore rendering fixture line.\n", count: 600) + "a_b c_d",
         ], options: [.sortedKeys])
         let underscorePrepared = try WebModelResponseCodec.prepareRequest(underscoreOriginal)
-        let underscoreStart = try XCTUnwrap(underscorePrepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
-        let underscoreEnd = try XCTUnwrap(underscorePrepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: underscoreStart..<underscorePrepared.prompt.endIndex)).lowerBound
-        let underscoreLegacy = underscorePrepared.prompt.replacingCharacters(in: underscoreStart..<underscoreEnd,
+        let underscoreJSONRange = try WebsiteRequestFixture.range(in: underscorePrepared.prompt, expectedModel: syntheticChatGPTModelID)
+        let underscoreLegacy = underscorePrepared.prompt.replacingCharacters(in: underscoreJSONRange,
                                                                             with: String(decoding: underscoreOriginal, as: UTF8.self))
         let protectedUnderscores = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": syntheticChatGPTModelID,

@@ -551,9 +551,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     private func canonicalRequestBytes(in prompt: String) throws -> Data {
-        let start = try XCTUnwrap(prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n"))
-        let end = try XCTUnwrap(prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start.upperBound..<prompt.endIndex))
-        return Data(prompt[start.upperBound..<end.lowerBound].utf8)
+        try WebsiteRequestFixture.json(in: prompt)
     }
     private func correctionRecords(root: URL) throws -> [WebsiteModelFormatCorrectionStore.Record] {
         try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("evidence/format-corrections-v1"), includingPropertiesForKeys: nil)

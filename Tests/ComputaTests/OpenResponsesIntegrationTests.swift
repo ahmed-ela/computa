@@ -392,9 +392,8 @@ private actor OpenResponsesFixtureTransport: WebModelTransport {
             sends += 1
             let token = try XCTUnwrap(input["sessionToken"])
             let prompt = try XCTUnwrap(input["prompt"])
-            let json = try XCTUnwrap(prompt.components(separatedBy: "COMPLETE_RESPONSES_REQUEST_JSON:\n").last?
-                .components(separatedBy: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.").first)
-            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            let json = try WebsiteRequestFixture.json(in: prompt)
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
             let tools = request["tools"] as? [[String: Any]] ?? []
             if let forcedReply { replies[token] = forcedReply }
             else if tools.first?["type"] as? String == "namespace" {

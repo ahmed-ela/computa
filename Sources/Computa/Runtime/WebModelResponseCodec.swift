@@ -225,6 +225,10 @@ enum WebModelResponseCodec {
             : originalJSON
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
         let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
+        // Keep ChatGPT's complete request in a literal, unlabelled code block.
+        // The JSON presentation stays byte-exact; the eight fence bytes count
+        // toward admission and the outbound ownership fingerprint.
+        let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT)
         let prompt = """
@@ -232,7 +236,7 @@ enum WebModelResponseCodec {
 
         \(ComputaAgentInstructions.webRequestContext)
         COMPLETE_RESPONSES_REQUEST_JSON:
-        \(displayJSON)
+        \(framedRequestJSON)
         END_COMPLETE_RESPONSES_REQUEST_JSON.
 
         \(currentUserInstructions)
