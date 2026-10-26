@@ -77,9 +77,23 @@ describe('private synchronous renderer work diagnostic', () => {
     f.expire(); expect(api.now()).toBeNull(); expect(api.snapshot()).toBeNull();
     const g = fixture(), other = g.install(); g.context.document = {}; expect(other.snapshot()).toBeNull(); expect(g.install()).toBeNull();
   });
+  test('provider-only shared-function wrappers preserve this, arguments, returns and throws', () => {
+    const begin = source.indexOf('function chatGPTProfileSynchronousWork(');
+    const end = source.indexOf('if (chatGPTRendererWorkDiagnostic)',begin);
+    const records: any[] = [], receiver = {}, sentinel = {};
+    const wrap = new Function('chatGPTSyncWorkStart','chatGPTSyncWorkEnd',source.slice(begin,end)
+      + 'return chatGPTProfileSynchronousWork;')(() => 7,(...args: any[]) => records.push(args));
+    const fn = function (this: any, ...args: any[]) { expect(this).toBe(receiver); expect(args).toEqual(['one','two']); return sentinel; };
+    expect(wrap(fn,5).call(receiver,'one','two')).toBe(sentinel); expect(records).toEqual([[5,7]]);
+    try { wrap(() => { throw sentinel; },11)(); throw new Error('Expected original throw'); }
+    catch (error) { expect(error).toBe(sentinel); }
+    expect(records).toEqual([[5,7],[11,7]]);
+    const shared = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url),'utf8');
+    expect(source.startsWith(shared + '\n')).toBeTrue();
+  });
   test('direct synchronous wrappers preserve exact return values and thrown objects', () => {
-    const names = ['websiteChatPickerState','chatGPTProductModeState','chatGPTProductModeProof','chatGPTTemporaryVerified',
-      'chatGPTTemporaryOutlineForRoot','websiteChatObservePinnedMutations','websiteChatDeferredModelRead'];
+    const names = ['chatGPTProductModeState','chatGPTProductModeProof','chatGPTTemporaryVerified',
+      'chatGPTTemporaryOutlineForRoot','websiteChatDeferredModelRead'];
     for (const name of names) {
       const begin = source.indexOf(`function ${name}(`), end = source.indexOf(`function ${name}Unprofiled(`,begin);
       const wrapper = source.slice(begin,end), sentinel = {}, calls: any[] = [];

@@ -13,7 +13,6 @@ function websiteModelDiagnosticPhase(phase) {
   } catch { /* An unavailable diagnostic channel must not change adapter behavior. */ }
 }
 websiteModelDiagnosticPhase('adapter_entry');
-const chatGPTRendererWorkDiagnostic = chatGPTInstallRendererWorkDiagnostic(input);
 function websiteModelNormalize(value) {
   return typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
 }
@@ -284,11 +283,6 @@ function websiteChatTrackPinnedControls(pin, state) {
     { attribute: 'aria-checked', value: String(control.choice?.key === pin.selection.family.key) });
 }
 function websiteChatObservePinnedMutations(records, pin = globalThis.__computaChatPresetPin) {
-  const started = chatGPTSyncWorkStart();
-  try { return websiteChatObservePinnedMutationsUnprofiled(records, pin); }
-  finally { chatGPTSyncWorkEnd(10, started); }
-}
-function websiteChatObservePinnedMutationsUnprofiled(records, pin) {
   if (!pin || pin.invalidated === true || !pin.controls || pin.owner !== globalThis.__computaModelOwner
     || globalThis.__computaChatPresetPin !== pin || pin.document !== document
     || window !== window.top || location.origin !== 'https://chatgpt.com') return;
@@ -311,11 +305,6 @@ function websiteChatObservePinnedMutationsUnprofiled(records, pin) {
   }
 }
 function websiteChatPickerState() {
-  const started = chatGPTSyncWorkStart();
-  try { return websiteChatPickerStateUnprofiled(); }
-  finally { chatGPTSyncWorkEnd(5, started); }
-}
-function websiteChatPickerStateUnprofiled() {
   const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
@@ -1274,15 +1263,11 @@ function websiteModelGuard(state, expected) {
   return null;
 }
 function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null, observeEditorControls = false) {
-  const readCondition = () => {
-    const started = chatGPTSyncWorkStart();
-    try { return condition(); } finally { chatGPTSyncWorkEnd(11, started); }
-  };
-  if (readCondition()) return Promise.resolve(true);
+  if (condition()) return Promise.resolve(true);
   websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
     let finished = false, timer;
-    const observer = new MutationObserver(() => { if (readCondition()) finish(true); });
+    const observer = new MutationObserver(() => { if (condition()) finish(true); });
     const finish = changed => {
       if (finished) return;
       finished = true;
@@ -1310,7 +1295,7 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClo
       // Standalone fixtures and nonnative adapters retain the bounded fallback.
       timer = setTimeout(() => finish(false), milliseconds);
     }
-    if (readCondition()) finish(true); // A synchronous mount cannot fall between read and arm.
+    if (condition()) finish(true); // A synchronous mount cannot fall between read and arm.
   });
 }
 async function websiteModelSettleSelection(provider, attempt, freshGuard, until) {
@@ -1719,6 +1704,25 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
   if (typeof currentTemporary !== 'function' || currentTemporary() !== true) return { error: 'temporary_mode_unverified' };
   return { ...observed, ...proof, ...(request.action === 'inspect' && observed.answerComplete && observed.responseCount > 0
     ? { modelDiagnostic: websiteModelDiagnostic(websiteModelPickerState(provider)) } : {}) };
+}
+
+// Provider-only private profiling leaves the audited shared model-control source
+// byte-identical. Only an armed invocation wraps these local function bindings.
+const chatGPTRendererWorkDiagnostic = chatGPTInstallRendererWorkDiagnostic(input);
+function chatGPTProfileSynchronousWork(fn, index) {
+  return function (...args) {
+    const started = chatGPTSyncWorkStart();
+    try { return Reflect.apply(fn, this, args); }
+    finally { chatGPTSyncWorkEnd(index, started); }
+  };
+}
+if (chatGPTRendererWorkDiagnostic) {
+  websiteChatPickerState = chatGPTProfileSynchronousWork(websiteChatPickerState, 5);
+  websiteChatObservePinnedMutations = chatGPTProfileSynchronousWork(websiteChatObservePinnedMutations, 10);
+  const unprofiledWait = websiteModelWaitForChange;
+  websiteModelWaitForChange = function (until, condition, ...rest) {
+    return Reflect.apply(unprofiledWait, this, [until, chatGPTProfileSynchronousWork(condition, 11), ...rest]);
+  };
 }
 
 // Optional first-preparation timings are diagnostic only. No timer grants page

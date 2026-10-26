@@ -7,6 +7,8 @@ import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 const source = readFileSync(new URL("../Sources/Computa/Resources/BrowserModels/chatgpt.js", import.meta.url), "utf8");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const execute = new AsyncFunction("input", "document", "window", "location", "getComputedStyle", "MutationObserver", "setTimeout", "globalThis", "crypto", "HTMLTextAreaElement", "Date", source);
+// Pure DOM fixtures explicitly disable the optional clock-only profiler.
+const disabledWorkDiagnostic = 'const chatGPTSyncWorkStart = () => null; const chatGPTSyncWorkEnd = () => {};\n';
 const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
@@ -3143,7 +3145,7 @@ describe('normal ChatGPT product provenance', () => {
     const start = source.indexOf('function chatGPTProductModeState()');
     const end = source.indexOf('function chatGPTProductModeDiagnostic', start);
     expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
-    const run = new Function('document', 'getComputedStyle', 'websiteModelNormalize', source.slice(start, end)
+    const run = new Function('document', 'getComputedStyle', 'websiteModelNormalize', disabledWorkDiagnostic + source.slice(start, end)
       + 'return chatGPTProductModeState();');
     const read = (f: ReturnType<typeof fixture>) => run(f.document, (node: Element) => ({ visibility: node.cssVisibility }),
       (value: unknown) => typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '');
@@ -3202,7 +3204,7 @@ describe('normal ChatGPT product provenance', () => {
   describe('temporary outlined user body physical witness', () => {
     const start = source.indexOf('function chatGPTTemporaryOutlineForRoot(root, body) {');
     const end = source.indexOf('// This fallback observes', start);
-    const read = new Function('root', 'body', 'getComputedStyle', source.slice(start, end)
+    const read = new Function('root', 'body', 'getComputedStyle', disabledWorkDiagnostic + source.slice(start, end)
       + 'return chatGPTTemporaryOutlineForRoot(root, body);');
     function outlined(shape: 'div' | 'span' = 'span') {
       const element = (tag: string, attrs: Record<string, string> = {}, text = '') => {
@@ -3290,6 +3292,7 @@ describe('normal ChatGPT product provenance', () => {
     const end = source.indexOf('function chatGPTTemporaryVerified()', start);
     expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
     const run = new Function('env', `
+      ${disabledWorkDiagnostic}
       const { document, window, location, globalThis } = env;
       const chatGPTProductModeState = () => env.mode;
       const chatGPTRenderedTemporary = () => { env.temporaryReads++; return env.rendered; };

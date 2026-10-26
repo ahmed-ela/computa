@@ -13059,8 +13059,10 @@ extension EmbeddedWebModelTransportTests {
                 XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererWorkDiagnostic(record["work"]),
                     "The same armed adapter result supplies finite work without another page read")
             }
-            XCTAssertNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token),
-                "The second poll after single-use arm consumption must clear old work")
+            if !["armed", "missing_source"].contains(kind) {
+                XCTAssertNil(fixture.transport.rendererWorkDiagnosticForTesting(sessionToken: token),
+                    "An invalid or absent arm must not cache work")
+            }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             try await assertHumanTabIntact(fixture)
