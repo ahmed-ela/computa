@@ -1053,6 +1053,22 @@ final class EmbeddedBrowserSession {
         return receipt
     }
 
+    func chatGPTResponseFailureReceipt(tabID: UUID, view: WKWebView, ownerToken: String,
+                                      generation: UUID, sequence: Int) -> ChatGPTResponseCompletion.FailureReceipt? {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == generation,
+              Self.responseCompletionURLAllowed(view.url), let lease = entry.responseCompletion,
+              let receipt = lease.failureReceipt(view: ObjectIdentifier(view), ownerToken: ownerToken,
+                generation: generation, sequence: sequence) else { return nil }
+        if view.url?.path.hasPrefix("/c/local-chatgpt") != true,
+           let currentConversation = ChatGPTTemporaryConversationRoutes.id(from: view.url),
+           currentConversation.uuidString.lowercased() != receipt.conversationID {
+            revokeResponseCompletion(entry); return nil
+        }
+        return receipt
+    }
+
     func revokeChatGPTResponseCompletion(tabID: UUID, ownerToken: String) {
         guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
         revokeResponseCompletion(entry)
@@ -1078,8 +1094,13 @@ final class EmbeddedBrowserSession {
         guard lease.isCurrent(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
             generation: entry.tab.documentGeneration, sequence: lease.sequence) else { return }
         if lease.receive(message.body) {
-            let state = lease.invalidated ? "invalidated" : "terminal"
+            let failure = lease.failureReceipt(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
+                generation: entry.tab.documentGeneration, sequence: lease.sequence)
+            let state = lease.invalidated ? "invalidated" : failure == nil ? "terminal" : "terminal_failure"
             Self.inferencePrewarmLog.notice("completionSignal version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) state=\(state, privacy: .public)")
+            if let failure {
+                Self.inferencePrewarmLog.notice("completionFailure version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(failure.reason.rawValue, privacy: .public) calls=\(failure.calls) assistantMessages=\(failure.assistantMessages) messageTerminalCount=\(failure.messageTerminalCount) mainTerminalCount=\(failure.mainTerminalCount)")
+            }
             entry.modelChanges?.signal()
         }
     }

@@ -105,7 +105,7 @@ final class OpenResponsesAppServerTests: XCTestCase {
             XCTAssertEqual(receipt.sendCount, scenario.responseCount,
                            "Failures must not cause native-client or app-level inference replay")
             if scenario.isFailure {
-                XCTAssertEqual(audit.status, .waiting)
+                XCTAssertEqual(audit.status, .failed)
                 XCTAssertFalse(audit.errors.isEmpty)
                 XCTAssertTrue(audit.errors.joined().contains(scenario == .usageLimit ? "website_usage_limit" : "malformed_website_reply"),
                               "The actual HTTP client's terminal error must preserve the structured failure code")
@@ -214,7 +214,7 @@ private final class EngineEventAudit {
         case .taskStatusChanged(let id, let value) where id == taskID:
             status = value
             if value == .running { began = true }
-            if began && (value == .completed || value == .waiting) { terminal = true }
+            if began && (value == .completed || value == .waiting || value == .failed) { terminal = true }
         case .timelineEntryAppended(let id, let entry) where id == taskID:
             if entry.kind == .assistant { assistant.append(entry) }
             if entry.kind == .system, entry.title == "Agent error" { errors.append(entry.body) }

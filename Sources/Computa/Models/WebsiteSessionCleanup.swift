@@ -150,8 +150,13 @@ struct WebsiteSessionCleanupStore: Sendable {
 
     private var transactionsDirectory: URL { directory.appendingPathComponent("transactions", isDirectory: true) }
     private var archiveDirectory: URL { directory.appendingPathComponent("legacy-archive", isDirectory: true) }
+    private var retention: WebsiteJournalRetentionStore { WebsiteJournalRetentionStore(cleanupDirectory: directory) }
 
     func save(_ receipt: WebsiteSessionCleanupReceipt, timing: SaveTimingSink? = nil) -> Bool {
+        (try? retention.withWriterLock { saveUnlocked(receipt, timing: timing) }) ?? false
+    }
+
+    private func saveUnlocked(_ receipt: WebsiteSessionCleanupReceipt, timing: SaveTimingSink? = nil) -> Bool {
         guard receipt.isValid, receipt.receiptSaved else { return false }
         if receipt.isJournalLinked, !saveInferenceObservation(receipt, timing: timing) { return false }
         let file = summaryFile(receipt.taskID)
@@ -185,7 +190,7 @@ struct WebsiteSessionCleanupStore: Sendable {
             for row in removed {
                 if row.isJournalLinked {
                     guard let turnID = row.turnID,
-                          try transactionRecords(for: row.taskID, turnID: turnID).contains(row) else { return false }
+                          try transactionRecords(for: row.taskID, turnID: turnID, validation: .init()).contains(row) else { return false }
                 } else if !saveArchivedLegacy(row) { return false }
             }
             try write(data, to: file, timing: timing)
@@ -197,7 +202,7 @@ struct WebsiteSessionCleanupStore: Sendable {
     /// A conflict, malformed existing proof or exceeded finite budget fails.
     func saveTransaction(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
         guard receipt.isTransactionLinked else { return false }
-        return saveInferenceObservation(receipt)
+        return (try? retention.withWriterLock { saveInferenceObservation(receipt) }) ?? false
     }
 
     private func saveInferenceObservation(_ receipt: WebsiteSessionCleanupReceipt, timing: SaveTimingSink? = nil) -> Bool {
@@ -207,6 +212,11 @@ struct WebsiteSessionCleanupStore: Sendable {
         let taskDirectory = transactionsDirectory.appendingPathComponent(receipt.taskID, isDirectory: true)
         let file = taskDirectory.appendingPathComponent(turnID + ".jsonl")
         do {
+            guard try !retention.isPending(taskID: receipt.taskID) else { return false }
+            if try retention.validateCleanupIdentity(receipt) { return true }
+            // An archived native turn is immutable. A new turn in this chat
+            // can create a fresh live segment without rewriting old evidence.
+            guard try retention.archivedBytes(store: "cleanup", taskID: receipt.taskID, turnID: turnID) == nil else { return false }
             try prepareDirectory(directory); try prepareDirectory(transactionsDirectory)
             let inventory = try transactionInventory(timing: timing)
             let taskExists = inventory.tasks.contains(receipt.taskID)
@@ -251,7 +261,9 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     func transactionRecords(for taskID: String, turnID: String) throws -> [WebsiteSessionCleanupReceipt] {
-        try transactionRecords(for: taskID, turnID: turnID, validation: WebsiteSessionCleanupReceipt.ValidationContext())
+        try retention.withWriterLock {
+            try transactionRecords(for: taskID, turnID: turnID, validation: WebsiteSessionCleanupReceipt.ValidationContext())
+        }
     }
 
     private func transactionRecords(for taskID: String, turnID: String,
@@ -260,9 +272,15 @@ struct WebsiteSessionCleanupStore: Sendable {
         guard !isLink(directory), !isLink(transactionsDirectory) else { throw corrupt() }
         let taskDirectory = transactionsDirectory.appendingPathComponent(taskID, isDirectory: true)
         guard !isLink(taskDirectory) else { throw corrupt() }
-        return try records(taskDirectory.appendingPathComponent(turnID + ".jsonl"), taskID: taskID, turnID: turnID,
+        let active = try records(taskDirectory.appendingPathComponent(turnID + ".jsonl"), taskID: taskID, turnID: turnID,
             maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
             requireTransactions: true, validation: validation, timing: timing)
+        guard let archived = try retention.archivedBytes(store: "cleanup", taskID: taskID, turnID: turnID) else { return active }
+        let historic = try decodeRecords(archived, taskID: taskID, turnID: turnID,
+            maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
+            requireTransactions: true, validation: validation)
+        guard active.isEmpty || active == historic else { throw corrupt() }
+        return historic
     }
 
     func archivedLegacyRecords(for taskID: String) throws -> [WebsiteSessionCleanupReceipt] {
@@ -274,25 +292,45 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     func latest() -> [WebsiteSessionCleanupReceipt] {
+        (try? retention.withWriterLock { latestUnlocked() }) ?? []
+    }
+
+    private func latestUnlocked() -> [WebsiteSessionCleanupReceipt] {
         guard !isLink(directory), let files = try? summaryFiles(), files.count <= limits.summaryTasks,
               let inventory = try? transactionInventory() else { return [] }
-        let taskIDs = Set(files.map { $0.deletingPathExtension().lastPathComponent }).union(inventory.tasks)
+        guard let archived = try? retention.latestArchived() else { return [] }
+        let historic = Dictionary(uniqueKeysWithValues: archived.map { ($0.taskID, $0) })
+        let taskIDs = Set(files.map { $0.deletingPathExtension().lastPathComponent }).union(inventory.tasks).union(historic.keys)
         return taskIDs.compactMap { taskID -> WebsiteSessionCleanupReceipt? in
             do {
                 let summary = try records(summaryFile(taskID), taskID: taskID, maximumRecords: limits.summaryRecords, maximumBytes: limits.summaryBytes)
                 var journal: [WebsiteSessionCleanupReceipt] = []
                 for file in inventory.files where file.deletingLastPathComponent().lastPathComponent == taskID {
-                    journal += try transactionRecords(for: taskID, turnID: file.deletingPathExtension().lastPathComponent)
+                    journal += try transactionRecords(for: taskID, turnID: file.deletingPathExtension().lastPathComponent, validation: .init())
+                }
+                if let old = historic[taskID] { journal.append(old) }
+                for prior in summary where prior.outcome == .unconfirmed && prior.isTransactionLinked {
+                    if let turnID = prior.turnID, !journal.contains(where: { $0.inferenceID == prior.inferenceID && $0.outcome == .closed }) {
+                        journal += try transactionRecords(for: taskID, turnID: turnID, validation: .init())
+                    }
                 }
                 // Empty-current-state and another transaction's closure cannot
                 // erase an unresolved causal cleanup observation.
-                let closed = Set(journal.filter { $0.outcome == .closed }.compactMap(\.inferenceID))
-                if let unresolved = journal.filter({ $0.outcome == .unconfirmed && !closed.contains($0.inferenceID!) })
+                var closed: [String: (String, Int)] = [:]
+                for (index, row) in journal.enumerated() where row.outcome == .closed {
+                    if let inference = row.inferenceID {
+                        let candidate = (row.timestamp, index)
+                        if closed[inference].map({ $0 < candidate }) ?? true { closed[inference] = candidate }
+                    }
+                }
+                if let unresolved = journal.enumerated().filter({ index, row in
+                    row.outcome == .unconfirmed && (closed[row.inferenceID!].map { $0 < (row.timestamp, index) } ?? true)
+                }).map(\.element)
                     .max(by: { ($0.timestamp, $0.attemptID) < ($1.timestamp, $1.attemptID) }) { return unresolved }
                 let latestJournal = journal.max { ($0.timestamp, $0.attemptID) < ($1.timestamp, $1.attemptID) }
                 if let last = summary.last {
                     if last.outcome == .unconfirmed, let inferenceID = last.inferenceID,
-                       let closure = journal.last(where: { $0.inferenceID == inferenceID && $0.outcome == .closed }) { return closure }
+                       let closure = journal.last(where: { $0.inferenceID == inferenceID && $0.outcome == .closed && $0.timestamp >= last.timestamp }) { return closure }
                     if let latestJournal, latestJournal.timestamp > last.timestamp { return latestJournal }
                     return last
                 }
@@ -416,6 +454,12 @@ struct WebsiteSessionCleanupStore: Sendable {
         guard let size = try regularFileSize(file) else { return [] }
         guard size <= maximumBytes else { throw corrupt() }
         let data = try Data(contentsOf: file)
+        return try decodeRecords(data, taskID: taskID, turnID: turnID, maximumRecords: maximumRecords,
+            maximumBytes: maximumBytes, requireTransactions: requireTransactions, validation: suppliedValidation)
+    }
+
+    private func decodeRecords(_ data: Data, taskID: String, turnID: String?, maximumRecords: Int, maximumBytes: Int,
+                               requireTransactions: Bool, validation suppliedValidation: WebsiteSessionCleanupReceipt.ValidationContext?) throws -> [WebsiteSessionCleanupReceipt] {
         guard !data.isEmpty, data.count <= maximumBytes, data.last == 0x0A else { throw corrupt() }
         let lines = data.dropLast().split(separator: 0x0A, omittingEmptySubsequences: false)
         guard lines.count <= maximumRecords else { throw corrupt() }

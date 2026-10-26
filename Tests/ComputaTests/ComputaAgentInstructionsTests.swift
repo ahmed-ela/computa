@@ -35,6 +35,25 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(ComputaAgentInstructions.runtimeInteractionPolicy().contains(ComputaAgentInstructions.compactionPrompt))
     }
 
+    func testChatGPTRelayOnlyGuidanceAppearsOnceInFullAndCompactNativeContracts() throws {
+        let guidance = ComputaAgentInstructions.webRelayOnlyResponse
+        XCTAssertTrue(guidance.contains("email composer"))
+        XCTAssertTrue(guidance.contains("writing cards, canvas, apps or connectors"))
+        XCTAssertTrue(guidance.contains("message.text, not a native website card"))
+        XCTAssertTrue(guidance.contains("currently offered Computa tool_calls"))
+        for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
+            let functions = ["functions.browser_open": "browser_open"]
+            let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: functions,
+                includedInstructionText: included, compactNativeContext: true)
+            XCTAssertEqual(contract.components(separatedBy: guidance).count, 2)
+            let other = ComputaAgentInstructions.webInferenceContract(offeredFunctions: functions,
+                includedInstructionText: included, compactNativeContext: false)
+            XCTAssertFalse(other.contains(guidance))
+        }
+        let noTools = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:], compactNativeContext: true)
+        XCTAssertEqual(noTools.components(separatedBy: guidance).count, 2)
+    }
+
     func testWebsiteResponseFormatChangesOnlyPresentationInstructions() {
         let fencedInstructions = """
         Return exactly one fenced JSON code block: three backticks, json, newline;

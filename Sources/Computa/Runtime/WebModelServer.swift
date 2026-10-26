@@ -238,6 +238,7 @@ actor WebModelServer {
     private var readinessTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var evidenceDirectory: URL?
+    private var journalTaskLimit = 256
     private let rejectedReplyDirectory: URL?
     private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
@@ -272,6 +273,15 @@ actor WebModelServer {
         guard unresolvedStartAttempts[task] == nil else { throw Failure.startOwnershipUnconfirmed }
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
+        do {
+            var retention = WebsiteJournalRetentionStore(cleanupDirectory: cleanupReceiptStore!.directory)
+            retention.limits.activeTasks = journalTaskLimit
+            let protected = Set(active.keys).union(sessions.keys).union(pendingClosedTransactions.keys)
+                .union(preparedInferenceContexts.keys).union(inferenceContexts.keys).union(contextWaiters.keys)
+                .union(cleanupTasks.keys).union(unresolvedStartAttempts.keys).union(unresolvedStartReceipts.keys)
+                .union(yieldedTurns.keys).union(closedTurns.keys).union(retiringTaskIDs)
+            try retention.admit(taskID: task, evidenceDirectory: evidenceDirectory!, protectedTaskIDs: protected)
+        } catch { throw Failure.persistenceRequired }
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
             runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance, isNewThread: isNewThread)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
@@ -511,6 +521,14 @@ actor WebModelServer {
     func setTimeoutsForTesting(readiness: Duration, response: Duration) {
         readinessTimeout = max(.milliseconds(1), min(.seconds(45), readiness))
         responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
+    }
+
+    func setJournalTaskLimitForTesting(_ value: Int) {
+        journalTaskLimit = max(1, min(256, value))
+        if let store = cleanupReceiptStore {
+            var limits = store.limits; limits.transactionTasks = journalTaskLimit
+            cleanupReceiptStore = WebsiteSessionCleanupStore(directory: store.directory, limits: limits)
+        }
     }
 
     func setBeforeListenerStartForTesting(_ value: (@Sendable () async -> Void)?) {
@@ -1602,7 +1620,7 @@ actor WebModelServer {
         }
         let tasks = try FileManager.default.contentsOfDirectory(at: directory,
             includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey])
-        guard tasks.count <= 256 else { throw Failure.persistenceRequired }
+        guard tasks.count <= journalTaskLimit else { throw Failure.persistenceRequired }
         var fileCount = 0, totalBytes = 0, currentBytes = 0
         var taskPresent = false
         let taskDirectory = directory.appendingPathComponent(taskID, isDirectory: true)
@@ -1631,7 +1649,7 @@ actor WebModelServer {
         guard fileCount <= 16_384, totalBytes <= 134_217_728,
               FileManager.default.fileExists(atPath: target.path) || fileCount < 16_384 else { throw Failure.persistenceRequired }
         if !taskPresent {
-            guard tasks.count < 256 else { throw Failure.persistenceRequired }
+            guard tasks.count < journalTaskLimit else { throw Failure.persistenceRequired }
             try FileManager.default.createDirectory(at: taskDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         }
         // Previous flat v1 files remain untouched. All new transaction evidence
@@ -1640,6 +1658,18 @@ actor WebModelServer {
     }
 
     private func appendEvidence(_ record: [String: Any], taskID: String) throws {
+        guard let cleanupReceiptStore else { throw Failure.persistenceRequired }
+        let retention = WebsiteJournalRetentionStore(cleanupDirectory: cleanupReceiptStore.directory)
+        do {
+            try retention.withWriterLock {
+                guard let turnID = record["turnID"] as? String, try !retention.isPending(taskID: taskID),
+                      try retention.archivedBytes(store: "evidence", taskID: taskID, turnID: turnID) == nil else { throw Failure.persistenceRequired }
+                try appendEvidenceUnlocked(record, taskID: taskID)
+            }
+        } catch { throw Failure.persistenceRequired }
+    }
+
+    private func appendEvidenceUnlocked(_ record: [String: Any], taskID: String) throws {
         guard let turnID = record["turnID"] as? String, let inferenceID = record["inferenceID"] as? String,
               let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]),
               encoded.count <= 4_096 else { throw Failure.persistenceRequired }
@@ -1873,6 +1903,7 @@ actor WebModelServer {
             case .unsupportedParameter(let param): return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_parameter", param: param)
             case .invalidToolChoice: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_tool_choice", param: "tool_choice")
             case .rejectedToolChoice: return .init(status: "500 Internal Server Error", type: "model_error", code: "tool_choice_violation", param: "tool_choice")
+            case .unsupportedWebsiteResponse: return .init(status: "500 Internal Server Error", type: "model_error", code: "unsupported_website_response")
             case .parallelToolCallsUnsupported: return .init(status: "500 Internal Server Error", type: "model_error", code: "parallel_tool_calls_violation", param: "parallel_tool_calls")
             case .toolCallLimitExceeded: return .init(status: "500 Internal Server Error", type: "model_error", code: "max_tool_calls_violation", param: "max_tool_calls")
             case .missingModel: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_model", param: "model")

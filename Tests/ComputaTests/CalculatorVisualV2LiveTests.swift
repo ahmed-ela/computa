@@ -455,6 +455,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
                 throw Failure(message: "The Calculator task disappeared.")
             }
             if task.status == .completed { return task }
+            if task.status == .failed { throw Failure(message: "The Calculator turn failed. \(diagnostics(state))") }
             if task.status == .waiting,
                task.entries.contains(where: {
                    $0.kind == .system && ["Agent error", "Prompt was not delivered"].contains($0.title)

@@ -15,7 +15,7 @@ final class ChatGPTResponseCompletion {
         case routeChanged = "route_changed", wrapperChanged = "wrapper_changed"
         case inputShape = "input_shape", inputHash = "input_hash", ownerConflict = "owner_conflict"
         case parentChanged = "parent_changed", parentLimit = "parent_limit", ancestryMissing = "ancestry_missing"
-        case finalStatus = "final_status", finalChanged = "final_changed", terminalOrder = "terminal_order"
+        case finalStatus = "final_status", finalChanged = "final_changed", terminalOrder = "terminal_order", terminalOpaque = "terminal_opaque"
         case error, sendChanged = "send_changed", expired, observerException = "observer_exception"
     }
 
@@ -49,6 +49,20 @@ final class ChatGPTResponseCompletion {
         }
     }
 
+    enum StreamFailureReason: String, Equatable { case emptyStream = "empty_stream", providerError = "provider_error" }
+
+    struct FailureReceipt: Equatable {
+        let identity: UUID
+        let revision: UInt64
+        let inputMessageID: String
+        let conversationID: String
+        let reason: StreamFailureReason
+        let calls: Int
+        let assistantMessages: Int
+        let messageTerminalCount: Int
+        let mainTerminalCount: Int
+    }
+
     let correlationID: UUID
     let view: ObjectIdentifier
     let ownerToken: String
@@ -60,6 +74,7 @@ final class ChatGPTResponseCompletion {
     private(set) var revision: UInt64 = 0
     private(set) var invalidated = false
     private var terminal: Receipt?
+    private var terminalFailure: FailureReceipt?
 
     init?(view: ObjectIdentifier, ownerToken: String, generation: UUID, sequence: Int,
           inputSHA256: String, inputUTF8Bytes: Int, deadline: ContinuousClock.Instant,
@@ -82,6 +97,12 @@ final class ChatGPTResponseCompletion {
                  now: ContinuousClock.Instant = .now) -> Receipt? {
         guard isCurrent(view: view, ownerToken: ownerToken, generation: generation, sequence: sequence, now: now) else { return nil }
         return terminal
+    }
+
+    func failureReceipt(view: ObjectIdentifier, ownerToken: String, generation: UUID, sequence: Int,
+                        now: ContinuousClock.Instant = .now) -> FailureReceipt? {
+        guard isCurrent(view: view, ownerToken: ownerToken, generation: generation, sequence: sequence, now: now) else { return nil }
+        return terminalFailure
     }
 
     /// The first observed rejection may concern an unclaimed decoder, rather
@@ -116,7 +137,32 @@ final class ChatGPTResponseCompletion {
             guard Set(body.keys) == identityKeys else { return invalidate() }
             return invalidate()
         }
+        if kind == "terminal_failure" {
+            guard Set(body.keys) == identityKeys.union(["inputMessageID", "conversationID", "reason", "calls",
+                "assistantMessages", "messageTerminalCount", "mainTerminalCount"]), terminal == nil,
+                  let input = Self.canonicalUUID(body["inputMessageID"]), let conversation = Self.canonicalUUID(body["conversationID"]),
+                  let rawReason = body["reason"] as? String, let reason = StreamFailureReason(rawValue: rawReason),
+                  let calls = Self.exactInteger(body["calls"]), (3...256).contains(calls),
+                  calls >= (reason == .providerError ? 4 : 3),
+                  let assistants = Self.exactInteger(body["assistantMessages"]),
+                  (0...calls - (reason == .providerError ? 4 : 3)).contains(assistants),
+                  Self.exactInteger(body["messageTerminalCount"]) == 1,
+                  let main = Self.exactInteger(body["mainTerminalCount"]), main == 1 else { return invalidate() }
+            if let terminalFailure {
+                guard terminalFailure.inputMessageID == input.uuidString.lowercased(),
+                      terminalFailure.conversationID == conversation.uuidString.lowercased(), terminalFailure.reason == reason,
+                      terminalFailure.calls == calls, terminalFailure.assistantMessages == assistants,
+                      terminalFailure.messageTerminalCount == 1, terminalFailure.mainTerminalCount == main else { return invalidate() }
+                return false
+            }
+            revision += 1
+            terminalFailure = FailureReceipt(identity: UUID(), revision: revision, inputMessageID: input.uuidString.lowercased(),
+                conversationID: conversation.uuidString.lowercased(), reason: reason, calls: calls,
+                assistantMessages: assistants, messageTerminalCount: 1, mainTerminalCount: main)
+            return true
+        }
         guard kind == "terminal", Set(body.keys) == identityKeys.union(["inputMessageID", "conversationID", "messageID", "text"]),
+              terminalFailure == nil,
               let inputMessageID = Self.canonicalUUID(body["inputMessageID"]),
               let conversationID = Self.canonicalUUID(body["conversationID"]),
               let messageID = Self.canonicalUUID(body["messageID"]),
@@ -144,7 +190,7 @@ final class ChatGPTResponseCompletion {
 
     private func invalidate() -> Bool {
         guard !invalidated else { return false }
-        invalidated = true; terminal = nil; revision += 1
+        invalidated = true; terminal = nil; terminalFailure = nil; revision += 1
         return true
     }
 

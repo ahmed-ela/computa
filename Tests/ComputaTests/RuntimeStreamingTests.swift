@@ -175,7 +175,7 @@ final class RuntimeStreamingTests: XCTestCase {
             let reasoningDiscardsBeforeError = harness.audit.reasoningDiscardCount
             try harness.release("release-error")
             try await self.waitFor("terminal error fence") { harness.audit.measuredTokens == 1_001 }
-            XCTAssertEqual(harness.audit.status, .waiting)
+            XCTAssertEqual(harness.audit.status, .failed)
             XCTAssertTrue(harness.audit.systemTitles.contains("Agent error"))
             XCTAssertGreaterThan(harness.audit.discardCount, discardsBeforeError)
             XCTAssertEqual(harness.audit.deltas.map(\.text), ["Unfinished text"])
@@ -374,8 +374,9 @@ final class RuntimeStreamingTests: XCTestCase {
         }
     }
 
-    func testTerminalCommandFailureCleansOwnedSessionBeforePublishingWaiting() async throws {
+    func testTerminalCommandFailureCleansOwnedSessionBeforePublishingItsOutcome() async throws {
         for scenario in ["command-terminal-error", "command-terminal-failed", "command-terminal-interrupted"] {
+            let expectedStatus: TaskStatus = scenario == "command-terminal-interrupted" ? .waiting : .failed
             try await withHarness(scenario: scenario) { harness in
                 try await harness.submit()
                 try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
@@ -384,7 +385,7 @@ final class RuntimeStreamingTests: XCTestCase {
                 try harness.release("release-command-failure")
                 try await self.waitFor("terminal error processed") { harness.audit.measuredTokens == 1_001 }
                 try await self.waitFor("cleanup admission or premature idle") {
-                    harness.markerExists("command-cleanup-requested") || harness.audit.status == .waiting
+                    harness.markerExists("command-cleanup-requested") || harness.audit.status == expectedStatus
                 }
                 XCTAssertEqual(harness.audit.status, .running, "A terminal error must await owned command cleanup before exposing an idle task")
                 let requested = harness.markerExists("command-cleanup-requested")
@@ -397,7 +398,7 @@ final class RuntimeStreamingTests: XCTestCase {
                 try harness.release("release-command-cleanup")
                 if requested {
                     try await self.waitFor("terminal command cleanup") { harness.audit.systemTitles.contains("Command cleanup") }
-                    try await self.waitFor("waiting after command cleanup") { harness.audit.status == .waiting }
+                    try await self.waitFor("terminal outcome after command cleanup") { harness.audit.status == expectedStatus }
                     XCTAssertTrue(harness.markerExists("terminated-4321"))
                     XCTAssertFalse(harness.markerExists("terminated-4322"))
                     XCTAssertFalse(harness.markerExists("terminated-9999"))
@@ -429,7 +430,7 @@ final class RuntimeStreamingTests: XCTestCase {
             XCTAssertFalse(try harness.trace().messages.contains { $0.method == "thread/compact/start" },
                 "Rejected maintenance cannot replace the failed turn's cleanup identity")
             try harness.release("release-command-cleanup")
-            try await self.waitFor("cleanup completion") { harness.audit.status == .waiting }
+            try await self.waitFor("cleanup completion") { harness.audit.status == .failed }
         }
     }
 
@@ -444,7 +445,7 @@ final class RuntimeStreamingTests: XCTestCase {
             try await self.waitFor("failed-turn inventory held") { harness.markerExists("command-cleanup-requested") }
             XCTAssertEqual(harness.audit.status, .running)
             try harness.release("release-command-cleanup")
-            try await self.waitFor("failed-turn cleanup done") { harness.audit.status == .waiting }
+            try await self.waitFor("failed-turn cleanup done") { harness.audit.status == .failed }
             XCTAssertTrue(harness.markerExists("terminated-4322"))
             XCTAssertFalse(harness.markerExists("terminated-4321"), "The failed turn cannot terminate a successful earlier turn's background session")
             XCTAssertFalse(harness.markerExists("terminated-9999"))
@@ -465,7 +466,7 @@ final class RuntimeStreamingTests: XCTestCase {
                 try harness.release("release-command-failure")
                 try await self.waitFor("failed-turn cleanup held") { harness.markerExists("command-cleanup-requested") }
                 try harness.release("release-command-cleanup")
-                try await self.waitFor("failed-turn cleanup complete") { harness.audit.status == .waiting }
+                try await self.waitFor("failed-turn cleanup complete") { harness.audit.status == .failed }
                 XCTAssertEqual(harness.audit.commands.filter { $0.id == "command-item" }.count, earlierUpdates,
                                "A later terminal turn must not replace the earlier command's row")
                 let earlier = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
@@ -480,13 +481,13 @@ final class RuntimeStreamingTests: XCTestCase {
                 let completed = try XCTUnwrap(harness.audit.commands.last { $0.id == "command-item" })
                 XCTAssertTrue(completed.toolEvent?.output?.contains("earlier authoritative completion") == true)
                 XCTAssertTrue(completed.toolEvent?.output?.contains("Exit code: 0") == true)
-                XCTAssertEqual(harness.audit.status, .waiting)
+                XCTAssertEqual(harness.audit.status, .failed)
                 XCTAssertEqual(Set(harness.audit.commands.map(\.id)), ["command-item", "command-item-two"])
             }
         }
     }
 
-    func testUnconfirmedFailedTurnCommandCleanupIsReportedBeforeWaitingAndCanRetryStop() async throws {
+    func testUnconfirmedFailedTurnCommandCleanupPreservesFailedAndCanRetryStop() async throws {
         try await withHarness(scenario: "command-terminal-refused") { harness in
             try await harness.submit()
             try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
@@ -494,7 +495,7 @@ final class RuntimeStreamingTests: XCTestCase {
             try await self.waitFor("held cleanup") { harness.markerExists("command-cleanup-requested") }
             XCTAssertEqual(harness.audit.status, .running)
             try harness.release("release-command-cleanup")
-            try await self.waitFor("unconfirmed cleanup") { harness.audit.status == .waiting }
+            try await self.waitFor("unconfirmed cleanup") { harness.audit.status == .failed }
             XCTAssertTrue(harness.audit.systemTitles.contains("Command cleanup unconfirmed"))
             XCTAssertFalse(harness.audit.systemTitles.contains("Command cleanup"))
             XCTAssertFalse(harness.markerExists("terminated-4321"))

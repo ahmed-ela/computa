@@ -8,16 +8,18 @@
     || config.handlerName !== 'computaChatGPTCompletion'
     || Object.prototype.hasOwnProperty.call(window, config.key)) return;
   const apply = Reflect.apply, descriptor = Object.getOwnPropertyDescriptor, define = Object.defineProperty;
-  const prototypeOf = Object.getPrototypeOf, functionSource = Function.prototype.toString;
+  const prototypeOf = Object.getPrototypeOf, ownKeys = Reflect.ownKeys, functionSource = Function.prototype.toString;
   const unknown = Symbol('unknown'), initialDocument = document;
   const now = performance.now.bind(performance), encoder = new TextEncoder();
+  const resourceEntries = typeof performance.getEntriesByType === 'function'
+    ? performance.getEntriesByType.bind(performance) : null;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
   const diagnosticReasons = Object.freeze(['runtime_unsupported', 'call_limit', 'decoder_limit', 'route_changed',
     'wrapper_changed', 'input_shape', 'input_hash', 'owner_conflict', 'parent_changed', 'parent_limit', 'ancestry_missing',
-    'final_status', 'final_changed', 'terminal_order', 'error', 'send_changed', 'expired', 'observer_exception']);
+    'final_status', 'final_changed', 'terminal_order', 'terminal_opaque', 'error', 'send_changed', 'expired', 'observer_exception']);
   let lease = null;
   function data(object, key) {
     if (object == null) return undefined;
@@ -28,6 +30,52 @@
       const prototype = prototypeOf(object);
       return prototype === Object.prototype || prototype === null ? undefined : unknown;
     } catch { return unknown; }
+  }
+  function observedRuntimeURL() {
+    // A fetch observation is not proof of ESM evaluation. Import only the one
+    // completed runtime script observed in this document; never fetch a pinned
+    // predecessor or try candidate URLs. ESM reuses an evaluated exact URL.
+    if (!resourceEntries) return null;
+    const entries = resourceEntries('resource');
+    if (!Array.isArray(entries) || entries.length > 4096) return null;
+    const candidates = new Set();
+    for (const entry of entries) {
+      if (!entry || entry.initiatorType !== 'script' || typeof entry.name !== 'string'
+        || !/^https:\/\/chatgpt\.com\/cdn\/assets\/633146\.[a-f0-9]{10}\.js$/.test(entry.name)
+        || !Number.isFinite(entry.startTime) || entry.startTime < 0
+        || !Number.isFinite(entry.responseEnd) || entry.responseEnd <= 0
+        || entry.responseEnd < entry.startTime || entry.responseEnd > now()) continue;
+      if (entry.responseStatus !== undefined && entry.responseStatus !== 0 && entry.responseStatus !== 200) continue;
+      candidates.add(entry.name);
+    }
+    return candidates.size === 1 ? [...candidates][0] : null;
+  }
+  function initializedDecoder(runtime) {
+    // Website chunk/module IDs change independently. Inspect bounded initialized
+    // cache entries only: no require, module factory, or unapproved export getter.
+    const require = data(runtime, '__webpack_require__'), cache = data(require, 'c');
+    if (!cache || typeof cache !== 'object' || ![Object.prototype, null].includes(prototypeOf(cache))) throw unknown;
+    const keys = ownKeys(cache);
+    if (keys.length > 16384) throw unknown;
+    let found = null;
+    for (const key of keys) {
+      if (typeof key !== 'string' || key.length > 64) continue;
+      const cached = data(cache, key), exports = data(cached, 'exports');
+      const exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
+      if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
+        || exported.enumerable !== true || exported.configurable !== false
+        || apply(functionSource, exported.get, []) !== '()=>O') continue;
+      const Decoder = apply(exported.get, exports, []), target = data(Decoder, 'prototype');
+      const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
+      if (!original || typeof original.value !== 'function' || original.writable !== true
+        || original.configurable !== true || original.enumerable !== false
+        || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
+        || apply(functionSource, original.value, []) !== completionSource) continue;
+      if (found && found.target !== target) throw unknown;
+      found = { cache, key, cached, exports, exported, target, original };
+    }
+    if (!found) throw unknown;
+    return found;
   }
   const id = value => typeof value === 'string' && uuid.test(value) ? value : null;
   function keys(object, expected) {
@@ -120,12 +168,27 @@
   }
   function publish(current, candidate) {
     if (!live(current) || current.owner !== candidate || candidate.rejected || current.sends !== 1
-      || candidate.published || !candidate.final || !candidate.terminal
+      || candidate.published || candidate.failurePublished || candidate.completionDisqualified || !candidate.final || !candidate.terminal
       || candidate.terminal <= candidate.final.ordinal) return;
     if (!ancestry(candidate, candidate.final)) { diagnostic(current, 'ancestry_missing'); return; }
     candidate.published = true;
     post({ ...identity(current, 'terminal'), inputMessageID: candidate.inputMessageID,
       conversationID: candidate.conversationID, messageID: candidate.final.id, text: candidate.final.text });
+  }
+  function publishFailure(current, candidate) {
+    if (!live(current) || current.owner !== candidate || candidate.rejected || current.sends !== 1
+      || candidate.published || candidate.failurePublished) return;
+    const ended = candidate.mainTerminal > 0 && candidate.messageTerminal > 0;
+    if (ended && candidate.opaqueAssistant) diagnostic(current, 'terminal_opaque');
+    const empty = ended && !candidate.final && candidate.nonemptyAssistants === 0 && !candidate.opaqueAssistant;
+    const failed = ended && candidate.providerErrorOrdinal > 0 && candidate.messageTerminal > candidate.providerErrorOrdinal
+      && !candidate.final && candidate.nonemptyAssistants === 0 && !candidate.opaqueAssistant;
+    if (!failed && !empty) return;
+    candidate.failurePublished = true;
+    post({ ...identity(current, 'terminal_failure'), inputMessageID: candidate.inputMessageID,
+      conversationID: candidate.conversationID, reason: failed ? 'provider_error' : 'empty_stream',
+      calls: candidate.ordinal, assistantMessages: candidate.assistantMessages,
+      messageTerminalCount: candidate.messageTerminal > 0 ? 1 : 0, mainTerminalCount: candidate.mainTerminal > 0 ? 1 : 0 });
   }
   function singleText(content, maxBytes) {
     if (data(content, 'content_type') !== 'text') return null;
@@ -141,22 +204,42 @@
     if (!candidate) {
       if (current.instances.size >= 4) { restore(current, true, 'decoder_limit'); return; }
       candidate = { parents: new Map(), ordinal: 0, rejected: false, inputSeen: false,
-        inputMessageID: null, conversationID: null, final: null, terminal: null, published: false };
+        inputMessageID: null, conversationID: null, final: null, terminal: null, published: false,
+        failurePublished: false, completionDisqualified: false, providerErrorOrdinal: 0, mainTerminal: 0, messageTerminal: 0,
+        assistantMessages: 0, nonemptyAssistants: 0, opaqueAssistant: false };
       current.instances.set(receiver, candidate);
     }
     const ordinal = ++candidate.ordinal, type = data(payload, 'type');
-    if (data(payload, 'error') != null || data(payload, 'error_code') != null
-      || ['error', 'message_error', 'conversation_error', 'cancelled', 'canceled'].includes(type)
-      || type === 'main_stream_complete' && data(payload, 'alternate_response_expected') !== false
-      || typeof type === 'string' && /_complete(?:d)?$/.test(type)
-        && !['main_stream_complete', 'message_stream_complete'].includes(type)) {
-      reject(current, candidate, 'error'); return;
-    }
     const conversationID = id(data(payload, 'conversation_id'));
     if (candidate.streamConversationID && conversationID && conversationID !== candidate.streamConversationID) {
       reject(current, candidate, 'owner_conflict'); return;
     }
     if (conversationID) candidate.streamConversationID = conversationID;
+    const providerError = data(payload, 'error'), errorCode = data(payload, 'error_code');
+    if (providerError !== unknown && providerError != null
+        && (typeof providerError === 'object' || typeof providerError === 'string' && providerError.length > 0)
+      || typeof errorCode === 'string' && errorCode.length > 0
+      || ['error', 'message_error', 'conversation_error'].includes(type)) {
+      // An error predating the input cannot be attributed to that input. An
+      // error after it is retained while the exact input digest is pending.
+      candidate.completionDisqualified = true;
+      // The website decoder may prioritize a valid message in an error-bearing
+      // envelope. Any such content excludes an empty/error-only conclusion.
+      if (data(payload, 'message') != null) candidate.opaqueAssistant = true;
+      if (candidate.published) { reject(current, candidate, 'error'); return; }
+      if (candidate.inputSeen) candidate.providerErrorOrdinal = ordinal;
+      diagnostic(current, 'error'); return;
+    }
+    if (['cancelled', 'canceled'].includes(type)
+      || type === 'main_stream_complete' && data(payload, 'alternate_response_expected') !== false
+      || typeof type === 'string' && /_complete(?:d)?$/.test(type)
+        && !['main_stream_complete', 'message_stream_complete'].includes(type)) {
+      reject(current, candidate, 'error'); return;
+    }
+    if (candidate.failurePublished) {
+      if (type === 'input_message' || data(payload, 'message') != null) reject(current, candidate, 'final_changed');
+      return;
+    }
     if (type === 'input_message') {
       if (candidate.inputSeen) { reject(current, candidate, 'input_shape'); return; }
       candidate.inputSeen = true;
@@ -175,7 +258,7 @@
         if (current.serverID && current.serverID !== conversationID) {
           restore(current, true, 'owner_conflict'); return;
         }
-        current.owner = candidate; publish(current, candidate);
+        current.owner = candidate; publishFailure(current, candidate); publish(current, candidate);
       }).catch(() => reject(current, candidate, 'observer_exception'));
     }
     const message = data(payload, 'message');
@@ -193,6 +276,12 @@
         candidate.parents.set(messageID, { role, parentID });
       }
       if (role === 'assistant') {
+        candidate.assistantMessages++;
+        const content = singleText(data(message, 'content'), 220000);
+        if (content === null || data(message, 'recipient') !== 'all'
+          || data(metadata, 'model_dil_v2') != null
+          || data(metadata, 'content_references') != null) candidate.opaqueAssistant = true;
+        if (content !== null && content.length > 0) candidate.nonemptyAssistants++;
         const status = data(message, 'status');
         const finishType = data(data(metadata, 'finish_details'), 'type');
         if (status !== 'in_progress' && status !== 'finished_successfully'
@@ -208,11 +297,19 @@
         if (success && !candidate.final) candidate.final = { id: messageID, parentID, text, ordinal };
       }
     }
+    if (type === 'main_stream_complete') {
+      if (!conversationID || !candidate.conversationID || conversationID !== candidate.conversationID) {
+        reject(current, candidate, 'owner_conflict'); return;
+      }
+      candidate.mainTerminal = ordinal;
+    }
     if (type === 'message_stream_complete') {
       if (!conversationID || !candidate.conversationID || conversationID !== candidate.conversationID
-        || !candidate.final || ordinal <= candidate.final.ordinal) { reject(current, candidate, 'terminal_order'); return; }
+        || candidate.final && ordinal <= candidate.final.ordinal) { reject(current, candidate, 'terminal_order'); return; }
+      candidate.messageTerminal = ordinal;
       candidate.terminal = ordinal;
     }
+    publishFailure(current, candidate);
     publish(current, candidate);
   }
   const api = Object.freeze({
@@ -231,21 +328,12 @@
         if (!route(current)) {
           bestEffort(() => diagnostic(current, now() >= current.deadline ? 'expired' : 'route_changed')); throw unknown;
         }
-        // This is an observed public runtime and an already-initialized cache.
-        // Importing it must never initialize dd or call a module factory.
-        const runtime = await import('https://chatgpt.com/cdn/assets/633146.fa01f470fd.js');
+        const runtimeURL = observedRuntimeURL();
+        if (!runtimeURL) throw unknown;
+        const runtime = await import(runtimeURL);
         if (!live(current)) return { armed: false };
-        const require = data(runtime, '__webpack_require__'), cached = data(data(require, 'c'), 'dd');
-        const exports = data(cached, 'exports'), exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
-        if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
-          || exported.enumerable !== true || exported.configurable !== false
-          || apply(functionSource, exported.get, []) !== '()=>O') throw unknown;
-        const Decoder = apply(exported.get, exports, []), target = data(Decoder, 'prototype');
-        const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
-        if (!original || typeof original.value !== 'function' || original.writable !== true
-          || original.configurable !== true || original.enumerable !== false
-          || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
-          || apply(functionSource, original.value, []) !== completionSource) throw unknown;
+        if (observedRuntimeURL() !== runtimeURL) throw unknown;
+        const found = initializedDecoder(runtime), { target, original } = found;
         const wrapper = function (...args) {
           let result;
           try { result = apply(original.value, this, args); }
@@ -253,7 +341,14 @@
           try { observe(current, this, result); } catch { restore(current, true, 'observer_exception'); }
           return result;
         };
-        if (!live(current) || descriptor(target, 'recordCompletion')?.value !== original.value) throw unknown;
+        const currentExport = descriptor(found.exports, 'c'), currentMethod = descriptor(target, 'recordCompletion');
+        if (!live(current) || observedRuntimeURL() !== runtimeURL
+          || data(found.cache, found.key) !== found.cached || data(found.cached, 'exports') !== found.exports
+          || !currentExport || currentExport.get !== found.exported.get || currentExport.set !== undefined
+          || currentExport.enumerable !== true || currentExport.configurable !== false
+          || data(apply(found.exported.get, found.exports, []), 'prototype') !== target
+          || !currentMethod || currentMethod.value !== original.value || currentMethod.writable !== true
+          || currentMethod.configurable !== true || currentMethod.enumerable !== false) throw unknown;
         define(target, 'recordCompletion', { ...original, value: wrapper });
         current.target = target; current.original = original; current.wrapper = wrapper;
         current.click = event => {

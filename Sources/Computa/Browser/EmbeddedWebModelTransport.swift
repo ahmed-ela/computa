@@ -199,6 +199,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
         case usageLimited(Provider), responseFailed(Provider), responseRenderingFailed
+        case responseStreamFailed(ChatGPTResponseCompletion.StreamFailureReason)
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
@@ -210,6 +211,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited: "website_usage_limit"
             case .responseFailed: "website_response_failed"
             case .responseRenderingFailed: "website_response_rendering_failed"
+            case .responseStreamFailed: "website_response_stream_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
             case .ownershipFailure: "website_ownership_unverified"
@@ -225,6 +227,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited: "wait_for_quota_reset"
             case .responseFailed: "inspect_website"
             case .responseRenderingFailed: "inspect_website"
+            case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
             case .ownershipFailure: "inspect_website"
@@ -268,6 +271,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .responseFailed(let provider): "\(provider.displayName)'s website reported that the response failed to load. Check its page in Computa's built-in browser before starting a new task. No prompt was replayed."
             case .responseRenderingFailed: "ChatGPT could not render its response. The failed response supplied no tool calls or final answer."
+            case .responseStreamFailed(let reason): reason == .emptyStream
+                ? "ChatGPT finished its response stream without an answer. No prompt was replayed and no tool calls were released."
+                : "ChatGPT reported an error and ended its response stream without an answer. No prompt was replayed and no tool calls were released."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
@@ -1753,6 +1759,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             ownerToken: session.token, generation: generation, sequence: session.sequence)
     }
 
+    private func terminalFailureReceipt(_ session: Session) -> ChatGPTResponseCompletion.FailureReceipt? {
+        // A candidate can request fresh proof while the post-Send body is still
+        // pending. Only the post-inspection branch below can accept a failure.
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              session.acknowledgedSendSequence == session.sequence, session.usesSubmissionOwnership,
+              session.currentSubmission?.sequence == session.sequence,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let generation = session.documentGeneration else { return nil }
+        return browser.chatGPTResponseFailureReceipt(tabID: session.tabID, view: session.view,
+            ownerToken: session.token, generation: generation, sequence: session.sequence)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -1773,6 +1791,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let observed: [String: Any]
         let readTimeoutCount = session.readTimeoutCount
         let terminalCandidate = terminalCompletionReceipt(session)
+        let failureCandidate = terminalFailureReceipt(session)
         let inspectsQuietCompletion = canInspectQuietChatGPTCompletion(session)
         let quietCandidateResponse = inspectsQuietCompletion ? session.response : nil
         let quietCandidateResponseCount = inspectsQuietCompletion ? session.observedResponseCount : nil
@@ -1780,7 +1799,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // The adapter's own waits remain bounded; allow queue time without
         // extending the inference's preparation or response deadline.
         do {
-            if inspectsQuietCompletion {
+            if failureCandidate != nil {
+                // A terminal stream observation can only abort after the same
+                // fresh model/product/submission proof used for ordinary output.
+                observed = try await page(session, action: "inspect",
+                    recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                    allowPendingChatGPTModelVerification: false,
+                    maximumWait: min(inspectionTimeout, deadline - .now))
+            } else if inspectsQuietCompletion {
                 session.responseProfile?.mark(.quietDeadlineReady)
                 session.responseProfile?.mark(.finalFullInspectStart)
                 defer { session.responseProfile?.mark(.finalFullInspectEnd) }
@@ -1933,6 +1959,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.completionCandidate = false
             guard observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
             guard observed["interrupted"] as? Bool != true else { throw Failure.responseInterrupted }
+            if let failureCandidate, failureCandidate == terminalFailureReceipt(session),
+               session.currentSubmissionVerified, !session.pendingSubmission,
+               session.confirmedUsers == session.sequence,
+               observed["modelVerificationPending"] == nil, observed["busy"] as? Bool == false,
+               count(observed, "userCount") == session.sequence,
+               (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
+               (observed["text"] as? String)?.isEmpty == true,
+               (try? validatedModelEvidence(observed, session: session)) != nil {
+                throw Failure.responseStreamFailed(failureCandidate.reason)
+            }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
                 guard session.submitted, session.firstUserFingerprint != nil, !session.pendingSubmission else {
                     throw Failure.ownershipFailure(.promotionFirstUser)

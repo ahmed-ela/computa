@@ -9,6 +9,8 @@ enum WebModelResponseCodec {
     struct Request: Sendable {
         let model: String
         let singleActionRelay: Bool
+        /// Provider-derived transport policy, never model-authored reply text.
+        let requiresEmbeddedEnvelope: Bool
         let stream: Bool
         let prompt: String
         let promptStatistics: WebsitePromptProjection.Statistics
@@ -102,6 +104,7 @@ enum WebModelResponseCodec {
         case promptTooLarge(actualBytes: Int, maximumBytes: Int)
         case emptyReply
         case malformedEnvelope
+        case unsupportedWebsiteResponse
         case unknownTool(String)
         case argumentsMustBeObject
         case customInputMustBeString
@@ -133,6 +136,7 @@ enum WebModelResponseCodec {
                 "The complete web model prompt is \(actual) bytes, exceeding the \(maximum)-byte limit. No context was truncated or submitted."
             case .emptyReply: "The website returned an empty model reply."
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
+            case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Computa cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
             case .unknownTool: "The website requested an unoffered tool. No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
@@ -251,7 +255,7 @@ enum WebModelResponseCodec {
             runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
-        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
+        return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
@@ -351,14 +355,19 @@ enum WebModelResponseCodec {
         return String(decoding: result, as: UTF8.self)
     }
 
-    /// Website prose is a final message, never an action. JSON-shaped output
-    /// and code fences must satisfy the complete envelope contract; do
-    /// not extract or repair a call hidden inside surrounding prose.
+    /// ChatGPT must use the complete envelope: native website cards can mix
+    /// controls and suggestions into rendered prose. Other providers retain
+    /// ordinary-text compatibility; prose never grants an action. Never extract
+    /// or repair a call hidden inside surrounding text.
     static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
            !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+            // This previously accepted prose is not a JSON format correction:
+            // a website-native action may have happened outside host history.
+            // Do not resend its request automatically.
+            guard !request.requiresEmbeddedEnvelope else { throw Failure.unsupportedWebsiteResponse }
             return try validated(.message(text), request: request)
         }
         return try parseReply(text, request: request, requireEnvelope: true)

@@ -1,0 +1,53 @@
+# ChatGPT empty-response investigation
+
+## Observed failures
+
+The installed 0.7.0 (270) app submitted and verified the complete prompt for
+the October 26 failed email task. ChatGPT became idle without exposing an
+assistant message or a recognized error. Computa waited until its 300-second
+response deadline. No local tool ran. The owned website session closed.
+The upstream cause of that particular empty response is not established:
+an adjacent WebKit HTTP 429 lacks an endpoint and is not causal evidence.
+
+Separate controlled, unsent `example.invalid` email drafts reproduced another
+failure: ChatGPT rendered a native email card. Computa's ordinary-prose
+compatibility path accepted the card's controls and suggestions as the final
+answer. These reproductions establish a response-format bug, but do not prove
+that the original empty response took that path.
+
+The completion observer also rejected the current website runtime because its
+asset/module identifiers had changed. The decoder method's verified source
+remained unchanged. This disabled the event shortcut and explains fallback use;
+it does not establish why ChatGPT produced no assistant message.
+
+A later fresh greeting failed before provider dispatch because both local
+transaction stores had reached their 256-task active limit. Finally, terminal
+provider errors were projected into the same `Waiting` state as interruptions.
+
+## Changes
+
+- Require the ChatGPT response envelope, including ordinary final messages.
+  Explicit relay instructions keep drafts in `message.text` and actions in
+  Computa's offered tools. Native card/prose output is rejected without an
+  automatic correction request or action replay.
+- Locate the one completed, observed current runtime resource and inspect its
+  bounded initialized module cache. Wrap only the uniquely verified decoder
+  method. Unsupported or ambiguous runtimes retain the normal fallback.
+- Recognize exact-prompt-owned terminal empty/error streams. A failure receipt
+  must pass fresh document, session, submission, model and empty-DOM checks.
+  An idle page, first HTTP error, missing event or diagnostic alone cannot end
+  a request. Late content revokes the empty-stream receipt. No request is replayed.
+- Display terminal errors as `Failed`, including restored history. User and
+  native safety interruptions retain their distinct waiting behavior.
+- Preserve closed journals in a durable SQLite archive before removing them
+  from the bounded active set. Recover interrupted retirement under the shared
+  writer lock, retain historical identity checks, and protect unresolved or
+  running tasks. Native chat history is retained.
+
+## Qualification boundaries
+
+Use synthetic greetings, unsent drafts, terminal markers and a local mailbox
+with an independently checked receipt. Never replay the failed real email as
+a software test. Record the installed artifact and each completed outcome;
+passing fixtures do not establish universal provider reliability. Validation
+and installed results are recorded in `EMBEDDED-PROVIDERS-QUALIFICATION.md`.

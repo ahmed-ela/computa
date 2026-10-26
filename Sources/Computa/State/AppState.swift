@@ -752,7 +752,8 @@ final class AppState {
               !isBusy(taskID: taskID), !interruptingTaskIDs.contains(taskID),
               !dispatchingQueueTaskIDs.contains(taskID),
               !queuedPrompts[taskID, default: []].contains(where: { $0.status == .sending }),
-              let task = tasks.first(where: { $0.id == taskID }), task.status == .waiting,
+              let task = tasks.first(where: { $0.id == taskID }),
+              task.status == .waiting || task.status == .failed,
               let lastUser = task.entries.lastIndex(where: { $0.kind == .user })
         else { return false }
         if let receipt = currentWebsiteSessionCleanupReceipt(taskID: taskID) {

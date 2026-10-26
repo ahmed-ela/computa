@@ -96,18 +96,23 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertEqual(queueText(state), ["Second"])
     }
 
-    func testWaitingPausesQueueUntilExplicitResume() async throws {
-        let (state, runtime) = fixture(running: true)
-        _ = await state.submitOrQueue(prompt: "Follow-up", toTaskID: taskID)
-        state.apply(.taskStatusChanged(taskID: taskID, status: .waiting))
-        await settleScheduledWork()
-        XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
-        let before = await runtime.submissions
-        XCTAssertTrue(before.isEmpty)
-        let resumed = await state.resumeQueue(taskID: taskID)
-        XCTAssertTrue(resumed)
-        try await waitForSubmissionCount(1, runtime: runtime)
-        XCTAssertTrue(queueText(state).isEmpty)
+    func testWaitingAndFailedPauseQueueUntilExplicitResume() async throws {
+        for status in [TaskStatus.waiting, .failed] {
+            let (state, runtime) = fixture(running: true)
+            _ = await state.submitOrQueue(prompt: "Follow-up", toTaskID: taskID)
+            state.apply(.taskStatusChanged(taskID: taskID, status: status))
+            await settleScheduledWork()
+            XCTAssertEqual(state.selectedTask?.status, status)
+            XCTAssertFalse(state.isBusy(taskID: taskID))
+            XCTAssertFalse(state.activeTurnTaskIDs.contains(taskID))
+            XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+            let before = await runtime.submissions
+            XCTAssertTrue(before.isEmpty)
+            let resumed = await state.resumeQueue(taskID: taskID)
+            XCTAssertTrue(resumed)
+            try await waitForSubmissionCount(1, runtime: runtime)
+            XCTAssertTrue(queueText(state).isEmpty)
+        }
     }
 
     func testStopPausesQueueEvenIfRuntimeLaterReportsCompleted() async {

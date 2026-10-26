@@ -222,6 +222,7 @@ private extension TaskStatus {
         switch self {
         case .running: "blue"
         case .waiting: "orange"
+        case .failed: "red"
         case .completed: "green"
         case .draft: "neutral"
         }

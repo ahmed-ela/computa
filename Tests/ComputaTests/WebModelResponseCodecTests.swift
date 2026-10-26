@@ -85,6 +85,44 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testChatGPTRequiresEnvelopeForNativeCardTextPlainAnswersAndRefusals() throws {
+        let card = "Hello\n\nReconnect email\ncourse-staff@example.invalid\nHi course staff,\nJust wanted to say hi!\n\nAdd a clear reason for writing"
+        for model in ["browser/chatgpt", syntheticChatGPTModelID] {
+            for tools in [[], [function]] {
+                let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                    "model": model, "input": "Draft a greeting here only; do not send it.", "tools": tools,
+                ]))
+                XCTAssertTrue(prepared.requiresEmbeddedEnvelope)
+                for text in [card, "Hello", "I cannot assist with that request."] {
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                        XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse)
+                        XCTAssertEqual(WebModelServer.errorPresentation(for: $0).code, "unsupported_website_response")
+                    }
+                    XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: prepared),
+                        "Unstructured website output must not grant a correction that could replay a website action")
+                }
+                for text in ["To: course-staff@example.invalid\nSubject: Hi\n\nHello, café 🧭!",
+                             "I cannot assist with that request."] {
+                    let json = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "message", "text": text]), as: UTF8.self)
+                    for reply in [json, "```json\n" + json + "\n```"] {
+                        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(reply, request: prepared), .message(text))
+                        XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(reply, request: prepared))
+                    }
+                }
+            }
+        }
+    }
+
+    func testEmbeddedEnvelopePolicyUsesExactProviderRoutingAndKeepsOtherProseCompatibility() throws {
+        for model in ["browser/claude", "browser/gemini", "not-a-route-chatgpt-model"] {
+            let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": model, "input": "Say hello", "tools": [],
+            ]))
+            XCTAssertFalse(prepared.requiresEmbeddedEnvelope)
+            XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply("Hello", request: prepared), .message("Hello"))
+        }
+    }
+
     func testSavedBrowserMutationSchemasAdvertiseTypedRefsAndPreserveWebsiteContinuations() throws {
         // Synthetic web-codec/native-contract coverage; no provider or UI is run.
         for provider in ["chatgpt", "claude", "gemini"] {
@@ -342,10 +380,11 @@ final class WebModelResponseCodecTests: XCTestCase {
         let required = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt", "input": "Perform the action", "tools": [function], "tool_choice": "required",
         ]))
-        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply("Done.", request: required)) {
+        let message = #"{"type":"message","text":"Done."}"#
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(message, request: required)) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
         }
-        XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic("Done.", request: required))
+        XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(message, request: required))
         let unknown = #"{"type":"tool_calls","calls":[{"name":"unoffered","arguments":{}}]}"#
         XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(unknown, request: prepared)) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("unoffered"))

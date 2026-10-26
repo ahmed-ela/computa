@@ -11263,6 +11263,106 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await finishTerminalFixture(fixture, token: token)
     }
 
+    func testChatGPTTerminalStreamFailureAbortsOnlyAfterFreshOwnedProofWithoutSendReplay() async throws {
+        for reason in ["empty_stream", "provider_error"] {
+            let (fixture, token, view) = try await terminalCompletionFixture()
+            defer { fixture.shutdown() }
+            _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"]').closest('section').remove(); return true;")
+            try await postTerminalFailure(in: fixture, view: view, token: token, reason: reason)
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A verified owned terminal empty/error stream must end in the current poll")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    .responseStreamFailed(reason == "empty_stream" ? .emptyStream : .providerError))
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testChatGPTTerminalStreamFailureCannotAbortBusyOrPositiveDOMResponse() async throws {
+        for mode in ["busy", "positive"] {
+            let (fixture, token, view) = try await terminalCompletionFixture()
+            defer { fixture.shutdown() }
+            if mode == "busy" {
+                _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"] > div').textContent=''; const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');stop.textContent='Stop';document.body.append(stop);return true;")
+            }
+            try await postTerminalFailure(in: fixture, view: view, token: token)
+            let state = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertTrue(["running", "complete"].contains(state["state"] as? String ?? ""))
+            if mode == "busy" { XCTAssertEqual(state["state"] as? String, "running") }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testChatGPTTerminalStreamFailureRechecksModelAndRevocationAcrossInspection() async throws {
+        for mode in ["model", "revoke", "deadline"] {
+            let (fixture, token, view) = try await terminalCompletionFixture()
+            defer { fixture.shutdown() }
+            _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"]').closest('section').remove(); return true;")
+            try await postTerminalFailure(in: fixture, view: view, token: token)
+            if mode == "model" { _ = try await evaluate(view, "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;") }
+            if mode == "deadline" { fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1)) }
+            let tab = try XCTUnwrap(fixture.createdTabs.last)
+            var revoked = false
+            if mode == "revoke" {
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    guard action == "inspect", !revoked else { return }
+                    revoked = true; fixture.browser.revokeChatGPTResponseCompletion(tabID: tab, ownerToken: token)
+                }
+            }
+            do {
+                let value = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(mode, "revoke"); XCTAssertTrue(revoked)
+                XCTAssertEqual(value["state"] as? String, "running")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, mode == "model" ? .modelMismatch : .deadline)
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testChatGPTTerminalStreamFailureCannotBypassChangedCurrentSubmission() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"]').closest('section').remove(); return true;")
+        try await postTerminalFailure(in: fixture, view: view, token: token)
+        _ = try await evaluate(view, "const body=document.querySelector('[data-markdown-text-style=\"user-message\"]');window.fixtureOriginalSubmissionBody=body.textContent;body.textContent='A different unowned submission';return true;")
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A terminal failure candidate cannot replace current-submission proof")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"user-message\"]').textContent=window.fixtureOriginalSubmissionBody;return true;")
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testChatGPTTerminalStreamFailureCancellationDuringFreshProofCannotAbortOrAccept() async throws {
+        let (fixture, token, view) = try await terminalCompletionFixture()
+        defer { fixture.shutdown() }
+        _ = try await evaluate(view, "document.querySelector('[data-markdown-text-style=\"assistant-message\"]').closest('section').remove(); return true;")
+        try await postTerminalFailure(in: fixture, view: view, token: token)
+        var cancelled = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !cancelled else { return }
+            cancelled = true
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
+        let poll = Task { @MainActor in
+            _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        }
+        do { _ = try await poll.value; XCTFail("Cancellation must win over a terminal observation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertTrue(cancelled)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
     func testChatGPTTerminalCompletionBeforeDOMCannotPublishUntilExactNonemptyAnswerAndFooter() async throws {
         let (fixture, token, view) = try await terminalCompletionFixture()
         defer { fixture.shutdown() }
@@ -11416,6 +11516,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         window.webkit.messageHandlers[config.handlerName].postMessage(packet);
         window.fixtureCompletion.posts++; return true;
       };
+      window.fixturePostStreamFailure=reason => {
+        const arm=window.fixtureCompletion.arm;
+        const packet={version:1,kind:'terminal_failure',correlationID:arm.correlationID,sequence:arm.sequence,
+          inputSHA256:arm.inputSHA256,inputMessageID:'00000000-0000-0000-0000-000000000003',
+          conversationID:'00000000-0000-0000-0000-000000000100',reason,calls:reason==='empty_stream'?3:4,assistantMessages:0,
+          messageTerminalCount:1,mainTerminalCount:1};
+        window.webkit.messageHandlers[config.handlerName].postMessage(packet);return true;
+      };
     })();
     """#
 
@@ -11438,8 +11546,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let token = try XCTUnwrap(started["sessionToken"] as? String)
             let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
             _ = try await waitForState("ready", fixture.transport, token: token)
-            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": "A synthetic owned decoded-terminal response"])
+            let pending = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(pending["firstUserFingerprint"] as? String, "",
+                           "The first poll must establish body proof before any terminal decision")
             let armed = try await evaluate(view, "return window.fixtureCompletion?.arm?.sequence === 1;") as? Bool
             XCTAssertEqual(armed, true, "The local observer must be armed by the actual native Send preparation")
             return (fixture, token, view)
@@ -11472,6 +11583,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, "return window.fixtureCompletion.posts;")
             XCTAssertNil(try terminalReceipt(in: fixture, view: view, token: token, sequence: sequence))
         }
+    }
+
+    private func postTerminalFailure(in fixture: Fixture, view: WKWebView, token: String,
+                                     reason: String = "empty_stream") async throws {
+        _ = try await evaluate(view, "return window.fixturePostStreamFailure(\(String(reflecting: reason)));")
+        let tab = try XCTUnwrap(fixture.createdTabs.last), generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tab))
+        func receipt() -> ChatGPTResponseCompletion.FailureReceipt? {
+            fixture.browser.chatGPTResponseFailureReceipt(tabID: tab, view: view, ownerToken: token, generation: generation, sequence: 1)
+        }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while receipt() == nil, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertNotNil(receipt(), "The failure crosses the actual WK message handler and native lease")
     }
 
     private func finishTerminalFixture(_ fixture: Fixture, token: String) async throws {

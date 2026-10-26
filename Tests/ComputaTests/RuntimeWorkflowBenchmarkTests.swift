@@ -404,7 +404,7 @@ private final class WorkflowEventAudit {
         case .taskStatusChanged(let id, let status) where id == taskID:
             self.status = status
             if status == .running { began = true }
-            if began && (status == .completed || status == .waiting) { terminal = true }
+            if began && (status == .completed || status == .waiting || status == .failed) { terminal = true }
         case .timelineEntryAppended(let id, let entry) where id == taskID:
             if entry.toolEvent?.name == "fileChange" { files.append(entry) }
             if entry.toolEvent?.name == "commandExecution" { commands.append(entry) }

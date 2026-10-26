@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-completion.js', import.meta.url), 'utf8');
-const runtimeImport = "import('https://chatgpt.com/cdn/assets/633146.fa01f470fd.js')";
+const runtimeImport = 'import(runtimeURL)';
+const runtimeURL = 'https://chatgpt.com/cdn/assets/633146.510c2d4c2a.js';
+const runtimeResource = (name = runtimeURL) => ({ name, initiatorType: 'script', startTime: 1, responseEnd: 50, responseStatus: 200 });
 const key = '__computaCompletion_' + 'a'.repeat(32);
 const correlationID = '11111111-1111-4111-8111-111111111111';
 const conversationID = '22222222-2222-4222-8222-222222222222';
@@ -17,8 +19,10 @@ const binding = () => ({ correlationID, sequence: 1, inputSHA256: hash(inputText
   inputUTF8Bytes: new TextEncoder().encode(inputText).length, durationMs: 1000 });
 const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0)); };
 
-function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean; loadRuntime?: () => Promise<unknown> } = {}) {
-  let clock = 0, imports = 0, timerID = 0, throwOriginal: unknown = null;
+function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean;
+  resources?: any[]; moduleID?: string; configureRuntime?: (runtime: any) => void;
+  loadRuntime?: () => Promise<unknown> } = {}) {
+  let clock = 100, imports = 0, timerID = 0, throwOriginal: unknown = null;
   // Retain all wire packets; the original authority regressions deliberately
   // inspect only the unchanged terminal/invalidated schemas.
   const allPosts: any[] = [], posts: any[] = [], diagnostics: any[] = [];
@@ -29,7 +33,9 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
   });
   const original = Object.getOwnPropertyDescriptor(O.prototype, 'recordCompletion')!;
   const exports = Object.defineProperty({}, 'c', { get: new Function('O', 'return ()=>O')(O), enumerable: true, configurable: false });
-  const runtime = { __webpack_require__: { c: { dd: { exports } } } };
+  const runtime = { __webpack_require__: { c: { [options.moduleID ?? 'jDdw']: { exports } } } };
+  options.configureRuntime?.(runtime);
+  const resources = options.resources ?? [runtimeResource()], importedURLs: string[] = [];
   const window: any = { webkit: { messageHandlers: { computaChatGPTCompletion: { postMessage(record: any) {
     allPosts.push(record); (record.kind === 'diagnostic' ? diagnostics : posts).push(record);
   } } } },
@@ -53,22 +59,22 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
     if (options.delayedDigest) return new Promise((resolve, reject) => pendingDigests.push({ bytes, resolve, reject }));
     return Promise.resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer);
   } } };
-  const loadRuntime = () => { imports++; return options.loadRuntime ? options.loadRuntime()
+  const loadRuntime = (url: string) => { imports++; importedURLs.push(url); return options.loadRuntime ? options.loadRuntime()
     : Promise.resolve(options.unsupported ? {} : runtime); };
   expect(source.split(runtimeImport)).toHaveLength(2);
   const execute = new Function('window', 'document', 'location', 'performance', 'crypto', 'MutationObserver',
     'getComputedStyle', 'setTimeout', 'clearTimeout', 'loadRuntime', source
       .replace('__COMPUTA_COMPLETION_CONFIG__', JSON.stringify({ key, handlerName: 'computaChatGPTCompletion' }))
-      .replace(runtimeImport, 'loadRuntime()'));
-  execute(window, document, location, { now: () => clock }, cryptoFixture, Observer, () => ({ visibility: 'visible' }),
+      .replace(runtimeImport, 'loadRuntime(runtimeURL)'));
+  execute(window, document, location, { now: () => clock, getEntriesByType: (type: string) => type === 'resource' ? resources : [] }, cryptoFixture, Observer, () => ({ visibility: 'visible' }),
     (callback: () => void) => { timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime);
   const receiver = new O();
-  return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, imports: () => imports,
+  return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, resources, importedURLs, runtime, imports: () => imports,
     api: window[key], O, receiver, original,
     send: () => documentEvents.get('click')?.({ target: button }),
     stopClick: () => documentEvents.get('click')?.({ target: { closest: (s: string) => s.includes('stop-button') ? {} : null } }),
     decode: (payload: any, instance = receiver) => instance.recordCompletion(payload),
-    tick: (value: number) => { clock = value; }, mutate: () => observers.filter(o => o.active).forEach(o => o.callback()),
+    tick: (value: number) => { clock = 100 + value; }, mutate: () => observers.filter(o => o.active).forEach(o => o.callback()),
     pagehide: () => windowEvents.get('pagehide')?.(), throwOriginal: (error: unknown) => { throwOriginal = error; },
     resolveDigests: () => pendingDigests.splice(0).forEach(({ bytes, resolve }) => resolve(new Uint8Array(createHash('sha256').update(bytes).digest()).buffer)),
     rejectDigests: () => pendingDigests.splice(0).forEach(({ reject }) => reject(new Error('private digest error'))),
@@ -94,6 +100,95 @@ async function ready(f: ReturnType<typeof fixture>) {
 function complete(f: ReturnType<typeof fixture>, text = 'HI') { f.decode(system()); f.decode(final(text)); f.decode(terminal()); }
 
 describe('ChatGPT current-response completion admission', () => {
+  test('the currently observed runtime and unique initialized decoder survive website asset and module ID changes', async () => {
+    for (const moduleID of ['dd', 'jDdw', 'futureCachedModule']) {
+      const currentURL = 'https://chatgpt.com/cdn/assets/633146.012345abcd.js';
+      const f = fixture({ moduleID, resources: [runtimeResource(currentURL), runtimeResource(currentURL),
+        runtimeResource('https://chatgpt.com/cdn/assets/87162.8221492420.js')] });
+      await ready(f); complete(f);
+      expect(f.importedURLs).toEqual([currentURL]);
+      expect(f.posts[0]).toMatchObject({ kind: 'terminal', text: 'HI' });
+      f.api.stop(correlationID);
+      expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+    }
+  });
+
+  test('missing, ambiguous, incomplete, foreign and non-script runtime observations never import a fallback', async () => {
+    for (const resources of [[], [runtimeResource(), runtimeResource('https://chatgpt.com/cdn/assets/633146.012345abcd.js')],
+      [{ ...runtimeResource(), initiatorType: 'link' }], [{ ...runtimeResource(), responseEnd: 0 }],
+      [{ ...runtimeResource(), responseEnd: 101 }], [{ ...runtimeResource(), startTime: 51 }],
+      [{ ...runtimeResource(), responseStatus: 404 }], [runtimeResource(runtimeURL + '?stale=1')],
+      [runtimeResource(runtimeURL + '#fragment')], [runtimeResource(runtimeURL.replace('chatgpt.com', 'other.test'))],
+      [runtimeResource(runtimeURL.replace('https:', 'http:'))], Array.from({ length: 4097 }, () => runtimeResource())]) {
+      const f = fixture({ resources });
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(f.importedURLs).toEqual([]); expect(f.posts).toEqual([]);
+      expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+      expect(f.diagnostics[0].reason).toBe('runtime_unsupported');
+    }
+  });
+
+  test('a runtime observation changing across the import cannot install a decoder wrapper', async () => {
+    let resolve!: (runtime: unknown) => void;
+    const f = fixture({ loadRuntime: () => new Promise(value => { resolve = value; }) });
+    const arming = f.api.arm(binding());
+    f.resources.push(runtimeResource('https://chatgpt.com/cdn/assets/633146.012345abcd.js'));
+    resolve(f.runtime);
+    expect(await arming).toEqual({ armed: false });
+    expect(f.importedURLs).toEqual([runtimeURL]); expect(f.listeners()).toBe(0);
+    expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+  });
+
+  test('cache discovery never invokes require, factories, cache accessors or unapproved export getters', async () => {
+    let forbidden = 0;
+    const reject = () => { forbidden++; throw new Error('must not execute'); };
+    const f = fixture({ configureRuntime(runtime) {
+      const cache = runtime.__webpack_require__.c;
+      Object.defineProperty(cache, 'accessorEntry', { get: reject });
+      cache.accessorExports = Object.defineProperty({}, 'exports', { get: reject });
+      cache.unapprovedGetter = { exports: Object.defineProperty({}, 'c', { get: reject, enumerable: true }) };
+      cache.nonDecoder = { exports: Object.defineProperty({}, 'c', {
+        get: new Function('O', 'return ()=>O')(class Unrelated {}), enumerable: true }) };
+      const require = Object.assign(reject, { c: cache, m: { uninitializedDecoder: reject } });
+      runtime.__webpack_require__ = require;
+    } });
+    await ready(f); complete(f);
+    expect(forbidden).toBe(0); expect(f.posts[0].kind).toBe('terminal');
+    f.api.stop(correlationID);
+  });
+
+  test('multiple distinct matching cached decoders, oversized cache and changed decoder source fail closed', async () => {
+    for (const mode of ['ambiguous', 'oversized', 'changed', 'uninitialized'] as const) {
+      let factoryCalls = 0;
+      const f = fixture({ configureRuntime(runtime) {
+        const cache = runtime.__webpack_require__.c;
+        if (mode === 'ambiguous') {
+          const O = new Function('T', 'return class O {recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}}')({ safeParse: () => ({ success: false }) });
+          cache.second = { exports: Object.defineProperty({}, 'c', { get: new Function('O', 'return ()=>O')(O), enumerable: true }) };
+        } else if (mode === 'oversized') {
+          for (let index = 0; index < 16384; index++) cache['unrelated' + index] = { exports: {} };
+        } else if (mode === 'changed') {
+          Object.defineProperty(cache.jDdw.exports.c.prototype, 'recordCompletion', { value(e: unknown) { return e; }, configurable: true, writable: true });
+        } else {
+          delete cache.jDdw;
+          runtime.__webpack_require__.m = { jDdw: () => { factoryCalls++; } };
+        }
+      } });
+      expect(await f.api.arm(binding())).toEqual({ armed: false });
+      expect(factoryCalls).toBe(0); expect(f.posts).toEqual([]); expect(f.listeners()).toBe(0);
+      expect(f.importedURLs).toEqual([runtimeURL]);
+    }
+  });
+
+  test('a large initialized website cache is inspected within the finite budget without initializing unrelated modules', async () => {
+    const f = fixture({ configureRuntime(runtime) {
+      for (let index = 0; index < 9312; index++) runtime.__webpack_require__.c['unrelated' + index] = { exports: {} };
+    } });
+    await ready(f); complete(f);
+    expect(f.posts[0]).toMatchObject({ kind: 'terminal', text: 'HI' });
+    f.api.stop(correlationID);
+  });
+
   test('a current final message needs its system ancestry and a later terminal on the claimed stream', async () => {
     const f = fixture(); await ready(f);
     f.decode(system()); f.decode(final()); expect(f.posts).toEqual([]);
@@ -370,5 +465,122 @@ describe('ChatGPT current-response completion admission', () => {
       expect(JSON.stringify(f.diagnostics)).not.toContain('https://');
       expect(JSON.stringify(f.diagnostics)).not.toContain(inputMessageID);
     }
+  });
+
+  test('an owned empty stream needs both terminal events, in either order, and emits no response bytes', async () => {
+    for (const reversed of [false, true]) {
+      const f = fixture(); await ready(f);
+      const main = { type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false };
+      f.decode(reversed ? terminal() : main); expect(f.posts).toEqual([]);
+      f.decode(reversed ? main : terminal());
+      expect(f.posts).toEqual([{ version: 1, kind: 'terminal_failure', correlationID, sequence: 1,
+        inputSHA256: hash(inputText), inputMessageID, conversationID, reason: 'empty_stream', calls: 3,
+        assistantMessages: 0, messageTerminalCount: 1, mainTerminalCount: 1 }]);
+      f.decode(terminal()); expect(f.posts).toHaveLength(1);
+      expect(JSON.stringify(f.posts)).not.toContain(inputText);
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('slow, hanging, alternate and unclaimed streams cannot emit a terminal failure', async () => {
+    for (const mode of ['hanging', 'message_only', 'main_only', 'alternate', 'unclaimed', 'wrong_input'] as const) {
+      const f = fixture(); expect(await f.api.arm(binding())).toEqual({ armed: true }); f.send();
+      if (mode !== 'unclaimed') f.decode(input(mode === 'wrong_input' ? 'x'.repeat(new TextEncoder().encode(inputText).length) : inputText));
+      await flush();
+      if (!['hanging', 'main_only'].includes(mode)) f.decode(terminal());
+      if (!['hanging', 'message_only'].includes(mode)) f.decode({ type: 'main_stream_complete', conversation_id: conversationID,
+        alternate_response_expected: mode === 'alternate' });
+      expect(f.posts.some(p => p.kind === 'terminal_failure')).toBe(false);
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('opaque DIL, content references and nontext content remain diagnostic-only after the stream ends', async () => {
+    for (const change of [
+      { metadata: { parent_id: systemID, finish_details: { type: 'stop' }, model_dil_v2: { code: 'not inspected', fallbackMarkdown: '' } } },
+      { metadata: { parent_id: systemID, finish_details: { type: 'stop' }, content_references: [{ private: 'not inspected' }] } },
+      { content: { content_type: 'native_widget', data: 'not inspected' } },
+    ]) {
+      const f = fixture(); await ready(f); f.decode(system()); f.decode(final('', change));
+      f.decode(terminal()); f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+      expect(f.posts).toEqual([]);
+      expect(f.diagnostics).toHaveLength(1); expect(f.diagnostics[0].reason).toBe('terminal_opaque');
+      expect(JSON.stringify(f.diagnostics)).not.toContain('not inspected');
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('owned provider errors need both terminal events and a matching resolved input digest', async () => {
+    const f = fixture({ delayedDigest: true }); expect(await f.api.arm(binding())).toEqual({ armed: true }); f.send();
+    f.decode(input()); f.decode({ error: { message: 'private provider error' }, conversation_id: conversationID });
+    expect(f.posts).toEqual([]); f.decode(terminal()); expect(f.posts).toEqual([]);
+    f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+    expect(f.posts).toEqual([]); f.resolveDigests(); await flush();
+    expect(f.posts).toEqual([{ version: 1, kind: 'terminal_failure', correlationID, sequence: 1,
+      inputSHA256: hash(inputText), inputMessageID, conversationID, reason: 'provider_error', calls: 4,
+      assistantMessages: 0, messageTerminalCount: 1, mainTerminalCount: 1 }]);
+    expect(JSON.stringify(f.allPosts)).not.toContain('private provider error');
+    f.pagehide(); expect(f.posts.at(-1).kind).toBe('invalidated');
+  });
+
+  test('combined error and message envelopes are diagnostic-only regardless of message shape', async () => {
+    for (const message of [final('PRIVATE ANSWER').message, final('', { content: { content_type: 'native_widget' } }).message, {}, null]) {
+      const f = fixture(); await ready(f);
+      const envelope = { error: 'private error', conversation_id: conversationID, message };
+      if (message === null) Object.defineProperty(envelope, 'message', { get() { throw Error('must not execute'); } });
+      f.decode(envelope); f.decode(terminal());
+      f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+      expect(f.posts).toEqual([]);
+      expect(JSON.stringify(f.allPosts)).not.toContain('PRIVATE ANSWER');
+      expect(JSON.stringify(f.allPosts)).not.toContain('private error');
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('an error and message terminal cannot abort before a later alternate main stream is known', async () => {
+    for (const alternate of [true, false]) {
+      const f = fixture(); await ready(f);
+      f.decode({ error: 'private error', conversation_id: conversationID }); f.decode(terminal());
+      expect(f.posts).toEqual([]);
+      f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: alternate });
+      expect(f.posts.some(p => p.kind === 'terminal_failure')).toBe(!alternate);
+      if (alternate) expect(f.posts.map(p => p.kind)).toEqual(['invalidated']);
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('pending empty observations are revoked by digest mismatch, navigation, cancellation or a foreign conversation', async () => {
+    for (const mode of ['wrong_input', 'navigation', 'stop', 'foreign'] as const) {
+      const f = fixture({ delayedDigest: true }); expect(await f.api.arm(binding())).toEqual({ armed: true }); f.send();
+      f.decode(input(mode === 'wrong_input' ? 'x'.repeat(new TextEncoder().encode(inputText).length) : inputText));
+      f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+      f.decode({ ...terminal(), conversation_id: mode === 'foreign' ? otherID : conversationID });
+      if (mode === 'navigation') { f.location.href = 'https://chatgpt.com/c/' + otherID; f.mutate(); }
+      if (mode === 'stop') f.api.stop(correlationID);
+      f.resolveDigests(); await flush();
+      expect(f.posts.some(p => p.kind === 'terminal_failure')).toBe(false);
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('mixed error and valid content can neither abort nor gain early completion authority', async () => {
+    const f = fixture(); await ready(f);
+    f.decode({ error: 'unrelated' }, new f.O());
+    f.decode({ error: 'owned but not a terminal result', conversation_id: conversationID });
+    expect(f.posts).toEqual([]);
+    complete(f, 'ACTUAL ANSWER');
+    f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+    expect(f.posts).toEqual([]);
+    f.decode({ error: 'late unrecognized metadata' }); expect(f.posts).toEqual([]);
+    f.api.stop(correlationID);
+  });
+
+  test('late content after an empty terminal revokes the failure instead of creating conflicting success authority', async () => {
+    const f = fixture(); await ready(f);
+    f.decode(terminal()); f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+    expect(f.posts.map(p => p.kind)).toEqual(['terminal_failure']);
+    f.decode(final('LATE CONTENT'));
+    expect(f.posts.map(p => p.kind)).toEqual(['terminal_failure', 'invalidated']);
+    expect(f.O.prototype.recordCompletion).toBe(f.original.value);
   });
 });

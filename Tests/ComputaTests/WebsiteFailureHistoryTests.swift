@@ -62,10 +62,10 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         return value
     }
 
-    func testSavedFailureRestoresOriginalEngineErrorAndWaitingWithoutAssistantClaims() throws {
+    func testSavedFailureRestoresOriginalEngineErrorAndFailedWithoutAssistantClaims() throws {
         let message = "We’re currently experiencing high demand, which may cause temporary errors."
         let data = try history([turn("failed", status: "failed", error: ["message": message, "codexErrorInfo": "internal_server_error"])])
-        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .failed)
         let entries = try AppServerThreadHistoryContract.entries(from: data)
         XCTAssertEqual(entries.map(\.title), ["You", "Agent error"])
         XCTAssertEqual(entries.last?.body, message); XCTAssertEqual(entries.last?.turnID, "failed")
@@ -76,7 +76,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         let errors: [Any] = [["code": "failure"], ["message": ""], ["message": String(repeating: "X", count: 8_193)], "malformed error"]
         for error in errors {
             let data = try history([turn("failed", status: "completed", error: error)])
-            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .waiting)
+            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .failed)
             XCTAssertTrue(try AppServerThreadHistoryContract.entries(from: data).allSatisfy { $0.kind == .user })
         }
     }
@@ -87,6 +87,20 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         XCTAssertFalse(try AppServerThreadHistoryContract.entries(from: data).contains { $0.title == "Agent error" })
         XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data, rejectedTurns: ["active"]), .waiting)
         XCTAssertFalse(try AppServerThreadHistoryContract.entries(from: data, excludingAssistantTurns: ["active"]).contains { $0.kind == .assistant })
+    }
+
+    func testExactWebsiteFailureRecordRestoresFailedWithoutRelabellingNativeStops() throws {
+        let data = try history([turn("native-stop", status: "interrupted"), turn("website", status: "inProgress")])
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data,
+            rejectedTurns: ["native-stop", "website"], failedTurns: ["website"]), .failed)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data,
+            rejectedTurns: ["native-stop", "website"], failedTurns: ["older-website"]), .waiting)
+        let interrupted = try history([turn("native-stop", status: "interrupted", error: ["message": "Stopped"])])
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: interrupted,
+            rejectedTurns: ["native-stop"]), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: interrupted), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(
+            from: history([turn("no-error-text", status: "failed")])), .failed)
     }
 
     func testLatestActualUserTurnSupersedesOlderFailureAndMaintenanceIsNotANewUserOutcome() throws {

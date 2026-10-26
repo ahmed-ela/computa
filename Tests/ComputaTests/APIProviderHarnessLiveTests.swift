@@ -529,7 +529,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         }
     }
 
-    func testBundledEngineFailedTurnCleansOnlyItsRunningCommandBeforeWaiting() async throws {
+    func testBundledEngineFailedTurnCleansOnlyItsRunningCommandBeforeFailed() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
@@ -567,13 +567,13 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             ownedRuntime = runtime
             let taskID = UUID().uuidString
             let audit = APIHarnessEventAudit(taskID: taskID)
-            var livenessAtWaiting: (prior: Bool, failed: Bool)?
+            var livenessAtFailure: (prior: Bool, failed: Bool)?
             pump = Task {
                 for await event in runtime.events() {
                     // Observe the process state at the actual UI-status boundary,
                     // not after shutdown or an independent cleanup by the test.
-                    if case .taskStatusChanged(let id, .waiting) = event, id == taskID, audit.began {
-                        livenessAtWaiting = (
+                    if case .taskStatusChanged(let id, .failed) = event, id == taskID, audit.began {
+                        livenessAtFailure = (
                             APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "prior"),
                             APIHarnessCommandCleanupInference.childIsAlive(project: project, name: "failed"))
                     }
@@ -595,10 +595,10 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             try await runtime.submit(prompt: "Start the separate failed-turn temporary fixture child once. Leave the prior background child untouched.",
                                      toTaskID: taskID, modelID: modelID)
             try await waitForTerminal(audit)
-            XCTAssertEqual(audit.status, .waiting)
-            let boundary = try XCTUnwrap(livenessAtWaiting)
+            XCTAssertEqual(audit.status, .failed)
+            let boundary = try XCTUnwrap(livenessAtFailure)
             XCTAssertTrue(boundary.prior, "Successful earlier-turn background work must survive this failure.")
-            XCTAssertFalse(boundary.failed, "The failed-turn child must be gone before Waiting is published.")
+            XCTAssertFalse(boundary.failed, "The failed-turn child must be gone before Failed is published.")
             XCTAssertTrue(audit.errors.joined(separator: "\n").contains("No request was replayed."))
             XCTAssertEqual(audit.finalTexts, ["PRIOR_CHILD_RUNNING"], "A terminal provider failure cannot produce a successful final answer.")
             XCTAssertEqual(audit.approvals, 0)
@@ -732,7 +732,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             try await runtime.submit(prompt: "Change fixture.txt to changed using apply_patch, verify it with a command, then report the result.",
                                      toTaskID: taskID, modelID: modelID)
             try await waitForTerminal(audit)
-            XCTAssertEqual(audit.status, .waiting)
+            XCTAssertEqual(audit.status, .failed)
             let errors = audit.errors.joined(separator: "\n")
             XCTAssertTrue(errors.contains("The API provider is busy because of high traffic. Try again shortly. No request was replayed."), errors)
             XCTAssertFalse(errors.contains("exceeded retry limit"), errors)
@@ -1015,7 +1015,7 @@ private final class APIHarnessEventAudit {
         case .taskStatusChanged(let id, let value) where id == taskID:
             status = value
             if value == .running { began = true }
-            if began && (value == .completed || value == .waiting) { terminal = true }
+            if began && (value == .completed || value == .waiting || value == .failed) { terminal = true }
         case .timelineEntryAppended(let id, let entry) where id == taskID:
             if let tool = entry.toolEvent { toolEvents.append(tool) }
             if entry.kind == .assistant { finalTexts.append(entry.body) }

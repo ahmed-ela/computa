@@ -343,6 +343,14 @@ enum ComputaAgentInstructions {
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
 
+    static let webRelayOnlyResponse = """
+    For this relay, return JSON text only. Do not use this website's email composer,
+    writing cards, canvas, apps or connectors for the local task. Put email drafts
+    and all other user-facing content in message.text, not a native website card.
+    Request local actions only through the currently offered Computa tool_calls
+    schema. Website-native UI or actions are not a Computa execution result.
+    """
+
     /// Rebuilt from this inference request's validated schemas, never from
     /// history, page text, a persisted thread's older instructions or tool output.
     /// Values are local function names; keys are their exact qualified names.
@@ -448,6 +456,9 @@ enum ComputaAgentInstructions {
         fetching, a remembered heading or a different browser for requested page
         interaction. Local terminal and native-app tools have separate access.
         """]
+        // Apply once to both full and compact ChatGPT contracts. Other
+        // providers retain their existing transport presentation policy.
+        if compactNativeContext { parts.append(webRelayOnlyResponse) }
         if !execution.isEmpty {
             parts.append(currentNative ? "Local command execution is offered as: \(execution.joined(separator: ", ")). Follow the current native command contract and exact schema." : """
             Local command execution is offered as: \(execution.joined(separator: ", ")).

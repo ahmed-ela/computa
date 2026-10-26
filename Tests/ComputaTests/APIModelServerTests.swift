@@ -2572,7 +2572,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let events = Task { @MainActor in
             for await event in runtime.events() {
                 if case .taskStatusChanged(let id, let status) = event, id == taskID,
-                   status == .completed || status == .waiting { audit.terminalStatuses.append(status) }
+                   status == .completed || status == .waiting || status == .failed { audit.terminalStatuses.append(status) }
                 if case .taskStatusChanged(let id, let status) = event, id == taskID { audit.events.append("status=\(status.rawValue)") }
                 if case .timelineEntryAppended(let id, let entry) = event, id == taskID { audit.events.append("entry=\(entry.title)") }
                 if case .approvalRequested(let request) = event {
