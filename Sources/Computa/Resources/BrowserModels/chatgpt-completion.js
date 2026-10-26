@@ -308,9 +308,25 @@
     const message = data(payload, 'message');
     if (message && message !== unknown) {
       const messageID = id(data(message, 'id')), role = data(data(message, 'author'), 'role');
-      const metadata = data(message, 'metadata'), parentID = id(data(metadata, 'parent_id'));
+      const metadata = data(message, 'metadata'), rawParentID = data(metadata, 'parent_id'), parentID = id(rawParentID);
+      const status = data(message, 'status'), finishType = data(data(metadata, 'finish_details'), 'type');
       if (data(metadata, 'is_error') === true || data(metadata, 'reasoning_status') === 'reasoning_cancelled'
-        || data(data(metadata, 'finish_details'), 'type') === 'interrupted') { reject(current, candidate, 'error'); return; }
+        || finishType === 'interrupted') { reject(current, candidate, 'error'); return; }
+      if (role === 'assistant') {
+        if (status != null && status !== 'in_progress' && status !== 'finished_successfully'
+          || finishType != null && finishType !== 'stop') { reject(current, candidate, 'final_status'); return; }
+        // Decoded messages can precede their status, finish or parent metadata. Missing
+        // fields supply no final or ancestry evidence, and are not an error.
+        // A previously selected final can never be downgraded this way.
+        if (status == null || status === 'finished_successfully' && finishType == null || rawParentID == null) {
+          if (candidate.final) { reject(current, candidate, 'final_changed'); return; }
+          const previous = messageID ? candidate.parents.get(messageID) : null;
+          if (previous && (previous.role !== role || previous.parentID !== parentID)) {
+            reject(current, candidate, 'parent_changed'); return;
+          }
+          candidate.assistantMessages++; candidate.opaqueAssistant = true; return;
+        }
+      }
       if (messageID) {
         const previous = candidate.parents.get(messageID);
         if (previous && (previous.role !== role || previous.parentID !== parentID)
@@ -326,11 +342,6 @@
           || data(metadata, 'model_dil_v2') != null
           || data(metadata, 'content_references') != null) candidate.opaqueAssistant = true;
         if (content !== null && content.length > 0) candidate.nonemptyAssistants++;
-        const status = data(message, 'status');
-        const finishType = data(data(metadata, 'finish_details'), 'type');
-        if (status !== 'in_progress' && status !== 'finished_successfully'
-          || typeof finishType === 'string' && finishType !== 'stop'
-          || status === 'finished_successfully' && finishType !== 'stop') { reject(current, candidate, 'final_status'); return; }
         const text = singleText(data(message, 'content'), 220000);
         const success = messageID && parentID && conversationID
           && data(message, 'status') === 'finished_successfully' && data(message, 'channel') === 'final'

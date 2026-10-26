@@ -357,6 +357,59 @@ describe('ChatGPT current-response completion admission', () => {
       'inputMessageID', 'conversationID', 'messageID', 'text'].sort());
   });
 
+  test('incomplete pre-final status, finish or parent metadata waits for the unchanged exact final contract', async () => {
+    for (const partial of [
+      final('', { status: undefined, metadata: undefined, end_turn: false }),
+      final('partial', { status: 'finished_successfully', metadata: { parent_id: systemID }, end_turn: false }),
+      final('', { status: null, metadata: { finish_details: { type: null } } }),
+      final('', { status: 'in_progress', metadata: undefined, end_turn: false }),
+      final('partial', { status: 'in_progress', metadata: { parent_id: null }, end_turn: false }),
+    ]) {
+      const f = fixture(); await ready(f); f.decode(partial);
+      expect(f.posts).toEqual([]); expect(f.diagnostics).toEqual([]);
+      f.decode(system()); f.decode(final('EXACT FINAL')); expect(f.posts).toEqual([]); f.decode(terminal());
+      expect(f.posts).toHaveLength(1); expect(f.posts[0]).toMatchObject({ kind: 'terminal', text: 'EXACT FINAL', messageID });
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('incomplete assistant metadata and terminal events alone supply neither success nor failure authority', async () => {
+    for (const change of [{ status: undefined, metadata: undefined }, { metadata: { parent_id: systemID } },
+      { status: 'in_progress', metadata: undefined }]) {
+      const f = fixture(); await ready(f); f.decode(final('', change)); f.decode(terminal());
+      f.decode({ type: 'main_stream_complete', conversation_id: conversationID, alternate_response_expected: false });
+      expect(f.posts).toEqual([]); expect(f.diagnostics[0].reason).toBe('terminal_opaque');
+      f.api.stop(correlationID);
+    }
+  });
+
+  test('explicit failed status or finish cannot hide behind missing metadata, and selected finals cannot regress', async () => {
+    for (const change of [
+      { status: 'finished_partial_completion', metadata: undefined },
+      { status: undefined, metadata: { finish_details: { type: 'length' } } },
+      { status: undefined, metadata: { finish_details: { type: 'interrupted' } } },
+    ]) {
+      const f = fixture(); await ready(f); f.decode(final('', change)); complete(f);
+      expect(f.posts.map(p => p.kind)).toEqual(['invalidated']);
+    }
+    for (const change of [{ status: undefined }, { metadata: { parent_id: systemID } },
+      { status: 'in_progress', metadata: undefined }]) {
+      const f = fixture(); await ready(f); f.decode(system()); f.decode(final('HI'));
+      f.decode(final('HI', change)); f.decode(terminal());
+      expect(f.posts.map(p => p.kind)).toEqual(['invalidated']); expect(f.diagnostics[0].reason).toBe('final_changed');
+    }
+  });
+
+  test('incomplete updates cannot erase or change an already observed assistant parent', async () => {
+    for (const nextParent of [undefined, otherID]) {
+      const f = fixture(); await ready(f);
+      f.decode(final('partial', { status: 'in_progress', end_turn: false, metadata: { parent_id: systemID } }));
+      f.decode(final('partial', { status: 'in_progress', end_turn: false, metadata: { parent_id: nextParent } }));
+      complete(f);
+      expect(f.posts.map(p => p.kind)).toEqual(['invalidated']); expect(f.diagnostics[0].reason).toBe('parent_changed');
+    }
+  });
+
   test('partial, non-final, tool-directed, interrupted, multi-part and oversized messages cannot admit completion', async () => {
     for (const change of [
       { status: 'finished_partial_completion' }, { channel: 'analysis' }, { recipient: 'browser' }, { end_turn: false },

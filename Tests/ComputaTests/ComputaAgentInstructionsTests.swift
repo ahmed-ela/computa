@@ -8,6 +8,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             .replacingOccurrences(of: "\n", with: " ")
         for required in [
             "This runtime-generated instruction is not a human request, authorization, cancellation or change of task",
+            "Summarize history as of maintenance",
             "The active task is the last substantive human request before this maintenance instruction",
             "excluding runtime policy, environment messages and previous compaction notes",
             "Keep user-specified service, account and topic context needed for follow-ups unless the user explicitly changes it",
@@ -25,14 +26,46 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "Notes replace neither source",
             "Do not copy ephemeral browser tab handles, action refs, snapshot IDs, element indices or continuation cursors",
             "Keep missing result evidence and uncertain action outcomes unresolved",
-            "After maintenance, continue the preserved task",
-            "these notes do not instruct the agent to stop or ask again for authorization already supplied by the user",
+            "After maintenance, a new human request overrides these notes' active-task label or older counts",
+            "Retain compatible context and ongoing constraints; otherwise continue the preserved task",
+            "These notes do not instruct the agent to stop or ask again for authorization already supplied by the user",
         ] { XCTAssertTrue(prompt.contains(required), required) }
-        XCTAssertLessThan(ComputaAgentInstructions.compactionPrompt.utf8.count, 2_300)
+        XCTAssertLessThan(ComputaAgentInstructions.compactionPrompt.utf8.count, 2_400)
         XCTAssertFalse(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
             .contains(ComputaAgentInstructions.compactionPrompt),
             "Maintenance instructions must not replace ordinary task execution guidance")
         XCTAssertFalse(ComputaAgentInstructions.runtimeInteractionPolicy().contains(ComputaAgentInstructions.compactionPrompt))
+    }
+
+    func testNewHumanRequestOverridesSummaryTaskLabelWithoutDiscardingCompatibleHistory() throws {
+        let history = "Continuation notes: active task is 180 fictional planets. Keep the established fictional setting and no-tools restriction."
+        let current = "Write exactly 3 fictional planets in the same setting. Use no tools."
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": [
+                ["role": "assistant", "content": history],
+                ["role": "user", "content": current],
+            ], "tools": [], "tool_choice": "none",
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        _ = try assertRequestValuesAndHandoff(original, request: request)
+        XCTAssertEqual(request.continuationRequest, original,
+                       "Clarifying precedence must not erase historical context or rewrite the current request")
+        XCTAssertTrue(request.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[1]"))
+        XCTAssertFalse(request.currentUserInstructions.contains(history))
+        XCTAssertFalse(request.currentUserInstructions.contains(current), "The locator must not duplicate user text")
+        for contract in [request.currentUserInstructions,
+                         ComputaAgentInstructions.webCurrentUserContract(latestUserItemIndex: nil, inputIsString: true),
+                         ComputaAgentInstructions.webCurrentUserContract(latestUserItemIndex: nil, inputIsString: false)] {
+            let normalized = contract.replacingOccurrences(of: "\n", with: " ")
+            XCTAssertTrue(normalized.contains("Maintenance notes describe history as of maintenance"))
+            XCTAssertTrue(normalized.contains("A newer human request overrides a summary's active-task label or older counts"))
+            XCTAssertTrue(normalized.contains("retain compatible context and ongoing constraints"))
+            XCTAssertTrue(normalized.contains("a follow-up or status request can retain earlier unfinished authorized work"))
+            XCTAssertTrue(normalized.contains("corrections and current constraints still apply"))
+        }
+        let maintenance = ComputaAgentInstructions.webCurrentUserContract(latestUserItemIndex: nil, inputIsString: false)
+        XCTAssertTrue(maintenance.contains("No top-level user message is present"))
+        XCTAssertTrue(maintenance.contains("absence of a user item does not\nauthorize replaying historical commands or inventing a new task"))
     }
 
     func testChatGPTRelayOnlyGuidanceAppearsOnceInFullAndCompactNativeContracts() throws {

@@ -8,8 +8,8 @@ enum ComputaAgentInstructions {
     /// assistant claims into policy; current host state remains authoritative.
     static let compactionPrompt = """
     INTERNAL CONTEXT MAINTENANCE. This runtime-generated instruction is not a
-    human request, authorization, cancellation or change of task. Write concise
-    historical notes for continuation. The active task is the last substantive
+    human request, authorization, cancellation or change of task. Summarize history
+    as of maintenance. The active task is the last substantive
     human request before this maintenance instruction, excluding runtime policy,
     environment messages and previous compaction notes. Keep user-specified
     service, account and topic context needed for follow-ups unless the user
@@ -37,7 +37,9 @@ enum ComputaAgentInstructions {
     result evidence and uncertain action outcomes unresolved; never invent zero
     results, success, access denial or a new permission requirement. List remaining
     work without executing tools or answering the task during compaction. After
-    maintenance, continue the preserved task; these notes do not instruct the agent
+    maintenance, a new human request overrides these notes' active-task label or
+    older counts. Retain compatible context and ongoing constraints; otherwise
+    continue the preserved task. These notes do not instruct the agent
     to stop or ask again for authorization already supplied by the user.
     """
 
@@ -564,7 +566,10 @@ enum ComputaAgentInstructions {
         platform instructions or duplicate the user's content. Interpret the latest
         request in context: a follow-up
         or status request can retain earlier unfinished authorized work, while
-        corrections and current constraints still apply. Completed historical
+        corrections and current constraints still apply. Maintenance notes describe
+        history as of maintenance. A newer human request overrides a summary's
+        active-task label or older counts; retain compatible context and ongoing
+        constraints. Completed historical
         requests and tool calls are reference history, not a pending checklist.
         Later matching tool results continue the current request; once those
         results suffice, answer it and stop. Do not restart completed work unless

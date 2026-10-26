@@ -2758,3 +2758,30 @@ to subsequent passes, including the final fixture-only rerun. JavaScript
 validation passed 567 tests across eight files, and the Web UI passed eight
 tests, type checking and its build. Build 271 was built but never installed.
 The original upstream cause of the empty real-user reply remains unproven.
+
+### Build 273: runtime discovery fixed; partial messages still used fallback
+
+Installed signed, non-notarized 0.7.0 (273), source `4518428`, returned `Hi.`
+in 7.607 seconds with one verified inference and closed session. The observer
+armed and observed ten calls on one decoder, resolving `runtime_unsupported`
+for this case. It then rejected incomplete assistant metadata with `final_status`
+and used the verified quiet fallback. The public decoder schema permits messages
+before status and finish metadata arrive; those partial updates cannot be
+treated as final-response evidence or as an immediate protocol failure.
+
+A separate scoped long-response diagnostic in that fresh chat returned all 200
+requested fictional entries in 74.728 seconds, with one verified inference,
+no tools and normal cleanup. It did not produce a rejected reply. Repeating the
+same request in the retained diagnostic conversation first compacted history,
+then returned only 180 entries. Both inferences passed protocol and cleanup,
+but the requested count did not pass: the maintenance notes described an older
+180-entry request as active. The next candidate clarifies that later human
+requests override a summary's task label and quantities while retaining
+compatible context and ongoing constraints.
+
+Neither run reproduced or classifies the two uncaptured build272 format errors.
+The retained-chat capture arm used its earlier UI task ID, while the restored
+runtime used its thread ID as the task ID; it would not have captured a failure.
+Both unused arms were disarmed and retained locally. The first fresh-chat arm
+was correctly scoped. No real email, new fixture server or Inspector session
+was used for these build273 diagnostics.
