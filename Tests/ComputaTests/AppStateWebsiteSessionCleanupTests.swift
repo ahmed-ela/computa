@@ -207,6 +207,42 @@ final class AppStateWebsiteSessionCleanupTests: XCTestCase {
         XCTAssertEqual(state.websiteSessionCleanupReceipts[otherID], newer)
     }
 
+    func testPersistenceOnlyRetryAcceptsExactMonotonicReceiptWithoutResumingTheTask() throws {
+        let state = fixture(runtime: CleanupUIRuntime())
+        let original = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: taskID, turnID: UUID().uuidString,
+            runtimeGeneration: UUID(), outcome: .closed, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .notCreated, trigger: .inference,
+            inferenceID: UUID().uuidString, sessionToken: UUID().uuidString)
+        state.apply(.websiteSessionCleanupUpdated(original))
+        XCTAssertTrue(state.canRetryWebsiteSessionCleanup(taskID: taskID))
+        var saved = original
+        saved.receiptSaved = true
+        state.apply(.websiteSessionCleanupUpdated(saved))
+        XCTAssertEqual(state.websiteSessionCleanupReceipts[taskID], saved)
+        XCTAssertFalse(state.canRetryWebsiteSessionCleanup(taskID: taskID))
+        XCTAssertEqual(state.tasks[0].status, .waiting)
+        state.apply(.websiteSessionCleanupUpdated(original))
+        XCTAssertEqual(state.websiteSessionCleanupReceipts[taskID], saved, "A replay cannot downgrade saved evidence")
+    }
+
+    func testEqualAttemptCannotChangeItsClosureIdentityWhenPersistenceSucceeds() throws {
+        let state = fixture(runtime: CleanupUIRuntime())
+        let original = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: taskID, turnID: UUID().uuidString,
+            runtimeGeneration: UUID(), outcome: .closed, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .notCreated, trigger: .inference,
+            inferenceID: UUID().uuidString, sessionToken: UUID().uuidString)
+        state.apply(.websiteSessionCleanupUpdated(original))
+        for field in ["sessionToken", "inferenceID", "turnID", "runtimeGeneration", "attemptID"] {
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+            raw["receiptSaved"] = true
+            raw[field] = UUID().uuidString.lowercased()
+            let changed = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self,
+                from: JSONSerialization.data(withJSONObject: raw))
+            state.apply(.websiteSessionCleanupUpdated(changed))
+            XCTAssertEqual(state.websiteSessionCleanupReceipts[taskID], original, field)
+        }
+    }
+
     private func fixture(runtime: (any AgentRuntimeClient)? = nil) -> AppState {
         let tasks = [taskID, otherID].map { id in
             AgentTask(id: id, title: "Failed website task", summary: "", status: .waiting, workspace: "/tmp", model: "browser/claude",

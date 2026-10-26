@@ -156,7 +156,6 @@ function Sidebar({
             >
               <span className="task-row-title">{task.title}</span>
               <span className={`task-row-status ${toneClass(task.statusTone)} ${task.status === 'Running' ? 'is-running' : ''}`} title={task.status} aria-hidden="true" /><span className="sr-only">{task.status}</span>
-              <span className="task-row-time">{relativeTime(task.updatedAt)}</span>
             </Button>
           ))
         )}
@@ -540,6 +539,18 @@ function Composer({
   onSubmit: () => void;
 }) {
   const textarea = useRef<HTMLTextAreaElement | null>(null);
+  const websitePrepareDemand = useRef<{ taskID: string; model: string; at: number | null }>({ taskID: task.id, model: task.model, at: null });
+  if (websitePrepareDemand.current.taskID !== task.id || websitePrepareDemand.current.model !== task.model) {
+    websitePrepareDemand.current = { taskID: task.id, model: task.model, at: null };
+  }
+  const prepareWebsiteModel = () => {
+    if (task.model !== 'browser/chatgpt' && !task.model.startsWith('browser/chatgpt/choice/')) return;
+    const now = performance.now();
+    const previous = websitePrepareDemand.current;
+    if (previous.at !== null && now < previous.at + 5000) return;
+    previous.at = now;
+    post({ action: 'prepareWebsiteModel', taskID: task.id });
+  };
   const queueActive = task.queuedPrompts.length > 0;
   const canSubmit = !pending && isValidPrompt(value) && (task.modelSelectable || task.isBusy || task.queuePaused || queueActive);
   const willQueue = task.isBusy || task.queuePaused || queueActive;
@@ -568,7 +579,11 @@ function Composer({
           placeholder={task.isBusy ? 'Type your next message to queue it…' : 'Ask a question or describe a task…'}
           aria-label="Task prompt"
           maxLength={200000}
-          onInput={(event) => setValue((event.currentTarget as HTMLTextAreaElement).value)}
+          onFocus={prepareWebsiteModel}
+          onInput={(event) => {
+            setValue((event.currentTarget as HTMLTextAreaElement).value);
+            prepareWebsiteModel();
+          }}
           onKeyDown={(event) => {
             if (shouldSubmitPromptKey(event)) {
               event.preventDefault();
@@ -588,7 +603,7 @@ function Composer({
               disabled={!task.modelSelectable}
               onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
             />
-            {task.model.startsWith('browser/') && <WebsiteModelsRefresh refreshing={snapshot.websiteModelsRefreshing}
+            {task.model.startsWith('browser/') && <WebsiteModelsRefresh canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing}
               onRefresh={() => post({ action: 'refreshWebsiteModels' })} />}
           </div>
           <div className="composer-right">
@@ -899,9 +914,12 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
             <div className="setting-row"><span><strong>Website models</strong><small>Choices come from your signed-in ChatGPT, Gemini and Claude menus.</small></span>
-              <WebsiteModelsRefresh refreshing={snapshot.websiteModelsRefreshing} onRefresh={() => post({ action: 'refreshWebsiteModels' })} />
+              <WebsiteModelsRefresh canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing} onRefresh={() => post({ action: 'refreshWebsiteModels' })} />
             </div>
             {snapshot.websiteModelsError && <p className="model-note" role="status">{snapshot.websiteModelsError}</p>}
+            <div className="setting-row"><span><strong>API providers</strong><small>Connect Cerebras or another provider and load its available models.</small></span>
+              <Button variant="outline" onClick={() => post({ action: 'showAPIProviders' })}>Manage providers</Button>
+            </div>
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
           </section>
           <section>
@@ -945,7 +963,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Computa action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access allows terminal/file commands outside the workspace and network access without engine approval prompts, and automatically approves Computa action requests. Ask every time keeps the workspace sandbox and asks before protected actions. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. New submissions use this choice; running turns keep their execution permissions. Your choice is remembered across launches.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>

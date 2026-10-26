@@ -41,7 +41,7 @@ pub fn same_process_identity(a: Option<&ProcessIdentity>, b: Option<&ProcessIden
         .is_some_and(|(a, b)| a.pid == b.pid && a.started == b.started && a.command == b.command)
 }
 fn environment() -> Result<BTreeMap<String, String>> {
-    let account = computa_browser::identity::user_home()
+    let account = computa_state::account::user_home()
         .map_err(|_| BenchmarkError("native_account_home_unavailable"))?;
     Ok(BTreeMap::from([
         (

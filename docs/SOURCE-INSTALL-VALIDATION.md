@@ -21,11 +21,13 @@ do not establish validation of the renamed build or installer.
 | Default installer signing sequence on that build | Ad-hoc helper and outer-app signatures passed deep/strict verification |
 | Bundled Rust executable after outer-app signing | Size and SHA-256 still matched its `mactopus-5` manifest |
 
+These historical checks predate removal of the Chrome connection implementation,
+extension, helper and associated test fixtures. They are not current setup requirements.
+
 The Chrome probes accepted mutually authenticated Apple-signed app/helper roles
 and rejected ad-hoc, unsigned, non-Apple, wrong-role and wrong-identifier peers.
-They used temporary local fixtures, not a real browser connection. Developers
-need their own Apple signing identity for the optional Chrome bridge; ad-hoc
-builds keep that bridge unavailable rather than relaxing its trust checks.
+They used temporary local fixtures, not a real browser connection. Those builds
+required an Apple signing identity for that former optional feature.
 
 The Rust tree was reconstructed independently from the public pinned upstream
 commit plus the committed checksum-locked patch. Its 13 modified/added paths

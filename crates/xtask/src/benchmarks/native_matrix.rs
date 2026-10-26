@@ -80,15 +80,14 @@ fn executable(path: &Path) -> Result<()> {
 }
 fn source(task: MatrixTask) -> String {
     hash(format!(
-        "native-matrix-v1:{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "native-matrix-v1:{}\n{}\n{}\n{}\n{}\n{}\n{}",
         task.name(),
         include_str!("../../../computa-desktop/src/bin/computa-native-model-qualification.rs"),
         include_str!("../../../computa-desktop/src/bin/native_model/mod.rs"),
         include_str!("../../../computa-desktop/src/bin/native_model/audit.rs"),
         include_str!("../../../computa-desktop/src/bin/native_model/backend.rs"),
         include_str!("../../../computa-macos/src/bin/computa-native-qualification-fixture.rs"),
-        include_str!("../../../computa-macos/src/qualification_fixture.rs"),
-        include_str!("../../../computa-browser/src/qualification.rs")
+        include_str!("../../../computa-macos/src/qualification_fixture.rs")
     ))
 }
 impl MatrixQualifier for NativeMatrixQualifier {

@@ -30,7 +30,8 @@ createInterface({ input: process.stdin }).on('line', async line => {
       emit({ method: 'turn/started', params: { threadId: threadID, turn: { id: turnID, status: 'inProgress' } } });
       const response = await fetch(provider.base_url + '/responses', { method: 'POST',
         headers: { ...provider.http_headers, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, input: 'Synthetic terminal-completion failure', tools: [], stream: false }) });
+        body: JSON.stringify({ model, input: 'Synthetic terminal-completion failure', tools: [], stream: false,
+          client_metadata: { 'x-codex-turn-metadata': JSON.stringify({ thread_id: threadID, turn_id: turnID }) } }) });
       const body = await response.json();
       if (response.ok || !body.error) throw Error('Expected exact native failure');
       const turn = { id: turnID, status: 'failed', error: body.error, startedAt, completedAt: Math.floor(Date.now() / 1000),

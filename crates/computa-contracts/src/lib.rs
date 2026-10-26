@@ -1,10 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! Portable contracts shared by the native app, UI, and Chrome worker.
+//! Portable contracts shared by the native app and UI.
 //! Untrusted wire data is validated before it becomes application state.
 
 pub mod appserver;
-pub mod chrome;
 pub mod grounding;
 pub mod models;
 pub mod responses;

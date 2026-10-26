@@ -91,24 +91,6 @@ impl FailureRecord {
                     .is_some_and(|p| p > 0 && p <= i32::MAX as i64)
                     && d["action_outcome"] == "not_confirmed"
             }
-            Some("chrome_navigation_recovery_required") => {
-                keys(
-                    o,
-                    &[
-                        "type",
-                        "error",
-                        "cause",
-                        "website_status",
-                        "action_outcome",
-                        "tab_state",
-                        "retry_policy",
-                        "next_step",
-                    ],
-                ) && self.tool_name == "computer_v2_open"
-                    && d["action_outcome"] == "navigation_not_confirmed"
-                    && d["tab_state"] == "preserved_if_created"
-                    && d["retry_policy"] == "stop_for_turn"
-            }
             Some(code @ ("computer_outcome_unverified" | "runtime_recovery_exhausted")) => {
                 let message = outcome_message(code);
                 let unresolved = d["unresolved_operations"].as_u64();

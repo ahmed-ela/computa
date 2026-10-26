@@ -62,7 +62,8 @@ await run(["codesign", "--force", "--options", "runtime", "--sign", "-", executa
 await run(["codesign", "--verify", "--strict", executable], root);
 const binary = await readFile(executable);
 await writeFile(join(resource, "manifest.json"), JSON.stringify({
-  schemaVersion: 1, runtimeVersion: pin.runtimeVersion, sourceCommit: pin.sourceCommit,
+  schemaVersion: 2, capabilities: ["browserLifecycleObservationsV1"],
+  runtimeVersion: pin.runtimeVersion, sourceCommit: pin.sourceCommit,
   patchSHA256: pin.patchSHA256, binarySHA256: sha256(binary), binarySize: binary.length,
   platform: "macos", architecture: "arm64", executable: "codex-app-server",
 }, null, 2) + "\n");

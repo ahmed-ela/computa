@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Sign a COPY of a completed build. Never edits the source bundle or installation.
 import { createHash } from "node:crypto";
+import { rejectRetiredBundleResources } from "./retired-bundle-resources";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
@@ -65,6 +66,7 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   try { await lstat(output); throw new Error("Output already exists; choose a new staging path."); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   await noSymlinks(app);
+  await rejectRetiredBundleResources(app);
 
   const identityList = await run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]);
   const identities = identityList.split("\n").flatMap(line => {
@@ -73,7 +75,7 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   }).filter(value => value.name === options.identity || value.hash.toLowerCase() === options.identity.toLowerCase());
   if (identities.length !== 1) throw new Error("Select one installed Developer ID Application identity. No credentials were created.");
   const identity = identities[0].hash;
-  for (const file of ["Contents/Info.plist", "Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
+  for (const file of ["Contents/Info.plist", "Contents/MacOS/Computa",
     "Contents/Resources/AgentRuntime/codex-app-server", "Contents/Resources/AgentRuntime/manifest.json"]) await regular(join(app, file));
   if ((await run(["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", join(app, "Contents/Info.plist")])).trim() !== bundleID) {
     throw new Error("Expected the Computa bundle identifier.");
@@ -92,11 +94,11 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   await run(["/usr/bin/ditto", app, output]);
   await regular(output, true);
   await noSymlinks(output);
+  await rejectRetiredBundleResources(output);
   // Sign inside out. Signing changes Mach-O bytes, so refresh the runtime's
   // integrity fields before sealing the outer app. Preserve source provenance.
   for (const [relative, identifier] of [
     [runtimePath, `${bundleID}.AgentRuntime`],
-    ["Contents/Resources/ChromeBridge/ChromeBridgeHost", `${bundleID}.ChromeBridgeHost`],
   ]) {
     await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--identifier", identifier,
       "--sign", identity, join(output, relative)]);

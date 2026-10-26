@@ -268,6 +268,66 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertEqual(queueText(state), ["Rejected", "Pending"])
     }
 
+    func testRejectedChatSelectionRetainsQueueThroughDiscoveryUntilExplicitResume() async throws {
+        let family = WebsiteModelChoice(provider: "chatgpt", key: "GPT-6", label: "GPT-6")
+        for rejectedModel in ["browser/chatgpt", family.modelID] {
+            let initiallyRunning = rejectedModel != "browser/chatgpt"
+            let historic = TimelineEntry(kind: .assistant, title: "Recorded answer", body: "Keep this history", turnID: "historic-turn")
+            let task = AgentTask(id: taskID, title: "Saved Chat selection", summary: "", status: initiallyRunning ? .running : .draft,
+                                 workspace: "/tmp", model: rejectedModel, entries: [historic])
+            let preferences = isolatedTestPreferences()
+            preferences.set(rejectedModel, forKey: "LocalCodex.defaultModelID")
+            let runtime = QueueControlledRuntime()
+            await runtime.validateWebsiteSelectionsBeforeDispatch()
+            let state = AppState(tasks: [task], runtime: runtime, preferences: preferences, websiteModelDiscovery: { provider in
+                provider == "chatgpt" ? [syntheticChatGPTChoice]
+                    : [WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
+            })
+            state.connectionState = .connected(provider: runtime.providerName)
+            if initiallyRunning { state.activeTurnTaskIDs.insert(taskID) }
+            let accepted = await state.submitOrQueue(prompt: "Keep this rejected message", toTaskID: taskID)
+            XCTAssertTrue(accepted)
+            if initiallyRunning {
+                XCTAssertEqual(state.selectedTask?.model, family.modelID, "An active/queued historic identity must not migrate before its dispatch boundary")
+                state.apply(.taskStatusChanged(taskID: taskID, status: .waiting))
+                await settleScheduledWork()
+                let attempts = await runtime.modelValidationAttempts
+                XCTAssertTrue(attempts.isEmpty, "Pausing the historic queue must not dispatch it")
+                let resumed = await state.resumeQueue(taskID: taskID)
+                XCTAssertTrue(resumed)
+            }
+            let failed = try XCTUnwrap(state.queuedPrompts[taskID]?.first)
+            XCTAssertEqual(failed.status, .failed)
+            XCTAssertEqual(failed.deliveryUncertain, false)
+            XCTAssertTrue(state.canChangeModel(for: taskID))
+            XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+            XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt was not delivered")
+            XCTAssertEqual(state.selectedTask?.entries.first, historic)
+            let rejectedAttempts = await runtime.modelValidationAttempts
+            let rejectedSubmissions = await runtime.submissions
+            XCTAssertEqual(rejectedAttempts.map(\.modelID), [rejectedModel])
+            XCTAssertTrue(rejectedSubmissions.isEmpty, "Actual configuration validation must reject before accepting a submission")
+
+            await state.refreshWebsiteModels()
+            await settleScheduledWork()
+            XCTAssertEqual(state.selectedTask?.model, syntheticChatGPTModelID)
+            XCTAssertEqual(state.defaultModel, syntheticChatGPTModelID)
+            XCTAssertEqual(state.queuedPrompts[taskID]?.first, failed, "Discovery must preserve the failed queued message")
+            XCTAssertEqual(state.selectedTask?.entries.first, historic)
+            XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+            let afterDiscovery = await runtime.modelValidationAttempts
+            XCTAssertEqual(afterDiscovery, rejectedAttempts, "Discovery and migration cannot replay the prompt")
+
+            let resumed = await state.resumeQueue(taskID: taskID)
+            XCTAssertTrue(resumed)
+            let recovered = await runtime.submissions
+            let finalAttempts = await runtime.modelValidationAttempts
+            XCTAssertEqual(finalAttempts.map(\.modelID), [rejectedModel, syntheticChatGPTModelID])
+            XCTAssertEqual(recovered, [.init(prompt: failed.text, taskID: taskID, modelID: syntheticChatGPTModelID)])
+            XCTAssertTrue(queueText(state).isEmpty)
+        }
+    }
+
     func testLegacyFailedQueueWithoutDeliveryClassificationRemainsFenced() {
         let (state, _) = fixture()
         var legacy = QueuedPrompt(id: "legacy", text: "Uncertain")
@@ -590,11 +650,13 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     }
     nonisolated let providerName = "Queue test runtime"
     private(set) var submissions = [Call]()
+    private(set) var modelValidationAttempts = [Call]()
     private(set) var steers = [Call]()
     private(set) var interruptions = [String]()
     private var shouldHoldSubmission = false
     private var shouldRejectSubmission = false
     private var shouldRejectBeforeDispatch = false
+    private var validatesWebsiteSelection = false
     private var shouldHoldSteer = false
     private var shouldRejectSteer = false
     private var submissionContinuation: CheckedContinuation<Void, Error>?
@@ -606,11 +668,17 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     func holdNextSubmission() { shouldHoldSubmission = true }
     func rejectNextSubmission() { shouldRejectSubmission = true }
     func rejectNextSubmissionBeforeDispatch() { shouldRejectBeforeDispatch = true }
+    func validateWebsiteSelectionsBeforeDispatch() { validatesWebsiteSelection = true }
     func holdNextSteer() { shouldHoldSteer = true }
     func rejectNextSteer() { shouldRejectSteer = true }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
-        submissions.append(Call(prompt: prompt, taskID: taskID, modelID: modelID))
+        let call = Call(prompt: prompt, taskID: taskID, modelID: modelID)
+        if validatesWebsiteSelection {
+            modelValidationAttempts.append(call)
+            try CodexAppServerRuntime.Configuration.localQwen.validateSelectedModel(modelID)
+        }
+        submissions.append(call)
         if shouldRejectBeforeDispatch {
             shouldRejectBeforeDispatch = false
             throw WebModelServer.Failure.embeddedRequired

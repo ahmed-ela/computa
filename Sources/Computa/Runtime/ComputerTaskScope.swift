@@ -12,16 +12,58 @@ struct ComputerTaskScope: Equatable, Sendable {
         case unknown, ambiguous, explicitURL, recognizedService, exactTabTitle
     }
 
+    /// A service can use a narrowly identified landing or authorization route
+    /// on a shared host without admitting unrelated content on that host.
+    private struct ServiceRoute: Equatable, Sendable {
+        let host: String
+        let pathPattern: String
+        var requiredQueryValues: [String: Set<String>] = [:]
+        var optionalQueryValues: [String: Set<String>] = [:]
+        var redirectURIs: Set<String> = []
+        var scopeURLs: Set<String> = []
+
+        func matches(_ url: URL) -> Bool {
+            guard url.scheme?.lowercased() == "https", url.host?.lowercased() == host,
+                  url.port == nil || url.port == 443, url.user == nil, url.password == nil,
+                  url.path.range(of: pathPattern, options: .regularExpression) != nil else { return false }
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func values(_ name: String) -> [URLQueryItem] {
+                items.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            }
+            for (name, allowed) in requiredQueryValues {
+                let found = values(name)
+                guard found.count == 1, let value = found[0].value, allowed.contains(value) else { return false }
+            }
+            for (name, allowed) in optionalQueryValues {
+                let found = values(name)
+                guard found.count <= 1, found.isEmpty || found[0].value.map({ allowed.contains($0) }) == true else { return false }
+            }
+            guard !redirectURIs.isEmpty || !scopeURLs.isEmpty else { return true }
+            let redirects = values("redirect_uri"), scopes = values("scope")
+            guard redirects.count <= 1, scopes.count <= 1 else { return false }
+            let redirectBound = redirects.first.flatMap { $0.value }.map { redirectURIs.contains($0) } == true
+            let scopeBound = scopes.first?.value?.split(separator: " ").contains { scopeURLs.contains(String($0)) } == true
+            // A known mail destination binds the authorization to Outlook.
+            // Without one, require the explicit Outlook resource scope; an
+            // arbitrary Microsoft authorization request is not enough.
+            return redirects.isEmpty ? scopeBound : redirectBound
+        }
+    }
+
     private struct Site: Equatable, Sendable {
         let name: String
         let hosts: Set<String>
         let port: Int?
+        var serviceRoutes: [ServiceRoute] = []
 
         func matches(_ url: URL) -> Bool {
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
                   let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")),
-                  hosts.contains(host), url.user == nil, url.password == nil else { return false }
-            return port == nil || (url.port ?? (url.scheme == "https" ? 443 : 80)) == port
+                  url.user == nil, url.password == nil else { return false }
+            if hosts.contains(host) {
+                return port == nil || (url.port ?? (url.scheme == "https" ? 443 : 80)) == port
+            }
+            return serviceRoutes.contains { $0.matches(url) }
         }
     }
 
@@ -29,13 +71,24 @@ struct ComputerTaskScope: Equatable, Sendable {
         let name: String
         let aliases: [String]
         let hosts: Set<String>
+        var routes: [ServiceRoute] = []
     }
 
     // Identity catalog, not task-specific recovery code. Exact hosts prevent a
     // misleading title, URL query, or attacker-controlled suffix from matching.
     private static let services: [Service] = [
         .init(name: "Gmail", aliases: ["gmail"], hosts: ["mail.google.com"]),
-        .init(name: "Outlook", aliases: ["outlook"], hosts: ["outlook.live.com", "outlook.office.com", "outlook.office365.com"]),
+        .init(name: "Outlook", aliases: ["outlook"], hosts: ["outlook.live.com", "outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"], routes: [
+            .init(host: "www.microsoft.com", pathPattern: #"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/?$"#),
+            .init(host: "go.microsoft.com", pathPattern: #"^/fwlink/p/?$"#,
+                  requiredQueryValues: ["LinkID": ["2125442"]], optionalQueryValues: ["deeplink": ["mail/", "mail/inbox"]]),
+            .init(host: "login.microsoftonline.com", pathPattern: #"^/common/oauth2/v2\.0/authorize/?$"#,
+                  redirectURIs: ["https://outlook.live.com/mail", "https://outlook.live.com/mail/",
+                                 "https://outlook.office.com/mail", "https://outlook.office.com/mail/",
+                                 "https://outlook.office365.com/mail", "https://outlook.office365.com/mail/",
+                                 "https://outlook.cloud.microsoft/mail", "https://outlook.cloud.microsoft/mail/"],
+                  scopeURLs: ["https://outlook.office.com/.default"]),
+        ]),
         .init(name: "YouTube", aliases: ["youtube"], hosts: ["youtube.com", "www.youtube.com", "m.youtube.com"]),
         .init(name: "GitHub", aliases: ["github"], hosts: ["github.com", "www.github.com"]),
         .init(name: "Google Calendar", aliases: ["google calendar"], hosts: ["calendar.google.com"]),
@@ -45,14 +98,18 @@ struct ComputerTaskScope: Equatable, Sendable {
         .init(name: "Wikipedia", aliases: ["wikipedia"], hosts: ["wikipedia.org", "www.wikipedia.org", "en.wikipedia.org"]),
     ]
 
-    let backgroundChromeOnly: Bool
+    let backgroundBrowserOnly: Bool
+    /// Generic background-browser requests can use Computa's own browser.
+    /// An explicit restriction to another browser excludes that backend.
+    let externalBrowserOnly: Bool
     let targetConfidence: TargetConfidence
     private let site: Site?
     private let exactTitle: String?
 
     init(userPrompt: String) {
         let normalized = userPrompt.replacingOccurrences(of: "\u{2011}", with: "-")
-        backgroundChromeOnly = Self.explicitBackgroundOnly(normalized)
+        backgroundBrowserOnly = Self.explicitBackgroundOnly(normalized)
+        externalBrowserOnly = Self.explicitExternalBrowserOnly(normalized)
         let titles = Set(Self.matches(#"\b(?:tabs?|pages?)\s+(?:titled|named|called)\s+[\"“]([^\"”]+)[\"”]"#,
                                      in: normalized, group: 1).map(Self.normalizedTitle))
         let rawURLs = Self.matches(#"https?://[^\s<>\"“”]+"#, in: normalized)
@@ -82,15 +139,20 @@ struct ComputerTaskScope: Equatable, Sendable {
         }
         exactTitle = titles.first
         if let url = urls.first, let host = url.host?.lowercased() {
-            // Conflicting named service + URL cannot be resolved with syntax.
-            if let service = mentioned.first, !service.hosts.contains(host) {
+            // Conflicting destinations cannot be resolved with syntax. A
+            // product discussed at an explicit documentation URL is not a
+            // second destination and must not erase that URL's restriction.
+            if let service = mentioned.first,
+               service.aliases.contains(where: { Self.requestsDestination($0, in: nonURLText) }),
+               !service.hosts.contains(host) {
                 site = nil; targetConfidence = .ambiguous
                 return
             }
             site = Site(name: host, hosts: [host], port: url.port ?? (url.scheme == "https" ? 443 : 80))
             targetConfidence = .explicitURL
-        } else if let service = mentioned.first {
-            site = Site(name: service.name, hosts: service.hosts, port: nil)
+        } else if let service = mentioned.first,
+                  service.aliases.contains(where: { Self.requestsDestination($0, in: nonURLText) }) {
+            site = Site(name: service.name, hosts: service.hosts, port: nil, serviceRoutes: service.routes)
             targetConfidence = .recognizedService
         } else {
             site = nil
@@ -98,38 +160,18 @@ struct ComputerTaskScope: Equatable, Sendable {
         }
     }
 
-    /// A host-retained target can give an otherwise untargeted follow-up its
-    /// previous restrictions, never its old action capabilities. The caller
-    /// must require the same still-authorized connection before setting the
-    /// flag. Explicit/ambiguous current targets are new user intent and win.
-    /// No affirmative-word list or model-authored history is used as authority.
-    func preservingContinuationRestrictions(from previous: Self?, hasRetainedTarget: Bool) -> Self {
-        guard hasRetainedTarget, targetConfidence == .unknown, let previous else { return self }
-        return Self(continuing: previous, backgroundChromeOnly: backgroundChromeOnly || previous.backgroundChromeOnly)
+    func embeddedBrowserToolViolation() -> String? {
+        externalBrowserOnly
+            ? "This request explicitly permits another browser only. Computa's built-in browser is a separate surface; no built-in browser action was dispatched."
+            : nil
     }
 
-    private init(continuing previous: Self, backgroundChromeOnly: Bool) {
-        self.backgroundChromeOnly = backgroundChromeOnly
-        targetConfidence = previous.targetConfidence
-        site = previous.site
-        exactTitle = previous.exactTitle
-    }
-
-    /// Called before tool dispatch, with host-owned binding state. A model may
-    /// not relax this restriction by passing activation=none or inventing an
-    /// alternative tool name. Reads/actions require the borrowed tab binding.
-    func toolViolation(tool: String, hasBorrowedBinding: Bool) -> String? {
-        guard backgroundChromeOnly else { return nil }
-        switch tool {
-        case "computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace":
-            return nil
-        case "computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text", "computer_v2_verify":
-            guard !hasBorrowedBinding else { return nil }
-            return "This request permits background Chrome tab tools only. Bind an observed Chrome tab before reading or interacting; native app fallback is outside the requested scope."
-        default:
-            guard tool == "computer" || tool.hasPrefix("computer_") || tool.hasPrefix("desktop_") else { return nil }
-            return "This request permits background Chrome tab tools only. Foreground app opening, new-tab fallback, screenshots, and global keyboard/pointer input are outside the requested scope. No action was dispatched."
-        }
+    /// Native fallback cannot bypass an explicit browser-only request.
+    func toolViolation(tool: String) -> String? {
+        guard backgroundBrowserOnly else { return nil }
+        if ["computer_v2_status", "computer_v2_apps"].contains(tool) { return nil }
+        guard tool == "computer" || tool.hasPrefix("computer_") || tool.hasPrefix("desktop_") else { return nil }
+        return "This request permits background browser tools only. Native app fallback, screenshots, and global keyboard/pointer input are outside the requested scope. No action was dispatched."
     }
 
     /// Presentation reuses the bind-time restriction, never a relevance guess.
@@ -158,17 +200,57 @@ struct ComputerTaskScope: Equatable, Sendable {
     /// site without substituting an empty title or weakening bind-time checks.
     func siteViolation(url: URL) -> String? {
         guard targetConfidence != .ambiguous, let site, !site.matches(url) else { return nil }
-        return "The selected tab does not match the requested \(site.name) site. Do not substitute an unrelated tab. Refresh the inventory if needed; if the requested site is absent, report that it was not found instead of binding another site."
+        return "The selected tab does not match the requested \(site.name) site. Do not substitute an unrelated tab. Use a matching observed tab or, when authorized by the request, browser_open at the requested address or official service entrypoint. A missing inventory tab does not prove that the requested content is absent or that opening a new tab is forbidden."
     }
 
     private static func explicitBackgroundOnly(_ prompt: String) -> Bool {
         // Only explicit restrictions, not a passing mention such as "is
-        // background Chrome faster?". Unrecognized phrasing is not interpreted
+        // background browser faster?". Unrecognized phrasing is not interpreted
         // as a runtime-enforced promise.
         let patterns = [
-            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:chrome|browser)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
-            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:chrome|browser)\b"#,
-            #"\b(?:chrome|browser)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:browser|chrome|safari|firefox|edge)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:browser|chrome|safari|firefox|edge)\b"#,
+            #"\b(?:browser|chrome|safari|firefox|edge)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+        ]
+        return patterns.contains { hasMatch($0, in: prompt) }
+    }
+
+    /// A product name can be the subject of research, not the place to act.
+    /// In particular, troubleshooting ChatGPT must not force all browsing onto
+    /// chatgpt.com and prevent opening its documentation. Only a small set of
+    /// destination instructions is recognized here; omissions remain unknown
+    /// rather than turning a topical mention into an exclusive host boundary.
+    private static func requestsDestination(_ alias: String, in prompt: String) -> Bool {
+        let name = NSRegularExpression.escapedPattern(for: alias)
+        let determiner = #"(?:(?:the|my|our)\s+)?"#
+        let topicSuffix = #"(?!\s*(?:['’]s\s+)?(?:support|documentation|docs|help|news|tutorials?|integration|alternatives?|permissions?|polic(?:y|ies)|problems?|errors?)\b)"#
+        let destination = name + #"\b"# + topicSuffix
+        let command = #"(?:^|[.!?;\n])\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:only\s+)?(?:open|visit|read|check|inspect|search|use|browse|look\s+at|go\s+to|navigate\s+to)\s+(?:only\s+)?"#
+        if hasMatch(command + determiner + destination, in: prompt) { return true }
+
+        // "In Gmail ...", "using Outlook", and an account-qualified mail
+        // destination identify where work happens. "through ChatGPT's supported
+        // settings" and "about ChatGPT" deliberately do not.
+        if hasMatch(#"(?:^|[.!?;\n])\s*(?:in|on)\s+"# + determiner + destination, in: prompt)
+            || hasMatch(#"\b(?:using|via)\s+"# + determiner + destination, in: prompt)
+            || hasMatch(#"\b(?:in|on|from|to)\s+(?:my|our|the)\s+"# + destination
+                        + #"\s+(?:account|inbox|mailbox|calendar|drive|feed|files|issues|messages)\b"#, in: prompt) {
+            return true
+        }
+
+        // A concrete browser object can precede its service ("read the page on
+        // Wikipedia"). Requiring that object avoids treating "find news on
+        // ChatGPT" or "research changes in ChatGPT" as a destination request.
+        return hasMatch(#"\b(?:tab|page|website|site|inbox|mailbox|email|emails|message|messages|attachment|attachments|file|files|document|documents|issue|issues|calendar|feed)\s+(?:in|on|from)\s+"#
+                        + determiner + destination, in: prompt)
+    }
+
+    private static func explicitExternalBrowserOnly(_ prompt: String) -> Bool {
+        let patterns = [
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:chrome|safari|firefox|edge)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:chrome|safari|firefox|edge)\b"#,
+            #"\b(?:chrome|safari|firefox|edge)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?(?:chrome|safari|firefox|edge)(?:\s+browser)?(?:\s+tab)?(?:\s+tools?)?\s+only\b"#
         ]
         return patterns.contains { hasMatch($0, in: prompt) }
     }

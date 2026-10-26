@@ -462,7 +462,7 @@ fn process_arguments(pid: i32) -> Result<Vec<String>> {
     // Wipe the kernel block, which also contains environment values never exposed.
     bytes.fill(0);
     parsed.ok_or(AutomationError::Invalid(
-        "Chrome process cannot be inspected".into(),
+        "Native process cannot be inspected".into(),
     ))
 }
 
@@ -472,7 +472,6 @@ pub struct NativeBackend {
     selected_window: Option<OwnedCf>,
     nodes: HashMap<Uuid, OwnedCf>,
     previous_nodes: HashMap<Uuid, OwnedCf>,
-    navigation_failed: bool,
 }
 impl NativeBackend {
     pub fn new() -> Result<Self> {
@@ -482,7 +481,6 @@ impl NativeBackend {
             selected_window: None,
             nodes: HashMap::new(),
             previous_nodes: HashMap::new(),
-            navigation_failed: false,
         })
     }
     /// Host-owned exact process selection. This performs no inventory, launch,
@@ -718,25 +716,7 @@ impl MacosBackend for NativeBackend {
         if matches.is_empty() {
             return Err(AutomationError::NotRunning);
         }
-        if bundle_id == "com.google.Chrome" {
-            let candidates: Result<Vec<_>> = matches
-                .into_iter()
-                .map(|a| {
-                    let arguments = process_arguments(a.process_identifier)?;
-                    let ordinary = !arguments.iter().any(|s| {
-                        s == "--user-data-dir"
-                            || s.starts_with("--user-data-dir=")
-                            || s.starts_with("--remote-debugging")
-                    });
-                    Ok((a, ordinary))
-                })
-                .collect();
-            matches = candidates?
-                .into_iter()
-                .filter(|(_, ordinary)| *ordinary)
-                .map(|(a, _)| a)
-                .collect();
-        }
+
         if matches.len() != 1 {
             return Err(AutomationError::AmbiguousApplication);
         }
@@ -797,23 +777,7 @@ impl MacosBackend for NativeBackend {
                 .into_iter()
                 .filter(|a| a.bundle_identifier.as_deref() == Some(bundle_id) && !a.is_terminated)
                 .collect();
-            if bundle_id == "com.google.Chrome" && !matches.is_empty() {
-                let mut ordinary = vec![];
-                for app in matches {
-                    let args = process_arguments(app.process_identifier)?;
-                    if !args.iter().any(|s| {
-                        s == "--user-data-dir"
-                            || s.starts_with("--user-data-dir=")
-                            || s.starts_with("--remote-debugging")
-                    }) {
-                        ordinary.push(app)
-                    }
-                }
-                matches = ordinary;
-                if matches.len() != 1 {
-                    return Err(AutomationError::AmbiguousApplication);
-                }
-            }
+
             if matches.len() > 1 {
                 return Err(AutomationError::AmbiguousApplication);
             }
@@ -824,16 +788,11 @@ impl MacosBackend for NativeBackend {
             };
             let mut binding = self.activate_and_bind(application, before_dispatch).await?;
             if let Some(url) = url {
-                if bundle_id == "com.google.Chrome" {
-                    self.navigate_ordinary_chrome(&binding, url, before_dispatch)
-                        .await?;
-                } else {
-                    let opened = workspace_open(bundle_id, Some(url), before_dispatch).await?;
-                    if !binding.same_process(&opened) {
-                        return Err(AutomationError::TargetChanged);
-                    }
-                    binding = self.activate_and_bind(opened, before_dispatch).await?;
+                let opened = workspace_open(bundle_id, Some(url), before_dispatch).await?;
+                if !binding.same_process(&opened) {
+                    return Err(AutomationError::TargetChanged);
                 }
+                binding = self.activate_and_bind(opened, before_dispatch).await?;
             }
             self.validate(&binding)?;
             Ok(binding)
@@ -873,16 +832,10 @@ impl MacosBackend for NativeBackend {
                 return Err(AutomationError::NotForeground);
             }
             let app = self.application(pid)?;
-            if app.bundle_identifier.as_deref() != Some("com.google.Chrome") {
-                return Err(AutomationError::TargetChanged);
-            }
             let args = process_arguments(pid)?;
             let actual = args.first().ok_or(AutomationError::TargetChanged)?;
-            if std::fs::canonicalize(actual).ok() != std::fs::canonicalize(executable).ok()
-                || !args.iter().any(|s| s.starts_with("--user-data-dir="))
-                || !args
-                    .iter()
-                    .any(|s| s.starts_with("--remote-debugging-port="))
+            if std::fs::canonicalize(actual).map_err(|_| AutomationError::TargetChanged)?
+                != std::fs::canonicalize(executable).map_err(|_| AutomationError::TargetChanged)?
             {
                 return Err(AutomationError::TargetChanged);
             }
@@ -1334,7 +1287,6 @@ impl MacosBackend for NativeBackend {
         self.previous_nodes.clear();
         self.selected_window = None;
         self.binding = None;
-        self.navigation_failed = false;
     }
 }
 
@@ -1718,54 +1670,6 @@ async fn workspace_open(
     }
     Ok(app)
 }
-struct ChromeTabs {
-    tabs: Vec<OwnedCf>,
-    selected: OwnedCf,
-}
-impl ChromeTabs {
-    fn same(&self, other: &Self) -> bool {
-        self.tabs.len() == other.tabs.len()
-            && self
-                .tabs
-                .iter()
-                .all(|old| other.tabs.iter().any(|new| old.same(new)))
-            && self.selected.same(&other.selected)
-    }
-    fn added_selected(&self, before: &Self) -> Option<OwnedCf> {
-        if self.tabs.len() != before.tabs.len() + 1
-            || !before
-                .tabs
-                .iter()
-                .all(|old| self.tabs.iter().any(|new| old.same(new)))
-        {
-            return None;
-        }
-        let added: Vec<_> = self
-            .tabs
-            .iter()
-            .filter(|new| !before.tabs.iter().any(|old| old.same(new)))
-            .collect();
-        if added.len() == 1 && self.selected.same(added[0]) {
-            Some(added[0].retained())
-        } else {
-            None
-        }
-    }
-    fn has_selected(&self, tab: &OwnedCf) -> bool {
-        self.selected.same(tab) && self.tabs.iter().any(|current| current.same(tab))
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CRange {
-    location: isize,
-    length: isize,
-}
-struct ChromeFocus {
-    control: OwnedCf,
-    value: String,
-    selection: Option<CRange>,
-}
 impl NativeBackend {
     async fn activate_and_bind(
         &mut self,
@@ -1836,339 +1740,6 @@ impl NativeBackend {
             }
         }
         Err(AutomationError::NotForeground)
-    }
-    fn chrome_tabs(&self, binding: &BoundApplication) -> Result<ChromeTabs> {
-        self.require_foreground(binding)?;
-        let root = self
-            .selected_window
-            .as_ref()
-            .ok_or(AutomationError::WindowUnavailable)?
-            .retained();
-        let mut queue = VecDeque::from([(root, 0usize, false)]);
-        let mut visited: Vec<OwnedCf> = vec![];
-        let mut top_groups = 0;
-        let mut ungrouped = false;
-        let mut tabs = vec![];
-        let mut selected = vec![];
-        while let Some((element, depth, in_group)) = queue.pop_front() {
-            if visited.len() >= 512 {
-                return Err(AutomationError::NavigationUnverified);
-            }
-            if visited.iter().any(|old| old.same(&element)) {
-                continue;
-            }
-            if owner(&element)? != binding.application.process_identifier {
-                return Err(AutomationError::TargetChanged);
-            }
-            let role = string_attribute(&element, "AXRole")?
-                .ok_or(AutomationError::NavigationUnverified)?;
-            visited.push(element.retained());
-            if matches!(role.as_str(), "AXWebArea" | "AXDocument") {
-                continue;
-            }
-            let group = role == "AXTabGroup";
-            if group && !in_group {
-                top_groups += 1
-            }
-            if role == "AXRadioButton" {
-                if !in_group {
-                    ungrouped = true
-                } else {
-                    if tabs.iter().any(|old: &OwnedCf| old.same(&element)) {
-                        return Err(AutomationError::NavigationUnverified);
-                    }
-                    tabs.push(element.retained());
-                    let value = attribute(&element, "AXValue")?;
-                    if value.as_ref().is_some_and(|value| {
-                        number_value(value.raw()) == Some(1.)
-                            || bool_value(value.raw()) == Some(true)
-                    }) {
-                        selected.push(element.retained())
-                    }
-                }
-            }
-            let children = attribute(&element, "AXChildren")?
-                .map(|a| array_owned(&a))
-                .transpose()?
-                .unwrap_or_default();
-            if (!children.is_empty() && depth >= 20)
-                || queue.len() + visited.len() + children.len() > 512
-            {
-                return Err(AutomationError::NavigationUnverified);
-            }
-            for child in children {
-                queue.push_back((child, depth + 1, in_group || group));
-            }
-        }
-        self.require_foreground(binding)?;
-        if top_groups != 1 || ungrouped || tabs.is_empty() || selected.len() != 1 {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        Ok(ChromeTabs {
-            tabs,
-            selected: selected.remove(0),
-        })
-    }
-    fn chrome_focus(&self, binding: &BoundApplication) -> Result<ChromeFocus> {
-        self.require_foreground(binding)?;
-        // SAFETY: exact approved live process identifier; Create supplies +1.
-        let app = unsafe {
-            OwnedCf::owned(AXUIElementCreateApplication(
-                binding.application.process_identifier,
-            ))
-        }
-        .ok_or(AutomationError::TargetChanged)?;
-        let control =
-            attribute(&app, "AXFocusedUIElement")?.ok_or(AutomationError::NavigationUnverified)?;
-        if owner(&control)? != binding.application.process_identifier {
-            return Err(AutomationError::TargetChanged);
-        }
-        let role = string_attribute(&control, "AXRole")?;
-        let label =
-            string_attribute(&control, "AXDescription")?.or(string_attribute(&control, "AXTitle")?);
-        if role.as_deref() != Some("AXTextField")
-            || label.as_deref() != Some("Address and search bar")
-            || !settable(&control)?
-        {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        let mut current = control.retained();
-        let mut toolbar = false;
-        let mut reached = false;
-        for _ in 0..24 {
-            let Some(parent) = attribute(&current, "AXParent")? else {
-                break;
-            };
-            if owner(&parent)? != binding.application.process_identifier {
-                return Err(AutomationError::TargetChanged);
-            }
-            let role = string_attribute(&parent, "AXRole")?;
-            if matches!(role.as_deref(), Some("AXWebArea" | "AXDocument")) {
-                return Err(AutomationError::NavigationUnverified);
-            }
-            if role.as_deref() == Some("AXToolbar") {
-                toolbar = true
-            }
-            if role.as_deref() == Some("AXWindow") {
-                reached = self
-                    .selected_window
-                    .as_ref()
-                    .is_some_and(|window| window.same(&parent));
-                break;
-            }
-            current = parent;
-        }
-        if !toolbar || !reached {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        let value =
-            string_attribute(&control, "AXValue")?.ok_or(AutomationError::NavigationUnverified)?;
-        let selection = attribute(&control, "AXSelectedTextRange")?.and_then(|range| {
-            // SAFETY: Copy supplied a live CF object; type is checked before
-            // extracting an AXValue CFRange into a correctly sized value.
-            unsafe {
-                if CFGetTypeID(range.raw()) != AXValueGetTypeID() {
-                    return None;
-                }
-                let mut out = CRange {
-                    location: 0,
-                    length: 0,
-                };
-                if AXValueGetValue(range.raw(), 4, (&mut out as *mut CRange).cast()) != 0
-                    && out.location >= 0
-                    && out.length >= 0
-                {
-                    Some(out)
-                } else {
-                    None
-                }
-            }
-        });
-        self.require_foreground(binding)?;
-        let fresh = attribute(&app, "AXFocusedUIElement")?.ok_or(AutomationError::TargetChanged)?;
-        if !fresh.same(&control) {
-            return Err(AutomationError::TargetChanged);
-        }
-        Ok(ChromeFocus {
-            control,
-            value,
-            selection,
-        })
-    }
-    async fn navigate_ordinary_chrome(
-        &mut self,
-        binding: &BoundApplication,
-        destination: &str,
-        before: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<()> {
-        if self.navigation_failed {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        validate_open_url(Some(destination))?;
-        self.require_foreground(binding)?;
-        let baseline = self.chrome_tabs(binding)?;
-        let fresh = self.chrome_tabs(binding)?;
-        if !fresh.same(&baseline) {
-            return Err(AutomationError::TargetChanged);
-        }
-        before()?;
-        self.require_foreground(binding)?;
-        // Never replay Cmd+T or Return if any later read/set fails. The newly
-        // created tab is intentionally preserved for human inspection.
-        self.navigation_failed = true;
-        self.input(
-            binding,
-            InputAction::Key {
-                key: "t".into(),
-                modifiers: vec!["command".into()],
-            },
-            before,
-        )?;
-        let mut selected = None;
-        let mut focus = None;
-        for attempt in 0..50 {
-            before()?;
-            self.require_foreground(binding)?;
-            if let (Ok(tabs), Ok(current)) = (self.chrome_tabs(binding), self.chrome_focus(binding))
-                && let Some(tab) = tabs.added_selected(&baseline)
-                && current.value.is_empty()
-            {
-                selected = Some(tab);
-                focus = Some(current);
-                break;
-            }
-            if attempt < 49 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        let tab = selected.ok_or(AutomationError::NavigationUnverified)?;
-        let original = focus.ok_or(AutomationError::NavigationUnverified)?;
-        let current = self.chrome_focus(binding)?;
-        if !current.control.same(&original.control)
-            || !current.value.is_empty()
-            || !self.chrome_tabs(binding)?.has_selected(&tab)
-        {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        before()?;
-        self.require_foreground(binding)?;
-        let key = cf_string("AXValue");
-        let text = cf_string(destination);
-        // SAFETY: exact currently focused native omnibox with checked setter,
-        // retained control and copied value; this setter is invoked only once.
-        let code =
-            unsafe { AXUIElementSetAttributeValue(original.control.raw(), key.raw(), text.raw()) };
-        if code != 0 {
-            return Err(AutomationError::NavigationUnverified);
-        }
-        let mut completion_removed = false;
-        for attempt in 0..50 {
-            before()?;
-            let current = self.chrome_focus(binding)?;
-            if !current.control.same(&original.control)
-                || !self.chrome_tabs(binding)?.has_selected(&tab)
-            {
-                return Err(AutomationError::NavigationUnverified);
-            }
-            if current.value == destination {
-                before()?;
-                let fresh = self.chrome_focus(binding)?;
-                if !fresh.control.same(&original.control)
-                    || fresh.value != destination
-                    || !self.chrome_tabs(binding)?.has_selected(&tab)
-                {
-                    return Err(AutomationError::NavigationUnverified);
-                }
-                self.input(
-                    binding,
-                    InputAction::Key {
-                        key: "return".into(),
-                        modifiers: vec![],
-                    },
-                    before,
-                )?;
-                self.navigation_failed = false;
-                return Ok(());
-            }
-            if !completion_removed
-                && selected_completion(&current.value, destination, current.selection)
-            {
-                let fresh = self.chrome_focus(binding)?;
-                if !fresh.control.same(&current.control)
-                    || fresh.value != current.value
-                    || fresh.selection.map(|r| (r.location, r.length))
-                        != current.selection.map(|r| (r.location, r.length))
-                    || !selected_completion(&fresh.value, destination, fresh.selection)
-                {
-                    return Err(AutomationError::NavigationUnverified);
-                }
-                completion_removed = true;
-                self.input(
-                    binding,
-                    InputAction::Key {
-                        key: "backspace".into(),
-                        modifiers: vec![],
-                    },
-                    before,
-                )?;
-            }
-            if attempt < 49 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        Err(AutomationError::NavigationUnverified)
-    }
-}
-fn selected_completion(value: &str, destination: &str, range: Option<CRange>) -> bool {
-    let Some(range) = range else { return false };
-    let expected: Vec<_> = destination.encode_utf16().collect();
-    let actual: Vec<_> = value.encode_utf16().collect();
-    range.location as usize == expected.len()
-        && range.length > 0
-        && (range.location as usize).checked_add(range.length as usize) == Some(actual.len())
-        && actual.starts_with(&expected)
-}
-#[cfg(test)]
-mod chrome_native_tests {
-    use super::*;
-    #[test]
-    fn completion_removal_requires_only_exact_selected_utf16_suffix() {
-        let text = "https://example.com/😀";
-        let completed = format!("{text}/completion");
-        let n = text.encode_utf16().count();
-        let rest = completed.encode_utf16().count() - n;
-        assert!(selected_completion(
-            &completed,
-            text,
-            Some(CRange {
-                location: n as isize,
-                length: rest as isize
-            })
-        ));
-        assert!(!selected_completion(
-            &completed,
-            text,
-            Some(CRange {
-                location: (n - 1) as isize,
-                length: rest as isize
-            })
-        ));
-        assert!(!selected_completion(
-            &completed,
-            text,
-            Some(CRange {
-                location: n as isize,
-                length: 0
-            })
-        ));
-        assert!(!selected_completion(
-            &completed,
-            "https://other/",
-            Some(CRange {
-                location: n as isize,
-                length: rest as isize
-            })
-        ));
     }
 }
 

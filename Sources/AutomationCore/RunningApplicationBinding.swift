@@ -30,7 +30,6 @@ public enum RunningApplicationBindingError: Error, Equatable, LocalizedError, Se
 @MainActor
 protocol RunningApplicationBindingRuntime {
     func runningApplications(bundleIdentifier: String) throws -> [ApplicationWindowProcessState]
-    func chromeArguments(processIdentifier: Int32) throws -> [String]?
 }
 
 /// Binds to an existing app and exact app-selected AX window without affecting
@@ -164,27 +163,10 @@ public final class RunningApplicationBinder {
         guard candidates.allSatisfy({ $0.processIdentifier > 0 }) else {
             throw RunningApplicationBindingError.processIdentityUnavailable
         }
-        let selected: ApplicationWindowProcessState
-        if bundleIdentifier == "com.google.Chrome" {
-            // Reuse the existing ordinary-profile policy, including refusing
-            // an uninspectable candidate beside an otherwise ordinary one.
-            let chromeCandidates = try candidates.map {
-                ExistingChromeCandidate(
-                    processIdentifier: $0.processIdentifier,
-                    arguments: try runtime.chromeArguments(processIdentifier: $0.processIdentifier)
-                )
-            }
-            guard let pid = try ExistingChromeSelection.processIdentifier(in: chromeCandidates),
-                  let match = candidates.first(where: { $0.processIdentifier == pid }) else {
-                throw RunningApplicationBindingError.notRunning
-            }
-            selected = match
-        } else {
-            guard candidates.count == 1 else {
-                throw RunningApplicationBindingError.ambiguousApplications(candidates.count)
-            }
-            selected = candidates[0]
+        guard candidates.count == 1 else {
+            throw RunningApplicationBindingError.ambiguousApplications(candidates.count)
         }
+        let selected = candidates[0]
         guard let launchDate = selected.launchDate, launchDate.timeIntervalSince1970.isFinite else {
             throw RunningApplicationBindingError.processIdentityUnavailable
         }
@@ -203,11 +185,5 @@ private struct SystemRunningApplicationBindingRuntime: RunningApplicationBinding
                 applicationName: $0.localizedName, launchDate: $0.launchDate, isTerminated: $0.isTerminated
             )
         }
-    }
-
-    func chromeArguments(processIdentifier: Int32) throws -> [String]? {
-        // Existing argc-bounded reader discards environment and wipes its
-        // temporary kernel buffer. No arguments are exposed in the result.
-        ChromeProcessArguments.read(processIdentifier: processIdentifier)
     }
 }

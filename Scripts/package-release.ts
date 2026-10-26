@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Package an already signed app. This never builds, signs, installs or launches it.
 import { createHash } from "node:crypto";
+import { rejectRetiredBundleResources } from "./retired-bundle-resources";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -107,9 +108,10 @@ export async function bundleFiles(app: string): Promise<FileEntry[]> {
 
 export async function inspectApp(context: Context, app: string, channel: Options["channel"]) {
   const files = await bundleFiles(app);
+  await rejectRetiredBundleResources(app);
   const regular = new Set(files.filter(item => item.kind === "file").map(item => item.path));
   for (const path of ["Contents/Info.plist", "Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
-    "Contents/Resources/AgentRuntime/manifest.json", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
+    "Contents/Resources/AgentRuntime/manifest.json",
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) {
     if (!regular.has(path)) throw new Error(`Required release file is missing or nonregular: ${path}`);
   }
@@ -130,10 +132,10 @@ export async function inspectApp(context: Context, app: string, channel: Options
     || runtime.executable !== "codex-app-server" || binary.kind !== "file" || runtime.binarySHA256 !== binary.sha256 || runtime.binarySize !== binary.size) {
     throw new Error("Agent runtime signature/hash differs from its sealed manifest");
   }
-  for (const binaryPath of [join(app, "Contents/MacOS/Computa"), join(runtimePath, "codex-app-server"), join(app, "Contents/Resources/ChromeBridge/ChromeBridgeHost")]) {
+  for (const binaryPath of [join(app, "Contents/MacOS/Computa"), join(runtimePath, "codex-app-server")]) {
     const architectures = (await checked(context, ["/usr/bin/lipo", "-archs", binaryPath])).split(/\s+/);
     if (!architectures.includes("arm64")) throw new Error("All release executables must include arm64");
-    // The app/helper may be universal, while the packaged MLX/runtime target is
+    // The app may be universal, while the packaged MLX/runtime target is
     // arm64. A single slice also avoids treating a later slice header as a path.
     const libraries = await checked(context, ["/usr/bin/otool", "-arch", "arm64", "-L", binaryPath]);
     for (const line of libraries.split("\n").slice(1).filter(value => value.trim())) {
@@ -195,7 +197,7 @@ export async function packageRelease(options: Options, context: Context) {
     + `Clean Mac: open Install Computa.command and confirm INSTALL. It installs into ~/Applications, downloads private Python/MLX and pinned Qwen 4B (~3.06 GB), then opens the app. Allow about 10 GB free space. No Xcode, Homebrew, Git, Bun or preinstalled Python required.\n\n`
     + `Already configured: drag Computa.app to Applications, or use the installer for a backed-up update in ~/Applications. Quit Computa and legacy Mactopus first. The installer upgrades a lone Mactopus.app and preserves its old name in the backup; if both names exist, it stops without replacing either. Use the intended app path if both installation locations exist.\n\n`
     + `Channel: ${options.channel}. ${options.channel === "signed-test" ? "Not notarized: macOS may block this test build. Obtain a notarized release for normal distribution." : "The packaged app has a validated notarization ticket; assess/notarize the DMG separately before publishing."}\n`
-    + `Permissions and Chrome consent are separate user actions. No quarantine removal or security bypass is performed. Failed runtime downloads can be retried; prior app backups and model download caches are retained.\n`;
+    + `macOS permissions are separate user actions. No quarantine removal or security bypass is performed. Failed runtime downloads can be retried; prior app backups and model download caches are retained.\n`;
   await writeFile(join(payload, "READ ME.txt"), guide, { flag: "wx" });
   const checksummed = ["Install Computa.command", "READ ME.txt", "release-manifest.json",
     ...resources.map(name => `Installer/${name}`), "Installer/install-release.py", "Installer/uv.lock.json"].sort();

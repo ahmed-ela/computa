@@ -280,26 +280,6 @@ enum Task {
         #[arg(long)]
         observation: String,
     },
-    InstructionIsolation {
-        #[arg(long)]
-        template: PathBuf,
-        #[arg(long)]
-        candidate: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long)]
-        instance: String,
-    },
-    InstructionContamination {
-        #[arg(long)]
-        template: PathBuf,
-        #[arg(long)]
-        candidate: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long)]
-        instance: String,
-    },
     MakeEvidenceFixtures,
     /// Run exact native Runtime gates only with an explicit trusted config.
     MatrixRun {
@@ -307,7 +287,7 @@ enum Task {
         output: PathBuf,
         #[arg(long, default_value = "4b,9b")]
         models: String,
-        #[arg(long, default_value = "status,chrome,semantic,combined,visual")]
+        #[arg(long, default_value = "status,semantic,combined,visual")]
         tasks: String,
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=20))]
         repetitions: u8,
@@ -435,7 +415,7 @@ async fn main() -> io::Result<()> {
             .join("../..")
             .canonicalize()
     };
-    let user_home = || computa_browser::identity::user_home().map_err(xtask::distribution::invalid);
+    let user_home = || computa_state::account::user_home().map_err(xtask::distribution::invalid);
     match command {
         Task::Check => {
             let root = source_root()?;
@@ -468,7 +448,6 @@ async fn main() -> io::Result<()> {
                     "-p",
                     "computa-ui",
                     "-p",
-                    "computa-extension",
                     "--target",
                     "wasm32-unknown-unknown",
                 ],
@@ -815,38 +794,6 @@ async fn main() -> io::Result<()> {
             })
             .await
             .map_err(xtask::distribution::invalid)?,
-        )?,
-        Task::InstructionIsolation {
-            template,
-            candidate,
-            output,
-            instance,
-        } => print_checked(
-            &xtask::benchmarks::instruction_isolation(&xtask::benchmarks::IsolationOptions {
-                template,
-                candidate,
-                output,
-                instance,
-            })
-            .await
-            .map_err(xtask::distribution::invalid)?,
-            "complete",
-        )?,
-        Task::InstructionContamination {
-            template,
-            candidate,
-            output,
-            instance,
-        } => print_checked(
-            &xtask::benchmarks::instruction_contamination(&xtask::benchmarks::IsolationOptions {
-                template,
-                candidate,
-                output,
-                instance,
-            })
-            .await
-            .map_err(xtask::distribution::invalid)?,
-            "complete",
         )?,
         Task::MakeEvidenceFixtures => print_json(
             &xtask::benchmarks::make_evidence_fixtures().map_err(xtask::distribution::invalid)?,

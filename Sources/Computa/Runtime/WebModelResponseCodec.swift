@@ -1,17 +1,21 @@
 import Foundation
 import CoreFoundation
 
-/// The browser is a stateless model transport. It never owns a tool or executes
+/// The browser is a model transport. It never owns a tool or executes
 /// an action: validated function calls return to the existing App Server loop.
 enum WebModelResponseCodec {
     static let maximumPromptBytes = 160 * 1_024
 
     struct Request: Sendable {
         let model: String
+        let singleActionRelay: Bool
         let stream: Bool
         let prompt: String
+        let promptStatistics: WebsitePromptProjection.Statistics
         let runtimeInstructions: String
         let currentUserInstructions: String
+        /// Derived from validated original definitions; native admission supplies state.
+        let requiresBrowserToolAvailability: Bool
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
@@ -21,12 +25,16 @@ enum WebModelResponseCodec {
         /// Serialized storage keeps the request safely transferable across the
         /// server actor while preserving the standard response configuration.
         fileprivate let responseConfiguration: Data
+        /// Private, lossless admission input, before presentation-only tool
+        /// filtering. Continuations must also reject changes to hidden tools.
+        let continuationRequest: Data
     }
 
     fileprivate struct OfferedTool: Sendable {
         let name: String
         let namespace: String?
         let isCustom: Bool
+        let browserReadMode: ComputaModelToolCatalog.BrowserReadMode?
     }
 
     fileprivate struct ToolPolicy: Sendable {
@@ -50,6 +58,7 @@ enum WebModelResponseCodec {
         case message(String)
         case assistantMessage(String, phase: AssistantPhase)
         case toolCalls([ToolCall])
+        case toolCallsWithCommentary([ToolCall], String)
     }
 
     /// Content-free diagnostics for a reply already rejected by the parser.
@@ -65,6 +74,7 @@ enum WebModelResponseCodec {
             case invalidCallName = "invalid_call_name"
             case invalidEnvelopeFields = "invalid_envelope_fields"
             case invalidMessagePhase = "invalid_message_phase"
+            case invalidToolCommentary = "invalid_tool_commentary"
         }
 
         let reason: Reason
@@ -86,6 +96,7 @@ enum WebModelResponseCodec {
         case missingInput
         case previousResponseUnsupported
         case invalidTools
+        case invalidBrowserReadArguments
         case unsupportedToolType
         case unsupportedModality(Modality)
         case promptTooLarge(actualBytes: Int, maximumBytes: Int)
@@ -108,6 +119,7 @@ enum WebModelResponseCodec {
             case .missingInput: "The web model request needs input as a string or an array."
             case .previousResponseUnsupported:
                 "Web models need the complete local conversation in input; previous_response_id is unsupported."
+            case .invalidBrowserReadArguments: "Browser read arguments do not match the offered fresh-read or continuation contract."
             case .invalidTools: "The web model request contains an invalid or ambiguous tool definition."
             case .unsupportedToolType:
                 "Web models support function tools with JSON object arguments and custom tools with literal string input, including namespaces. This request contains an unsupported tool type."
@@ -134,13 +146,14 @@ enum WebModelResponseCodec {
         }
     }
 
-    static func prepareRequest(_ data: Data) throws -> Request {
+    static func prepareRequest(_ data: Data,
+                               browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
         }
         guard let originalJSON = String(data: data, encoding: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Failure.invalidRequest
         }
         guard let model = object["model"] as? String,
@@ -161,11 +174,26 @@ enum WebModelResponseCodec {
             throw Failure.invalidRequest
         }
         let schemas: [[String: Any]]
+        let requiresBrowserToolAvailability: Bool
+        var toolDefinitionsChanged = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
-            schemas = values
+            var historical: [String: OfferedTool] = [:]
+            for value in values {
+                if value["type"] as? String == "namespace" {
+                    guard let namespace = value["name"] as? String, !namespace.isEmpty,
+                          let children = value["tools"] as? [[String: Any]] else { throw Failure.invalidTools }
+                    for child in children { try insertTool(child, namespace: namespace, into: &historical) }
+                } else { try insertTool(value, namespace: nil, into: &historical) }
+            }
+            requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
+            schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
+                browserToolAvailability: browserToolAvailability)
+            toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
+            object["tools"] = schemas
         } else {
             schemas = []
+            requiresBrowserToolAvailability = false
         }
         var offered: [String: OfferedTool] = [:]
         for schema in schemas {
@@ -182,39 +210,170 @@ enum WebModelResponseCodec {
         let policy = try toolPolicy(object["tool_choice"], tools: offered)
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
-        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name), customToolNames: customNames)
+        let includedInstructionText = trustedInstructionText(in: object)
+        let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
+        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
+            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT)
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
         }
         let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
             latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
+        let displaySource = toolDefinitionsChanged
+            ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+            : originalJSON
+        let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
+        let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
+        // Keep ChatGPT's complete request in a literal, unlabelled code block.
+        // The JSON presentation stays byte-exact; the eight fence bytes count
+        // toward admission and the outbound ownership fingerprint.
+        let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
+        let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT)
         let prompt = """
         \(runtimeInstructions)
 
         \(ComputaAgentInstructions.webRequestContext)
         COMPLETE_RESPONSES_REQUEST_JSON:
-        \(originalJSON)
+        \(framedRequestJSON)
         END_COMPLETE_RESPONSES_REQUEST_JSON.
 
         \(currentUserInstructions)
 
-        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames))
+        \(responseContract)
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
-        return Request(model: model, stream: stream, prompt: prompt, runtimeInstructions: runtimeInstructions,
+        let statistics = projection.statistics(originalRequestBytes: data.count, presentedRequestBytes: displayJSON.utf8.count,
+            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
+            currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
+            finalPromptBytes: bytes)
+        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
+                       requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
-                       responseConfiguration: configuration)
+                       responseConfiguration: configuration, continuationRequest: data)
     }
 
-    /// Embedded inference requires its response contract. Generic callers keep
-    /// ordinary-text compatibility; strict callers never repair or extract JSON.
+    /// Only actual local instruction fields can establish an already-supplied
+    /// complete contract block. Never promote quoted user/history/tool data or
+    /// join separate parts into a match that no individual instruction contains.
+    private static func trustedInstructionText(in object: [String: Any]) -> [String] {
+        var texts = (object["instructions"] as? String).map { [$0] } ?? []
+        for message in object["input"] as? [[String: Any]] ?? [] {
+            guard message["type"] == nil || message["type"] as? String == "message",
+                  let role = message["role"] as? String, ["system", "developer"].contains(role) else { continue }
+            if let content = message["content"] as? String {
+                texts.append(content)
+            } else if let parts = message["content"] as? [[String: Any]] {
+                for part in parts {
+                    guard let type = part["type"] as? String, ["input_text", "text"].contains(type),
+                          let text = part["text"] as? String else { continue }
+                    texts.append(text)
+                }
+            }
+        }
+        return texts
+    }
+
+    /// Protect rendering-sensitive punctuation in JSON strings. ChatGPT's
+    /// selected message DOM was observed changing the literal request after
+    /// Send; shielding . : / is a mitigation hypothesis, not a parser diagnosis.
+    /// Structural JSON punctuation and decoded values remain unchanged. Other
+    /// providers retain literal URL punctuation. ChatGPT keeps ASCII intraword
+    /// underscores readable: between ASCII letters/digits they cannot delimit
+    /// CommonMark emphasis. Edge/repeated underscores retain existing shielding.
+    /// Consume complete escape pairs
+    /// so quotes and literal backslashes retain their decoded values.
+    private static func displayStableJSON(_ original: String, shieldURLPunctuation: Bool = false) -> String {
+        let bytes = Array(original.utf8)
+        var index = 0
+        var result: [UInt8] = []
+        result.reserveCapacity(original.utf8.count)
+        let hex = Array("0123456789abcdef".utf8)
+        var inString = false
+        var previousLiteralAlphanumeric = false
+        func appendUnicodeEscape(_ byte: UInt8) {
+            result.append(contentsOf: [92, 117, 48, 48, hex[Int(byte >> 4)], hex[Int(byte & 15)]])
+        }
+        func asciiAlphanumeric(_ byte: UInt8) -> Bool {
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+        }
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
+            if !inString {
+                result.append(byte)
+                if byte == 34 { inString = true; previousLiteralAlphanumeric = false }
+                continue
+            }
+            if byte == 34 {
+                result.append(byte)
+                inString = false
+                previousLiteralAlphanumeric = false
+                continue
+            }
+            if byte == 92, index < bytes.count {
+                let escaped = bytes[index]
+                index += 1
+                previousLiteralAlphanumeric = false
+                if escaped == 47 {
+                    if shieldURLPunctuation { appendUnicodeEscape(escaped) }
+                    else { result.append(escaped) }
+                }
+                else if escaped == 34 || escaped == 92 { appendUnicodeEscape(escaped) }
+                else {
+                    result.append(byte); result.append(escaped)
+                    // Validated JSON's Unicode escape is one token. Its hex
+                    // tail must not become a literal identifier neighbor.
+                    if escaped == 117 {
+                        result.append(contentsOf: bytes[index..<(index + 4)])
+                        index += 4
+                    }
+                }
+            } else if shieldURLPunctuation && byte == 95 && previousLiteralAlphanumeric && index < bytes.count
+                        && asciiAlphanumeric(bytes[index]) {
+                result.append(byte)
+            } else if shieldURLPunctuation && [46, 47, 58].contains(byte)
+                        || (33...44).contains(byte) || (59...64).contains(byte)
+                        || (91...96).contains(byte) || (123...126).contains(byte) {
+                appendUnicodeEscape(byte)
+            } else {
+                result.append(byte)
+            }
+            if byte != 92 { previousLiteralAlphanumeric = asciiAlphanumeric(byte) }
+        }
+        return String(decoding: result, as: UTF8.self)
+    }
+
+    /// Website prose is a final message, never an action. JSON-shaped output
+    /// and code fences must satisfy the complete envelope contract; do
+    /// not extract or repair a call hidden inside surrounding prose.
+    static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw Failure.emptyReply }
+        if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
+           !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+            return try validated(.message(text), request: request)
+        }
+        return try parseReply(text, request: request, requireEnvelope: true)
+    }
+
+    static func malformedEmbeddedReplyDiagnostic(_ text: String, request: Request) -> MalformedEnvelopeDiagnostic? {
+        do { _ = try parseEmbeddedReply(text, request: request); return nil }
+        catch {
+            guard (error as? Failure) == .malformedEnvelope else { return nil }
+            return malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: true)
+        }
+    }
+
+    /// Generic callers keep ordinary-text compatibility. Strict envelope
+    /// callers never repair or extract JSON.
     static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
@@ -238,8 +397,11 @@ enum WebModelResponseCodec {
             }
             return try validated(.message(message), request: request)
         case "tool_calls":
-            guard Set(envelope.keys).isSubset(of: ["type", "calls"]),
+            guard Set(envelope.keys).isSubset(of: ["type", "calls", "commentary"]),
                   let calls = envelope["calls"] as? [[String: Any]], !calls.isEmpty else {
+                throw Failure.malformedEnvelope
+            }
+            if let commentary = envelope["commentary"], !(commentary is String) {
                 throw Failure.malformedEnvelope
             }
             let validated = try calls.map { call -> ToolCall in
@@ -260,7 +422,12 @@ enum WebModelResponseCodec {
                 let encoded = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
                 return ToolCall(name: tool.name, argumentsJSON: String(decoding: encoded, as: UTF8.self), namespace: tool.namespace)
             }
-            return try self.validated(.toolCalls(validated), request: request)
+            let reply: Reply = if let commentary = envelope["commentary"] as? String {
+                .toolCallsWithCommentary(validated, commentary)
+            } else {
+                .toolCalls(validated)
+            }
+            return try self.validated(reply, request: request)
         default:
             if requireEnvelope { throw Failure.malformedEnvelope }
             return try validated(.message(text), request: request)
@@ -298,7 +465,10 @@ enum WebModelResponseCodec {
             }
             return nil
         case "tool_calls":
-            guard Set(envelope.keys).isSubset(of: ["type", "calls"]) else { return diagnostic(.invalidEnvelopeFields) }
+            guard Set(envelope.keys).isSubset(of: ["type", "calls", "commentary"]) else { return diagnostic(.invalidEnvelopeFields) }
+            if let commentary = envelope["commentary"], !(commentary is String) {
+                return diagnostic(.invalidToolCommentary)
+            }
             guard let calls = envelope["calls"] as? [[String: Any]], !calls.isEmpty else {
                 return diagnostic(.invalidCalls)
             }
@@ -318,11 +488,12 @@ enum WebModelResponseCodec {
         request: Request,
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
-        websiteModelEvidence: WebsiteModelEvidence? = nil
+        websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteToolSelection: String? = nil
     ) throws -> Data {
         _ = try validated(reply, request: request)
         let output = outputItems(for: reply, responseID: responseID)
-        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence)
+        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
         var events: [[String: Any]] = [
             ["type": "response.created", "response": initial],
             ["type": "response.in_progress", "response": initial],
@@ -357,7 +528,7 @@ enum WebModelResponseCodec {
             }
             events.append(["type": "response.output_item.done", "output_index": index, "item": item])
         }
-        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence)
+        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
         events.append(["type": "response.completed", "response": completed])
         var result = Data()
         for (sequence, var event) in events.enumerated() {
@@ -376,12 +547,13 @@ enum WebModelResponseCodec {
         request: Request,
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
-        websiteModelEvidence: WebsiteModelEvidence? = nil
+        websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteToolSelection: String? = nil
     ) throws -> Data {
         _ = try validated(reply, request: request)
         return try JSONSerialization.data(withJSONObject: response(
             request: request, reply: reply, responseID: responseID, createdAt: createdAt,
-            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence
+            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection
         ), options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
@@ -389,7 +561,7 @@ enum WebModelResponseCodec {
         switch reply {
         case .message, .assistantMessage:
             guard !request.toolPolicy.requiresCall else { throw Failure.rejectedToolChoice }
-        case let .toolCalls(calls):
+        case let .toolCalls(calls), let .toolCallsWithCommentary(calls, _):
             guard !calls.isEmpty else { throw Failure.malformedEnvelope }
             guard request.parallelToolCalls || calls.count == 1 else { throw Failure.parallelToolCallsUnsupported }
             if let maximum = request.maximumToolCalls, calls.count > maximum { throw Failure.toolCallLimitExceeded }
@@ -401,8 +573,13 @@ enum WebModelResponseCodec {
                     guard call.customInput != nil, call.argumentsJSON.isEmpty else { throw Failure.customInputMustBeString }
                 } else {
                     guard call.customInput == nil,
-                          (try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8))) is [String: Any] else {
+                          let arguments = try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: Any] else {
                         throw Failure.argumentsMustBeObject
+                    }
+                    if let mode = tool.browserReadMode {
+                        if mode == .fresh, arguments["cursor"] != nil { throw Failure.invalidBrowserReadArguments }
+                        do { try EmbeddedBrowserTools.validate(tool: tool.name, arguments: arguments) }
+                        catch { throw Failure.invalidBrowserReadArguments }
                     }
                 }
             }
@@ -572,7 +749,10 @@ enum WebModelResponseCodec {
         if type == "custom", let format = schema["format"], !(format is [String: Any]) { throw Failure.invalidTools }
         let offeredName = namespace.map { "\($0).\(name)" } ?? name
         guard tools[offeredName] == nil else { throw Failure.invalidTools }
-        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom")
+        let readMode = type == "function" ? (schema["parameters"] as? [String: Any]).flatMap {
+            ComputaModelToolCatalog.browserReadMode(name: name, namespace: namespace, schema: $0)
+        } : nil
+        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom", browserReadMode: readMode)
     }
 
     private static func rejectUnsupportedModalities(in input: Any?) throws {
@@ -614,12 +794,22 @@ enum WebModelResponseCodec {
     }
 
     private static func removingJSONFence(_ text: String) -> String {
-        guard text.hasPrefix("```"), text.hasSuffix("```"),
-              let newline = text.firstIndex(of: "\n") else { return text }
-        let label = text[text.index(text.startIndex, offsetBy: 3)..<newline].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard label.isEmpty || label.lowercased() == "json" else { return text }
-        let content = text[text.index(after: newline)..<text.index(text.endIndex, offsetBy: -3)]
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 6, text.hasPrefix("```"), text.hasSuffix("```") else { return text }
+        let end = text.index(text.endIndex, offsetBy: -3)
+        if let newline = text.firstIndex(of: "\n") {
+            let label = text[text.index(text.startIndex, offsetBy: 3)..<newline]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if label.isEmpty || label.lowercased() == "json" {
+                return text[text.index(after: newline)..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        // A website can render a whole JSON wrapper inline. Remove only its
+        // exact outer delimiters; the complete body still must parse as JSON.
+        // Never search for an object inside prose or repair damaged JSON.
+        let content = text[text.index(text.startIndex, offsetBy: 3)..<end]
+        guard let boundary = content.firstIndex(where: \.isWhitespace),
+              content[..<boundary].lowercased() == "json" else { return text }
+        return content[boundary...].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func looksLikeToolEnvelope(_ text: String) -> Bool {
@@ -636,6 +826,9 @@ enum WebModelResponseCodec {
         case let .assistantMessage(text, phase):
             return [["id": "msg_\(identity)", "type": "message", "role": "assistant", "status": "completed", "phase": phase.rawValue,
                      "content": [["type": "output_text", "text": text, "annotations": [] as [String]]]]]
+        case let .toolCallsWithCommentary(calls, commentary):
+            return outputItems(for: .assistantMessage(commentary, phase: .commentary), responseID: responseID)
+                + outputItems(for: .toolCalls(calls), responseID: responseID)
         case let .toolCalls(calls):
             return calls.enumerated().map { index, call in
                 var item: [String: Any] = ["id": "fc_\(identity)_\(index)", "type": "function_call", "status": "completed",
@@ -652,12 +845,13 @@ enum WebModelResponseCodec {
         }
     }
 
-    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil) -> [String: Any] {
+    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
         let finalText: String
         let endTurn: Bool
         switch reply {
         case let .message(text): finalText = completed ? text : ""; endTurn = true
         case let .assistantMessage(text, phase): finalText = completed ? text : ""; endTurn = phase == .finalAnswer
+        case let .toolCallsWithCommentary(_, commentary): finalText = completed ? commentary : ""; endTurn = false
         case .toolCalls: finalText = ""; endTurn = false
         }
         // Configuration was validated before the browser was contacted.
@@ -667,11 +861,19 @@ enum WebModelResponseCodec {
                 "status": completed ? "completed" : "in_progress", "output": output, "output_text": finalText,
                 "error": NSNull(), "incomplete_details": NSNull(), "usage": NSNull(),
                 "end_turn": completed ? endTurn : false]) { _, new in new }
+        // This reserved key describes host selection, never execution. A client
+        // metadata value cannot impersonate the host's finite diagnostic.
+        var metadata = value["metadata"] as? [String: Any] ?? [:]
+        var metadataChanged = metadata.removeValue(forKey: "computa_website_tool_selection") != nil
         if let websiteModelEvidence {
-            var metadata = value["metadata"] as? [String: Any] ?? [:]
             metadata["computa_website_model"] = websiteModelEvidence.dictionary
-            value["metadata"] = metadata
+            metadataChanged = true
         }
+        if let websiteToolSelection {
+            metadata["computa_website_tool_selection"] = websiteToolSelection
+            metadataChanged = true
+        }
+        if metadataChanged { value["metadata"] = metadata }
         return value
     }
 }

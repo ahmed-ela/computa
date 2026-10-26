@@ -71,7 +71,7 @@ pub struct BrowserFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum BrowserFailureCode {
     #[serde(rename = "web_sign_in_required")]
-    #[error("Sign in to the selected website in Chrome, then retry the task.")]
+    #[error("Sign in to the selected website in the built-in browser, then retry the task.")]
     SignInRequired,
     #[serde(rename = "web_tab_closed")]
     #[error("The owned website tab was closed.")]
@@ -147,25 +147,21 @@ pub enum BrowserFailureCode {
     CleanupFailed,
     #[serde(other)]
     #[error(
-        "The website could not produce a response. Check its sign-in, usage limit, or error in Chrome."
+        "The website could not produce a response. Check its sign-in, usage limit, or error in the built-in browser."
     )]
     Unknown,
 }
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum BrowserTransportError {
-    #[error(
-        "The installed Computa extension is out of date. Reload it once in Chrome, then retry; Computa reconnects automatically."
-    )]
-    ReloadRequired,
-    #[error("Sign in to the selected website in Chrome, then retry the task.")]
+    #[error("Sign in to the selected website in the built-in browser, then retry the task.")]
     SignInRequired,
-    #[error("Chrome is not connected to Computa.")]
+    #[error("The built-in website model transport is unavailable.")]
     Disconnected,
-    #[error("The browser bridge rejected this request.")]
+    #[error("The website model transport rejected this request.")]
     Rejected,
-    #[error("The browser bridge response was invalid.")]
+    #[error("The website model transport response was invalid.")]
     InvalidResponse,
-    #[error("The browser bridge request timed out.")]
+    #[error("The website model transport request timed out.")]
     Timeout,
     #[error("{0}")]
     Website(BrowserFailureCode),

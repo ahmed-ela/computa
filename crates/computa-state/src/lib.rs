@@ -1,5 +1,6 @@
 //! First-party durable state. The pinned upstream App Server continues to own
 //! state_5.sqlite and rollouts; this crate never creates a replacement chat DB.
+pub mod account;
 pub mod evidence;
 pub mod preferences;
 use std::os::unix::fs::DirBuilderExt;

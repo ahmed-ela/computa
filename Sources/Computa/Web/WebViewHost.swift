@@ -65,6 +65,10 @@ struct WebWorkspaceView: View {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+        .sheet(isPresented: Binding(get: { state.isAPIProvidersPresented && !state.approvalGateBlocksInteraction },
+            set: { state.isAPIProvidersPresented = $0 })) {
+            APIProviderSettingsView(settings: state.apiProviderSettings)
+        }
     }
 }
 

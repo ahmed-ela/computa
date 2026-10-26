@@ -668,9 +668,6 @@ fn code_identity(bytes: &[u8]) -> io::Result<Vec<CodeSlice>> {
 fn expected_code_identifier(path: &str) -> Option<String> {
     match path {
         MAIN_PATH => Some(distribution::BUNDLE_ID.into()),
-        "Contents/Resources/ChromeBridge/ChromeBridgeHost" => {
-            Some(format!("{}.ChromeBridgeHost", distribution::BUNDLE_ID))
-        }
         "Contents/Resources/AgentRuntime/codex-app-server" => {
             Some(format!("{}.AgentRuntime", distribution::BUNDLE_ID))
         }

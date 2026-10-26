@@ -338,7 +338,32 @@ async function validateArtifacts(directory: string) {
 }
 
 const officialIDs = ["basic-response", "assistant-phase", "response-output-phase-schema", "streaming-response", "system-prompt", "tool-calling", "multi-turn"];
-async function runOfficial(baseUrl: string, model: string) {
+export type OfficialFixtureHeaders = { "x-computa-task-id": string; "x-codex-turn-metadata": string };
+export function parseOfficialFixtureHeaders(value: unknown): OfficialFixtureHeaders {
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).length !== 2 || !Object.hasOwn(value, "x-computa-task-id")
+    || !Object.hasOwn(value, "x-codex-turn-metadata")) throw new Error("Fixture headers must contain only explicit task and native turn metadata");
+  const input = value as Record<string, unknown>;
+  const task = input["x-computa-task-id"], metadata = input["x-codex-turn-metadata"];
+  if (typeof task !== "string" || !uuid.test(task) || typeof metadata !== "string"
+    || metadata.length > 4096 || /[\r\n]/.test(metadata)) throw new Error("Invalid fixture task or native turn header");
+  let context: unknown;
+  try { context = JSON.parse(metadata); } catch { throw new Error("Invalid fixture native turn metadata JSON"); }
+  if (!context || typeof context !== "object" || Array.isArray(context) || Object.keys(context).length !== 2
+    || !Object.hasOwn(context, "thread_id") || !Object.hasOwn(context, "turn_id")
+    || !["thread_id", "turn_id"].every(key => typeof (context as JSON)[key] === "string" && uuid.test((context as JSON)[key])))
+    throw new Error("Fixture native turn metadata requires explicit UUID thread and turn identities");
+  return { "x-computa-task-id": task, "x-codex-turn-metadata": metadata };
+}
+export function officialRequestHeaders(original?: HeadersInit, fixture?: OfficialFixtureHeaders): Headers {
+  const headers = new Headers(original);
+  if (fixture) {
+    for (const [name, value] of Object.entries(parseOfficialFixtureHeaders(fixture))) headers.set(name, value);
+  } else headers.set("x-computa-task-id", randomUUID());
+  return headers;
+}
+async function runOfficial(baseUrl: string, model: string, fixtureHeaders?: OfficialFixtureHeaders) {
   const apiKey = process.env.COMPUTA_OPEN_RESPONSES_API_KEY;
   if (!apiKey) throw new Error("Set COMPUTA_OPEN_RESPONSES_API_KEY in the process environment");
   const url = new URL(baseUrl);
@@ -348,8 +373,10 @@ async function runOfficial(baseUrl: string, model: string) {
   const wireResults: { id: string; errors: string[] }[] = [];
   let activeID = "";
   globalThis.fetch = async (input, init) => {
-    const headers = new Headers(init?.headers);
-    headers.set("x-computa-task-id", randomUUID());
+    // Explicit synthetic context is supplied by a prepared local test server.
+    // The runner never invents native turn identity or changes request bodies,
+    // authorization, schema checks, or the normal random-task default.
+    const headers = officialRequestHeaders(init?.headers, fixtureHeaders);
     const response = await originalFetch(input, { ...init, headers });
     const body = await response.clone().text();
     const contentType = response.headers.get("content-type") ?? "";
@@ -383,8 +410,20 @@ export async function main(args: string[]) {
   await verifyUpstream();
   const value = (flag: string) => args.indexOf(flag) >= 0 ? args[args.indexOf(flag) + 1] : undefined;
   if (value("--artifacts")) return validateArtifacts(value("--artifacts")!);
-  if (args.includes("--official") && value("--base-url") && value("--model")) return runOfficial(value("--base-url")!, value("--model")!);
-  throw new Error("Usage: bun Scripts/open-responses-conformance.ts --artifacts <directory> OR --official --base-url <loopback/v1> --model <model>");
+  if (args.includes("--official") && value("--base-url") && value("--model")) {
+    let headers: OfficialFixtureHeaders | undefined;
+    if (args.includes("--fixture-headers")) {
+      const file = value("--fixture-headers");
+      if (!file || !isAbsolute(file)) throw new Error("Fixture headers require an explicit absolute JSON file");
+      const bytes = await readFile(file);
+      if (bytes.length > 4096) throw new Error("Fixture header file exceeds its byte bound");
+      let decodedFixtureHeaders: unknown;
+      try { decodedFixtureHeaders = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("Invalid fixture header file JSON"); }
+      headers = parseOfficialFixtureHeaders(decodedFixtureHeaders);
+    }
+    return runOfficial(value("--base-url")!, value("--model")!, headers);
+  }
+  throw new Error("Usage: bun Scripts/open-responses-conformance.ts --artifacts <directory> OR --official --base-url <loopback/v1> --model <model> [--fixture-headers <absolute-json-file>]");
 }
 
 if (import.meta.main) await main(process.argv.slice(2));

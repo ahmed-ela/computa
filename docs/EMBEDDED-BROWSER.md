@@ -2,12 +2,20 @@
 
 ## Scope
 
-Computa owns a native WKWebView tab pane beside the chat. General browsing remains
-human-operated; Qwen has no general embedded-browser tools. The Swift app's
-ChatGPT, Gemini, and Claude models use fixed inference actions in separate owned
-Temporary Chat or Incognito tabs sharing this profile. They do not require Chrome
-for inference; ordinary browser tools still use the separately approved Chrome connection.
-General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent-control-deferred).
+Computa owns a native WKWebView tab pane beside the chat. People can browse in
+the pane; fresh agent chats receive the nine typed
+[built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
+and actions. The Swift app's adapters use separate owned Temporary Chat or
+Incognito pages. ChatGPT creates a fresh private store for each inference,
+seeded with the signed-in profile's eligible ChatGPT cookies while excluding
+canonical conversation-key and history-off cookie families. Gemini and Claude
+use the shared profile. Gemini retains one owned page for a native turn;
+ChatGPT and Claude use a fresh page for each
+[inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Embedded ChatGPT
+still requires per-submission ownership. Browser tasks use this built-in browser;
+external Chrome connection code and controls have been removed.
+Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
+retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 
 ## Composition
 
@@ -32,12 +40,15 @@ General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent
   temporary-mode checks remain mandatory; deadlines and stable-response timers
   remain. The local harness executes tools and stores transcripts.
   Before the first Send, the entire editor contents must match the outbound
-  prompt, including an opaque session marker at its end. The first rendered
-  user message must contain that marker as its last nonempty line. Its normalized
-  rendered body is fingerprinted once and must match on every later read,
+  prompt, including an opaque submission marker at its end. Each retained-page
+  submission has a distinct marker and sequence. Its rendered user message must
+  contain that marker as its last nonempty line. Its normalized rendered body is
+  fingerprinted once and must match the native outbound fingerprint on later reads,
   mutation and cleanup, including the one allowed local-to-server SPA route
-  promotion. This supports Markdown rendering without treating rendered text as
-  the original prompt bytes.
+  promotion. Legacy first-message lineage can pin rendered Markdown. Retained
+  submission proof additionally requires the complete canonical outbound body;
+  removing Markdown delimiters or changing its whitespace cannot satisfy that
+  digest merely because the visible message has a matching marker.
 - Owned model views stay attached to a permanent render host behind the workspace,
   including while the Browser pane is hidden. The host does not accept input or
   expose model pages in Accessibility. DOM editor focus preserves the native
@@ -51,8 +62,17 @@ General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent
   Closing the last human tab shows the empty browser while model work continues;
   model loading, errors and teardown do not replace the human browser's errors.
 
-Sign in through a regular human browser tab. Both use the same persistent WebKit
-profile; inference never takes over the sign-in tab. Saved model catalogs are
+ChatGPT observations defer fresh model verification while a response is running.
+Pending snapshots expose no answer, tool instruction or fresh model proof, and
+these reads do not open the model picker. Current visible header contradictions
+still reject the session. Before publishing a stable answer or tool request,
+Computa rechecks the complete current model, product mode and owned submission.
+The existing first owned SPA transition can follow its acknowledged first Send;
+it cannot replay that Send or authorize a later unrelated conversation route.
+
+Sign in through a regular human browser tab. ChatGPT inference copies only its
+eligible sign-in and policy cookies into a private store; Gemini and Claude use
+the persistent profile. Inference never takes over the sign-in tab. Saved model catalogs are
 reused on startup; only missing catalogs are discovered once. **Refresh website
 models** explicitly reads all provider menus sequentially without sending a
 prompt.
@@ -84,6 +104,8 @@ configuration so the opener relationship and signed-in profile remain intact.
 Closing a child from the website returns selection to its surviving opener.
 Pop-ups count toward the normal tab limit and obey the same URL policy.
 Inference-owned pages cannot create or close browser tabs this way.
+
+Browser tools also reject popups from a human document after attempting input on it, including delayed callbacks after task cleanup. Human popup use on that document requires a reload or fresh document navigation that commits; a SPA route change is insufficient. Untouched documents and declined tool actions retain normal human popup behavior. This is a conservative ownership boundary, not precise attribution of concurrent human and agent input.
 
 Downloads, file selection, camera/microphone requests, external-app schemes and
 JavaScript modal dialogs are declined. Google can independently reject embedded

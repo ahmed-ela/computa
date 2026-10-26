@@ -48,6 +48,13 @@ final class HeadlessMLXServerTests: XCTestCase {
         XCTAssertNil(environment["OPENAI_API_KEY"])
         XCTAssertNil(environment["PYTHONPATH"])
         XCTAssertNil(environment["HTTP_PROXY"])
+        XCTAssertNil(environment["COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED"])
+        let descriptions = try? JSONSerialization.jsonObject(with: Data((environment["COMPUTA_NATIVE_TOOL_OVERRIDES"] ?? "").utf8)) as? [[String: String]]
+        let continuation = descriptions?.first { $0["name"] == "computer_v2_continue" }?["description"] ?? ""
+        XCTAssertTrue(continuation.contains("Continue only a current native computer read"))
+        XCTAssertTrue(continuation.contains("browser_read(cursor=next_cursor)"))
+        XCTAssertTrue(continuation.contains("browser_tabs(cursor=next_cursor)"))
+        XCTAssertFalse(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.contains("Chrome"))
     }
 
     func testBundledPythonResourcesContainOnlySourcesAndNoGeneratedCaches() throws {

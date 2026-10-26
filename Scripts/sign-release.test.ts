@@ -15,8 +15,8 @@ async function fixture() {
   const app = join(root, "input.app"), output = join(root, "signed.app");
   const runtime = "Contents/Resources/AgentRuntime/codex-app-server";
   const manifestPath = "Contents/Resources/AgentRuntime/manifest.json";
-  for (const relative of ["Contents/MacOS", "Contents/Resources/ChromeBridge", "Contents/Resources/AgentRuntime"]) await mkdir(join(app, relative), { recursive: true });
-  for (const relative of ["Contents/Info.plist", "Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost"]) await writeFile(join(app, relative), "fixture");
+  for (const relative of ["Contents/MacOS", "Contents/Resources/AgentRuntime"]) await mkdir(join(app, relative), { recursive: true });
+  for (const relative of ["Contents/Info.plist", "Contents/MacOS/Computa"]) await writeFile(join(app, relative), "fixture");
   await writeFile(join(app, runtime), "original");
   const manifest = { executable: "codex-app-server", platform: "macos", architecture: "arm64", binarySize: 8, binarySHA256: sha("original"), sourceCommit: "pinned-source", patchSHA256: "pinned-patch" };
   await writeFile(join(app, manifestPath), JSON.stringify(manifest));
@@ -43,7 +43,7 @@ test("signs copy inside out, refreshes integrity before sealing, preserves origi
   expect(JSON.parse(await readFile(join(f.output, f.manifestPath), "utf8")).sourceCommit).toBe("pinned-source");
   expect(result.runtimeSHA256).toBe(sha("signed-runtime"));
   const signs = f.calls.filter(call => call.includes("--sign"));
-  expect(signs.map(call => call.at(-1))).toEqual([join(f.output, f.runtime), join(f.output, "Contents/Resources/ChromeBridge/ChromeBridgeHost"), f.output]);
+  expect(signs.map(call => call.at(-1))).toEqual([join(f.output, f.runtime), f.output]);
   expect(signs.every(call => call.includes("--timestamp") && call.includes("runtime"))).toBe(true);
 });
 
@@ -83,4 +83,26 @@ test("rejects symlinked resource ancestors without signing or changing external 
   await expect(signRelease(f.options, f.run)).rejects.toThrow("symlink");
   expect(await readFile(join(external, "codex-app-server"), "utf8")).toBe("original");
   expect(f.calls).toHaveLength(0);
+});
+
+test("refuses stale retired resources before signing or copying without changing the source", async () => {
+  for (const relative of ["Contents/Resources/ChromeBridge", "Contents/Resources/BrowserExtension"]) {
+    const f = await fixture();
+    await mkdir(join(f.app, relative));
+    await expect(signRelease(f.options, f.run)).rejects.toThrow("Retired bundle resource remains");
+    expect((await lstat(join(f.app, relative))).isDirectory()).toBe(true);
+    expect(f.calls).toHaveLength(0);
+    expect(await lstat(f.output).catch(() => null)).toBeNull();
+  }
+});
+
+test("rechecks copied resources before applying a signature", async () => {
+  const f = await fixture();
+  const run: SignRunner = async command => {
+    const result = await f.run(command);
+    if (command[0] === "/usr/bin/ditto") await mkdir(join(f.output, "Contents/Resources/BrowserExtension"));
+    return result;
+  };
+  await expect(signRelease(f.options, run)).rejects.toThrow("Retired bundle resource remains");
+  expect(f.calls.some(call => call.includes("--sign"))).toBe(false);
 });

@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -24,6 +25,100 @@ MODEL_IDS = (
 MAX_BODY = 32 * 1024 * 1024
 MAX_IMAGE = 6 * 1024 * 1024
 MAX_IMAGES = 8
+RETIRED_TOOL_NAMES = frozenset(("computer_v2_tabs", "computer_v2_bind_tab",
+    "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow"))
+
+
+class NativeToolVisibility:
+    """Retire removed tool routes unconditionally; preserve saved calls and outputs."""
+
+    def __init__(self, environment=None):
+        environment = os.environ if environment is None else environment
+        self.descriptions = {}
+        raw = environment.get("COMPUTA_NATIVE_TOOL_OVERRIDES", "[]")
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > 131_072:
+            raise ValueError("Invalid native tool visibility configuration.")
+        values = json.loads(raw, parse_constant=reject_nonfinite)
+        if not isinstance(values, list) or len(values) > 128:
+            raise ValueError("Invalid native tool visibility configuration.")
+        for value in values:
+            if not isinstance(value, dict):
+                raise ValueError("Invalid native tool visibility configuration.")
+            name, description = value.get("name"), value.get("description")
+            if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", name)
+                    or name in self.descriptions or not isinstance(description, str)
+                    or not description or len(description.encode("utf-8")) > 8192):
+                raise ValueError("Invalid native tool visibility configuration.")
+            # Optional schemas are deliberately not applied: the native launch
+            # must never widen a persisted activation or permission contract.
+            self.descriptions[name] = description
+
+    @staticmethod
+    def hidden(name):
+        return isinstance(name, str) and name.rsplit(".", 1)[-1] in RETIRED_TOOL_NAMES
+
+    def apply(self, request):
+        schemas = request.get("tools") or []
+        if not isinstance(schemas, list) or len(schemas) > 256:
+            raise ValueError("Invalid active tool catalog.")
+        active_names = set()
+
+        def tool(schema, namespace=None):
+            if not isinstance(schema, dict):
+                raise ValueError("Invalid active tool catalog.")
+            if schema.get("type") == "namespace":
+                children = schema.get("tools")
+                if namespace is not None or not isinstance(children, list) or len(children) > 256:
+                    raise ValueError("Invalid active tool catalog.")
+                children = [child for value in children if (child := tool(value, schema.get("name"))) is not None]
+                return {**schema, "tools": children} if children else None
+            name = schema.get("name")
+            if self.hidden(name):
+                return None
+            if schema.get("type") != "function":
+                return schema
+            if not isinstance(name, str) or not name:
+                raise ValueError("Invalid active tool catalog.")
+            result = dict(schema)
+            base = name.rsplit(".", 1)[-1]
+            if base in self.descriptions:
+                result["description"] = self.descriptions[base]
+            if base == "computer_v2_open":
+                parameters = result.get("parameters")
+                if not isinstance(parameters, dict) or not isinstance(parameters.get("properties"), dict):
+                    raise ValueError("Invalid native open contract.")
+                required = parameters.get("required", [])
+                if not isinstance(required, list) or any(not isinstance(value, str) for value in required):
+                    raise ValueError("Invalid native open contract.")
+                removed = {"url", "browser_mode"}
+                result["parameters"] = {**parameters,
+                    "properties": {key: value for key, value in parameters["properties"].items() if key not in removed}}
+                if "required" in parameters:
+                    result["parameters"]["required"] = [value for value in required if value not in removed]
+            active_names.add(name)
+            if namespace:
+                active_names.add(namespace + "." + name)
+            return result
+
+        active = [value for schema in schemas if (value := tool(schema)) is not None]
+        choice = request.get("tool_choice")
+        pending = [(choice, 0)]
+        while pending:
+            value, depth = pending.pop()
+            if depth > 8:
+                raise ValueError("Invalid active tool choice.")
+            if isinstance(value, dict):
+                if self.hidden(value.get("name")):
+                    raise ValueError("The selected tool is not enabled.")
+                pending.extend((child, depth + 1) for child in value.values() if isinstance(child, (dict, list)))
+            elif isinstance(value, list):
+                pending.extend((child, depth + 1) for child in value)
+        if choice == "required" and not active:
+            raise ValueError("The selected tool is not enabled.")
+        result = dict(request)
+        if "tools" in request:
+            result["tools"] = active
+        return (request if result == request else result), frozenset(active_names)
 
 
 def discover_model_paths(root, fallback_root=None):
@@ -124,6 +219,7 @@ class LocalInferenceBoundary:
             raise ValueError("Model paths must belong to the fixed local catalog.")
         self.busy = False
         self.selected_model = None
+        self.tool_visibility = NativeToolVisibility()
 
     async def json(self, send, status, value):
         if isinstance(value.get("error"), dict):
@@ -177,6 +273,9 @@ class LocalInferenceBoundary:
             try:
                 request = json.loads(body, parse_constant=reject_nonfinite)
                 validate_request(request, self.models)
+                original_request = request
+                request, active_names = self.tool_visibility.apply(request)
+                request_changed = request is not original_request
             except (ValueError, TypeError, RecursionError):
                 return await self.json(send, 400, {"error": {"message": "Invalid local inference request."}})
             # The pinned upstream retains old model references during a switch.
@@ -197,6 +296,7 @@ class LocalInferenceBoundary:
             # lets owned 4B coexist with a legacy 9B without copying either.
             if self.selected_model in self.model_paths:
                 request["model"] = str(self.model_paths[self.selected_model])
+            if request_changed or self.selected_model in self.model_paths:
                 body = json.dumps(request, separators=(",", ":")).encode()
                 scope = {**scope, "headers": [(key, value) for key, value in scope.get("headers", [])
                                                if key.lower() != b"content-length"]
@@ -210,7 +310,7 @@ class LocalInferenceBoundary:
                     return {"type": "http.request", "body": bytes(body), "more_body": False}
                 return await receive()
 
-            with producer_scope() as producer:
+            with producer_scope(allowed_tool_names=active_names) as producer:
                 response = ResponseBoundary(send, request.get("max_output_tokens", 4096), producer,
                                             request=public_request, codex_usage=codex_usage)
                 try:

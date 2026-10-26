@@ -550,6 +550,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
         publish({ ...snapshot, defaultModel: action.modelID });
         return;
+      case 'prepareWebsiteModel':
+        // Preview never opens a website or submits a prompt.
+        return;
       case 'setTaskModel':
         if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
         if (!snapshot.tasks.some((task) => task.id === action.taskID && task.modelSelectable)) return;
@@ -562,6 +565,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         // Preview has no signed-in browser. Never invent provider availability.
         publish({ ...snapshot, websiteModelsRefreshing: false, websiteModelsError: 'Website discovery is available in the desktop app.' });
         return;
+      case 'showAPIProviders':
+        return; // Credentials are entered only in the desktop's native sheet.
     }
   };
 

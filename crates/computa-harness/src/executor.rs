@@ -46,45 +46,6 @@ pub trait ApprovalGate {
     ) -> LocalFuture<'a, Result<bool, HarnessError>>;
 }
 #[derive(Clone, Debug)]
-pub struct OwnedBrowserBinding {
-    pub process_identifier: i32,
-    pub executable: std::path::PathBuf,
-}
-pub trait BrowserToolLane {
-    fn set_turn_authority(&mut self, _authority: TurnAuthority) {}
-    fn is_borrowed(&self) -> bool {
-        true
-    }
-    fn open_isolated<'a>(
-        &'a mut self,
-        _scope: &'a ExecutionScope,
-        _executable: std::path::PathBuf,
-        _url: &'a str,
-        _cancel: &'a CancellationToken,
-    ) -> LocalFuture<'a, Result<OwnedBrowserBinding, HarnessError>> {
-        Box::pin(async {
-            Err(HarnessError::Capability(
-                "The owned browser transport is unavailable.".into(),
-            ))
-        })
-    }
-    fn execute<'a>(
-        &'a mut self,
-        scope: &'a ExecutionScope,
-        name: &'a str,
-        args: Value,
-        approval: &'a mut dyn ApprovalGate,
-        cancellation: &'a CancellationToken,
-    ) -> LocalFuture<'a, Result<ToolOutput, HarnessError>>;
-    fn end_turn<'a>(&'a mut self, scope: &'a ExecutionScope) -> LocalFuture<'a, Vec<String>>;
-    fn outcome_counts(&self) -> (u64, u64) {
-        (0, 0)
-    }
-    fn operation_count(&self) -> usize {
-        0
-    }
-}
-#[derive(Clone, Debug)]
 pub struct QualifiedGrounding {
     pub capture_id: Uuid,
     pub point: Point,
@@ -103,26 +64,6 @@ pub trait VisualGrounder {
         target: &'a str,
         cancellation: &'a CancellationToken,
     ) -> LocalFuture<'a, Result<QualifiedGrounding, HarnessError>>;
-}
-pub struct DisconnectedBrowser;
-impl BrowserToolLane for DisconnectedBrowser {
-    fn execute<'a>(
-        &'a mut self,
-        _scope: &'a ExecutionScope,
-        _name: &'a str,
-        _args: Value,
-        _approval: &'a mut dyn ApprovalGate,
-        _cancel: &'a CancellationToken,
-    ) -> LocalFuture<'a, Result<ToolOutput, HarnessError>> {
-        Box::pin(async {
-            Err(HarnessError::Browser(
-                "Chrome is not connected. Use the native Chrome connection controls.".into(),
-            ))
-        })
-    }
-    fn end_turn<'a>(&'a mut self, _scope: &'a ExecutionScope) -> LocalFuture<'a, Vec<String>> {
-        Box::pin(async { vec![] })
-    }
 }
 pub struct UnavailableGrounder;
 impl VisualGrounder for UnavailableGrounder {
@@ -147,9 +88,7 @@ pub enum HarnessError {
     StaleScope,
     #[error("The requested action is outside the host's computer interaction policy.")]
     Policy,
-    #[error(
-        "No application is bound in this turn. Bind an already-running app or an approved Chrome tab."
-    )]
+    #[error("No application is bound in this turn. Bind an already-running app.")]
     Unbound,
     #[error(
         "The observed reference is stale, unexposed, or the wrong capability; no input was sent."
@@ -163,8 +102,6 @@ pub enum HarnessError {
     Invalid(String),
     #[error("{0}")]
     Capability(String),
-    #[error("{0}")]
-    Browser(String),
     #[error(transparent)]
     Native(#[from] AutomationError),
     #[error(transparent)]
@@ -232,7 +169,6 @@ pub struct Harness<B: MacosBackend> {
     scope: Option<ExecutionScope>,
     authority: TurnAuthority,
     binding: Option<BoundApplication>,
-    browser_bound: bool,
     browser_model: bool,
     reader: SemanticReader,
     publication: Option<ReadPublication>,
@@ -252,7 +188,6 @@ impl<B: MacosBackend> Harness<B> {
             scope: None,
             authority: TurnAuthority::new(),
             binding: None,
-            browser_bound: false,
             browser_model: false,
             reader: SemanticReader::default(),
             publication: None,
@@ -312,7 +247,6 @@ impl<B: MacosBackend> Harness<B> {
         self.binding = None;
         self.publication = None;
         self.capture = None;
-        self.browser_bound = false;
         self.operations.clear();
         self.calls.clear();
         self.failures.clear();
@@ -328,9 +262,9 @@ impl<B: MacosBackend> Harness<B> {
         self.capture = None;
         self.reader.invalidate();
     }
-    pub async fn end_turn(&mut self, browser: &mut dyn BrowserToolLane) -> Vec<String> {
+    pub async fn end_turn(&mut self) -> Vec<String> {
         self.authority.revoke();
-        let scope = self.scope.take();
+        self.scope.take();
         let mut issues = vec![];
         if self
             .operations
@@ -338,9 +272,6 @@ impl<B: MacosBackend> Harness<B> {
             .any(|r| r.status == "verification_pending")
         {
             issues.push("One or more dispatched computer actions remain unverified; this turn does not establish completion.".into())
-        }
-        if let Some(scope) = scope {
-            issues.extend(browser.end_turn(&scope).await)
         }
         self.backend.invalidate();
         self.binding = None;
@@ -436,13 +367,6 @@ impl<B: MacosBackend> Harness<B> {
                     text: args.text,
                 })
             }
-            ToolCall::Follow(args) => {
-                let r = self.reference(&args.link_ref, Some(ReferenceCapability::Link))?;
-                ToolCall::FollowLink(ElementArgs {
-                    snapshot_id: r.snapshot_id.to_string(),
-                    element_index: r.index,
-                })
-            }
             ToolCall::Press(args) => {
                 let r = self.reference(&args.action_ref, None)?;
                 let ReferenceCapability::Action(action) = r.capability else {
@@ -496,13 +420,10 @@ impl<B: MacosBackend> Harness<B> {
         args: Value,
         cancel: &CancellationToken,
         approval: &mut dyn ApprovalGate,
-        browser: &mut dyn BrowserToolLane,
         grounder: &mut dyn VisualGrounder,
     ) -> ToolOutput {
         let result = self
-            .execute_inner(
-                scope, call_id, name, args, cancel, approval, browser, grounder,
-            )
+            .execute_inner(scope, call_id, name, args, cancel, approval, grounder)
             .await;
         match result {
             Ok(output) => output,
@@ -546,7 +467,6 @@ impl<B: MacosBackend> Harness<B> {
         args: Value,
         cancel: &CancellationToken,
         approval: &mut dyn ApprovalGate,
-        browser: &mut dyn BrowserToolLane,
         grounder: &mut dyn VisualGrounder,
     ) -> Result<ToolOutput, HarnessError> {
         self.check(scope, cancel)?;
@@ -566,20 +486,14 @@ impl<B: MacosBackend> Harness<B> {
                 | ToolCall::SetText(_)
                 | ToolCall::Press(_)
                 | ToolCall::Fill(_)
-                | ToolCall::Follow(_)
-                | ToolCall::FollowLink(_)
                 | ToolCall::Click(_)
                 | ToolCall::GroundClick(_)
                 | ToolCall::Pointer(_)
                 | ToolCall::Keypress(_)
                 | ToolCall::Type(_)
                 | ToolCall::Open(_)
-                | ToolCall::BindTab(_)
-                | ToolCall::CreateWorkspace(_)
         );
-        if changes_target_or_input
-            && (self.outcome_counts().0 > 0 || browser.outcome_counts().0 > 0)
-        {
+        if changes_target_or_input && self.outcome_counts().0 > 0 {
             return Err(HarnessError::PendingOutcome);
         }
         if matches!(
@@ -588,14 +502,12 @@ impl<B: MacosBackend> Harness<B> {
                 | ToolCall::SetText(_)
                 | ToolCall::Press(_)
                 | ToolCall::Fill(_)
-                | ToolCall::Follow(_)
-                | ToolCall::FollowLink(_)
                 | ToolCall::Click(_)
                 | ToolCall::GroundClick(_)
                 | ToolCall::Pointer(_)
                 | ToolCall::Keypress(_)
                 | ToolCall::Type(_)
-        ) && self.operations.len() + browser.operation_count() >= 64
+        ) && self.operations.len() >= 64
         {
             return Err(HarnessError::RecoveryExhausted);
         }
@@ -616,35 +528,9 @@ impl<B: MacosBackend> Harness<B> {
         if matches!(parsed, ToolCall::Capture(_)) && self.browser_model {
             return Err(HarnessError::Capability("This browser model has no image attachment transport. Use text and Accessibility observations.".into()));
         }
-        let browser_call = matches!(
-            parsed,
-            ToolCall::Tabs(_) | ToolCall::BindTab(_) | ToolCall::CreateWorkspace(_)
-        ) || (self.browser_bound
-            && !matches!(
-                parsed,
-                ToolCall::Status | ToolCall::Apps(_) | ToolCall::Open(_)
-            )
-            && !(!browser.is_borrowed() && (global || matches!(parsed, ToolCall::Capture(_)))));
-        if browser_call {
-            if global || matches!(parsed, ToolCall::Capture(_)) {
-                return Err(HarnessError::Capability("Borrowed Chrome tabs have no capture, pointer, global keyboard or foreground fallback.".into()));
-            }
-            browser.set_turn_authority(self.authority.clone());
-            let output = browser.execute(scope, name, args, approval, cancel).await?;
-            self.check(scope, cancel)?;
-            if output.success
-                && matches!(parsed, ToolCall::BindTab(_) | ToolCall::CreateWorkspace(_))
-            {
-                self.backend.invalidate();
-                self.binding = None;
-                self.browser_bound = true;
-                self.clear_observations()
-            }
-            return Ok(output);
-        }
         let call = self.canonicalize(parsed)?;
         match call{
-            ToolCall::Status=>Ok(ToolOutput::text(json!({"permissions":self.backend.permissions(),"bound":self.binding.is_some(),"browser_bound":self.browser_bound,"interaction_policy":self.policy}).to_string(),true)),
+            ToolCall::Status=>Ok(ToolOutput::text(json!({"permissions":self.backend.permissions(),"bound":self.binding.is_some(),"interaction_policy":self.policy}).to_string(),true)),
             ToolCall::Apps(args)=>{
                 if args.query.as_ref().is_some_and(|q|q.trim().is_empty()||q.chars().count()>200){return Err(HarnessError::Invalid("query".into()))}
                 let query=args.query.as_ref().map(|q|q.to_lowercase());let mut apps=self.backend.applications()?;apps.retain(|a|!a.is_terminated&&a.process_identifier>0&&query.as_ref().map_or(a.activation_policy==0||a.is_active,|q|a.localized_name.as_ref().is_some_and(|n|n.to_lowercase().contains(q))||a.bundle_identifier.as_ref().is_some_and(|n|n.to_lowercase().contains(q))));apps.sort_by(|a,b|b.is_active.cmp(&a.is_active).then(a.localized_name.cmp(&b.localized_name)));
@@ -653,18 +539,10 @@ impl<B: MacosBackend> Harness<B> {
             ToolCall::Open(args)=>{
                 if args.bundle_id.is_empty()||args.bundle_id.len()>255||!args.bundle_id.chars().all(|c|c.is_alphanumeric()||c=='.'||c=='-'){return Err(HarnessError::Invalid("bundle_id".into()))}
                 if args.activation==ActivationMode::Foreground&&self.policy!=InteractionPolicy::Foreground{return Err(HarnessError::Policy)}
-                if args.activation==ActivationMode::None&&(args.url.is_some()||args.browser_mode==Some(BrowserMode::Isolated)){return Err(HarnessError::Policy)}
-                if args.browser_mode==Some(BrowserMode::Isolated){
-                    if args.bundle_id!="com.google.Chrome"{return Err(HarnessError::Invalid("isolated browser requires com.google.Chrome".into()))}let url=args.url.as_deref().ok_or_else(||HarnessError::Invalid("isolated browser requires an explicit initial URL".into()))?;
-                    self.approve(scope,call_id,"Isolated browser action",format!("Launch a separate Chrome process and private task profile.\nURL: {url}"),cancel,approval).await?;self.check(scope,cancel)?;
-                    browser.set_turn_authority(self.authority.clone());let executable=self.backend.application_executable(&args.bundle_id)?;let owned=browser.open_isolated(scope,executable,url,cancel).await?;self.check(scope,cancel)?;
-                    let authority=self.authority.clone();let token=cancel.clone();let mut before=move||{authority.check().map_err(|_|AutomationError::Cancelled)?;if token.is_cancelled(){return Err(AutomationError::Cancelled)}Ok(())};
-                    let binding=self.backend.bind_owned_process(owned.process_identifier,&owned.executable,true,&mut before).await?;self.check(scope,cancel)?;self.clear_observations();self.binding=Some(binding);self.browser_bound=true;
-                    return Ok(ToolOutput::text("BOUND_BROWSER_TAB mode=isolated activation=foreground\nThe native host owns this process/profile; document reads and safe DOM actions use its exact tab. Input dispatch never establishes task completion.",true))
-                }
+                if args.activation==ActivationMode::None&&args.url.is_some(){return Err(HarnessError::Policy)}
                 self.approve(scope,call_id,"Application action",format!("Application: {}\nActivation: {:?}\nURL: {}",args.bundle_id,args.activation,json!(args.url)),cancel,approval).await?;
                 self.check(scope,cancel)?;let authority=self.authority.clone();let token=cancel.clone();let mut before=move||{authority.check().map_err(|_|AutomationError::Cancelled)?;if token.is_cancelled(){return Err(AutomationError::Cancelled)}Ok(())};let binding=self.backend.open(&args.bundle_id,args.activation==ActivationMode::Foreground,args.url.as_deref(),&mut before).await?;self.check(scope,cancel)?;
-                self.clear_observations();self.binding=Some(binding.clone());self.browser_bound=false;Ok(ToolOutput::text(format!("BOUND_APPLICATION pid={} bundle_id={} activation={} window={}\nNative reads/actions require fresh observed references. Binding itself grants no input authority.",binding.application.process_identifier,args.bundle_id,if binding.activated{"foreground"}else{"none"},binding.window.title.as_deref().unwrap_or("unknown")),true))
+                self.clear_observations();self.binding=Some(binding.clone());Ok(ToolOutput::text(format!("BOUND_APPLICATION pid={} bundle_id={} activation={} window={}\nNative reads/actions require fresh observed references. Binding itself grants no input authority.",binding.application.process_identifier,args.bundle_id,if binding.activated{"foreground"}else{"none"},binding.window.title.as_deref().unwrap_or("unknown")),true))
             },
             ToolCall::Snapshot(args)=>{
                 let binding=self.binding()?;self.backend.validate(&binding)?;
@@ -675,7 +553,6 @@ impl<B: MacosBackend> Harness<B> {
             ToolCall::Continue(args)=>{let binding=self.binding()?;self.backend.validate(&binding)?;let publication=self.reader.continue_read(uuid(&args.cursor)?,None,binding.generation,16384)?;self.check(scope,cancel)?;self.backend.validate(&binding)?;Ok(self.emit_read(publication))},
             ToolCall::SetText(args)=>{if args.text.len()>4096||args.text.contains('\0'){return Err(HarnessError::Invalid("field text".into()))};self.semantic_mutation(scope,call_id,&args.snapshot_id,args.element_index,SemanticMutation::SetText(args.text.clone()),NativeMutation::SetValue(args.text),None,cancel,approval).await},
             ToolCall::Ax(args)=>{if args.ax_action==AxAction::Raise&&self.policy==InteractionPolicy::BackgroundOnly{return Err(HarnessError::Policy)}let mutation=if args.ax_action==AxAction::Press{SemanticMutation::Press}else{SemanticMutation::OtherAction(args.ax_action.as_str().into())};self.semantic_mutation(scope,call_id,&args.snapshot_id,args.element_index,mutation,NativeMutation::Action(args.ax_action.as_str().into()),args.postcondition.as_ref(),cancel,approval).await},
-            ToolCall::FollowLink(_)=>Err(HarnessError::Capability("Following navigation links is a browser-only operation. Native AXPress must be observed and verified separately.".into())),
             ToolCall::Capture(args)=>{
                 let binding=self.binding()?;if args.display_id==Some(0){return Err(HarnessError::Invalid("display_id".into()))}
                 if (args.display_id.is_some() || args.shows_cursor) && (self.policy!=InteractionPolicy::Foreground || !binding.activated) {return Err(HarnessError::Policy)}
@@ -1577,7 +1454,7 @@ mod tests {
         let (mut harness, state, scope, cancel) = setup();
         bind_and_read(&mut harness, &scope, &cancel).await;
         let mut approval = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut grounder = UnavailableGrounder;
         for (id, args) in [
             ("display", json!({"display_id":1})),
@@ -1592,7 +1469,6 @@ mod tests {
                         args,
                         &cancel,
                         &mut approval,
-                        &mut browser,
                         &mut grounder
                     )
                     .await
@@ -1609,7 +1485,6 @@ mod tests {
                     json!({}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
@@ -1630,7 +1505,6 @@ mod tests {
                 json!({"include_accessibility":true}),
                 &cancel,
                 &mut Allow,
-                &mut DisconnectedBrowser,
                 &mut UnavailableGrounder,
             )
             .await;
@@ -1666,7 +1540,6 @@ mod tests {
                 json!({"bundle_id":"test.app","activation":"foreground"}),
                 &cancel,
                 &mut Allow,
-                &mut DisconnectedBrowser,
                 &mut UnavailableGrounder,
             )
             .await;
@@ -1679,7 +1552,6 @@ mod tests {
                 json!({"text":"new"}),
                 &cancel,
                 &mut Allow,
-                &mut DisconnectedBrowser,
                 &mut UnavailableGrounder,
             )
             .await;
@@ -1703,7 +1575,7 @@ mod tests {
         harness.begin_turn(scope.clone()).unwrap();
         harness.set_browser_model(true);
         let mut approval = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut grounder = UnavailableGrounder;
         assert!(
             harness
@@ -1714,7 +1586,6 @@ mod tests {
                     json!({"bundle_id":"test.app","activation":"foreground"}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
@@ -1729,7 +1600,6 @@ mod tests {
                     json!({}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
@@ -1744,7 +1614,6 @@ mod tests {
                     json!({"text":"new"}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
@@ -1762,7 +1631,6 @@ mod tests {
                     json!({"text":"new"}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
@@ -1779,14 +1647,13 @@ mod tests {
                     json!({}),
                     &cancel,
                     &mut approval,
-                    &mut browser,
                     &mut grounder
                 )
                 .await
                 .success
         );
         let snapshot = harness.publication.as_ref().unwrap().snapshot.id;
-        let output=harness.execute(&scope,&call("verify-rendered-value"),"computer_v2_verify",json!({"operation_id":operation,"snapshot_id":snapshot,"element_index":0,"property":"value","expected":"new"}),&cancel,&mut approval,&mut browser,&mut grounder).await;
+        let output=harness.execute(&scope,&call("verify-rendered-value"),"computer_v2_verify",json!({"operation_id":operation,"snapshot_id":snapshot,"element_index":0,"property":"value","expected":"new"}),&cancel,&mut approval,&mut grounder).await;
         assert!(output.success);
         assert_eq!(harness.outcome_counts(), (0, 0));
         assert_eq!(state.borrow().inputs, 1);
@@ -1798,7 +1665,7 @@ mod tests {
         cancel: &CancellationToken,
     ) {
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             h.execute(
@@ -1808,7 +1675,6 @@ mod tests {
                 json!({"bundle_id":"test.app"}),
                 cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1822,7 +1688,6 @@ mod tests {
                 json!({}),
                 cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1844,7 +1709,7 @@ mod tests {
     async fn status_does_not_prompt_and_background_global_tools_never_send_input() {
         let (mut h, state, scope, cancel) = setup();
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             h.execute(
@@ -1854,7 +1719,6 @@ mod tests {
                 json!({}),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1868,7 +1732,6 @@ mod tests {
                 json!({"key":"return"}),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision,
             )
             .await;
@@ -1882,7 +1745,7 @@ mod tests {
         bind_and_read(&mut h, &scope, &cancel).await;
         let args = fill_args(&h);
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             h.execute(
@@ -1892,7 +1755,6 @@ mod tests {
                 args.clone(),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1908,7 +1770,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1922,7 +1783,7 @@ mod tests {
         bind_and_read(&mut h, &scope, &cancel).await;
         let args = fill_args(&h);
         let mut gate = CancelApproval(cancel.clone());
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             !h.execute(
@@ -1932,7 +1793,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1947,7 +1807,7 @@ mod tests {
         bind_and_read(&mut h, &scope, &cancel).await;
         let args = fill_args(&h);
         let mut gate = ChangeApproval(state.clone());
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             !h.execute(
@@ -1957,7 +1817,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -1972,7 +1831,7 @@ mod tests {
         state.borrow_mut().behavior = MutationBehavior::RejectBeforeDispatch;
         let args = fill_args(&h);
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             !h.execute(
@@ -1982,7 +1841,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -2003,7 +1861,7 @@ mod tests {
         state.borrow_mut().behavior = MutationBehavior::LostAcknowledgement;
         let args = fill_args(&h);
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             !h.execute(
@@ -2013,7 +1871,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -2029,7 +1886,6 @@ mod tests {
                 json!({"operation_id":id,"expected":"guessed"}),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision,
             )
             .await;
@@ -2042,7 +1898,6 @@ mod tests {
                 json!({"operation_id":id}),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision,
             )
             .await;
@@ -2055,7 +1910,7 @@ mod tests {
         let (mut h, state, scope, cancel) = setup();
         bind_and_read(&mut h, &scope, &cancel).await;
         let mut gate = Allow;
-        let mut browser = DisconnectedBrowser;
+
         let mut vision = UnavailableGrounder;
         assert!(
             !h.execute(
@@ -2065,7 +1920,6 @@ mod tests {
                 json!({"field_ref":"unpublished","text":"new"}),
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await
@@ -2081,7 +1935,6 @@ mod tests {
                 args,
                 &cancel,
                 &mut gate,
-                &mut browser,
                 &mut vision
             )
             .await

@@ -151,6 +151,7 @@ export interface AppSnapshot {
   defaultModel: string;
   modelOptions: ModelOption[];
   websiteModelsRefreshing?: boolean;
+  canRefreshWebsiteModels?: boolean;
   websiteModelsError?: string;
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
@@ -166,6 +167,7 @@ export type NativeAction =
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
   | { action: 'chooseTaskWorkspace'; taskID: string }
+  | { action: 'prepareWebsiteModel'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
   | { action: 'retryWebsiteSessionCleanup'; taskID: string }
@@ -190,6 +192,7 @@ export type NativeAction =
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'refreshWebsiteModels' }
+  | { action: 'showAPIProviders' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }
   | { action: 'requestAccessibilityPermission' }

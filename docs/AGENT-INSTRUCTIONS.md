@@ -32,6 +32,51 @@ Putting current website capability guidance outside retained history avoids
 depending on those overrides or a reminder every N messages. Empty-tool context
 maintenance remains valid and cannot revive historical tool names.
 
+The native engine's supported `compact_prompt` configuration uses
+`ComputaAgentInstructions.compactionPrompt` for automatic and manual maintenance.
+It separates earlier attempts from the current request and preserves explicit
+ongoing user restrictions with their source and scope. Generated notes must not
+invent current execution, revive ephemeral browser handles/cursors, or turn
+assistant refusals into policy. The maintenance instruction explicitly identifies
+itself as runtime-generated: it must not replace the last substantive human task
+with an invented request for historical notes, or declare that task completed by
+summarization. Continuation resumes the preserved task under its existing scope.
+The current native host checkpoint, when supplied,
+establishes recorded operation chronology; operation counts do not establish site
+search results or task success. Matching tool receipts remain the evidence for
+observed content and action outcomes. This contract improves summary generation;
+it does not make a generated summary authoritative or verify its factual claims.
+
+API inference requests append a fresh native developer message after translation,
+containing current host policy and bounded browser-operation counts. It is bound
+to the exact native turn and preparation, uses monotonic revisions, and is cleared
+on cancellation/finish. There is no model-facing endpoint to update it. Raw user
+history and tool schemas remain intact. The checkpoint establishes execution
+chronology only: counts do not prove that the model read an output or that the
+website returned relevant results. Current tool observations establish those facts.
+
+For ordinary API inferences, the host also repeats the active turn's original
+request and accepted steering messages after that checkpoint, in order and with
+their exact text at **user** authority. These reminders come from native submission
+state, not from parsing summaries or promoting user text into developer policy.
+They preserve the active task through compaction without authorizing replay of
+completed or uncertain actions. Engine history and current tool schemas are unchanged.
+The engine's native `request_kind=compaction` metadata places these reminders
+immediately before the final maintenance instruction, which remains last, with
+guidance to preserve the active request in notes without executing it. Ordinary
+inference keeps the reminders at the end. Prompt wording and summary prefixes do
+not determine request purpose. Conflicting native identities/purposes and maintenance with offered tools
+are rejected before contacting the provider.
+
+Steering stages a bounded native update before sending `turn/steer`. New inference
+admissions wait for its acknowledgment; accepted text is committed in order, while
+an ambiguous acknowledgment retires the turn rather than continuing with stale
+constraints. Cancellation and turn replacement remove the stored inputs. A request
+already sent to the provider retains its immutable input snapshot. Before any new
+provider dispatch, including schema correction, the host rejects a snapshot that
+has been superseded by pending or accepted steering. Correction accounting still
+retains the usage from the first response.
+
 Instructions distinguish general questions from requested inspections and
 actions. Completion of an operation requires the relevant local observations
 and outcome. A familiar or plausible answer does not establish that the
@@ -47,12 +92,46 @@ The engine executes patches and emits file-change items and aggregate turn
 diffs. Proposed, failed, or interrupted changes are not labeled applied merely
 because the model returned a patch. See [code editing](CODE-EDITING.md).
 
-Current website models receive text and Accessibility observations. Normal
-browser automation uses an authorized Chrome connection. Embedded ChatGPT,
-Gemini and Claude pages provide inference; general control of normal WebKit tabs and
-image/audio input are unavailable. Full Access automatically resolves permitted
-approval requests; it does not remove the engine sandbox, private HOME, native
-privacy grants, Chrome consent or the native interaction policy.
+Current website models receive text observations. The `browser_*` tools control
+Computa's normal built-in WebKit tabs through a separate owned controller;
+the `computer_v2_*` tools operate native applications.
+Embedded ChatGPT, Gemini and Claude model pages remain private inference surfaces
+and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).
+Image/audio input remains unavailable. Full Access uses the engine's
+`danger-full-access` terminal/file mode and automatically resolves permitted
+approval requests. Private HOME, native privacy grants and the native interaction
+policy still apply.
+
+Background-only is an input-delivery constraint. It forbids native activation,
+focus theft and global keyboard/pointer input; it does not prohibit user-authorized
+changes through offered background browser or native controls. Filling forms,
+submitting them and sending a requested message remain available subject to the
+user's scope, approvals, actual access denials and outcome verification. A read-only
+lookup allows navigation and search/filter input, but not sends, edits, deletions
+or settings changes. A later explicit send request can authorize that
+send without permitting unrelated changes or cancelling continuing constraints.
+The host repeats this distinction in each turn's interaction policy and in each
+website browser handoff, including after retained assistant refusals.
+
+Each new user turn must acquire current browser bindings and observations; prior
+turn handles and cursors are not reusable, and task-owned pages may already have
+been cleaned up. Prior failed-action receipts are retained as historical outcome
+evidence, explicitly separated from the current turn's permission and tool state.
+They prevent unsupported success claims without creating a permanent read-only
+restriction or revoking a later user authorization. The host also repeats current
+browser lifecycle guidance in every turn's policy suffix, because cold-resumed
+threads can retain old developer instructions. A closed task tab can be reopened
+at its supplied or previously observed URL for the authorized follow-up; its old
+snapshot, handle and cursor cannot be reused. Website handoffs repeat this rule
+outside retained history as well.
+
+Browser reads publish `READ_SELECTION_EVIDENCE` separately from website content.
+It identifies local view/filter selection, truncation and whether exposed query
+hits occur in readable text or input values. The host does not infer website
+search result counts from those matches. Search guidance asks for concise site
+queries, actual result/message content, and refinement of irrelevant results.
+Partial captures still support truthful scoped positives; a negative needs
+observed relevant site-result evidence.
 
 The instruction design takes inspiration from the public Codex autonomy/task
 template and terminal session/output schemas in the pinned source revision
@@ -68,7 +147,8 @@ application's active prompts, user configuration, credentials or private chats.
 - `bun test Scripts/persistent-instructions.integration.test.ts` exercises the
   real pinned App Server with scripted loopback Responses. It checks actual
   developer roles, successful command output, matched tool continuations, cold
-  resume, compaction and an 80-message replay. Missing default artifacts skip
+  resume, exact production compaction-prompt delivery, matching native request-kind
+  metadata in the header and body, and an 80-message replay. Missing default artifacts skip
   clearly; an explicit `COMPUTA_INSTRUCTION_TEST_RESOURCES` override or a present
   mismatched artifact fails closed. The fixture uses a private home and an outer
   sandbox denying external network. Its thread sandbox differs from production

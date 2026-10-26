@@ -3,25 +3,18 @@ import XCTest
 @testable import Computa
 
 final class ComputerTaskScopeTests: XCTestCase {
-    func testBackgroundOnlyIsExplicitAndIndependentOfModelActivationArguments() {
-        for prompt in [
-            "Use the background Chrome tab tools only. Check my Gmail.",
-            "Please use background-only Chrome to check my inbox.",
-            "Use Chrome tab tools only in the background.",
-        ] {
+    func testBackgroundBrowserOnlyRejectsNativeFallback() {
+        for prompt in ["Use background browser tools only. Check my inbox.",
+                       "Please use background-only Chrome to check my inbox.",
+                       "Use Chrome tab tools only in the background."] {
             let scope = ComputerTaskScope(userPrompt: prompt)
-            XCTAssertTrue(scope.backgroundChromeOnly, prompt)
-            for tool in ["computer_v2_open", "computer_v2_type", "computer_v2_keypress", "computer_v2_click",
-                         "computer_v2_capture", "computer_v2_pointer", "computer_v2_ground_click", "computer",
-                         "desktop_open_application", "desktop_input", "desktop_perform_action", "desktop_set_text"] {
-                XCTAssertNotNil(scope.toolViolation(tool: tool, hasBorrowedBinding: true), tool)
+            XCTAssertTrue(scope.backgroundBrowserOnly, prompt)
+            for tool in ["computer_v2_open", "computer_v2_snapshot", "computer_v2_ax", "computer_v2_type",
+                         "computer_v2_capture", "computer_v2_verify", "desktop_input"] {
+                XCTAssertNotNil(scope.toolViolation(tool: tool), tool)
             }
-            for tool in ["computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace"] {
-                XCTAssertNil(scope.toolViolation(tool: tool, hasBorrowedBinding: false), tool)
-            }
-            for tool in ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text", "computer_v2_verify"] {
-                XCTAssertNotNil(scope.toolViolation(tool: tool, hasBorrowedBinding: false), tool)
-                XCTAssertNil(scope.toolViolation(tool: tool, hasBorrowedBinding: true), tool)
+            for tool in ["computer_v2_status", "computer_v2_apps", "browser_tabs", "browser_read"] {
+                XCTAssertNil(scope.toolViolation(tool: tool), tool)
             }
         }
     }
@@ -30,8 +23,8 @@ final class ComputerTaskScopeTests: XCTestCase {
         for prompt in ["Is background Chrome faster?", "Do not use background Chrome tools only.",
                        "Check Gmail using Chrome", "Open Chrome in the foreground."] {
             let scope = ComputerTaskScope(userPrompt: prompt)
-            XCTAssertFalse(scope.backgroundChromeOnly, prompt)
-            XCTAssertNil(scope.toolViolation(tool: "computer_v2_open", hasBorrowedBinding: false))
+            XCTAssertFalse(scope.backgroundBrowserOnly, prompt)
+            XCTAssertNil(scope.toolViolation(tool: "computer_v2_open"))
         }
     }
 
@@ -59,6 +52,180 @@ final class ComputerTaskScopeTests: XCTestCase {
             XCTAssertEqual(scope.targetConfidence, .recognizedService, prompt)
             XCTAssertNil(scope.candidateViolation(url: try url(accepted), title: "Anything"), prompt)
             XCTAssertNotNil(scope.candidateViolation(url: try url("https://example.com"), title: prompt), prompt)
+        }
+    }
+
+    func testTroubleshootingProductMentionsDoNotCreateExclusiveSiteRestrictions() throws {
+        let reported = "Help me enable Chrome access through ChatGPT’s supported settings. Focus on read-only Terminal diagnostics to identify why “Local browser use is disabled in Work settings” appears. Find the documented setting or supported command, and explain any action I must perform myself. Don’t alter internal permission databases or override safety restrictions. This is a read-only troubleshooting request: do not change settings or configuration files; report your findings and the supported user steps."
+        for prompt in [reported, "Why does ChatGPT refuse to act? Find its documentation.",
+                       "Read ChatGPT documentation", "Read ChatGPT’s support article",
+                       "Research how to use Gmail", "Find news on ChatGPT",
+                       "Research changes in Outlook", "Explain GitHub permissions"] {
+            let scope = ComputerTaskScope(userPrompt: prompt)
+            XCTAssertEqual(scope.targetConfidence, .unknown, prompt)
+            XCTAssertFalse(scope.hasCandidateRestriction, prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://help.openai.com/")), prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://support.openai.com/")), prompt)
+            XCTAssertFalse(scope.externalBrowserOnly, prompt)
+        }
+    }
+
+    func testConcreteServiceDestinationsStillRejectOtherSites() throws {
+        for prompt in ["Open ChatGPT", "Use only ChatGPT. Find its settings.",
+                       "Can you open ChatGPT in the built-in browser?",
+                       "In ChatGPT, read my last conversation.", "Read the page on ChatGPT"] {
+            let scope = ComputerTaskScope(userPrompt: prompt)
+            XCTAssertEqual(scope.targetConfidence, .recognizedService, prompt)
+            XCTAssertNil(scope.siteViolation(url: try url("https://chatgpt.com/")), prompt)
+            XCTAssertNotNil(scope.siteViolation(url: try url("https://help.openai.com/")), prompt)
+        }
+        let outlook = ComputerTaskScope(userPrompt: "Find the evidence packet sent by Uny to my Outlook account neh6vw. Use the built-in browser and tell me the attachment filename. Do not send, forward, download, or delete anything.")
+        XCTAssertEqual(outlook.targetConfidence, .recognizedService)
+        XCTAssertNil(outlook.siteViolation(url: try url("https://outlook.live.com/mail/")))
+        XCTAssertNotNil(outlook.siteViolation(url: try url("https://example.com/")))
+        let wikipedia = ComputerTaskScope(userPrompt: "Read the requested page on Wikipedia using the built-in browser.")
+        XCTAssertEqual(wikipedia.targetConfidence, .recognizedService)
+        XCTAssertNil(wikipedia.siteViolation(url: try url("https://en.wikipedia.org/wiki/Browser")))
+        XCTAssertNotNil(wikipedia.siteViolation(url: try url("https://example.com/")))
+    }
+
+    func testDocumentationTopicPreservesAnExplicitDestination() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read ChatGPT documentation at https://help.openai.com/")
+        XCTAssertEqual(scope.targetConfidence, .explicitURL)
+        XCTAssertNil(scope.siteViolation(url: try url("https://help.openai.com/en/articles/123")))
+        XCTAssertNotNil(scope.siteViolation(url: try url("https://chatgpt.com/")))
+        XCTAssertNotNil(scope.siteViolation(url: try url("https://help.openai.com.attacker.test/")))
+    }
+
+    func testRejectedDestinationGuidesAuthorizedOpeningWithoutClaimingContentAbsence() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        let diagnostic = try XCTUnwrap(scope.siteViolation(url: try url("https://example.com/")))
+        XCTAssertTrue(diagnostic.contains("browser_open"))
+        XCTAssertTrue(diagnostic.contains("when authorized by the request"))
+        XCTAssertTrue(diagnostic.contains("A missing inventory tab does not prove"))
+        XCTAssertFalse(diagnostic.contains("report that it was not found"))
+    }
+
+    func testTopicMentionDoesNotEraseExplicitTitleOrBrowserConstraints() throws {
+        let title = ComputerTaskScope(userPrompt: "Read ChatGPT documentation in the tab titled \"Support article\".")
+        XCTAssertEqual(title.targetConfidence, .exactTabTitle)
+        XCTAssertNil(title.candidateViolation(url: try url("https://help.openai.com/"), title: "Support article"))
+        XCTAssertNotNil(title.candidateViolation(url: try url("https://help.openai.com/"), title: "Unrelated"))
+        let browser = ComputerTaskScope(userPrompt: "Use Chrome only. Research ChatGPT documentation.")
+        XCTAssertEqual(browser.targetConfidence, .unknown)
+        XCTAssertNotNil(browser.embeddedBrowserToolViolation())
+    }
+
+    func testOutlookScopeIncludesDedicatedMailHostsAndOnlyItsProductLandingPath() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        for raw in [
+            "https://outlook.live.com/mail/", "https://outlook.office.com/mail/",
+            "https://outlook.office365.com/mail/", "https://outlook.cloud.microsoft/mail",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook?deeplink=%2Fmail%2F&sdf=0&sessionId=opaque",
+            "https://www.microsoft.com/fr-fr/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/",
+            "https://www.microsoft.com/en/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://www.microsoft.com/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+        for raw in [
+            "https://www.microsoft.com/", "https://www.microsoft.com/en-us/microsoft-365/",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/another-product",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/other",
+            "https://www.microsoft.com.attacker.test/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "http://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://www.microsoft.com:444/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://user:secret@www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookScopeAcceptsOnlyTheObservedSignInForwardLink() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        for raw in [
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&sessionId=opaque",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox&sessionId=opaque",
+            "https://go.microsoft.com/fwlink/p?LinkID=2125442",
+            "https://go.microsoft.com:443/fwlink/p/?linkid=2125442&deeplink=mail%2F",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+        for raw in [
+            "https://go.microsoft.com/fwlink/p/", "https://go.microsoft.com/fwlink/p/?LinkID=1",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&LinkID=2125442",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&linkid=1",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=https%3A%2F%2Fattacker.test",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Fother",
+            "https://go.microsoft.com/fwlink/p/?LinkID=1&deeplink=mail%2Finbox",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox%2Fother",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox%3Fnext%3Dhttps%3A%2F%2Fattacker.test",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%252Finbox",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox&DEEPLink=mail%2Finbox",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&deeplink=mail%2F",
+            "https://go.microsoft.com/fwlink/?LinkID=2125442", "https://go.microsoft.com/other?LinkID=2125442",
+            "http://go.microsoft.com/fwlink/p/?LinkID=2125442", "https://go.microsoft.com:444/fwlink/p/?LinkID=2125442",
+            "https://user@go.microsoft.com/fwlink/p/?LinkID=2125442",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookAuthorizationRequiresAnExactKnownMailDestinationOrOutlookResource() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        let authorization = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        for host in ["outlook.live.com", "outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"] {
+            for path in ["/mail", "/mail/"] {
+                var components = try XCTUnwrap(URLComponents(string: authorization))
+                components.queryItems = [URLQueryItem(name: "redirect_uri", value: "https://" + host + path),
+                                         URLQueryItem(name: "scope", value: "openid profile https://outlook.office.com/.default")]
+                XCTAssertNil(scope.siteViolation(url: try XCTUnwrap(components.url)), host + path)
+            }
+        }
+        for query in [
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "redirect_uri=https%3A%2F%2Foutlook.cloud.microsoft%2Fmail&scope=openid%20profile",
+            "redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F",
+            "scope=openid%20https%3A%2F%2Foutlook.office.com%2F.default",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(authorization + "?" + query)), query)
+        }
+        for query in [
+            "", "scope=openid%20profile", "redirect_uri=", "redirect_uri=https%3A%2F%2Fattacker.test%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com.attacker.test%2Fmail%2F&scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "redirect_uri=http%3A%2F%2Foutlook.live.com%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%3A444%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2Fother",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F%3Fnext%3Dhttps%3A%2F%2Fattacker.test",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&REDIRECT_URI=https%3A%2F%2Foutlook.live.com%2Fmail%2F",
+            "scope=https%3A%2F%2Foutlook.office.com%2F.default&SCOPE=openid",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(authorization + "?" + query)), query)
+        }
+        for raw in [
+            "https://login.microsoftonline.com/other/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com/common/other?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com.attacker.test/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "http://login.microsoftonline.com/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com:444/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://user@login.microsoftonline.com/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookSupplementalRoutesDoNotExpandExplicitURLOrOtherServiceScopes() throws {
+        let landing = try url("https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook")
+        let authorization = try url("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F")
+        let forward = try url("https://go.microsoft.com/fwlink/p/?LinkID=2125442")
+        let inboxForward = try url("https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox")
+        let explicit = ComputerTaskScope(userPrompt: "Read Outlook at https://outlook.live.com/mail/")
+        XCTAssertEqual(explicit.targetConfidence, .explicitURL)
+        XCTAssertNil(explicit.siteViolation(url: try url("https://outlook.live.com/mail/")))
+        for scope in [explicit, ComputerTaskScope(userPrompt: "Read Gmail")] {
+            for destination in [landing, authorization, forward, inboxForward] {
+                XCTAssertNotNil(scope.siteViolation(url: destination), destination.absoluteString)
+            }
         }
     }
 
@@ -113,58 +280,15 @@ final class ComputerTaskScopeTests: XCTestCase {
             .candidateViolation(url: try url("https://mail.google.com/"), title: "Gmail"))
     }
 
-    func testUntargetedContinuationPreservesBackgroundAndSiteRestrictionsWithoutAffirmativeWordList() throws {
-        let previous = ComputerTaskScope(userPrompt: "Use the background Chrome tab tools only. Read Gmail.")
-        for prompt in ["yes", "Read the next message too.", "What does that say?", "Show the remaining details."] {
-            let current = ComputerTaskScope(userPrompt: prompt)
-            XCTAssertEqual(current.targetConfidence, .unknown)
-            let continued = current.preservingContinuationRestrictions(from: previous, hasRetainedTarget: true)
-            XCTAssertTrue(continued.backgroundChromeOnly)
-            XCTAssertEqual(continued.targetConfidence, .recognizedService)
-            XCTAssertNotNil(continued.toolViolation(tool: "computer_v2_open", hasBorrowedBinding: true))
-            XCTAssertNotNil(continued.toolViolation(tool: "computer_v2_keypress", hasBorrowedBinding: true))
-            XCTAssertNil(continued.candidateViolation(url: try url("https://mail.google.com/mail/u/0/"), title: "Inbox"))
-            XCTAssertNotNil(continued.candidateViolation(url: try url("https://github.com/"), title: "Gmail"))
-        }
-    }
 
-    func testContinuationCannotInheritWithoutRetainedAuthorizedTargetOrPriorScope() {
-        let previous = ComputerTaskScope(userPrompt: "Use the background Chrome tab tools only. Read Gmail.")
-        let current = ComputerTaskScope(userPrompt: "yes")
-        XCTAssertEqual(current.preservingContinuationRestrictions(from: previous, hasRetainedTarget: false), current)
-        XCTAssertEqual(current.preservingContinuationRestrictions(from: nil, hasRetainedTarget: true), current)
-    }
 
-    func testNewExplicitOrAmbiguousTargetWinsInsteadOfSilentlyInheritingOldDestination() throws {
-        let previous = ComputerTaskScope(userPrompt: "Use the background Chrome tab tools only. Read Gmail.")
-        for prompt in ["Read Outlook.", "Inspect https://github.com/fixture/repository.",
-                       "Use the tab titled \"Different tab\".", "Compare Gmail and Outlook."] {
-            let current = ComputerTaskScope(userPrompt: prompt)
-            XCTAssertNotEqual(current.targetConfidence, .unknown)
-            XCTAssertEqual(current.preservingContinuationRestrictions(from: previous, hasRetainedTarget: true), current)
-        }
-        let changed = ComputerTaskScope(userPrompt: "Read Outlook.")
-            .preservingContinuationRestrictions(from: previous, hasRetainedTarget: true)
-        XCTAssertNotNil(changed.candidateViolation(url: try url("https://mail.google.com/"), title: "Outlook"))
-    }
 
-    func testContinuationPreservesNewlyExplicitStricterBackgroundConstraint() {
-        let previous = ComputerTaskScope(userPrompt: "Read Gmail.")
-        let current = ComputerTaskScope(userPrompt: "Use the background Chrome tab tools only. Read the next item.")
-        XCTAssertFalse(previous.backgroundChromeOnly)
-        let continued = current.preservingContinuationRestrictions(from: previous, hasRetainedTarget: true)
-        XCTAssertTrue(continued.backgroundChromeOnly)
-        XCTAssertEqual(continued.targetConfidence, .recognizedService)
-        XCTAssertNotNil(continued.toolViolation(tool: "computer_v2_open", hasBorrowedBinding: true))
-    }
 
-    func testContinuationRetainsExactTitleRestrictionAlongsideKnownSite() throws {
-        let previous = ComputerTaskScope(userPrompt: "In Gmail use the tab titled \"Personal Inbox\".")
-        let continued = ComputerTaskScope(userPrompt: "Continue reading.")
-            .preservingContinuationRestrictions(from: previous, hasRetainedTarget: true)
-        XCTAssertNil(continued.candidateViolation(url: try url("https://mail.google.com/mail/u/0/"), title: "Personal Inbox"))
-        XCTAssertNotNil(continued.candidateViolation(url: try url("https://mail.google.com/mail/u/1/"), title: "Work Inbox"))
-    }
+
+
+
+
+
 
     private func url(_ value: String) throws -> URL { try XCTUnwrap(URL(string: value)) }
 }

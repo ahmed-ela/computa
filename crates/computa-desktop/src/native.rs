@@ -2,13 +2,11 @@
 //! independent human browser views. AX handles remain on this event-loop thread.
 use crate::{
     assets::{Assets, UI_CSP, UI_DOCUMENT, accepts_ipc},
-    chrome::{ChromeCoordinator, ChromeEvent},
     executor::Executor,
     grounder::{NativeGroundingConfig, NativeGroundingService},
     human::{HumanBrowser, HumanEvent},
     menus::{MenuEvent, NativeMenus},
 };
-use computa_browser::{identity, leases::BrowserController};
 use computa_contracts::{Identifier, models::*, ui::*};
 use computa_harness::NativeApproval;
 use computa_macos::{
@@ -37,7 +35,6 @@ use tao::{
     window::{Window, WindowBuilder},
 };
 use tokio::sync::oneshot;
-use uuid::Uuid;
 use wry::{Rect, WebView, WebViewBuilder, http::Response};
 
 pub enum DesktopEvent {
@@ -62,17 +59,6 @@ pub enum DesktopEvent {
         reply: oneshot::Sender<bool>,
     },
     ApprovalExpired(String),
-    ChromeReady(Result<Arc<ChromeCoordinator>, String>),
-    Chrome(ChromeEvent),
-    ChromeResync(crate::chrome::ChromeSnapshot),
-    ChromeAttached {
-        controller: Arc<BrowserController>,
-        result: Result<Uuid, String>,
-    },
-    ChromeDetached {
-        generation: Uuid,
-    },
-    ChromeTransition(Result<(Uuid, Arc<BrowserController>), String>),
     Status(String),
     ShutdownDone(Vec<String>),
     Wake,
@@ -159,26 +145,12 @@ enum Prompt {
         reply: oneshot::Sender<bool>,
     },
     Runtime(ApprovalRequest),
-    Pair {
-        id: Uuid,
-        installation: String,
-        extension: String,
-    },
-    Temporary {
-        generation: Uuid,
-    },
-}
-enum BrowserChange {
-    Pair(Uuid),
-    Temporary(Uuid),
 }
 impl Prompt {
     fn id(&self) -> String {
         match self {
             Self::Harness { request, .. } => request.id.clone(),
             Self::Runtime(r) => r.id.as_str().into(),
-            Self::Pair { id, .. } => id.to_string(),
-            Self::Temporary { generation } => format!("temporary-{generation}"),
         }
     }
 }
@@ -202,15 +174,8 @@ struct Host {
     prompts: VecDeque<Prompt>,
     pending: Option<Prompt>,
     proxy: EventLoopProxy<DesktopEvent>,
-    chrome: Option<Arc<ChromeCoordinator>>,
-    proposal: Option<(Uuid, String, String)>,
-    candidate: Option<Arc<BrowserController>>,
-    browser_generation: Option<Uuid>,
-    chrome_generation: Option<Uuid>,
-    attaching: bool,
     closing: bool,
     runtime_starting: bool,
-    chrome_starting: bool,
     shutdown_started: bool,
     shutdown_done: bool,
     status: Option<String>,
@@ -222,7 +187,7 @@ pub fn run() -> io::Result<()> {
 }
 pub fn run_with_options(options: Options) -> io::Result<()> {
     let private = options.private_home.is_some();
-    let user_home = identity::user_home().map_err(invalid)?;
+    let user_home = computa_state::account::user_home().map_err(invalid)?;
     let home = match &options.private_home {
         Some(p) => PrivateHome::at(p.clone())?,
         None => PrivateHome::existing_or_create(&user_home)?,
@@ -365,7 +330,6 @@ pub fn run_with_options(options: Options) -> io::Result<()> {
         proxy.clone(),
         mode.clone(),
         home.evidence.clone(),
-        home.codex_home.join("OwnedBrowserProfiles"),
         grounder.clone(),
     );
     let snapshot = initial_snapshot(&preferences, options.fixture);
@@ -389,15 +353,8 @@ pub fn run_with_options(options: Options) -> io::Result<()> {
         prompts: VecDeque::new(),
         pending: None,
         proxy: proxy.clone(),
-        chrome: None,
-        proposal: None,
-        candidate: None,
-        browser_generation: None,
-        chrome_generation: None,
-        attaching: false,
         closing: false,
         runtime_starting: !options.fixture,
-        chrome_starting: !options.fixture && !private,
         shutdown_started: false,
         shutdown_done: false,
         status: None,
@@ -470,57 +427,6 @@ pub fn run_with_options(options: Options) -> io::Result<()> {
                 }
             }
         });
-        if !private {
-            let chrome_proxy = proxy.clone();
-            host.rt.spawn(async move {
-                match ChromeCoordinator::start(store) {
-                    Ok(chrome) => {
-                        let mut events = chrome.events();
-                        let _ =
-                            chrome_proxy.send_event(DesktopEvent::ChromeReady(Ok(chrome.clone())));
-                        let snapshot = chrome.snapshot().await;
-                        let _ =
-                            chrome_proxy.send_event(DesktopEvent::Chrome(ChromeEvent::Status {
-                                text: snapshot.status,
-                            }));
-                        if let Some(proposal) = snapshot.proposal {
-                            let _ = chrome_proxy.send_event(DesktopEvent::Chrome(
-                                ChromeEvent::Proposal {
-                                    id: proposal.id,
-                                    installation: proposal.installation,
-                                    extension: proposal.extension,
-                                },
-                            ));
-                        }
-                        if let Some(controller) = snapshot.connected {
-                            let generation = controller.generation;
-                            let _ = chrome_proxy.send_event(DesktopEvent::Chrome(
-                                ChromeEvent::Connected {
-                                    controller,
-                                    generation,
-                                },
-                            ));
-                        }
-                        loop {
-                            let event = match events.recv().await {
-                                Ok(event) => DesktopEvent::Chrome(event),
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    DesktopEvent::ChromeResync(chrome.snapshot().await)
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            };
-                            if chrome_proxy.send_event(event).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = chrome_proxy
-                            .send_event(DesktopEvent::ChromeReady(Err(error.to_string())));
-                    }
-                }
-            });
-        }
     }
     host.publish();
     event_loop.run(move |event, _, control| {
@@ -577,7 +483,6 @@ impl Host {
                     Ok(runtime) => {
                         self.runtime = Some(runtime);
                         self.permissions(None);
-                        self.try_attach();
                     }
                     Err(error) => {
                         self.status = Some(error);
@@ -613,7 +518,6 @@ impl Host {
                     );
                     self.layout();
                     self.publish();
-                    self.try_attach();
                 }
                 RuntimeEvent::ApprovalRequested(request) => {
                     if self.closing {
@@ -721,108 +625,6 @@ impl Host {
                     }
                     self.publish();
                 }
-            }
-            DesktopEvent::ChromeReady(result) => {
-                self.chrome_starting = false;
-                match result {
-                    Ok(chrome) => {
-                        self.chrome = Some(chrome);
-                        self.status = Some("Chrome bridge ready".into());
-                        self.publish();
-                    }
-                    Err(error) => {
-                        self.status = Some(error);
-                        self.publish();
-                    }
-                }
-                if self.closing {
-                    self.start_shutdown();
-                }
-            }
-            DesktopEvent::Chrome(event) => self.chrome_event(event),
-            DesktopEvent::ChromeResync(snapshot) => {
-                if snapshot.connected.is_none() {
-                    if let Some(generation) = self.chrome_generation {
-                        self.chrome_event(ChromeEvent::Disconnected { generation });
-                    }
-                    self.candidate = None;
-                }
-                if let Some(controller) = snapshot.connected {
-                    let generation = controller.generation;
-                    self.chrome_event(ChromeEvent::Connected {
-                        controller,
-                        generation,
-                    });
-                }
-                self.proposal = snapshot
-                    .proposal
-                    .map(|p| (p.id, p.installation, p.extension));
-                self.status = Some(snapshot.status);
-                self.publish();
-            }
-            DesktopEvent::ChromeAttached { controller, result } => {
-                self.attaching = false;
-                match result {
-                    Ok(generation) => {
-                        if !self.closing
-                            && self
-                                .candidate
-                                .as_ref()
-                                .is_some_and(|c| c.generation == controller.generation)
-                            && controller.link.check().is_ok()
-                        {
-                            self.browser_generation = Some(generation);
-                            self.chrome_generation = Some(controller.generation);
-                            self.executor.set_browser(Some(controller));
-                            self.status = Some("Chrome connected".into());
-                        } else if let Some(runtime) = self.runtime.clone() {
-                            self.rt.spawn(async move {
-                                let _ = runtime.detach_browser(generation).await;
-                            });
-                        }
-                    }
-                    Err(error) => self.status = Some(error),
-                }
-                self.publish();
-            }
-            DesktopEvent::ChromeDetached { generation } => {
-                if self.chrome_generation == Some(generation) {
-                    self.executor.set_browser(None);
-                    self.chrome_generation = None;
-                    self.browser_generation = None;
-                    self.publish();
-                }
-            }
-            DesktopEvent::ChromeTransition(result) => {
-                self.attaching = false;
-                match result {
-                    Ok((generation, controller))
-                        if !self.closing && controller.link.check().is_ok() =>
-                    {
-                        self.browser_generation = Some(generation);
-                        self.chrome_generation = Some(controller.generation);
-                        self.candidate = Some(controller.clone());
-                        self.executor.set_browser(Some(controller));
-                        self.proposal = None;
-                        self.status = Some("Chrome connected".into());
-                    }
-                    Ok((generation, _)) => {
-                        self.executor.set_browser(None);
-                        if let Some(runtime) = self.runtime.clone() {
-                            self.rt.spawn(async move {
-                                let _ = runtime.detach_browser(generation).await;
-                            });
-                        }
-                    }
-                    Err(error) => {
-                        self.executor.set_browser(None);
-                        self.browser_generation = None;
-                        self.chrome_generation = None;
-                        self.candidate = None;
-                        self.status = Some(error);
-                    }
-                }
-                self.publish();
             }
             DesktopEvent::Status(status) => {
                 self.status = Some(status);
@@ -948,12 +750,6 @@ impl Host {
                     &request.method,
                     &request.details.to_string(),
                 ),
-                Prompt::Pair {
-                    installation,
-                    extension,
-                    ..
-                } => self.controls.present_pairing(&id, extension, installation),
-                Prompt::Temporary { .. } => self.controls.present_temporary_tab_grant(&id),
             };
             if result.is_ok() {
                 self.pending = Some(prompt);
@@ -1030,185 +826,9 @@ impl Host {
                 }
                 self.next_prompt();
             }
-            NativeControlEvent::RequestPairingUi => {
-                if let Some((id, installation, extension)) = self.proposal.clone() {
-                    self.prompts.push_back(Prompt::Pair {
-                        id,
-                        installation,
-                        extension,
-                    });
-                    self.next_prompt();
-                } else {
-                    self.status =
-                        Some("Open the Computa extension in Chrome and choose Pair.".into());
-                    self.publish();
-                }
-            }
-            NativeControlEvent::PairingResolved { id, remember } => {
-                if self.pending.as_ref().is_none_or(|p| p.id() != id) {
-                    return;
-                }
-                if let Some(Prompt::Pair { id, .. }) = self.pending.take()
-                    && remember
-                {
-                    self.change_browser(BrowserChange::Pair(id));
-                }
-                self.next_prompt();
-            }
-            NativeControlEvent::RequestTemporaryTabGrant => {
-                if let Some(generation) = self.chrome_generation {
-                    self.prompts.push_back(Prompt::Temporary { generation });
-                    self.next_prompt();
-                } else {
-                    self.status = Some("Connect Chrome before allowing temporary tabs.".into());
-                    self.publish();
-                }
-            }
-            NativeControlEvent::TemporaryTabGrantResolved { id, approved } => {
-                if self.pending.as_ref().is_none_or(|p| p.id() != id) {
-                    return;
-                }
-                if let Some(Prompt::Temporary { generation }) = self.pending.take()
-                    && approved
-                    && self.chrome_generation == Some(generation)
-                {
-                    self.change_browser(BrowserChange::Temporary(generation));
-                }
-                self.next_prompt();
-            }
-            NativeControlEvent::DisconnectChrome => {
-                if let (Some(chrome), Some(generation)) =
-                    (self.chrome.clone(), self.chrome_generation)
-                {
-                    self.executor.set_browser(None);
-                    self.candidate = None;
-                    let runtime = self.runtime.clone();
-                    let runtime_generation = self.browser_generation;
-                    let proxy = self.proxy.clone();
-                    self.rt.spawn(async move {
-                        if let (Some(runtime), Some(runtime_generation)) =
-                            (runtime, runtime_generation)
-                            && let Err(error) = runtime.detach_browser(runtime_generation).await
-                        {
-                            let _ = proxy.send_event(DesktopEvent::Status(error.to_string()));
-                        }
-                        if let Err(error) = chrome.disconnect(generation).await {
-                            let _ = proxy.send_event(DesktopEvent::Status(error.to_string()));
-                        }
-                    });
-                }
-            }
             NativeControlEvent::RequestAccessibility => self.permissions(Some(true)),
             NativeControlEvent::RequestScreenRecording => self.permissions(Some(false)),
         }
-    }
-    fn chrome_event(&mut self, event: ChromeEvent) {
-        match event {
-            ChromeEvent::Proposal {
-                id,
-                installation,
-                extension,
-            } => {
-                self.proposal = Some((id, installation, extension));
-                self.status =
-                    Some("Chrome pairing is available in the native connection menu.".into());
-            }
-            ChromeEvent::Connected { controller, .. } => {
-                self.candidate = Some(controller);
-                self.try_attach();
-            }
-            ChromeEvent::Disconnected { generation } => {
-                if self
-                    .candidate
-                    .as_ref()
-                    .is_some_and(|c| c.generation == generation)
-                {
-                    self.candidate = None;
-                }
-                if self.chrome_generation == Some(generation) {
-                    self.executor.set_browser(None);
-                    if let (Some(runtime), Some(runtime_generation)) =
-                        (self.runtime.clone(), self.browser_generation)
-                    {
-                        let proxy = self.proxy.clone();
-                        self.rt.spawn(async move {
-                            let _ = runtime.detach_browser(runtime_generation).await;
-                            let _ = proxy.send_event(DesktopEvent::ChromeDetached { generation });
-                        });
-                    }
-                }
-            }
-            ChromeEvent::Status { text } => self.status = Some(text),
-            ChromeEvent::PreferencesChanged(_) => {}
-        }
-        self.publish();
-    }
-    fn try_attach(&mut self) {
-        if self.attaching
-            || self.closing
-            || self.snapshot.tasks.iter().any(|t| t.is_busy)
-            || self.snapshot.pending_approval_count > 0
-        {
-            return;
-        }
-        let (Some(runtime), Some(chrome), Some(controller)) = (
-            self.runtime.clone(),
-            self.chrome.clone(),
-            self.candidate.clone(),
-        ) else {
-            return;
-        };
-        if self.chrome_generation == Some(controller.generation) {
-            return;
-        }
-        self.attaching = true;
-        let proxy = self.proxy.clone();
-        self.rt.spawn(async move {
-            let expected = runtime.browser_generation().await;
-            let transport = chrome.transport(&controller);
-            let result = runtime
-                .attach_browser(expected, Arc::new(transport))
-                .await
-                .map_err(|e| e.to_string());
-            let _ = proxy.send_event(DesktopEvent::ChromeAttached { controller, result });
-        });
-    }
-    fn change_browser(&mut self, change: BrowserChange) {
-        if self.attaching || self.closing {
-            return;
-        }
-        let (Some(runtime), Some(chrome)) = (self.runtime.clone(), self.chrome.clone()) else {
-            return;
-        };
-        self.attaching = true;
-        let proxy = self.proxy.clone();
-        self.rt.spawn(async move {
-            let expected = runtime.browser_generation().await;
-            let result = runtime
-                .transition_browser(expected, move || async move {
-                    let result = match change {
-                        BrowserChange::Pair(id) => chrome.pair(id).await,
-                        BrowserChange::Temporary(generation) => {
-                            chrome.grant_temporary(generation).await
-                        }
-                    };
-                    result.map_err(|error| {
-                        computa_runtime::RuntimeError::Inference(error.to_string())
-                    })?;
-                    let controller = chrome
-                        .snapshot()
-                        .await
-                        .connected
-                        .ok_or(computa_runtime::RuntimeError::BrowserUnavailable)?;
-                    let transport: Arc<dyn computa_contracts::responses::BrowserTransport> =
-                        Arc::new(chrome.transport(&controller));
-                    Ok((transport, controller))
-                })
-                .await
-                .map_err(|error| error.to_string());
-            let _ = proxy.send_event(DesktopEvent::ChromeTransition(result));
-        });
-        self.publish();
     }
     fn shutdown(&mut self) {
         if self.closing {
@@ -1228,12 +848,11 @@ impl Host {
         self.publish();
     }
     fn start_shutdown(&mut self) {
-        if !self.closing || self.runtime_starting || self.chrome_starting || self.shutdown_started {
+        if !self.closing || self.runtime_starting || self.shutdown_started {
             return;
         }
         self.shutdown_started = true;
         let runtime = self.runtime.clone();
-        let chrome = self.chrome.clone();
         let grounder = self.grounder.clone();
         let proxy = self.proxy.clone();
         self.rt.spawn(async move {
@@ -1242,13 +861,7 @@ impl Host {
             } else {
                 vec![]
             };
-            if let Some(chrome) = chrome {
-                for receipt in chrome.shutdown().await {
-                    if receipt["status"] != "closed" && receipt["status"] != "detached" {
-                        issues.push("Chrome cleanup was not confirmed.".into());
-                    }
-                }
-            }
+
             if let Err(error) = grounder.shutdown().await {
                 issues.push(error);
             }

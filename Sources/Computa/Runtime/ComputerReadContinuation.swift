@@ -1,65 +1,35 @@
 import Foundation
 
 /// Turn-local routing for host-issued read cursors. This is not an authorization
-/// store: the inventory/page backend still validates its unchanged UUID, target,
+/// store: the native page backend still validates its unchanged UUID, target,
 /// lifetime and replay rules. Construct a new registry at every turn boundary.
 /// Only successful host-generated read results may register a cursor here.
 struct ComputerReadContinuation: Sendable {
     static let capacity = 128
 
     enum Route: Equatable, Sendable {
-        case inventory(cursor: UUID, pageSize: Int)
         case page(cursor: UUID)
 
-        var toolName: String {
-            switch self {
-            case .inventory: "computer_v2_tabs"
-            case .page: "computer_v2_snapshot"
-            }
-        }
-
+        var toolName: String { "computer_v2_snapshot" }
         var arguments: [String: Any] {
-            switch self {
-            case let .inventory(cursor, pageSize): ["cursor": cursor.uuidString, "page_size": pageSize]
-            case let .page(cursor): ["cursor": cursor.uuidString]
-            }
-        }
-
-        fileprivate var source: Source {
-            switch self {
-            case .inventory: .inventory
-            case .page: .page
-            }
+            switch self { case let .page(cursor): ["cursor": cursor.uuidString] }
         }
     }
 
     enum Failure: Error, Equatable, LocalizedError, Sendable {
-        case unknownCursor
-        case inventoryScopeChanged
-        case pageScopeChanged
-        case invalidPageSize
-        case invalidScope
-        case conflictingCursor
+        case unknownCursor, pageScopeChanged, invalidScope, conflictingCursor
 
         var errorDescription: String? {
+            let reason: String
             switch self {
-            case .unknownCursor:
-                "This continuation cursor was not issued by a current read in this turn, or its route is no longer retained. Call computer_v2_tabs without cursor for a fresh inventory, or computer_v2_snapshot for a fresh page read, then use its returned cursor. No read or action was dispatched."
-            case .inventoryScopeChanged:
-                "The tab inventory scope changed. Call computer_v2_tabs without cursor for a fresh inventory, then use its returned cursor. No tab was attached or changed."
-            case .pageScopeChanged:
-                "The observed app or tab scope changed. Call computer_v2_snapshot for a fresh page read, then use its returned cursor. No input was sent."
-            case .invalidPageSize:
-                "A tab-inventory continuation requires its original page_size from 1 through 100. Start a fresh computer_v2_tabs read."
-            case .invalidScope:
-                "The host read scope is unavailable. Start a fresh computer_v2_tabs or computer_v2_snapshot read; no continuation was registered."
-            case .conflictingCursor:
-                "The cursor has conflicting host read routes. Start a fresh computer_v2_tabs or computer_v2_snapshot read; no continuation was dispatched."
+            case .unknownCursor: reason = "This cursor is not a current native computer continuation, or its retained route expired."
+            case .pageScopeChanged: reason = "The observed native app scope changed."
+            case .invalidScope: reason = "The host read scope is unavailable; no continuation was registered."
+            case .conflictingCursor: reason = "The cursor has conflicting host read routes."
             }
+            return reason + " For a native app, bind with computer_v2_open and make a fresh computer_v2_read_page (or computer_v2_snapshot if offered), then use its own returned cursor. Continue built-in pages with their offered page-continuation tool and next_cursor alone; tab inventory uses browser_tabs(cursor=next_cursor). Keep each cursor with its originating read surface; cursors are never converted between sources. No read, binding, navigation or input was dispatched."
         }
     }
-
-    fileprivate enum Source: Equatable, Sendable { case inventory, page }
 
     private struct Entry: Equatable, Sendable {
         let route: Route
@@ -70,31 +40,18 @@ struct ComputerReadContinuation: Sendable {
     private var insertionOrder: [UUID] = []
     var count: Int { entries.count }
 
-    mutating func recordInventory(nextCursor: UUID?, pageSize: Int, scope: String, replacing: Bool) throws {
-        guard (1...100).contains(pageSize) else { throw Failure.invalidPageSize }
-        try record(cursor: nextCursor, source: .inventory, scope: scope, replacing: replacing) {
-            .inventory(cursor: $0, pageSize: pageSize)
-        }
-    }
-
     mutating func recordPage(nextCursor: UUID?, scope: String, replacing: Bool) throws {
-        try record(cursor: nextCursor, source: .page, scope: scope, replacing: replacing) { .page(cursor: $0) }
+        try record(cursor: nextCursor, scope: scope, replacing: replacing) { .page(cursor: $0) }
     }
 
-    /// Resolution never refreshes an inventory, reconnects, binds, or consumes
-    /// the backend cursor. Replaying a route goes through the same backend.
-    func resolve(cursor: UUID, inventoryScope: String?, pageScope: String?) throws -> Route {
+    /// Resolving a native cursor never refreshes, binds, or consumes the backend cursor.
+    func resolve(cursor: UUID, pageScope: String?) throws -> Route {
         guard let entry = entries[cursor] else { throw Failure.unknownCursor }
-        switch entry.route {
-        case .inventory:
-            guard inventoryScope == entry.scope else { throw Failure.inventoryScopeChanged }
-        case .page:
-            guard pageScope == entry.scope else { throw Failure.pageScopeChanged }
-        }
+        guard pageScope == entry.scope else { throw Failure.pageScopeChanged }
         return entry.route
     }
 
-    private mutating func record(cursor: UUID?, source: Source, scope: String, replacing: Bool,
+    private mutating func record(cursor: UUID?, scope: String, replacing: Bool,
                                  route: (UUID) -> Route) throws {
         guard !scope.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               scope.utf8.count <= 1_024,
@@ -106,19 +63,15 @@ struct ComputerReadContinuation: Sendable {
         var nextEntries = entries
         var nextOrder = insertionOrder
         if replacing {
-            let removed = Set(nextEntries.compactMap { $0.value.route.source == source ? $0.key : nil })
-            for cursor in removed { nextEntries.removeValue(forKey: cursor) }
-            nextOrder.removeAll { removed.contains($0) }
+            nextEntries.removeAll()
+            nextOrder.removeAll()
         }
         if let cursor {
             let entry = Entry(route: route(cursor), scope: scope)
             if let existing = nextEntries[cursor] {
-                guard existing.scope == entry.scope,
-                      existing.route.source == entry.route.source else { throw Failure.conflictingCursor }
-                // The inventory backend can issue the same cursor for the same
-                // offset after differently sized requests hit its byte bound.
-                // Keep the first route/page size instead of rejecting that
-                // harmless replay or silently extending its FIFO lifetime.
+                guard existing.scope == entry.scope else { throw Failure.conflictingCursor }
+                // A repeated cursor keeps its FIFO lifetime; backend freshness
+                // and replay checks still apply before publishing content.
             } else {
                 while nextEntries.count >= Self.capacity, let oldest = nextOrder.first {
                     nextOrder.removeFirst()
@@ -129,7 +82,7 @@ struct ComputerReadContinuation: Sendable {
             }
         }
         // nil means this response is terminal, not that prior backend cursors
-        // became invalid. An explicit replacement clears only its source kind.
+        // became invalid. An explicit replacement clears the retained read routes.
         entries = nextEntries
         insertionOrder = nextOrder
     }

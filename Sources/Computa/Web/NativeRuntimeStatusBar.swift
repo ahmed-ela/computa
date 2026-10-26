@@ -33,9 +33,11 @@ struct NativeRuntimeStatusBar: View {
                     }
                 }
                 Divider()
-                Text("Full access automatically approves app action requests.")
+                Text("Full access allows terminal/file commands outside the workspace and network access.")
+                Text("It also automatically approves app action requests.")
                 Text("macOS permissions and tool validation still apply.")
-                Text("Your choice is remembered when Computa relaunches.")
+                Text("New submissions use this choice; running turns keep their execution permissions.")
+                Text("Your choice is remembered across launches.")
             } label: {
                 Label(state.accessMode.label, systemImage: state.accessMode == .fullAccess
                     ? "bolt.shield" : "hand.raised")
@@ -46,8 +48,6 @@ struct NativeRuntimeStatusBar: View {
             .accessibilityLabel("Access mode")
             .accessibilityValue(state.accessMode.label)
             .help("Choose whether Computa asks before protected actions. This setting applies to all tasks and is remembered across launches.")
-
-            NativeChromeConnectionControl(state: state)
 
             if state.accessMode == .askEveryTime, !state.resolvingApprovalIDs.isEmpty {
                 HStack(spacing: 6) {

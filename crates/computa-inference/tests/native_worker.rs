@@ -1,5 +1,5 @@
 //! Explicit installed-weights qualification; never downloads a model or touches
-//! the installed app, its inference listener, Chrome, or persistent chat state.
+//! the installed app, its inference listener, a browser, or persistent chat state.
 #![cfg(all(target_os = "macos", target_arch = "aarch64", feature = "native-mlx"))]
 use base64::{Engine, engine::general_purpose::STANDARD};
 use computa_contracts::models::LocalModel;

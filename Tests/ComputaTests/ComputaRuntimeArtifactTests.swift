@@ -40,24 +40,27 @@ final class ComputaRuntimeArtifactTests: XCTestCase {
     }
 
     func testLegacyManifestNeverInfersCapabilitiesFromRuntimeVersion() throws {
-        try withFixture { fixture in
-            var manifest = fixture.manifest
-            manifest["runtimeVersion"] = "heydash-999-threadDynamicToolsV1"
-            try fixture.writeManifest(manifest)
-            let artifact = try ComputaRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)
-            XCTAssertEqual(artifact.manifest.capabilities, [])
+        for name in ["threadDynamicToolsV1", "browserLifecycleObservationsV1"] {
+            try withFixture { fixture in
+                var manifest = fixture.manifest
+                manifest["runtimeVersion"] = "heydash-999-\(name)"
+                try fixture.writeManifest(manifest)
+                let artifact = try ComputaRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)
+                XCTAssertEqual(artifact.manifest.capabilities, [])
+            }
         }
     }
 
     func testVersionTwoManifestAcceptsExplicitKnownCapabilities() throws {
-        for names in [[], ["threadDynamicToolsV1"]] {
+        for names in [[], ["threadDynamicToolsV1"], ["browserLifecycleObservationsV1"],
+                      ["threadDynamicToolsV1", "browserLifecycleObservationsV1"]] {
             try withFixture { fixture in
                 var manifest = fixture.manifest
                 manifest["schemaVersion"] = 2
                 manifest["capabilities"] = names
                 try fixture.writeManifest(manifest)
                 let artifact = try ComputaRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)
-                let expected: Set<ComputaRuntimeArtifact.Capability> = names.isEmpty ? [] : [.threadDynamicToolsV1]
+                let expected = Set(names.compactMap(ComputaRuntimeArtifact.Capability.init(rawValue:)))
                 XCTAssertEqual(artifact.manifest.schemaVersion, 2)
                 XCTAssertEqual(artifact.manifest.capabilities, expected)
                 XCTAssertEqual(artifact.manifest.binarySHA256, digest(fixture.bytes))
@@ -67,7 +70,7 @@ final class ComputaRuntimeArtifactTests: XCTestCase {
     }
 
     func testLegacyManifestRejectsAnyCapabilitiesField() throws {
-        let values: [Any] = [[String](), ["threadDynamicToolsV1"], NSNull()]
+        let values: [Any] = [[String](), ["threadDynamicToolsV1"], ["browserLifecycleObservationsV1"], NSNull()]
         for value in values {
             try withFixture { fixture in
                 var manifest = fixture.manifest
@@ -94,6 +97,9 @@ final class ComputaRuntimeArtifactTests: XCTestCase {
             { $0["capabilities"] = ["threadDynamicToolsV1 "] },
             { $0["capabilities"] = ["threadDynamicToolsV1", "threadDynamicToolsV2"] },
             { $0["capabilities"] = ["threadDynamicToolsV1", "threadDynamicToolsV1"] },
+            { $0["capabilities"] = ["browserLifecycleObservationsV1", "browserLifecycleObservationsV1"] },
+            { $0["capabilities"] = ["browserLifecycleObservationsV2"] },
+            { $0["capabilities"] = ["browserLifecycleObservationsV1 "] },
             { $0["unrecognized"] = true },
             { $0.removeValue(forKey: "binarySHA256") },
         ]

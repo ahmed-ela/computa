@@ -14,6 +14,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let defaultModel: String
     let modelOptions: [LocalModelOption]
     let websiteModelsRefreshing: Bool
+    let canRefreshWebsiteModels: Bool
     let websiteModelsError: String?
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
@@ -55,6 +56,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions
         websiteModelsRefreshing = state.websiteModelsRefreshing
+        canRefreshWebsiteModels = state.canRefreshWebsiteModels
         websiteModelsError = state.websiteModelsError
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented

@@ -16,9 +16,9 @@ enum ComputerInteractionPolicy: String, Codable, CaseIterable, Sendable {
         var errorDescription: String? {
             switch self {
             case .foregroundUnavailable:
-                "Background-only computer use cannot activate apps, navigate by native open, raise windows, or send global keyboard/pointer input. Use a bound app's supported background AX actions or an authorized Chrome tab. A screenshot is observation only, not permission to click. If no supported action exists, report the capability limitation; do not repeat or try another foreground path. Foreground interaction is not enabled for this runtime."
+                return "Background-only computer use cannot activate apps, navigate by native open, raise windows, or send global keyboard/pointer input. Use the bound native app's supported background AX actions. For authorized webpage work use the offered browser_* tools in Computa's built-in browser. A screenshot is observation only, not input permission. If the requested native action is unavailable, report that limitation; do not repeat, change the requested surface, or try another foreground path. Full Access does not elevate this host policy."
             case .legacyMutationUnavailable:
-                "Legacy computer mutations are unavailable in background-only mode. Use computer_v2_open to bind an already-running app without activation, or computer_v2_tabs then computer_v2_bind_tab for an authorized Chrome tab, followed by supported background AX actions. Do not retry with legacy, pointer, keyboard, or app-activation tools."
+                return "Legacy computer mutations are unavailable in background-only mode. Bind an already-running native app with computer_v2_open without activation, then use its supported background AX actions. Webpages use the offered browser_* tools and their own bindings/cursors. Do not retry with legacy, pointer, keyboard, or app-activation tools; do not substitute another surface for the user's requested target. No mutation was dispatched."
             }
         }
     }
@@ -35,8 +35,7 @@ enum ComputerInteractionPolicy: String, Codable, CaseIterable, Sendable {
         switch call.tool {
         case .open:
             guard call.activationMode == .none,
-                  call.arguments["url"] == nil,
-                  call.browserMode != .isolated else {
+                  call.arguments["url"] == nil else {
                 throw Violation.foregroundUnavailable
             }
         case .ax:

@@ -3,10 +3,148 @@ import ApplicationServices
 import AutomationCore
 import Foundation
 
-struct BrowserAttachedSession: Equatable, Sendable {
-    let connectionGeneration: UUID
-    let sessionID: String
-    let incarnation: UUID
+/// A complete browser observation, including its reference menu, must
+/// fit atomically in the pinned runtime's existing latest-receipt budget.
+enum BrowserCompleteObservation {
+    static let marker = #"{"retention":"complete_browser_observation_v1"}"#
+    static let maximumTextBytes = 4_096
+    static let maximumSerializedItemsBytes = 4_608
+    static let literalCopyGuidance = "Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority."
+
+    static func footer(cursor _: String?) throws -> String {
+        // READ already publishes the exact next_cursor. Repeating the cursor
+        // and verbose policy keys here can push an ordinary form off the page.
+        // This footer is presentation only; native references retain authority.
+        let metadata: [String: Any] = [
+            "refs": "Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.",
+            "next": "current_observation/browser_read; never replay.",
+            "copy": "Verbatim Unicode/whitespace.",
+        ]
+        let bytes = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes])
+        return "\nBROWSER_ACTION_REFERENCES " + String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Only the native recovery paths can construct these closed rejection
+    /// cues. They describe a failed request, never a dispatched input.
+    struct RejectionReceipt: Sendable {
+        enum Kind: String, Sendable { case read, click, fill }
+        enum Reason: String, Sendable {
+            case continuationFiltersChanged = "continuation_filters_changed"
+            case staleSnapshot = "stale_snapshot", staleDocument = "stale_document"
+        }
+        let kind: Kind
+        let reason: Reason
+
+        private init(kind: Kind, reason: Reason) { self.kind = kind; self.reason = reason }
+        static let changedFilters = Self(kind: .read, reason: .continuationFiltersChanged)
+        static func stale(wasFill: Bool, documentChanged: Bool) -> Self {
+            Self(kind: wasFill ? .fill : .click, reason: documentChanged ? .staleDocument : .staleSnapshot)
+        }
+        var compactText: String {
+            "{\"dispatched\":false,\"kind\":\"\(kind.rawValue)\",\"outcome\":\"unverified\",\"reason\":\"\(reason.rawValue)\"}"
+        }
+    }
+
+    /// Completion of a host browser lifecycle operation, not page input or
+    /// proof of the user's requested website outcome. Never a read-ledger proof.
+    struct LifecycleReceipt: Sendable {
+        enum Kind: String, Sendable { case open, bind, navigate }
+        struct Binding: Sendable {
+            let targetID: String
+            let handle: UUID
+            let owned: Bool
+            let alreadyBound: Bool
+        }
+        let kind: Kind
+        let binding: Binding?
+
+        private init(kind: Kind, binding: Binding?) { self.kind = kind; self.binding = binding }
+        static func bound(wasOpen: Bool, targetID: String, handle: UUID, owned: Bool,
+                          alreadyBound: Bool = false) -> Self {
+            Self(kind: wasOpen ? .open : .bind,
+                 binding: .init(targetID: targetID, handle: handle, owned: owned, alreadyBound: alreadyBound))
+        }
+        static let navigation = Self(kind: .navigate, binding: nil)
+        var compactText: String {
+            "{\"completed\":true,\"kind\":\"\(kind.rawValue)\",\"outcome\":\"unverified\"}"
+        }
+        var completion: [String: Any] {
+            var result: [String: Any] = ["operation_kind": kind.rawValue, "operation_complete": true,
+                "no_replay": true, "result_verified": false]
+            if let binding {
+                result.merge(["browser": "computa_builtin", "tab_id": binding.targetID,
+                    "tab_handle": binding.handle.uuidString, "bound": true,
+                    "ownership": binding.owned ? "task_created" : "user_existing",
+                    "already_bound": binding.alreadyBound, "profile": "shared_human"]) { _, value in value }
+            } else { result["navigation_complete"] = true }
+            return result
+        }
+    }
+
+    /// Size the actual input/recovery envelope before advancing a read cursor.
+    /// Its dispatch or rejection cue remains separate through compaction.
+    enum Encoding: Sendable {
+        case read
+        case input(wasFill: Bool, receipt: String, feedback: BrowserInputFeedback? = nil)
+        case recovery(receipt: RejectionReceipt, view: SemanticReadView)
+        case lifecycle(receipt: LifecycleReceipt)
+
+        var retentionCue: String? {
+            if case let .recovery(receipt, _) = self { return receipt.compactText }
+            if case let .lifecycle(receipt) = self { return receipt.compactText }
+            return actionReceipt
+        }
+
+        var actionReceipt: String? {
+            if case let .input(_, receipt, _) = self { return receipt }
+            return nil
+        }
+
+        func encode(_ text: String, snapshotID: UUID, page: BrowserInputFeedback.PublishedPage? = nil) throws -> String {
+            if case let .lifecycle(receipt) = self {
+                var result = receipt.completion
+                result["current_observation"] = ["status": "available", "view": "overview",
+                    "snapshot_id": snapshotID.uuidString, "text": text]
+                result["next"] = "Use this observation; continue only its next_cursor. Operation complete; do not repeat it."
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+                return String(decoding: data, as: UTF8.self)
+            }
+            if case let .recovery(receipt, view) = self {
+                let result: [String: Any] = [
+                    "success": false, "error": ["code": receipt.reason.rawValue],
+                    "dispatched": false, "no_replay": true, "result_verified": false,
+                    "current_observation": ["status": "available", "source": "separate_recovery_read", "view": view.rawValue,
+                        "snapshot_id": snapshotID.uuidString, "text": text],
+                    "next": "Rejected; no input. Inspect this separate fresh read. Only its next_cursor continues; omit cursor for new filters. Never reuse rejected refs."
+                ]
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+                return String(decoding: data, as: UTF8.self)
+            }
+            guard case let .input(wasFill, _, feedback) = self else { return text }
+            let effect = wasFill
+                ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
+                : "Click unverified. For pending navigation: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); then read. Never replay."
+            var result: [String: Any] = [
+                "dispatched": true, "no_replay": true, "result_verified": false,
+                "input_kind": wasFill ? "fill" : "click",
+                "current_observation": ["status": "available", "view": "overview",
+                    "snapshot_id": snapshotID.uuidString, "text": text],
+                "action_references": ["consumed": true, "next": "current_observation"],
+                "next": effect
+            ]
+            if !wasFill, let feedback { result["input_feedback"] = feedback.presentation(page: page) }
+            let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    static func excessBytes(_ text: String, referenceReserve: Int = 0, actionReceipt: String? = nil) throws -> Int {
+        let parts = [marker] + (actionReceipt.map { [$0] } ?? []) + [text]
+        let items = parts.map { ["type": "inputText", "text": $0] }
+        let serialized = try JSONSerialization.data(withJSONObject: items, options: [.sortedKeys])
+        return max(0, max(parts.reduce(parts.count - 1) { $0 + $1.utf8.count } + referenceReserve - maximumTextBytes,
+                          serialized.count + referenceReserve - maximumSerializedItemsBytes))
+    }
 }
 
 struct BrowserTarget: Equatable, Sendable {
@@ -14,25 +152,132 @@ struct BrowserTarget: Equatable, Sendable {
     let instanceToken: String
     let title: String
     let url: URL
-    let webSocketURL: URL?
-    let attachedSession: BrowserAttachedSession?
+}
 
-    init(targetID: String, instanceToken: String, title: String, url: URL, webSocketURL: URL?) {
-        self.targetID = targetID
-        self.instanceToken = instanceToken
-        self.title = title
-        self.url = url
-        self.webSocketURL = webSocketURL
-        attachedSession = nil
+/// Passive HTML field constraints. These never establish whether a click
+/// submitted a form, ran page handlers, or completed a requested action.
+struct BrowserConstraintValidation: Codable, Equatable, Sendable {
+    enum Issue: String, Codable, CaseIterable, Sendable {
+        case valueMissing = "value_missing", typeMismatch = "type_mismatch"
+        case patternMismatch = "pattern_mismatch", tooLong = "too_long", tooShort = "too_short"
+        case rangeUnderflow = "range_underflow", rangeOverflow = "range_overflow"
+        case stepMismatch = "step_mismatch", badInput = "bad_input", customError = "custom_error"
+    }
+    let required: Bool
+    let candidate: Bool
+    let valid: Bool
+    let issues: [Issue]
+
+    static func decode(_ raw: Any?) throws -> Self? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        guard let object = raw as? [String: Any],
+              Set(object.keys) == ["required", "candidate", "valid", "issues"],
+              let names = object["issues"] as? [String], names.count <= Issue.allCases.count,
+              Set(names).count == names.count,
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              value.valid == value.issues.isEmpty
+        else {
+            throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid field constraint metadata.")
+        }
+        return value
     }
 
-    init(targetID: String, title: String, url: URL, attachedSession: BrowserAttachedSession) {
-        self.targetID = targetID
-        instanceToken = attachedSession.incarnation.uuidString
-        self.title = title
-        self.url = url
-        webSocketURL = nil
-        self.attachedSession = attachedSession
+    var formattedMetadata: String {
+        // No page strings occur here. The whole fixed-size suffix participates
+        // in the row's existing byte budget, including on continued fragments.
+        let names = Issue.allCases.filter { issues.contains($0) }.map(\.rawValue).joined(separator: ",")
+        let state = !candidate ? "not_candidate" : valid ? "valid" : "invalid[\(names)]"
+        return (required ? " required=true" : "") + " constraint=\(state)"
+    }
+}
+
+/// Events observed during one dispatched click, not proof that submission or
+/// any page-handler request did or did not occur. IDs never leave native code.
+struct BrowserInputFeedback: Equatable, Sendable {
+    struct Field: Codable, Equatable, Sendable {
+        let backendNodeID: Int64
+        let issues: [BrowserConstraintValidation.Issue]
+    }
+    let loaderID: String
+    let documentURL: URL
+    let fields: [Field]
+    let truncated: Bool
+    let committedDocumentID: UUID?
+
+    init(loaderID: String, documentURL: URL, fields: [Field], truncated: Bool, committedDocumentID: UUID? = nil) {
+        self.loaderID = loaderID; self.documentURL = documentURL
+        self.fields = fields; self.truncated = truncated; self.committedDocumentID = committedDocumentID
+    }
+
+    struct PublishedPage: Sendable {
+        let loaderID: String
+        let documentURL: URL
+        let elements: [BrowserTabElement]
+        let receipt: SemanticReadReceipt
+        let committedDocumentID: UUID?
+
+        init(loaderID: String, documentURL: URL, elements: [BrowserTabElement], receipt: SemanticReadReceipt,
+             committedDocumentID: UUID? = nil) {
+            self.loaderID = loaderID; self.documentURL = documentURL
+            self.elements = elements; self.receipt = receipt; self.committedDocumentID = committedDocumentID
+        }
+
+        init?(snapshot: BrowserTabSnapshot) {
+            guard let receipt = snapshot.readReceipt, receipt.id == snapshot.id else { return nil }
+            self.init(loaderID: snapshot.loaderID, documentURL: snapshot.documentURL,
+                      elements: snapshot.elements, receipt: receipt,
+                      committedDocumentID: snapshot.evidenceDocument?.committedDocumentID)
+        }
+    }
+
+    /// Malformed optional feedback is discarded. It must never turn an already
+    /// dispatched click into an apparent input failure or invite replay.
+    static func decode(_ raw: Any?, document: BrowserDocumentObservation) -> Self? {
+        guard let object = raw as? [String: Any], Set(object.keys) == ["fields", "truncated"],
+              let rawFields = object["fields"] as? [[String: Any]], (1...3).contains(rawFields.count),
+              rawFields.allSatisfy({ Set($0.keys) == ["backendNodeID", "issues"] }),
+              let bytes = try? JSONSerialization.data(withJSONObject: object), bytes.count <= 2_048 else { return nil }
+        struct Payload: Decodable { let fields: [Field]; let truncated: Bool }
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: bytes),
+              Set(payload.fields.map(\.backendNodeID)).count == payload.fields.count,
+              payload.fields.allSatisfy({ field in
+                  field.backendNodeID > 0 && !field.issues.isEmpty
+                      && field.issues.count <= BrowserConstraintValidation.Issue.allCases.count
+                      && Set(field.issues).count == field.issues.count
+                      && document.nodes.contains { $0.backendNodeID == field.backendNodeID && $0.constraintValidation != nil }
+              }) else { return nil }
+        return .init(loaderID: document.loaderID, documentURL: document.url,
+                     fields: payload.fields, truncated: payload.truncated, committedDocumentID: document.committedDocumentID)
+    }
+
+    func presentation(page: PublishedPage?) -> [String: Any] {
+        var exposed: [[String: Any]] = []
+        if let page, let committedDocumentID, page.committedDocumentID == committedDocumentID,
+           page.loaderID == loaderID, page.documentURL == documentURL {
+            for field in fields {
+                guard let element = page.elements.first(where: { $0.backendNodeID == field.backendNodeID }) else { continue }
+                let bytes = Array(element.label.utf8)
+                guard let span = page.receipt.exposures.first(where: {
+                    $0.nodeID == "backend:\(field.backendNodeID)" && $0.field == .label
+                        && $0.totalUTF8 == bytes.count && $0.startUTF8 >= 0
+                        && $0.endUTF8 >= $0.startUTF8 && $0.endUTF8 <= bytes.count
+                        && ($0.startUTF8 < $0.endUTF8 || bytes.isEmpty && $0.startUTF8 == 0)
+                }), let fragment = String(bytes: bytes[span.startUTF8..<span.endUTF8], encoding: .utf8) else { continue }
+                var label = ""
+                for character in fragment {
+                    let candidate = label + String(character)
+                    guard let encoded = try? JSONSerialization.data(withJSONObject: [candidate]), encoded.count <= 84 else { break }
+                    label = candidate
+                }
+                exposed.append(["label": label,
+                    "partial": span.startUTF8 != 0 || span.endUTF8 != bytes.count || !label.utf8.elementsEqual(fragment.utf8),
+                    "issues": field.issues.map(\.rawValue)])
+            }
+        }
+        return ["kind": "native_constraint_validation_observed", "during": "synchronous_click",
+            "fields": exposed, "fields_omitted": truncated || exposed.count < fields.count,
+            "next": "Native invalid events occurred during this click. Inspect current field constraints before a new action. Page handlers may still have acted; submission and delivery remain unverified. Do not replay."]
     }
 }
 
@@ -51,13 +296,20 @@ struct BrowserDocumentNode: Equatable, Sendable {
     /// Browser-reported clickability for this exact backend node, never
     /// inferred from labels, CSS, descendants, or a clickable ancestor.
     let isDOMClickable: Bool
+    /// An explicit backend veto overrides role-derived press support without
+    /// hiding a readable link or pretending its enabled state is disabled.
+    let isPressUnsupported: Bool
     /// An exact-node activation candidate checked by the transport: AX
     /// focusability plus visible positive rendered bounds and pointer cursor.
     /// This is not proof that pressing it completes any user-requested action.
     let isFocusablePointer: Bool
-    /// Chrome AX editable metadata, independent of role names. Used to keep
+    /// Browser editable metadata, independent of role names. Used to keep
     /// contenteditable groups out of read-only result verification regions.
     let isEditable: Bool
+    let constraintValidation: BrowserConstraintValidation?
+    /// Passive observed naming provenance, not a message/authorship claim or
+    /// input capability. Absent on older/other backends.
+    let isExplicitlyNamedContainer: Bool
 
     init(
         backendNodeID: Int64?, role: String, name: String, value: String?,
@@ -65,7 +317,9 @@ struct BrowserDocumentNode: Equatable, Sendable {
         nodeID: String? = nil, parentNodeID: String? = nil,
         childNodeIDs: [String] = [], linkURL: String? = nil,
         isDOMClickable: Bool = false, isFocusablePointer: Bool = false,
-        isEditable: Bool = false
+        isEditable: Bool = false, isPressUnsupported: Bool = false,
+        constraintValidation: BrowserConstraintValidation? = nil,
+        isExplicitlyNamedContainer: Bool = false
     ) {
         self.backendNodeID = backendNodeID
         self.role = role
@@ -79,18 +333,33 @@ struct BrowserDocumentNode: Equatable, Sendable {
         self.childNodeIDs = childNodeIDs
         self.linkURL = linkURL
         self.isDOMClickable = isDOMClickable
+        self.isPressUnsupported = isPressUnsupported
         self.isFocusablePointer = isFocusablePointer
         self.isEditable = isEditable
+        self.constraintValidation = constraintValidation
+        self.isExplicitlyNamedContainer = isExplicitlyNamedContainer
     }
 }
 
 struct BrowserDocumentObservation: Equatable, Sendable {
+    enum SemanticReadiness: String, Equatable, Sendable {
+        /// Observed semantics exist; this is not a match for the user's task.
+        case ready
+        case emptyAtDeadline = "empty_at_deadline"
+    }
     let loaderID: String
     let title: String
     let url: URL
     let nodes: [BrowserDocumentNode]
     let sourceTruncated: Bool
-    /// Host-only immutable plan carried to the final CDP mutation preflight.
+    var sourceName = "embedded_webkit"
+    /// Optional for other backends. An empty bounded observation is not proof
+    /// that requested content is absent or that SPA initialization has ended.
+    var semanticReadiness: SemanticReadiness? = nil
+    /// Optional native identity from a committed document, never page JSON.
+    /// Provisional-load invalidation and URL-only changes do not advance it.
+    var committedDocumentID: UUID? = nil
+    /// Host-only immutable plan carried to the final browser mutation preflight.
     /// Never accepted from a browser document or model response.
     var verificationPlan: BrowserActionVerification.Plan? = nil
 
@@ -103,18 +372,63 @@ struct BrowserDocumentObservation: Equatable, Sendable {
     }
 }
 
+/// Readiness concerns the requested view, never whether its optional local
+/// query matches. Query misses cannot become a reason to wait for site results.
+enum BrowserReadReadiness: String, Equatable, Sendable {
+    case semanticContent = "semantic_content"
+    case content
+}
+
+/// A fresh read may settle native navigation before checking site scope. The
+/// backend must invoke this gate after that wait and before reading page data.
+typealias BrowserReadAuthorization = @Sendable (BrowserTarget) throws -> Void
+
+/// A native checkpoint from the current published capture. Model arguments
+/// select its snapshot ID; they never supply its URL, loader or lifetime.
+struct BrowserDocumentChangeCheckpoint: Sendable {
+    let snapshotID: UUID
+    let targetID: String
+    let targetInstanceToken: String
+    let loaderID: String
+    let documentURL: URL
+    let expiresAt: ContinuousClock.Instant
+
+    fileprivate init(snapshot: BrowserTabSnapshot, binding: BrowserTabBinding,
+                     expiresAt: ContinuousClock.Instant) {
+        snapshotID = snapshot.id; targetID = binding.targetID
+        targetInstanceToken = binding.targetInstanceToken
+        loaderID = snapshot.loaderID; documentURL = snapshot.documentURL
+        self.expiresAt = expiresAt
+    }
+}
+
+struct BrowserDocumentChangeResult: Equatable, Sendable {
+    let changed: Bool
+    let navigationReady: Bool
+}
+
 protocol BrowserTabTransport: Sendable {
     func createTarget(url: URL) async throws -> BrowserTarget
     func target(id: String) async throws -> BrowserTarget?
     func activateTarget(id: String) async throws
     func closeTarget(target: BrowserTarget) async throws
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation
+    /// Fresh user reads may await semantic content. Binding, continuation and
+    /// mutation preflight retain the immediate observation contract.
+    func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness,
+                        authorization: @escaping BrowserReadAuthorization) async throws -> BrowserDocumentObservation
     func press(
         target: BrowserTarget,
         backendNodeID: Int64,
         document: BrowserDocumentObservation,
         permit: BrowserMutationPermit
     ) async throws
+    func pressWithFeedback(
+        target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+        permit: BrowserMutationPermit
+    ) async throws -> BrowserInputFeedback?
     func setText(
         target: BrowserTarget,
         backendNodeID: Int64,
@@ -124,8 +438,25 @@ protocol BrowserTabTransport: Sendable {
     ) async throws
 }
 
-/// Target lifetime is independent of browser/process ownership. A borrowed
-/// broker must never be placed in ChromeTabBroker's owned process/profile path.
+extension BrowserTabTransport {
+    func pressWithFeedback(
+        target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
+        permit: BrowserMutationPermit
+    ) async throws -> BrowserInputFeedback? {
+        try await press(target: target, backendNodeID: backendNodeID, document: document, permit: permit)
+        return nil
+    }
+    func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
+        try await observe(target: target)
+    }
+
+    func observeForRead(target: BrowserTarget, readiness: BrowserReadReadiness) async throws -> BrowserDocumentObservation {
+        try await observeForRead(target: target)
+    }
+}
+
+/// Task-created targets are owned; existing built-in browser tabs are borrowed.
+/// Releasing a borrowed binding never closes the user's tab.
 enum BrowserTabOwnership: Equatable, Sendable {
     case owned
     case borrowed
@@ -141,6 +472,8 @@ struct BrowserTabBinding: Equatable, Sendable {
     let documentEpoch: UUID
     let ownership: BrowserTabOwnership
     let lifetime: BrowserTabLifetime
+    /// Host-only committed document identity; absent backends grant no refund.
+    var committedDocumentID: UUID? = nil
 }
 
 /// Structural provenance, not a judgment that text answers the user's request.
@@ -166,12 +499,78 @@ struct BrowserTabElement: Equatable, Sendable {
     var parentNodeID: String? = nil
     var childNodeIDs: [String] = []
     var linkURL: String? = nil
-    /// Preserve the source CDP/ARIA role separately from the compact native AX
+    /// Preserve the source ARIA role separately from the compact native AX
     /// presentation. searchbox/textbox and region/status/listitem otherwise
     /// collapse to the same display roles and lose evidence-relevant meaning.
     var semanticRole: String? = nil
     var contentScope: BrowserContentScope = .unknown
     var contentKind: SemanticReadContentKind = .unknown
+    var constraintValidation: BrowserConstraintValidation? = nil
+    /// Passive record ancestry within one immutable capture. These ordinals
+    /// are never input targets and are excluded from action corroboration.
+    var recordPath: [Int] = []
+
+    /// Exact bounded native semantics, independent of selected-page indexing.
+    /// Corroboration never normalizes Unicode or relaxes a prior exposure.
+    func hasIdenticalActionSemantics(to other: BrowserTabElement) -> Bool {
+        func bytes(_ value: String?) -> Data? { value.map { Data($0.utf8) } }
+        return backendNodeID == other.backendNodeID
+            && bytes(nodeID) == bytes(other.nodeID) && bytes(parentNodeID) == bytes(other.parentNodeID)
+            && childNodeIDs.map { Data($0.utf8) } == other.childNodeIDs.map { Data($0.utf8) }
+            && bytes(role) == bytes(other.role) && bytes(semanticRole) == bytes(other.semanticRole)
+            && bytes(label) == bytes(other.label) && bytes(value) == bytes(other.value)
+            && bytes(linkURL) == bytes(other.linkURL) && isEnabled == other.isEnabled
+            && supportsPress == other.supportsPress && supportsSetText == other.supportsSetText
+            && isDOMClickable == other.isDOMClickable && isFocusablePointer == other.isFocusablePointer
+            && contentScope == other.contentScope && contentKind == other.contentKind
+            && constraintValidation == other.constraintValidation
+    }
+}
+
+/// Minted only by this broker from a bounded, emitted row. It identifies one
+/// exposed target inside the retained immutable selection, never a whole page
+/// or a model-supplied node. The controller publishes its opaque reference only
+/// after the complete output fits; holding this value alone grants no input.
+struct BrowserPublishedActionWitness: Equatable, Sendable {
+    let publicationID = UUID()
+    let sourceID: UUID
+    let selectionID: UUID
+    let snapshotID: UUID
+    let bindingHandle: UUID
+    let targetInstanceToken: String
+    let committedDocumentID: UUID?
+    let loaderID: String
+    let documentEpoch: UUID
+    let documentURL: URL
+    let element: BrowserTabElement
+    let label: String
+    let exposures: [SemanticReadFieldExposure]
+    fileprivate let selectedIndex: Int
+    fileprivate let deadline: ContinuousClock.Instant
+    fileprivate struct Corroboration: Equatable, Sendable {
+        let sourceID: UUID
+        let selectionID: UUID
+        let element: BrowserTabElement
+    }
+    fileprivate var corroboration: Corroboration?
+    var authoritySourceID: UUID { corroboration?.sourceID ?? sourceID }
+    var authoritySelectionID: UUID { corroboration?.selectionID ?? selectionID }
+
+    func checkCaptureAge() throws {
+        guard ContinuousClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
+    }
+
+    fileprivate init(sourceID: UUID, selectionID: UUID, snapshot: BrowserTabSnapshot,
+                     binding: BrowserTabBinding, element: BrowserTabElement, label: String,
+                     exposures: [SemanticReadFieldExposure], selectedIndex: Int,
+                     deadline: ContinuousClock.Instant) {
+        self.sourceID = sourceID; self.selectionID = selectionID; snapshotID = snapshot.id
+        bindingHandle = binding.handle; targetInstanceToken = binding.targetInstanceToken
+        committedDocumentID = snapshot.evidenceDocument?.committedDocumentID
+        loaderID = snapshot.loaderID; documentEpoch = snapshot.documentEpoch; documentURL = snapshot.documentURL
+        self.element = element; self.label = label; self.exposures = exposures
+        self.selectedIndex = selectedIndex; self.deadline = deadline
+    }
 }
 
 struct BrowserTabSnapshot: Equatable, Sendable {
@@ -194,6 +593,14 @@ struct BrowserTabSnapshot: Equatable, Sendable {
     /// Exact published row text; full retained fields above must not be used
     /// to reconstruct a model-facing reference menu.
     var presentation: SemanticReadPresentation? = nil
+    /// A subtree may share sourceID, but only cursor continuation retains this
+    /// selection identity and can retain previously published input references.
+    var actionSelectionID: UUID? = nil
+    var isActionContinuation = false
+    var actionWitnesses: [Int: BrowserPublishedActionWitness] = [:]
+    /// Only prior published witnesses, corroborated by this successful fresh
+    /// capture. No new unexposed capability is minted from retained nodes.
+    var corroboratedActionWitnesses: [BrowserPublishedActionWitness] = []
 
     func element(at index: Int) -> BrowserTabElement? {
         guard elements.indices.contains(index), elements[index].index == index else {
@@ -210,7 +617,7 @@ struct BrowserTabObservation: Equatable, Sendable {
 
 enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
     case browserUnavailable(String)
-    case malformedDevToolsResponse(String)
+    case malformedResponse(String)
     case handleMissing
     case crossTaskHandle
     case browserGenerationChanged
@@ -225,19 +632,23 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
     case mutationRejected(String)
     case ownershipMismatch
     case invalidRead(String)
+    // Post-input observation diagnostics must distinguish host policy from
+    // output packing without inferring either from private error text.
+    case scopeDenied(String)
+    case outputLimit(String)
 
     var errorDescription: String? {
         switch self {
         case .browserUnavailable(let detail):
-            "The project-owned Chrome tab broker is unavailable: \(detail)"
-        case .malformedDevToolsResponse(let detail):
-            "Chrome DevTools returned an invalid response: \(detail)"
+            "The browser tab broker is unavailable: \(detail)"
+        case .malformedResponse(let detail):
+            "The browser returned an invalid response: \(detail)"
         case .handleMissing:
             "The bound browser tab handle is no longer available. Open the tab again."
         case .crossTaskHandle:
             "The browser tab handle belongs to a different task."
         case .browserGenerationChanged:
-            "The brokered Chrome process changed. Open the browser tab again."
+            "The brokered browser instance changed. Open the browser tab again."
         case .targetClosed:
             "The bound browser tab was closed. Open it again before interacting."
         case .targetReplaced:
@@ -255,10 +666,10 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
         case .unsupportedAction(let action):
             "The browser tab broker does not support \(action) for this element."
         case .mutationRejected(let detail):
-            "Chrome rejected the approved browser action: \(detail)"
+            "The browser rejected the approved browser action: \(detail)"
         case .ownershipMismatch:
             "The browser tab operation does not match this broker's ownership policy."
-        case .invalidRead(let detail):
+        case .invalidRead(let detail), .scopeDenied(let detail), .outputLimit(let detail):
             "The browser read request is invalid: \(detail)"
         }
     }
@@ -305,9 +716,11 @@ final class BrowserMutationPermit: @unchecked Sendable {
     private let lock = NSLock()
     private var available = true
     private let lifetime: BrowserTabLifetime?
+    private let deadline: ContinuousClock.Instant?
 
-    init(lifetime: BrowserTabLifetime? = nil) {
+    init(lifetime: BrowserTabLifetime? = nil, deadline: ContinuousClock.Instant? = nil) {
         self.lifetime = lifetime
+        self.deadline = deadline
     }
 
     func revoke() {
@@ -331,6 +744,7 @@ final class BrowserMutationPermit: @unchecked Sendable {
             throw BrowserTabBrokerError.staleSnapshot
         }
         try Task.checkCancellation()
+        if let deadline, ContinuousClock.now >= deadline { throw BrowserTabBrokerError.staleSnapshot }
         available = false
         try enqueue()
     }
@@ -360,6 +774,7 @@ actor BrowserTabSessionBroker {
         var activeSnapshot: BrowserTabSnapshot?
         let lifetime: BrowserTabLifetime
         var readState: ReadState? = nil
+        var committedDocumentID: UUID? = nil
     }
 
     /// Server-owned pagination capabilities never encode a user-controlled tab,
@@ -368,9 +783,11 @@ actor BrowserTabSessionBroker {
         let document: BrowserDocumentObservation
         let capturedAt: ContinuousClock.Instant
         let selected: [BrowserTabElement]
+        let omittedInputNodeCount: Int
         let request: SemanticReadRequest
         let scopeNodeID: String?
         let sourceID: UUID
+        let selectionID: UUID
         let nextPosition: ReadPosition
         let nextCursor: String?
         let snapshotID: UUID
@@ -487,7 +904,8 @@ actor BrowserTabSessionBroker {
                 documentURL: document.url,
                 documentEpoch: UUID(),
                 activeSnapshot: nil,
-                lifetime: lifetime
+                lifetime: lifetime,
+                committedDocumentID: document.committedDocumentID
             )
             entries[handle] = entry
             return binding(handle: handle, entry: entry)
@@ -498,8 +916,7 @@ actor BrowserTabSessionBroker {
         }
     }
 
-    /// Adapter foundation only: no current ordinary-Chrome extension is wired
-    /// here. The caller must already hold an authorized exact target identity.
+    /// The caller must already hold an authorized exact built-in target identity.
     /// Binding observes that target without activation, navigation, or ownership
     /// transfer. Failure/cancellation only revokes the local capability.
     func bindBorrowed(
@@ -557,7 +974,8 @@ actor BrowserTabSessionBroker {
                 targetID: current.targetID, targetInstanceToken: current.instanceToken,
                 processIdentifier: processIdentifier, ownership: .borrowed,
                 loaderID: document.loaderID, documentURL: document.url,
-                documentEpoch: UUID(), activeSnapshot: nil, lifetime: lifetime
+                documentEpoch: UUID(), activeSnapshot: nil, lifetime: lifetime,
+                committedDocumentID: document.committedDocumentID
             )
             entries[handle] = entry
             return binding(handle: handle, entry: entry)
@@ -580,11 +998,44 @@ actor BrowserTabSessionBroker {
         )
     }
 
+    /// No transport read or authority renewal. Only the last successfully
+    /// published, unexpired page can establish a document-change baseline.
+    func documentChangeCheckpoint(taskKey: String, binding: BrowserTabBinding,
+                                  snapshotID: UUID) throws -> BrowserDocumentChangeCheckpoint {
+        try beginOperation(taskKey: taskKey)
+        defer { tasksInFlight.remove(taskKey) }
+        let current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        guard let snapshot = current.activeSnapshot, let read = current.readState,
+              snapshot.id == snapshotID, read.snapshotID == snapshotID,
+              snapshot.loaderID == current.loaderID, snapshot.documentURL == current.documentURL,
+              readClock.now < read.capturedAt + readLifetime else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        return BrowserDocumentChangeCheckpoint(snapshot: snapshot, binding: binding,
+            expiresAt: read.capturedAt + readLifetime)
+    }
+
+    /// A changed document cannot leave old cursors or action witnesses usable.
+    /// The exact publication guard prevents retiring a different new capture.
+    func retireObservation(taskKey: String, binding: BrowserTabBinding, snapshotID: UUID) throws {
+        var current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        guard current.activeSnapshot?.id == snapshotID, current.readState?.snapshotID == snapshotID else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        current.activeSnapshot = nil; current.readState = nil
+        entries[binding.handle] = current
+    }
+
     func snapshot(
         taskKey: String,
         binding suppliedBinding: BrowserTabBinding,
         bundleIdentifier: String,
-        read: SemanticReadRequest
+        read: SemanticReadRequest,
+        replacingCursor: String? = nil,
+        compact: Bool = false,
+        compactEncoding: BrowserCompleteObservation.Encoding = .read,
+        readAuthorization: BrowserReadAuthorization? = nil,
+        priorPublishedActions: [BrowserPublishedActionWitness] = []
     ) async throws -> BrowserTabObservation {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
@@ -598,6 +1049,18 @@ actor BrowserTabSessionBroker {
         }
         let priorRead = entry.readState
         let priorSnapshot = entry.activeSnapshot
+        // A changed-filter recovery is a separate fresh read, admitted only
+        // by the exact current, unexpired cursor. It never follows an unknown
+        // cursor or turns a navigation-stale capture into a new capability.
+        if let replacingCursor {
+            guard read.cursor == nil, read.snapshotID == nil, read.elementIndex == nil,
+                  !replacingCursor.isEmpty, let priorRead,
+                  priorRead.nextCursor == replacingCursor,
+                  priorRead.snapshotID == priorSnapshot?.id,
+                  priorRead.capturedAt.duration(to: readClock.now) < readLifetime else {
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+        }
         if let cursor = read.cursor {
             guard !cursor.isEmpty, priorRead?.nextCursor == cursor,
                   priorRead?.snapshotID == priorSnapshot?.id else {
@@ -620,11 +1083,35 @@ actor BrowserTabSessionBroker {
             }
             scopeNodeID = nodeID
         }
-        entry.activeSnapshot = nil
-        entry.readState = nil
-        entries[suppliedBinding.handle] = entry
+        // Validate the old publication while its retained capture is still
+        // current. Invalid candidates never become authority in a new capture.
+        let corroborationCandidates: [BrowserPublishedActionWitness]
+        if read.cursor == nil, read.snapshotID == nil, replacingCursor == nil {
+            corroborationCandidates = priorPublishedActions.prefix(EmbeddedBrowserActionReferences.maximumCurrent).filter {
+                (try? approvedTarget(.published($0), entry: entry, binding: suppliedBinding)) != nil
+            }
+        } else { corroborationCandidates = [] }
+        if replacingCursor == nil {
+            entry.activeSnapshot = nil
+            entry.readState = nil
+            entries[suppliedBinding.handle] = entry
+        }
         let target = try await currentTarget(for: suppliedBinding.handle, entry: entry)
-        let freshDocument = try await transport.observe(target: target)
+        if replacingCursor != nil, target.url != priorRead?.document.url {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        let freshDocument: BrowserDocumentObservation
+        if read.cursor == nil, read.snapshotID == nil {
+            let readiness: BrowserReadReadiness = read.view == .content ? .content : .semanticContent
+            if let readAuthorization {
+                freshDocument = try await transport.observeForRead(
+                    target: target, readiness: readiness, authorization: readAuthorization)
+            } else {
+                freshDocument = try await transport.observeForRead(target: target, readiness: readiness)
+            }
+        } else {
+            freshDocument = try await transport.observe(target: target)
+        }
         // The observation may have suspended across target detach/replacement.
         // Recheck exact identity, then local validity after that extra await.
         _ = try self.entry(
@@ -632,6 +1119,7 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: false
         )
+
         _ = try await currentTarget(for: suppliedBinding.handle, entry: entry)
         try Task.checkCancellation()
         _ = try self.entry(
@@ -639,6 +1127,16 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: false
         )
+        if replacingCursor != nil {
+            guard let priorRead, freshDocument.loaderID == priorRead.document.loaderID,
+                  freshDocument.url == priorRead.document.url,
+                  priorRead.capturedAt.duration(to: readClock.now) < readLifetime else {
+                entry.activeSnapshot = nil
+                entry.readState = nil
+                entries[suppliedBinding.handle] = entry
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+        }
 
         if freshDocument.loaderID != entry.loaderID
             || freshDocument.url != entry.documentURL {
@@ -647,6 +1145,7 @@ actor BrowserTabSessionBroker {
             entry.documentEpoch = UUID()
             entry.activeSnapshot = nil
         }
+        entry.committedDocumentID = freshDocument.committedDocumentID
         // Read pages are one immutable captured observation, not a splice of
         // different live trees. Unrelated timers or ads must not make that
         // observation impossible to finish. Revalidate the exact tab/document
@@ -664,9 +1163,10 @@ actor BrowserTabSessionBroker {
         let capturedAt = retainingObservation ? priorRead!.capturedAt : readClock.now
         let effectiveRead = read.cursor == nil ? read : priorRead!.request
         if read.cursor != nil { scopeNodeID = priorRead?.scopeNodeID }
-        let selected = read.cursor == nil
-            ? makeElements(from: document, read: effectiveRead, scopeNodeID: scopeNodeID)
-            : priorRead!.selected
+        let selection = read.cursor == nil
+            ? makeElementSelection(from: document, read: effectiveRead, scopeNodeID: scopeNodeID)
+            : ElementSelection(elements: priorRead!.selected, omittedInputNodeCount: priorRead!.omittedInputNodeCount)
+        let selected = selection.elements
         let position = read.cursor == nil ? ReadPosition() : priorRead!.nextPosition
         let snapshotID = UUID()
         let currentBinding = binding(handle: suppliedBinding.handle, entry: entry)
@@ -682,41 +1182,62 @@ actor BrowserTabSessionBroker {
         let navigationCandidates = Set(candidateSnapshot.elements.filter {
             BrowserActionVerification.observedLinkDestination($0, at: document.url) != nil
         }.map(\.backendNodeID))
-        let page = try makePage(selected: selected, position: position, regionCandidates: candidates,
-                                navigationCandidates: navigationCandidates,
-                                overview: effectiveRead.view == .overview)
-        let elements = page.elements
-        let nextCursor = page.nextPosition.element < selected.count ? UUID().uuidString : nil
         let sourceID = retainingObservation ? priorRead!.sourceID : UUID()
-        let receipt = SemanticReadReceipt(
-            id: snapshotID, sourceID: sourceID,
-            targetGeneration: "\(browserGeneration):\(currentBinding.handle):\(currentBinding.documentEpoch)",
-            consistency: .immutableCapture, view: effectiveRead.view, query: effectiveRead.query,
-            subtreeNodeID: scopeNodeID, selectedElementCount: selected.count,
-            selectedFieldCount: selected.reduce(0) { $0 + readFields($1).count },
-            sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
-            outputTruncated: nextCursor != nil, exposures: page.exposures
-        )
-        let formatted = formatSnapshot(
-            snapshotID: snapshotID,
-            binding: currentBinding,
-            bundleIdentifier: bundleIdentifier,
-            document: document,
-            elements: elements,
-            rows: page.rows,
-            sourceID: sourceID,
-            read: effectiveRead,
-            scopeNodeID: scopeNodeID,
-            totalMatches: selected.count,
-            offset: position.element,
-            nextCursor: nextCursor,
-            fieldsTruncated: page.fieldsTruncated,
-            retainedObservation: retainingObservation
-        )
-        guard formatted.utf8.count <= 16_384 else {
-            throw BrowserTabBrokerError.invalidRead("the observed snapshot metadata exceeds the bounded read output")
+        let selectionID = read.cursor != nil ? priorRead!.selectionID : UUID()
+        let continuationID = UUID().uuidString
+        var bodyLimit = compact ? 3_000 : (effectiveRead.view == .overview ? 6_000 : 10_000)
+        var page: ReadPage
+        var receipt: SemanticReadReceipt
+        var nextCursor: String?
+        var formatted: String
+        // Rebuild from the same immutable position; never trim a finished page
+        // while keeping a cursor which has already advanced past omitted rows.
+        while true {
+            page = try makePage(selected: selected, position: position, regionCandidates: candidates,
+                navigationCandidates: navigationCandidates, overview: effectiveRead.view == .overview,
+                bodyByteLimit: bodyLimit, compact: compact, sourceID: sourceID)
+            nextCursor = page.nextPosition.element < selected.count ? continuationID : nil
+            receipt = SemanticReadReceipt(
+                id: snapshotID, sourceID: sourceID,
+                targetGeneration: "\(browserGeneration):\(currentBinding.handle):\(currentBinding.documentEpoch)",
+                consistency: .immutableCapture, view: effectiveRead.view, query: effectiveRead.query,
+                subtreeNodeID: scopeNodeID, selectedElementCount: selected.count,
+                selectedFieldCount: selected.reduce(0) { $0 + readFields($1).count },
+                sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
+                outputTruncated: nextCursor != nil, exposures: page.exposures)
+            formatted = try formatSnapshot(snapshotID: snapshotID, binding: currentBinding,
+                bundleIdentifier: bundleIdentifier, document: document, elements: page.elements,
+                rows: page.rows, sourceID: sourceID, read: effectiveRead, receipt: receipt,
+                scopeNodeID: scopeNodeID, totalMatches: selected.count, offset: position.element,
+                nextCursor: nextCursor, fieldsTruncated: page.fieldsTruncated,
+                retainedObservation: retainingObservation, compact: compact,
+                omittedInputNodeCount: selection.omittedInputNodeCount)
+            if !compact { break }
+            let withFooter = formatted + (try BrowserCompleteObservation.footer(cursor: nextCursor))
+            let encoded = try compactEncoding.encode(withFooter, snapshotID: snapshotID,
+                page: .init(loaderID: document.loaderID, documentURL: document.url, elements: page.elements, receipt: receipt,
+                            committedDocumentID: document.committedDocumentID))
+            let excess = try BrowserCompleteObservation.excessBytes(encoded,
+                referenceReserve: page.elements.reduce(0) { $0 + compactReferenceReserve($1) },
+                actionReceipt: compactEncoding.retentionCue)
+            if excess == 0 { break }
+            // This can fail even with zero rows when the host metadata itself
+            // cannot fit. Do not publish any partial page or reference menu.
+            // `excess` includes the envelope and JSON's nested escaping, so
+            // it can exceed the entire unescaped row allowance. Reduce by at
+            // most half and rebuild the same position before declaring that
+            // even one field fragment cannot fit.
+            let nextLimit = max(bodyLimit / 2, bodyLimit - max(64, excess))
+            guard !page.elements.isEmpty, nextLimit > 0, nextLimit < bodyLimit else {
+                throw BrowserTabBrokerError.outputLimit("The complete browser observation exceeds its bounded output. Use a narrower view or query; no partial page was published.")
+            }
+            bodyLimit = nextLimit
         }
-        let snapshot = BrowserTabSnapshot(
+        let elements = page.elements
+        guard formatted.utf8.count <= 16_384 else {
+            throw BrowserTabBrokerError.outputLimit("the observed snapshot metadata exceeds the bounded read output")
+        }
+        var snapshot = BrowserTabSnapshot(
             id: snapshotID,
             tabHandle: currentBinding.handle,
             documentEpoch: currentBinding.documentEpoch,
@@ -730,25 +1251,143 @@ actor BrowserTabSessionBroker {
             isLiveObservation: !retainingObservation,
             evidenceDocument: document,
             readReceipt: receipt,
-            presentation: .init(snapshotID: snapshotID, rows: page.presentedRows)
+            presentation: .init(snapshotID: snapshotID, rows: page.presentedRows),
+            actionSelectionID: selectionID,
+            isActionContinuation: read.cursor != nil
         )
+        // Build witnesses from this final internally constructed page, after
+        // both output budgets have passed. Never mint from arbitrary retained
+        // document nodes or from a caller-supplied snapshot.
+        for row in page.presentedRows {
+            guard let element = snapshot.element(at: row.index), element.isEnabled,
+                  element.supportsPress || element.supportsSetText,
+                  let label = EmbeddedBrowserTargetAssertion.exposedLabel(snapshot: snapshot, element: element) else { continue }
+            let matches = selected.enumerated().filter { $0.element.backendNodeID == element.backendNodeID }
+            guard matches.count == 1, let selectedElement = matches.first,
+                  reindexed(selectedElement.element, index: element.index) == element else { continue }
+            snapshot.actionWitnesses[row.index] = BrowserPublishedActionWitness(
+                sourceID: sourceID, selectionID: selectionID, snapshot: snapshot, binding: currentBinding,
+                element: element, label: label,
+                exposures: receipt.exposures.filter { $0.nodeID == "backend:\(element.backendNodeID)" },
+                selectedIndex: selectedElement.offset, deadline: capturedAt + readLifetime)
+        }
+        if !corroborationCandidates.isEmpty {
+            let currentElements = makeElementSelection(from: document, read: SemanticReadRequest(view: .all), scopeNodeID: nil).elements
+            for prior in corroborationCandidates {
+                guard let committed = prior.committedDocumentID, committed == document.committedDocumentID,
+                      prior.bindingHandle == currentBinding.handle,
+                      prior.targetInstanceToken == currentBinding.targetInstanceToken,
+                      prior.loaderID == document.loaderID, prior.documentURL == document.url,
+                      prior.documentEpoch == currentBinding.documentEpoch,
+                      readClock.now < prior.deadline,
+                      let current = corroboratingElement(prior.element, in: document, elements: currentElements) else { continue }
+                var corroborated = prior
+                corroborated.corroboration = .init(sourceID: sourceID, selectionID: selectionID, element: current)
+                snapshot.corroboratedActionWitnesses.append(corroborated)
+            }
+        }
         entry.activeSnapshot = snapshot
         entry.readState = ReadState(
-            document: document, capturedAt: capturedAt, selected: selected, request: effectiveRead, scopeNodeID: scopeNodeID,
-            sourceID: sourceID, nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
+            document: document, capturedAt: capturedAt, selected: selected,
+            omittedInputNodeCount: selection.omittedInputNodeCount, request: effectiveRead, scopeNodeID: scopeNodeID,
+            sourceID: sourceID, selectionID: selectionID,
+            nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
         )
         entries[suppliedBinding.handle] = entry
         return BrowserTabObservation(binding: currentBinding, snapshot: snapshot)
     }
 
-    func perform(
+    private enum CapturedTarget {
+        case snapshot(BrowserTabSnapshot, Int)
+        case published(BrowserPublishedActionWitness)
+    }
+
+    /// Read-only preapproval validation. The witness is not refreshed: it must
+    /// still identify the original retained selection and capture deadline.
+    func validatePublishedAction(taskKey: String, binding: BrowserTabBinding,
+                                 witness: BrowserPublishedActionWitness) throws {
+        try beginOperation(taskKey: taskKey)
+        defer { tasksInFlight.remove(taskKey) }
+        let current = try entry(taskKey: taskKey, binding: binding, requiresCurrentEpoch: true)
+        _ = try approvedTarget(.published(witness), entry: current, binding: binding)
+        try Task.checkCancellation()
+    }
+
+    private func approvedTarget(_ captured: CapturedTarget, entry: Entry, binding: BrowserTabBinding)
+        throws -> (element: BrowserTabElement, deadline: ContinuousClock.Instant) {
+        guard let active = entry.activeSnapshot, let read = entry.readState,
+              read.snapshotID == active.id,
+              active.documentEpoch == entry.documentEpoch,
+              active.loaderID == entry.loaderID, active.documentURL == entry.documentURL else {
+            throw BrowserTabBrokerError.staleSnapshot
+        }
+        let deadline = read.capturedAt + readLifetime
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
+        switch captured {
+        case let .snapshot(snapshot, index):
+            guard active == snapshot else { throw BrowserTabBrokerError.staleSnapshot }
+            guard let element = snapshot.element(at: index) else { throw BrowserTabBrokerError.elementNotFound }
+            return (element, deadline)
+        case let .published(witness):
+            guard witness.authoritySourceID == read.sourceID, witness.authoritySelectionID == read.selectionID,
+                  active.actionSelectionID == witness.authoritySelectionID,
+                  witness.bindingHandle == binding.handle,
+                  witness.targetInstanceToken == entry.targetInstanceToken,
+                  witness.committedDocumentID == read.document.committedDocumentID,
+                  witness.loaderID == entry.loaderID, witness.documentURL == entry.documentURL,
+                  witness.documentEpoch == entry.documentEpoch, readClock.now < witness.deadline else {
+                throw BrowserTabBrokerError.staleSnapshot
+            }
+            if let proof = witness.corroboration {
+                guard witness.committedDocumentID != nil,
+                      proof.element.hasIdenticalActionSemantics(to: witness.element),
+                      corroboratingElement(witness.element, in: read.document,
+                          elements: [proof.element]) != nil else { throw BrowserTabBrokerError.staleSnapshot }
+            } else {
+                guard witness.deadline == deadline, read.selected.indices.contains(witness.selectedIndex),
+                      reindexed(read.selected[witness.selectedIndex], index: witness.element.index) == witness.element else {
+                    throw BrowserTabBrokerError.staleSnapshot
+                }
+            }
+            return (witness.element, witness.deadline)
+        }
+    }
+
+    /// Presence is checked against the whole native capture, including
+    /// ignored/duplicate nodes. A partial capture can corroborate a unique
+    /// present target, but never an absent or ambiguous one.
+    private func corroboratingElement(_ prior: BrowserTabElement, in document: BrowserDocumentObservation,
+                                      elements: [BrowserTabElement]) -> BrowserTabElement? {
+        guard let nodeID = prior.nodeID, !nodeID.isEmpty else { return nil }
+        let matches = document.nodes.filter { $0.backendNodeID == prior.backendNodeID }
+        guard matches.count == 1, let node = matches.first, !node.isIgnored,
+              node.nodeID.map({ Data($0.utf8) }) == Data(nodeID.utf8),
+              document.nodes.filter({ $0.nodeID.map { Data($0.utf8) } == Data(nodeID.utf8) }).count == 1,
+              let current = elements.first(where: { $0.backendNodeID == prior.backendNodeID }),
+              current.isEnabled, current.hasIdenticalActionSemantics(to: prior) else { return nil }
+        return current
+    }
+
+    @discardableResult func perform(
         taskKey: String,
         binding suppliedBinding: BrowserTabBinding,
         snapshot suppliedSnapshot: BrowserTabSnapshot,
         elementIndex: Int,
         action: String,
         verificationPlan: BrowserActionVerification.Plan? = nil
-    ) async throws {
+    ) async throws -> BrowserInputFeedback? {
+        try await perform(taskKey: taskKey, binding: suppliedBinding,
+            captured: .snapshot(suppliedSnapshot, elementIndex), action: action, verificationPlan: verificationPlan)
+    }
+
+    @discardableResult func perform(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
+                 action: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws -> BrowserInputFeedback? {
+        try await perform(taskKey: taskKey, binding: binding, captured: .published(witness),
+                          action: action, verificationPlan: verificationPlan)
+    }
+
+    private func perform(taskKey: String, binding suppliedBinding: BrowserTabBinding, captured: CapturedTarget,
+                         action: String, verificationPlan: BrowserActionVerification.Plan?) async throws -> BrowserInputFeedback? {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
         guard action == "AXPress" else {
@@ -759,16 +1398,7 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: true
         )
-        guard entry.activeSnapshot?.id == suppliedSnapshot.id,
-              entry.activeSnapshot == suppliedSnapshot,
-              suppliedSnapshot.documentEpoch == entry.documentEpoch,
-              suppliedSnapshot.loaderID == entry.loaderID,
-              suppliedSnapshot.documentURL == entry.documentURL else {
-            throw BrowserTabBrokerError.staleSnapshot
-        }
-        guard let approvedElement = suppliedSnapshot.element(at: elementIndex) else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
+        let (approvedElement, deadline) = try approvedTarget(captured, entry: entry, binding: suppliedBinding)
         guard approvedElement.supportsPress, approvedElement.isEnabled else {
             throw BrowserTabBrokerError.unsupportedAction(action)
         }
@@ -778,7 +1408,7 @@ actor BrowserTabSessionBroker {
         entry.activeSnapshot = nil
         entries[suppliedBinding.handle] = entry
 
-        let permit = BrowserMutationPermit(lifetime: entry.lifetime)
+        let permit = BrowserMutationPermit(lifetime: entry.lifetime, deadline: deadline)
         pendingMutations[suppliedBinding.handle] = permit
         defer {
             permit.revoke()
@@ -792,7 +1422,8 @@ actor BrowserTabSessionBroker {
             requiresCurrentEpoch: true
         )
         guard currentDocument.loaderID == entry.loaderID,
-              currentDocument.url == entry.documentURL else {
+              currentDocument.url == entry.documentURL,
+              entry.committedDocumentID == nil || currentDocument.committedDocumentID == entry.committedDocumentID else {
             entry.loaderID = currentDocument.loaderID
             entry.documentURL = currentDocument.url
             entry.documentEpoch = UUID()
@@ -810,12 +1441,13 @@ actor BrowserTabSessionBroker {
         guard sameApprovedSemantics(currentElement, approvedElement) else {
             throw BrowserTabBrokerError.elementChanged
         }
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
 
         try verificationPlan?.revalidateBaseline(binding: suppliedBinding, document: currentDocument)
         var dispatchedDocument = currentDocument
         dispatchedDocument.verificationPlan = verificationPlan
 
-        try await transport.press(
+        return try await transport.pressWithFeedback(
             target: target,
             backendNodeID: approvedElement.backendNodeID,
             document: dispatchedDocument,
@@ -831,6 +1463,18 @@ actor BrowserTabSessionBroker {
         text: String,
         verificationPlan: BrowserActionVerification.Plan? = nil
     ) async throws {
+        try await setText(taskKey: taskKey, binding: suppliedBinding,
+            captured: .snapshot(suppliedSnapshot, elementIndex), text: text, verificationPlan: verificationPlan)
+    }
+
+    func setText(taskKey: String, binding: BrowserTabBinding, witness: BrowserPublishedActionWitness,
+                 text: String, verificationPlan: BrowserActionVerification.Plan? = nil) async throws {
+        try await setText(taskKey: taskKey, binding: binding, captured: .published(witness),
+                          text: text, verificationPlan: verificationPlan)
+    }
+
+    private func setText(taskKey: String, binding suppliedBinding: BrowserTabBinding, captured: CapturedTarget,
+                         text: String, verificationPlan: BrowserActionVerification.Plan?) async throws {
         try beginOperation(taskKey: taskKey)
         defer { tasksInFlight.remove(taskKey) }
         var entry = try entry(
@@ -838,23 +1482,14 @@ actor BrowserTabSessionBroker {
             binding: suppliedBinding,
             requiresCurrentEpoch: true
         )
-        guard entry.activeSnapshot?.id == suppliedSnapshot.id,
-              entry.activeSnapshot == suppliedSnapshot,
-              suppliedSnapshot.documentEpoch == entry.documentEpoch,
-              suppliedSnapshot.loaderID == entry.loaderID,
-              suppliedSnapshot.documentURL == entry.documentURL else {
-            throw BrowserTabBrokerError.staleSnapshot
-        }
-        guard let approvedElement = suppliedSnapshot.element(at: elementIndex) else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
+        let (approvedElement, deadline) = try approvedTarget(captured, entry: entry, binding: suppliedBinding)
         guard approvedElement.supportsSetText, approvedElement.isEnabled else {
             throw BrowserTabBrokerError.unsupportedAction("set text")
         }
         entry.activeSnapshot = nil
         entries[suppliedBinding.handle] = entry
 
-        let permit = BrowserMutationPermit(lifetime: entry.lifetime)
+        let permit = BrowserMutationPermit(lifetime: entry.lifetime, deadline: deadline)
         pendingMutations[suppliedBinding.handle] = permit
         defer {
             permit.revoke()
@@ -868,7 +1503,8 @@ actor BrowserTabSessionBroker {
             requiresCurrentEpoch: true
         )
         guard currentDocument.loaderID == entry.loaderID,
-              currentDocument.url == entry.documentURL else {
+              currentDocument.url == entry.documentURL,
+              entry.committedDocumentID == nil || currentDocument.committedDocumentID == entry.committedDocumentID else {
             entry.loaderID = currentDocument.loaderID
             entry.documentURL = currentDocument.url
             entry.documentEpoch = UUID()
@@ -886,6 +1522,7 @@ actor BrowserTabSessionBroker {
         guard sameApprovedSemantics(currentElement, approvedElement) else {
             throw BrowserTabBrokerError.elementChanged
         }
+        guard readClock.now < deadline else { throw BrowserTabBrokerError.staleSnapshot }
 
         try verificationPlan?.revalidateBaseline(binding: suppliedBinding, document: currentDocument)
         var dispatchedDocument = currentDocument
@@ -931,7 +1568,7 @@ actor BrowserTabSessionBroker {
     }
 
     /// Internal fixture cleanup only. Identity still comes from created targets,
-    /// never from enumeration of arbitrary Chrome tabs with matching titles.
+    /// never from enumeration of arbitrary browser tabs with matching titles.
     func closeTargets(urls: Set<URL>) async throws {
         guard ownership == .owned else { return }
         let targets = ownedTargets.values.filter { urls.contains($0.url) }
@@ -1042,18 +1679,35 @@ actor BrowserTabSessionBroker {
             processIdentifier: entry.processIdentifier,
             documentEpoch: entry.documentEpoch,
             ownership: entry.ownership,
-            lifetime: entry.lifetime
+            lifetime: entry.lifetime,
+            committedDocumentID: entry.committedDocumentID
         )
     }
 
-    private func makeElements(
+    private struct ElementSelection {
+        let elements: [BrowserTabElement]
+        let omittedInputNodeCount: Int
+    }
+
+    private func makeElementSelection(
         from document: BrowserDocumentObservation,
         read: SemanticReadRequest,
         scopeNodeID: String?
-    ) -> [BrowserTabElement] {
+    ) -> ElementSelection {
         let sourceNodes = Dictionary(grouping: document.nodes.compactMap { node in
             node.nodeID.map { ($0, node) }
         }, by: { $0.0 }).filter { !$0.key.isEmpty && $0.value.count == 1 }.mapValues { $0[0].1 }
+        // Number only observed semantic record containers, independently of
+        // view/query/page selection. Never publish their DOM IDs or labels.
+        let recordRoles: Set<String> = ["article", "listitem", "option", "row"]
+        var recordOrdinals: [String: Int] = [:]
+        for node in document.nodes where !node.isIgnored && (recordRoles.contains(node.role.lowercased())
+            || (node.isExplicitlyNamedContainer && ["group", "region"].contains(node.role.lowercased())
+                && !node.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)) {
+            if let id = node.nodeID, sourceNodes[id] == node {
+                recordOrdinals[id] = recordOrdinals.count + 1
+            }
+        }
         let scopeIDs: Set<String>?
         if let scopeNodeID {
             var included: Set<String> = [scopeNodeID]
@@ -1068,7 +1722,7 @@ actor BrowserTabSessionBroker {
                     }
                 }
             }
-            // Some CDP versions provide parentId without all childIds.
+            // Captures may provide parent links without a complete child list.
             var changed = true
             while changed {
                 changed = false
@@ -1086,11 +1740,16 @@ actor BrowserTabSessionBroker {
         let trimmedQuery = read.query?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        var capturedInputNodeCount = 0
         let elements: [BrowserTabElement] = document.nodes.compactMap { node in
             if let scopeIDs, !scopeIDs.contains(node.nodeID ?? "") { return nil }
             guard var element = browserElement(from: node, index: 0) else { return nil }
+            if element.isEnabled && (element.supportsPress || element.supportsSetText) {
+                capturedInputNodeCount += 1
+            }
             element.contentScope = contentScope(of: node, nodes: sourceNodes)
             element.contentKind = contentKind(of: node, nodes: sourceNodes)
+            element.recordPath = recordPath(of: node, nodes: sourceNodes, ordinals: recordOrdinals)
             switch read.view {
             case .all:
                 break
@@ -1101,7 +1760,7 @@ actor BrowserTabSessionBroker {
             case .links:
                 guard node.role.lowercased() == "link" else { return nil }
             case .content:
-                guard element.contentKind == .readable,
+                guard element.contentKind == .readable || isListboxOptionContent(node, nodes: sourceNodes),
                       !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || !(element.value ?? "").isEmpty else { return nil }
             }
@@ -1116,24 +1775,43 @@ actor BrowserTabSessionBroker {
             }
             return element
         }
-        guard read.view == .overview else { return elements }
-        // Interleave observed controls, headings, and navigation so a long
-        // sidebar cannot consume the first page before controls are exposed.
-        // Preserve source order within headings/navigation and each control
-        // strength group, then freeze this selection for continuations.
-        // Ordinary body text is read separately.
-        // CDP clickability can also mark roots and empty layout wrappers.
+        // Count filtering of this immutable capture, not pagination or the live
+        // site's controls. Only counts leave this layer; omitted labels, rows
+        // and input references still require a separately published read.
+        let omittedInputNodeCount = capturedInputNodeCount - elements.filter {
+            $0.isEnabled && ($0.supportsPress || $0.supportsSetText)
+        }.count
+        if read.view == .content {
+            // A source-order result list can fill the first bounded page before
+            // an already captured reading pane. Keep every field and its exact
+            // authority, but expose document text before selectable results.
+            let documentText = elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }
+            let otherText = elements.filter { $0.contentKind == .readable && !$0.contentScope.isDocumentContent }
+            let controls = elements.filter { $0.contentKind != .readable }
+            return ElementSelection(elements: documentText + otherText + controls,
+                omittedInputNodeCount: omittedInputNodeCount)
+        }
+        guard read.view == .overview else {
+            return ElementSelection(elements: elements, omittedInputNodeCount: omittedInputNodeCount)
+        }
+        // Interleave observed controls, headings, document text, and navigation
+        // within the same page budget. Post-input observations must show a
+        // bounded sample of the new document, not only its heading and controls.
+        // Preserve source order within each lane, then freeze the selection for
+        // continuations. No page text or success wording determines priority.
+        // Captured clickability can also mark roots and empty layout wrappers.
         // Keep those custom candidates, but never let them precede observed
         // semantic controls in the control lane. No label text is ranked.
         let controls = elements.filter { overviewCategory($0) == 0 }
             + elements.filter { overviewCategory($0) == 3 }
         let groups = [controls, elements.filter { overviewCategory($0) == 1 },
+                      elements.filter { overviewCategory($0) == 4 },
                       elements.filter { overviewCategory($0) == 2 }]
         var ordered = [BrowserTabElement]()
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
             for group in groups where offset < group.count { ordered.append(group[offset]) }
         }
-        return ordered
+        return ElementSelection(elements: ordered, omittedInputNodeCount: omittedInputNodeCount)
     }
 
     private func overviewCategory(_ element: BrowserTabElement) -> Int? {
@@ -1148,7 +1826,32 @@ actor BrowserTabSessionBroker {
                 "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
                 "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"].contains(role) { return 0 }
         if element.supportsPress || element.isDOMClickable || element.isFocusablePointer { return 3 }
+        if element.contentKind == .readable, element.contentScope.isDocumentContent,
+           !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !(element.value ?? "").isEmpty { return 4 }
         return nil
+    }
+
+    /// Association requires a complete, unambiguous observed ancestor chain.
+    /// Missing/ignored/cyclic ancestry never receives a guessed group. A short
+    /// path preserves nesting without unbounded per-row metadata or page text.
+    private func recordPath(of node: BrowserDocumentNode, nodes: [String: BrowserDocumentNode],
+                            ordinals: [String: Int]) -> [Int] {
+        var current = node
+        var seen = Set<String>()
+        var path: [Int] = []
+        for _ in 0..<128 {
+            guard !current.isIgnored, let id = current.nodeID,
+                  nodes[id] == current, seen.insert(id).inserted else { return [] }
+            if let ordinal = ordinals[id] {
+                guard path.count < 8 else { return [] }
+                path.append(ordinal)
+            }
+            guard let parentID = current.parentNodeID else { return Array(path.reversed()) }
+            guard let parent = nodes[parentID] else { return [] }
+            current = parent
+        }
+        return []
     }
 
     private func contentScope(of node: BrowserDocumentNode,
@@ -1213,6 +1916,38 @@ actor BrowserTabSessionBroker {
         }
     }
 
+    /// Selectable listbox results can carry document text while remaining
+    /// controls. This changes view selection only, never their action authority
+    /// or document-content classification. Every ancestor must be observed.
+    private func isListboxOptionContent(_ node: BrowserDocumentNode,
+                                        nodes: [String: BrowserDocumentNode]) -> Bool {
+        let textRoles: Set<String> = ["statictext", "inlinetextbox", "text", "heading", "paragraph", "listitem", "term",
+            "definition", "code", "blockquote", "cell", "gridcell", "rowheader", "columnheader", "caption", "label"]
+        guard node.role.lowercased() == "option" || textRoles.contains(node.role.lowercased()) else { return false }
+        let excludedRoles: Set<String> = ["button", "checkbox", "combobox", "searchbox", "textbox", "menu", "menubar",
+            "menuitem", "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist", "toolbar",
+            "slider", "spinbutton", "treeitem", "link", "navigation", "banner", "contentinfo"]
+        var current = node
+        var seen = Set<String>()
+        var optionSeen = false, listboxSeen = false
+        for _ in 0..<128 {
+            guard let id = current.nodeID, nodes[id] == current, seen.insert(id).inserted else { return false }
+            let role = current.role.lowercased()
+            if excludedRoles.contains(role) { return false }
+            if role == "option" {
+                guard !optionSeen else { return false }
+                optionSeen = true
+            } else if role == "listbox" {
+                guard optionSeen, !listboxSeen else { return false }
+                listboxSeen = true
+            }
+            guard let parentID = current.parentNodeID else { return optionSeen && listboxSeen }
+            guard let parent = nodes[parentID] else { return false }
+            current = parent
+        }
+        return false
+    }
+
     private func readFields(_ element: BrowserTabElement) -> [(field: SemanticReadField, text: String)] {
         var fields: [(field: SemanticReadField, text: String)] = [(.label, element.label)]
         if let value = element.value { fields.append((.value, value)) }
@@ -1220,10 +1955,21 @@ actor BrowserTabSessionBroker {
         return fields
     }
 
+    private func reindexed(_ original: BrowserTabElement, index: Int) -> BrowserTabElement {
+        BrowserTabElement(index: index, backendNodeID: original.backendNodeID, role: original.role,
+            label: original.label, value: original.value, isEnabled: original.isEnabled,
+            supportsPress: original.supportsPress, supportsSetText: original.supportsSetText,
+            isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
+            nodeID: original.nodeID, parentNodeID: original.parentNodeID, childNodeIDs: original.childNodeIDs,
+            linkURL: original.linkURL, semanticRole: original.semanticRole, contentScope: original.contentScope,
+            contentKind: original.contentKind, constraintValidation: original.constraintValidation,
+            recordPath: original.recordPath)
+    }
+
     private func makePage(selected: [BrowserTabElement], position: ReadPosition,
-                          regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false) throws -> ReadPage {
+                          regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false,
+                          bodyByteLimit: Int, compact: Bool = false, sourceID: UUID) throws -> ReadPage {
         let maximumElements = overview ? 18 : 60
-        let bodyByteLimit = overview ? 6_000 : 10_000
         var page = ReadPage(nextPosition: position)
         var pageFragments = [[FieldFragment]]()
         var bytes = 0
@@ -1231,15 +1977,7 @@ actor BrowserTabSessionBroker {
         // fragment. Only the current page's original elements authorize input.
         while page.nextPosition.element < selected.count, page.elements.count < maximumElements {
             let original = selected[page.nextPosition.element]
-            let element = BrowserTabElement(
-                index: page.elements.count, backendNodeID: original.backendNodeID, role: original.role,
-                label: original.label, value: original.value, isEnabled: original.isEnabled,
-                supportsPress: original.supportsPress, supportsSetText: original.supportsSetText,
-                isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
-                nodeID: original.nodeID, parentNodeID: original.parentNodeID,
-                childNodeIDs: original.childNodeIDs, linkURL: original.linkURL,
-                semanticRole: original.semanticRole, contentScope: original.contentScope, contentKind: original.contentKind
-            )
+            let element = reindexed(original, index: page.elements.count)
             // A parent can occur later on this page. Reserve the largest
             // possible page index now, then resolve actual page membership.
             let reservedParentIndex = element.parentNodeID == nil ? nil : maximumElements - 1
@@ -1247,7 +1985,8 @@ actor BrowserTabSessionBroker {
             let fields = readFields(element)
             var next = page.nextPosition
             var fragments = [FieldFragment]()
-            let available = bodyByteLimit - bytes - 1 - SemanticReadPresentation.rowMetadataByteReserve
+            let referenceReserve = compact ? compactReferenceReserve(element) : SemanticReadPresentation.rowMetadataByteReserve
+            let available = bodyByteLimit - bytes - 1 - referenceReserve
             while next.field < fields.count {
                 let field = fields[next.field]
                 // Links are never presented as a syntactically valid clipped
@@ -1260,7 +1999,7 @@ actor BrowserTabSessionBroker {
                         start: next.utf8Offset, end: part.end, total: field.text.utf8.count)
                     guard fragment.end > fragment.start || fragment.total == 0 else { break }
                     let rowBytes = formatElement(element, fragments: fragments + [fragment],
-                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID)).utf8.count
+                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID).utf8.count
                     if rowBytes <= available { accepted = fragment; break }
                     budget -= max(1, rowBytes - available)
                 }
@@ -1275,15 +2014,17 @@ actor BrowserTabSessionBroker {
             }
             guard !fragments.isEmpty else {
                 if page.elements.isEmpty {
-                    throw BrowserTabBrokerError.invalidRead("the observed element metadata exceeds the bounded read output")
+                    throw BrowserTabBrokerError.outputLimit(compact
+                        ? "The observed element metadata exceeds the bounded read output. Use a narrower view or query; no partial page was published."
+                        : "the observed element metadata exceeds the bounded read output")
                 }
                 break
             }
             let row = formatElement(element, fragments: fragments,
-                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID)
             page.elements.append(element)
             pageFragments.append(fragments)
-            bytes += row.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve
+            bytes += row.utf8.count + 1 + referenceReserve
             page.exposures += fragments.map {
                 SemanticReadFieldExposure(nodeID: "backend:\(element.backendNodeID)", field: $0.field,
                     startUTF8: $0.start, endUTF8: $0.end, totalUTF8: $0.total,
@@ -1307,7 +2048,7 @@ actor BrowserTabSessionBroker {
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
             return formatElement(element, fragments: fragments,
                 parentIndex: parentIndex == element.index ? nil : parentIndex,
-                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID), compact: compact, sourceID: sourceID)
         }
         page.presentedRows = zip(page.elements, page.rows).map { element, row in
             let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
@@ -1345,8 +2086,16 @@ actor BrowserTabSessionBroker {
         return (text, rawBytes)
     }
 
+    // Tokens are native UUIDs: each suffix, including JSON escaping, is <64
+    // bytes. Passive rows need no speculative capability budget.
+    private func compactReferenceReserve(_ element: BrowserTabElement) -> Int {
+        guard element.isEnabled else { return 0 }
+        return (element.supportsPress ? 64 : 0) + (element.supportsSetText ? 64 : 0)
+    }
+
     private func formatElement(_ element: BrowserTabElement, fragments: [FieldFragment],
-                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool) -> String {
+                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool,
+                               compact: Bool = false, sourceID: UUID) -> String {
         let actions = element.supportsPress ? "[\"AXPress\"]" : "[]"
         let pressSource: String
         if element.supportsPress && !supportsSemanticPress(role: element.semanticRole ?? element.role) {
@@ -1372,10 +2121,15 @@ actor BrowserTabSessionBroker {
         // indices. Only #index and an exposed parent's index address this page.
         let parent = parentIndex.map { " parent_index=\($0)" } ?? ""
         let children = element.childNodeIDs.isEmpty ? "" : " child_count=\(element.childNodeIDs.count) expandable=true"
-        return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children) "
+        // The capture UUID is repeated on each row because historical bounded
+        // excerpts may preserve a whole row without its page header.
+        let record = element.recordPath.isEmpty ? "" : " record_path=\(quote(sourceID.uuidString + "/" + element.recordPath.map(String.init).joined(separator: "/")))"
+        return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children)\(record) "
             + "content_scope=\(element.contentScope.rawValue) content_kind=\(element.contentKind.rawValue) "
-            + "enabled=\(element.isEnabled ? "true" : "false") "
-            + "settable=\(element.supportsSetText ? "true" : "false") actions=\(actions)\(pressSource)"
+            + (compact ? (element.isEnabled ? "" : "enabled=false ") : "enabled=\(element.isEnabled ? "true" : "false") ")
+            + (compact ? (element.supportsSetText ? "settable=true " : "") : "settable=\(element.supportsSetText ? "true" : "false") ")
+            + (compact && !element.supportsPress ? "" : "actions=\(actions)") + pressSource
+            + (element.constraintValidation?.formattedMetadata ?? "")
     }
 
     private func readViewName(_ view: SemanticReadView) -> String {
@@ -1398,7 +2152,8 @@ actor BrowserTabSessionBroker {
         let role = axRole(for: node.role)
         let label = node.name.isEmpty ? (node.value ?? "") : node.name
         let normalizedRole = node.role.lowercased()
-        let supportsPress = supportsSemanticPress(role: normalizedRole) || node.isDOMClickable || node.isFocusablePointer
+        let supportsPress = !node.isPressUnsupported
+            && (supportsSemanticPress(role: normalizedRole) || node.isDOMClickable || node.isFocusablePointer)
         let supportsSetText = !node.isReadOnly && [
             "combobox", "searchbox", "textbox",
         ].contains(normalizedRole)
@@ -1417,7 +2172,8 @@ actor BrowserTabSessionBroker {
             parentNodeID: node.parentNodeID,
             childNodeIDs: node.childNodeIDs,
             linkURL: node.linkURL,
-            semanticRole: node.role
+            semanticRole: node.role,
+            constraintValidation: node.constraintValidation
         )
     }
 
@@ -1467,6 +2223,63 @@ actor BrowserTabSessionBroker {
         }
     }
 
+    /// Selection counts describe this capture, never the website's search
+    /// results. Match provenance uses only exposed field fragments, so a query
+    /// hidden in a retained field tail cannot become claimed readable evidence.
+    private func selectionEvidence(receipt: SemanticReadReceipt,
+                                   elements: [BrowserTabElement], compact: Bool = false) throws -> String {
+        let query = receipt.query?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let filtered = query?.isEmpty == false
+        if compact && !filtered {
+            // No emitted-match counts exist without a local query. Keep the
+            // same facts without a second JSON object nested in input receipts.
+            return "READ_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured"
+        }
+        var evidence: [String: Any] = [
+            "operation": filtered ? "local_capture_filter" : "capture_view_selection",
+            "counts_scope": "captured_elements_only",
+            "query_applied": filtered,
+            "site_search_evaluated": false,
+            "site_result_count": "not_measured",
+        ]
+        if let query, filtered {
+            let exposures = Dictionary(grouping: receipt.exposures, by: \.nodeID)
+            var readable = Set<Int>(), inputValues = Set<Int>(), other = Set<Int>()
+            for element in elements {
+                let fields = readFields(element)
+                for exposure in exposures["backend:\(element.backendNodeID)", default: []] {
+                    guard let field = fields.first(where: { $0.field == exposure.field })?.text else { continue }
+                    let bytes = field.utf8
+                    guard exposure.startUTF8 >= 0, exposure.endUTF8 >= exposure.startUTF8,
+                          exposure.endUTF8 <= bytes.count else { continue }
+                    let start = bytes.index(bytes.startIndex, offsetBy: exposure.startUTF8)
+                    let end = bytes.index(bytes.startIndex, offsetBy: exposure.endUTF8)
+                    guard let fragment = String(bytes: bytes[start..<end], encoding: .utf8),
+                          fragment.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                            .contains(query) else { continue }
+                    if exposure.field == .value,
+                       element.supportsSetText || ["textbox", "searchbox", "combobox"].contains((element.semanticRole ?? "").lowercased()) {
+                        inputValues.insert(element.index)
+                    } else if exposure.kind == .readable, exposure.field != .linkURL {
+                        readable.insert(element.index)
+                    } else {
+                        other.insert(element.index)
+                    }
+                }
+            }
+            evidence["emitted_query_matches"] = [
+                "basis": "emitted_field_fragments",
+                "readable_text_elements": readable.count,
+                "input_value_elements": inputValues.count,
+                "other_field_elements": other.count,
+                "only_input_values": !inputValues.isEmpty && readable.isEmpty && other.isEmpty,
+            ] as [String: Any]
+        }
+        let data = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+        return "READ_SELECTION_EVIDENCE " + String(decoding: data, as: UTF8.self)
+    }
+
     private func formatSnapshot(
         snapshotID: UUID,
         binding: BrowserTabBinding,
@@ -1476,13 +2289,23 @@ actor BrowserTabSessionBroker {
         rows: [String],
         sourceID: UUID,
         read: SemanticReadRequest,
+        receipt: SemanticReadReceipt,
         scopeNodeID: String?,
         totalMatches: Int,
         offset: Int,
         nextCursor: String?,
         fieldsTruncated: Bool,
-        retainedObservation: Bool
-    ) -> String {
+        retainedObservation: Bool,
+        compact: Bool = false,
+        omittedInputNodeCount: Int = 0
+    ) throws -> String {
+        if compact {
+            return try formatCompactSnapshot(snapshotID: snapshotID, binding: binding,
+                document: document, elements: elements, rows: rows, sourceID: sourceID,
+                read: read, receipt: receipt, scopeNodeID: scopeNodeID, totalMatches: totalMatches,
+                offset: offset, nextCursor: nextCursor, fieldsTruncated: fieldsTruncated,
+                retainedObservation: retainedObservation, omittedInputNodeCount: omittedInputNodeCount)
+        }
         let documentURL = document.url.absoluteString
         let formattedURL = documentURL.utf8.count <= 2048
             ? "url=\(quote(documentURL))" : "url_omitted=1"
@@ -1491,7 +2314,7 @@ actor BrowserTabSessionBroker {
         var lines = [
             "AXSNAPSHOT id=\(snapshotID.uuidString) pid=\(binding.processIdentifier) "
                 + "bundle=\(quote(bundleIdentifier)) tab_handle=\(binding.handle.uuidString) "
-                + "document_epoch=\(binding.documentEpoch.uuidString) source=chrome_devtools "
+                + "document_epoch=\(binding.documentEpoch.uuidString) source=\(document.sourceName) "
                 + "\(formattedURL) "
                 + "title=\(quote(title.text))",
             "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") "
@@ -1501,7 +2324,10 @@ actor BrowserTabSessionBroker {
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) "
                 + "metadata_truncated=\(metadataTruncated ? 1 : 0) "
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
-                + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")",
+                + (nextCursor.map { "next_cursor=\($0) " } ?? "")
+                + "observation=\(retainedObservation ? "retained" : "live")"
+                + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
+            try selectionEvidence(receipt: receipt, elements: elements),
             "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }.count) "
                 + "navigation_shown=\(elements.filter { $0.contentScope == .navigation }.count) "
                 + "complementary_shown=\(elements.filter { $0.contentScope == .complementary }.count) "
@@ -1513,10 +2339,22 @@ actor BrowserTabSessionBroker {
                 + "metadata_shown=\(elements.filter { $0.contentKind == .metadata }.count) "
                 + "scope_basis=observed_ancestry subject_relevance=not_verified",
         ]
-        if read.view == .overview {
-            lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
+        if read.view == .links {
+            lines.insert("LINK_VIEW_SCOPE non_link_controls_omitted=true. Buttons/form controls may be outside this view; read view=overview or all before absence/access claims.", at: 2)
         }
+        if read.view == .content {
+            lines.insert("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true. Included options retain original actions; read view=overview or all for other controls and before absence/access claims.", at: 2)
+        }
+        if read.view == .overview {
+            lines.append("OVERVIEW selection=observed_controls_headings_document_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
+        }
+        if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
+        if document.semanticReadiness == .emptyAtDeadline {
+            lines.append(read.view == .content
+                ? "No readable content or qualifying listbox options were observed before the content-readiness deadline. Controls may already be present; this bounded read does not establish website search results or absent content."
+                : "Only a document shell or footer was observed before the readiness deadline; meaningful page content is still unresolved. This does not establish that requested content is absent.")
+        }
         lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
         lines.append("Readable fields are distinct from controls and metadata. Use view=all or links for navigation/controls. Exhausting a captured selection does not establish that virtualized or uncaptured content is absent.")
         if rows.contains(where: { $0.contains(" region_changed_candidate=true ") }) {
@@ -1532,10 +2370,49 @@ actor BrowserTabSessionBroker {
             lines.append("Source tree is incomplete. Counts describe captured nodes, not the entire page; do not infer absent content from no_matches.")
         }
         if totalMatches == 0 {
-            lines.append("No matching captured elements. Try view=content, headings, or links without a literal query; no unrelated fallback nodes were substituted.")
+            lines.append("No matching captured elements in this view/filter. This is not a website search result or proof of absent content. Read without a local query to inspect the site's actual result state; no unrelated fallback nodes were substituted.")
         }
         return lines.joined(separator: "\n")
     }
+
+    /// The same captured rows and exact field spans, with one concise scope
+    /// declaration instead of repeated prose. No text is removed after paging.
+    private func formatCompactSnapshot(snapshotID: UUID, binding: BrowserTabBinding,
+        document: BrowserDocumentObservation, elements: [BrowserTabElement], rows: [String], sourceID: UUID,
+        read: SemanticReadRequest, receipt: SemanticReadReceipt, scopeNodeID: String?,
+        totalMatches: Int, offset: Int, nextCursor: String?, fieldsTruncated: Bool,
+        retainedObservation: Bool, omittedInputNodeCount: Int) throws -> String {
+        let url = document.url.absoluteString
+        let title = fieldPrefix(document.title, startUTF8: 0, escapedByteLimit: 128)
+        let metadataTruncated = title.end < document.title.utf8.count || url.utf8.count > 1_024
+        var lines = [
+            // The controller already omits document_epoch from model output.
+            // Do so before packing too; the native snapshot retains the epoch.
+            "AXSNAPSHOT id=\(snapshotID.uuidString) tab_handle=\(binding.handle.uuidString) source=\(document.sourceName) "
+                + (url.utf8.count <= 1_024 ? "url=\(quote(url))" : "url_omitted=1") + " title=\(quote(title.text))",
+            "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") source_observation=\(sourceID) consistency=immutable_capture "
+                + "source_nodes=\(document.nodes.count) source_truncated=\(document.sourceTruncated ? 1 : 0) matches=\(totalMatches) shown=\(elements.count) offset=\(offset) "
+                + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) metadata_truncated=\(metadataTruncated ? 1 : 0) no_matches=\(totalMatches == 0 ? 1 : 0) "
+                + (nextCursor.map { "next_cursor=\($0) " } ?? "") + "observation=\(retainedObservation ? "retained" : "live")"
+                + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
+            try selectionEvidence(receipt: receipt, elements: elements, compact: true),
+            "SCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input."
+        ]
+        if omittedInputNodeCount > 0 {
+            lines.append("VIEW \(readViewName(read.view)) omitted_input_nodes=\(omittedInputNodeCount) basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim.")
+        } else if read.view != .all {
+            lines.append("VIEW \(readViewName(read.view)) omits kinds; content=text; all=toolbars.")
+        }
+        if document.semanticReadiness == .emptyAtDeadline {
+            lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
+        }
+        if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
+        lines.append(contentsOf: rows)
+        if nextCursor != nil { lines.append("Continue with cursor only for remaining captured fields/rows.") }
+        return lines.joined(separator: "\n")
+    }
+
+    private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes."
 
     private func quote(_ value: String) -> String {
         var result = "\""
@@ -1553,956 +2430,4 @@ actor BrowserTabSessionBroker {
         return result + "\""
     }
 
-}
-
-actor SystemChromeDevToolsTransport: BrowserTabTransport {
-    private let baseURL: URL
-
-    init(port: UInt16) {
-        baseURL = URL(string: "http://127.0.0.1:\(port)")!
-    }
-
-    func createTarget(url: URL) async throws -> BrowserTarget {
-        try requireBrowserAccessibilityPermission()
-        let allowed = CharacterSet.urlQueryAllowed.subtracting(
-            CharacterSet(charactersIn: "&=+#")
-        )
-        guard let encoded = url.absoluteString.addingPercentEncoding(
-            withAllowedCharacters: allowed
-        ), let endpoint = URL(string: "/json/new?\(encoded)", relativeTo: baseURL) else {
-            throw BrowserTabBrokerError.browserUnavailable("the requested URL could not be encoded")
-        }
-        let object = try await requestJSONObject(url: endpoint, method: "PUT")
-        return try parseTarget(object)
-    }
-
-    func target(id: String) async throws -> BrowserTarget? {
-        let targets = try await listTargets()
-        return targets.first(where: { $0.targetID == id })
-    }
-
-    func activateTarget(id: String) async throws {
-        guard let endpoint = URL(
-            string: "/json/activate/\(id)",
-            relativeTo: baseURL
-        ) else {
-            throw BrowserTabBrokerError.browserUnavailable("the target ID is invalid")
-        }
-        _ = try await requestData(url: endpoint, method: "GET")
-    }
-
-    func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
-        try requireBrowserAccessibilityPermission()
-        let current = try await requireCurrent(target)
-        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
-            throw BrowserTabBrokerError.ownershipMismatch
-        }
-        let socket = ChromeDevToolsSocket(url: endpoint)
-        defer { socket.close() }
-        return try await BrowserCDPDocumentOperations().observe(target: current, socket: socket)
-    }
-
-    func press(
-        target: BrowserTarget,
-        backendNodeID: Int64,
-        document: BrowserDocumentObservation,
-        permit: BrowserMutationPermit
-    ) async throws {
-        try requireBrowserAccessibilityPermission()
-        let current = try await requireCurrent(target)
-        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
-            throw BrowserTabBrokerError.ownershipMismatch
-        }
-        let socket = ChromeDevToolsSocket(url: endpoint)
-        defer { socket.close() }
-        try await BrowserCDPDocumentOperations().press(
-            target: current, backendNodeID: backendNodeID, document: document,
-            permit: permit, socket: socket
-        )
-    }
-
-    func setText(
-        target: BrowserTarget,
-        backendNodeID: Int64,
-        text: String,
-        document: BrowserDocumentObservation,
-        permit: BrowserMutationPermit
-    ) async throws {
-        try requireBrowserAccessibilityPermission()
-        let current = try await requireCurrent(target)
-        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
-            throw BrowserTabBrokerError.ownershipMismatch
-        }
-        let socket = ChromeDevToolsSocket(url: endpoint)
-        defer { socket.close() }
-        try await BrowserCDPDocumentOperations().setText(
-            target: current, backendNodeID: backendNodeID, text: text,
-            document: document, permit: permit, socket: socket
-        )
-    }
-
-    func listTargets() async throws -> [BrowserTarget] {
-        guard let endpoint = URL(string: "/json/list", relativeTo: baseURL) else {
-            throw BrowserTabBrokerError.browserUnavailable("the target-list URL is invalid")
-        }
-        let data = try await requestData(url: endpoint, method: "GET")
-        guard let values = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "/json/list did not return an array"
-            )
-        }
-        return values.compactMap { value in
-            guard value["type"] as? String == "page" else { return nil }
-            return try? parseTarget(value)
-        }
-    }
-
-    func closeTarget(target: BrowserTarget) async throws {
-        guard let current = try await self.target(id: target.targetID) else { return }
-        guard current.instanceToken == target.instanceToken else {
-            throw BrowserTabBrokerError.targetReplaced
-        }
-        try await closeTarget(id: current.targetID)
-    }
-
-    func closeTarget(id: String) async throws {
-        guard let endpoint = URL(
-            string: "/json/close/\(id)",
-            relativeTo: baseURL
-        ) else {
-            throw BrowserTabBrokerError.browserUnavailable("the target ID is invalid")
-        }
-        _ = try await requestData(url: endpoint, method: "GET")
-    }
-
-    private func requireCurrent(_ target: BrowserTarget) async throws -> BrowserTarget {
-        guard let current = try await self.target(id: target.targetID) else {
-            throw BrowserTabBrokerError.targetClosed
-        }
-        guard current.instanceToken == target.instanceToken else {
-            throw BrowserTabBrokerError.targetReplaced
-        }
-        return current
-    }
-
-
-    private func parseTarget(_ object: [String: Any]) throws -> BrowserTarget {
-        let allowedID = CharacterSet(
-            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-        )
-        guard let targetID = object["id"] as? String,
-              !targetID.isEmpty, targetID.utf8.count <= 128,
-              let rawURL = object["url"] as? String,
-              let url = URL(string: rawURL),
-              let rawWebSocketURL = object["webSocketDebuggerUrl"] as? String,
-              let webSocketURL = URL(string: rawWebSocketURL),
-              webSocketURL.scheme == "ws",
-              webSocketURL.host == "127.0.0.1",
-              webSocketURL.port == baseURL.port,
-              webSocketURL.user == nil, webSocketURL.password == nil,
-              webSocketURL.query == nil, webSocketURL.fragment == nil,
-              webSocketURL.path == "/devtools/page/\(targetID)" else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "a page target was missing its ID, URL, or WebSocket endpoint"
-            )
-        }
-        // Avoid the optimized allSatisfy(bound-method) specialization shared
-        // with contains(where:); keep identifier rejection explicit.
-        for scalar in targetID.unicodeScalars {
-            if !allowedID.contains(scalar) {
-                throw BrowserTabBrokerError.malformedDevToolsResponse("a page target had an invalid ID")
-            }
-        }
-        return BrowserTarget(
-            targetID: targetID,
-            instanceToken: webSocketURL.absoluteString,
-            title: object["title"] as? String ?? "",
-            url: url,
-            webSocketURL: webSocketURL
-        )
-    }
-
-
-    private func requestJSONObject(
-        url: URL,
-        method: String
-    ) async throws -> [String: Any] {
-        let data = try await requestData(url: url, method: method)
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "\(url.path) did not return a JSON object"
-            )
-        }
-        return object
-    }
-
-    private func requestData(url: URL, method: String) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.timeoutInterval = 5
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 10
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse,
-              (200 ..< 300).contains(response.statusCode) else {
-            throw BrowserTabBrokerError.browserUnavailable(
-                "\(method) \(url.path) did not return success"
-            )
-        }
-        return data
-    }
-}
-
-private actor ChromeDevToolsSocket: BrowserDocumentChannel {
-    private let session: URLSession
-    private let task: URLSessionWebSocketTask
-    private var nextID = 1
-    private let deadline: Task<Void, Never>
-
-    init(url: URL) {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 10
-        session = URLSession(configuration: configuration)
-        let socketTask = session.webSocketTask(with: url)
-        task = socketTask
-        deadline = Task {
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
-            socketTask.cancel(with: .goingAway, reason: nil)
-        }
-        socketTask.resume()
-    }
-
-    func request(
-        method: String,
-        params: Data,
-        permit: BrowserMutationPermit?
-    ) async throws -> Data {
-        try Task.checkCancellation()
-        let parameters = try JSONSerialization.jsonObject(with: params)
-        let id = nextID
-        nextID += 1
-        let request: [String: Any] = [
-            "id": id,
-            "method": method,
-            "params": parameters,
-        ]
-        let data = try JSONSerialization.data(withJSONObject: request)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "a command could not be encoded as UTF-8"
-            )
-        }
-        if let permit {
-            try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<Void, Error>) in
-                do {
-                    try permit.commit {
-                        try requireBrowserAccessibilityPermission()
-                        task.send(.string(text)) { error in
-                            if let error {
-                                continuation.resume(throwing: error)
-                            } else {
-                                continuation.resume(returning: ())
-                            }
-                        }
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        } else {
-            try await task.send(.string(text))
-        }
-
-        while true {
-            try Task.checkCancellation()
-            let message = try await task.receive()
-            let responseData: Data
-            switch message {
-            case .data(let data):
-                responseData = data
-            case .string(let text):
-                responseData = Data(text.utf8)
-            @unknown default:
-                throw BrowserTabBrokerError.malformedDevToolsResponse(
-                    "an unknown WebSocket message was received"
-                )
-            }
-            guard let object = try JSONSerialization.jsonObject(
-                with: responseData
-            ) as? [String: Any] else {
-                throw BrowserTabBrokerError.malformedDevToolsResponse(
-                    "a WebSocket response was not a JSON object"
-                )
-            }
-            guard (object["id"] as? NSNumber)?.intValue == id else {
-                continue
-            }
-            if let error = object["error"] as? [String: Any] {
-                throw BrowserTabBrokerError.malformedDevToolsResponse(
-                    error["message"] as? String ?? "\(method) failed"
-                )
-            }
-            guard let result = object["result"] as? [String: Any] else {
-                throw BrowserTabBrokerError.malformedDevToolsResponse(
-                    "\(method) returned no result"
-                )
-            }
-            return try JSONSerialization.data(withJSONObject: result)
-        }
-    }
-
-    nonisolated func close() {
-        deadline.cancel()
-        task.cancel(with: .normalClosure, reason: nil)
-        session.invalidateAndCancel()
-    }
-
-    func invalidate() { close() }
-}
-
-/// A narrow lifecycle seam. Live ownership still comes only from OwnedChildProcess.
-protocol BrowserOwnedChild: Sendable {
-    var processIdentifier: Int32 { get }
-    var isRunning: Bool { get }
-    func stop() async -> OwnedChildProcess.StopResult
-}
-
-extension OwnedChildProcess: BrowserOwnedChild {}
-
-actor ChromeTabBroker {
-    struct OpenedTab: Sendable {
-        let application: ActivatedApplication
-        let binding: BrowserTabBinding
-    }
-
-    static let shared = ChromeTabBroker()
-
-    struct BrowserProcess: Sendable {
-        let process: any BrowserOwnedChild
-        let dataDirectory: URL
-        let generation: UUID
-        let transport: SystemChromeDevToolsTransport
-        let sessions: BrowserTabSessionBroker
-    }
-
-    /// Tests can construct a fresh child without launching Chrome. The post-spawn
-    /// hook runs only after that child and its directory are recorded by the owner.
-    struct LaunchOperations: Sendable {
-        let resolveExecutable: @Sendable () async throws -> URL
-        let createProfile: @Sendable (URL) throws -> Void
-        let spawn: @Sendable (URL, [String]) throws -> any BrowserOwnedChild
-        let didSpawn: @Sendable (any BrowserOwnedChild, URL) async throws -> Void
-
-        static let live = Self(
-            resolveExecutable: {
-                let applicationURL = await MainActor.run {
-                    NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome")
-                }
-                guard let applicationURL else {
-                    throw BrowserTabBrokerError.browserUnavailable("Google Chrome is not installed")
-                }
-                let executableURL = applicationURL
-                    .appendingPathComponent("Contents", isDirectory: true)
-                    .appendingPathComponent("MacOS", isDirectory: true)
-                    .appendingPathComponent("Google Chrome")
-                guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
-                    throw BrowserTabBrokerError.browserUnavailable(
-                        "the Google Chrome executable could not be found"
-                    )
-                }
-                return executableURL
-            },
-            createProfile: { directory in
-                try FileManager.default.createDirectory(
-                    at: directory,
-                    withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700]
-                )
-            },
-            spawn: { executableURL, arguments in
-                try OwnedChildProcess(executableURL: executableURL, arguments: arguments)
-            },
-            didSpawn: { _, _ in }
-        )
-    }
-
-    private var browser: BrowserProcess?
-    private var isStartingBrowser = false
-    private var isShuttingDown = false
-    private var startingProcess: (any BrowserOwnedChild)?
-    private var startingDirectory: URL?
-    private var ownedDirectories = Set<URL>()
-    private var unboundTargets = [String: BrowserTarget]()
-    private var lifetimes = [ObjectIdentifier: BrowserTabLifetime]()
-    private var shutdownTask: Task<ShutdownReport, Never>?
-    private var exactCloseIssues = [String]()
-    private struct RetirementResult: Sendable {
-        let stopped: OwnedChildProcess.StopResult
-        let profileRemoved: Bool
-        let profileIssue: String?
-    }
-    private struct Retirement: Sendable {
-        let directory: URL
-        let task: Task<RetirementResult, Never>
-    }
-    private var retirement: Retirement?
-    private let removeProfile: @Sendable (URL) async -> String?
-    private let willLaunchBrowser: @Sendable () async throws -> Void
-    private let launchOperations: LaunchOperations
-    // Optional instrumentation. Nil in production and in the primitive gate.
-    // A configured read-only observer completes before a successful press returns;
-    // it neither authorizes input nor delays synchronous lifetime revocation.
-    private let didPerformPress: (@Sendable (BrowserTabBinding, BrowserTabSnapshot) async -> Void)?
-
-    /// Live defaults construct only an OwnedChildProcess. Lifecycle tests may
-    /// inject a fresh fake child; neither path adopts a discovered process ID.
-    init(
-        initialBrowser: BrowserProcess? = nil,
-        removeProfile: @escaping @Sendable (URL) async -> String? = {
-            await OwnedProfileCleanup.remove($0)
-        },
-        willLaunchBrowser: @escaping @Sendable () async throws -> Void = {},
-        launchOperations: LaunchOperations = .live,
-        didPerformPress: (@Sendable (BrowserTabBinding, BrowserTabSnapshot) async -> Void)? = nil
-    ) {
-        browser = initialBrowser
-        self.removeProfile = removeProfile
-        self.willLaunchBrowser = willLaunchBrowser
-        self.launchOperations = launchOperations
-        self.didPerformPress = didPerformPress
-        if let initialBrowser { ownedDirectories.insert(initialBrowser.dataDirectory) }
-    }
-
-    struct Ownership: Equatable, Sendable {
-        let processGroupID: Int32
-        let profileDirectory: URL
-    }
-
-    struct ShutdownReport: Equatable, Sendable {
-        let ownership: [Ownership]
-        let issues: [String]
-        var succeeded: Bool { issues.isEmpty }
-    }
-
-    /// Diagnostics are retained through shutdown. Successful group/profile
-    /// disposal can reconcile a close race, but must not erase its evidence.
-    func exactTargetCleanupIssues() -> [String] { exactCloseIssues }
-
-    func ownership() -> Ownership? {
-        if let browser {
-            return Ownership(
-                processGroupID: browser.process.processIdentifier,
-                profileDirectory: browser.dataDirectory
-            )
-        }
-        if let startingProcess, let startingDirectory {
-            return Ownership(
-                processGroupID: startingProcess.processIdentifier,
-                profileDirectory: startingDirectory
-            )
-        }
-        return nil
-    }
-
-    func shutdown() async -> ShutdownReport {
-        await beginShutdown().value
-    }
-
-    /// Synchronously revoke and return the one owned disposal operation.
-    /// Tests can establish this boundary without sleeps or scheduler assumptions.
-    func beginShutdown() -> Task<ShutdownReport, Never> {
-        if let shutdownTask { return shutdownTask }
-        isShuttingDown = true
-        for lifetime in lifetimes.values { lifetime.revoke() }
-        lifetimes.removeAll()
-        let task = Task { await self.finishShutdown() }
-        shutdownTask = task
-        return task
-    }
-
-    private func finishShutdown() async -> ShutdownReport {
-        let active = browser
-        let starting = startingProcess
-        let directory = startingDirectory
-        let retiring = retirement
-        browser = nil
-        startingProcess = nil
-        startingDirectory = nil
-        retirement = nil
-        unboundTargets.removeAll()
-        if let active { await active.sessions.invalidateAll() }
-
-        var children = [(any BrowserOwnedChild, URL)]()
-        if let active { children.append((active.process, active.dataDirectory)) }
-        if let starting, let directory,
-           !children.contains(where: { $0.0.processIdentifier == starting.processIdentifier }) {
-            children.append((starting, directory))
-        }
-        var issues = [String]()
-        var ownership = [Ownership]()
-        let unlaunchedDirectories = ownedDirectories.subtracting(Set(children.map { $0.1 }))
-        for (process, directory) in children {
-            ownership.append(Ownership(
-                processGroupID: process.processIdentifier,
-                profileDirectory: directory
-            ))
-            let stopped: OwnedChildProcess.StopResult
-            var profileRemoved = false
-            if let retiring, retiring.directory == directory {
-                // Retirement remains the sole stop/removal owner while suspended.
-                // Join it; never invoke stop concurrently or discard its errors.
-                let result = await retiring.task.value
-                stopped = result.stopped
-                profileRemoved = result.profileRemoved
-                if let issue = result.profileIssue { issues.append(issue) }
-            } else {
-                stopped = await process.stop()
-            }
-            issues.append(contentsOf: stopped.issues)
-            // Disposal can remove a safe profile while still reporting stop issues.
-            // A failed earlier removal may be retried sequentially, with its
-            // original error retained even when the retry succeeds.
-            if stopped.rootReaped && stopped.groupGone {
-                if profileRemoved {
-                    ownedDirectories.remove(directory)
-                } else if let issue = await removeProfile(directory) {
-                    issues.append(issue)
-                } else {
-                    ownedDirectories.remove(directory)
-                }
-            } else {
-                issues.append("Retained the profile because owned process cleanup was incomplete: \(directory.path)")
-            }
-        }
-        for directory in unlaunchedDirectories {
-            if let issue = await removeProfile(directory) {
-                issues.append(issue)
-            } else {
-                ownedDirectories.remove(directory)
-            }
-        }
-        return ShutdownReport(ownership: ownership, issues: issues)
-    }
-
-    func open(
-        taskKey: String,
-        url: URL,
-        lifetime: BrowserTabLifetime = BrowserTabLifetime()
-    ) async throws -> OpenedTab {
-        try requireBrowserAccessibilityPermission()
-        guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-        try lifetime.check()
-        let lifetimeID = ObjectIdentifier(lifetime)
-        lifetimes[lifetimeID] = lifetime
-        var published = false
-        defer {
-            if !published { lifetimes.removeValue(forKey: lifetimeID) }
-        }
-        let browser = try await ensureBrowser()
-        try lifetime.check()
-        let processIdentifier = browser.process.processIdentifier
-        let binding = try await browser.sessions.open(
-            taskKey: taskKey,
-            processIdentifier: processIdentifier,
-            url: url,
-            lifetime: lifetime
-        )
-        do {
-            try lifetime.check()
-            // Never close another task's blank or still-loading target.
-            let application = try await activatedApplication(
-                processIdentifier: processIdentifier
-            )
-            try lifetime.check()
-            _ = try currentBrowser(generation: binding.browserGeneration)
-            published = true
-            return OpenedTab(application: application, binding: binding)
-        } catch {
-            try? await browser.sessions.revoke(taskKey: taskKey, binding: binding)
-            throw error
-        }
-    }
-
-    func snapshot(
-        taskKey: String,
-        binding: BrowserTabBinding,
-        query: String?
-    ) async throws -> BrowserTabObservation {
-        try await snapshot(taskKey: taskKey, binding: binding, read: SemanticReadRequest(query: query))
-    }
-
-    func snapshot(
-        taskKey: String,
-        binding: BrowserTabBinding,
-        read: SemanticReadRequest
-    ) async throws -> BrowserTabObservation {
-        let browser = try currentBrowser(generation: binding.browserGeneration)
-        return try await browser.sessions.snapshot(
-            taskKey: taskKey,
-            binding: binding,
-            bundleIdentifier: "com.google.Chrome",
-            read: read
-        )
-    }
-
-    func perform(
-        taskKey: String,
-        binding: BrowserTabBinding,
-        snapshot: BrowserTabSnapshot,
-        elementIndex: Int,
-        action: String,
-        verificationPlan: BrowserActionVerification.Plan? = nil
-    ) async throws {
-        let browser = try currentBrowser(generation: binding.browserGeneration)
-        try await browser.sessions.perform(
-            taskKey: taskKey,
-            binding: binding,
-            snapshot: snapshot,
-            elementIndex: elementIndex,
-            action: action,
-            verificationPlan: verificationPlan
-        )
-        if let didPerformPress {
-            // Normal tool response/turn completion follows this awaited boundary.
-            // The observer receives immutable provenance, not mutation authority.
-            await didPerformPress(binding, snapshot)
-        }
-    }
-
-    func setText(
-        taskKey: String,
-        binding: BrowserTabBinding,
-        snapshot: BrowserTabSnapshot,
-        elementIndex: Int,
-        text: String,
-        verificationPlan: BrowserActionVerification.Plan? = nil
-    ) async throws {
-        let browser = try currentBrowser(generation: binding.browserGeneration)
-        try await browser.sessions.setText(
-            taskKey: taskKey,
-            binding: binding,
-            snapshot: snapshot,
-            elementIndex: elementIndex,
-            text: text,
-            verificationPlan: verificationPlan
-        )
-    }
-
-    func revoke(taskKey: String, binding: BrowserTabBinding) async {
-        guard binding.taskKey == taskKey else { return }
-        binding.lifetime.revoke()
-        lifetimes.removeValue(forKey: ObjectIdentifier(binding.lifetime))
-        guard let browser, browser.generation == binding.browserGeneration else { return }
-        do {
-            try await browser.sessions.revoke(taskKey: taskKey, binding: binding)
-        } catch BrowserTabBrokerError.handleMissing {
-            // Already revoked or known closed/replaced; never retarget by URL.
-        } catch {
-            exactCloseIssues.append(error.localizedDescription)
-            NSLog("Exact broker target cleanup failed: %@", error.localizedDescription)
-        }
-    }
-
-    func openUnboundForegroundTab(
-        processIdentifier: Int32,
-        url: URL
-    ) async throws -> ActivatedApplication {
-        guard !isShuttingDown, let browser,
-              browser.process.isRunning,
-              browser.process.processIdentifier == processIdentifier else {
-            throw BrowserTabBrokerError.browserGenerationChanged
-        }
-        let target = try await browser.transport.createTarget(url: url)
-        do {
-            _ = try currentBrowser(generation: browser.generation)
-            unboundTargets[target.targetID] = target
-            try await browser.transport.activateTarget(id: target.targetID)
-            return try await activatedApplication(processIdentifier: processIdentifier)
-        } catch {
-            try? await browser.transport.closeTarget(target: target)
-            unboundTargets.removeValue(forKey: target.targetID)
-            throw error
-        }
-    }
-
-    func closeTabs(
-        processIdentifier: Int32,
-        urls: Set<URL>
-    ) async throws {
-        guard !isShuttingDown, let browser,
-              browser.process.processIdentifier == processIdentifier else {
-            throw BrowserTabBrokerError.browserGenerationChanged
-        }
-        try await browser.sessions.closeTargets(urls: urls)
-        let targets = unboundTargets.values.filter { urls.contains($0.url) }
-        for target in targets {
-            try await browser.transport.closeTarget(target: target)
-            unboundTargets.removeValue(forKey: target.targetID)
-        }
-    }
-
-    /// Internal so deterministic tests exercise this caller's actual restart gate.
-    /// Model-facing opens still enter through open(), including its permission check.
-    func ensureBrowser() async throws -> BrowserProcess {
-        guard !isShuttingDown else {
-            throw BrowserTabBrokerError.browserUnavailable("the broker has been shut down")
-        }
-        if let browser, browser.process.isRunning { return browser }
-        guard startingProcess == nil || isStartingBrowser else {
-            throw BrowserTabBrokerError.browserUnavailable(
-                "prior owned cleanup is incomplete; shut down this broker before retrying"
-            )
-        }
-        guard browser != nil || ownedDirectories.isEmpty || isStartingBrowser else {
-            throw BrowserTabBrokerError.browserUnavailable(
-                "prior owned cleanup is incomplete; shut down this broker before retrying"
-            )
-        }
-        guard !isStartingBrowser else {
-            throw BrowserTabBrokerError.browserUnavailable(
-                "the isolated browser is starting; retry after it becomes ready"
-            )
-        }
-        isStartingBrowser = true
-        defer { isStartingBrowser = false }
-        let retired = browser
-        browser = nil
-        if let retired {
-            startingProcess = retired.process
-            startingDirectory = retired.dataDirectory
-            let remove = removeProfile
-            let operation = Task {
-                await retired.sessions.invalidateAll()
-                let stopped = await retired.process.stop()
-                // Restart requires total stop success. Shutdown may subsequently
-                // remove a physically safe profile despite an unexpected stop issue.
-                guard stopped.succeeded else {
-                    return RetirementResult(stopped: stopped, profileRemoved: false, profileIssue: nil)
-                }
-                let issue = await remove(retired.dataDirectory)
-                return RetirementResult(stopped: stopped, profileRemoved: issue == nil, profileIssue: issue)
-            }
-            // Publish the operation BEFORE the first await. Shutdown must join it.
-            retirement = Retirement(directory: retired.dataDirectory, task: operation)
-            let result = await operation.value
-            if isShuttingDown {
-                let report = await shutdown()
-                guard report.succeeded else {
-                    throw BrowserTabBrokerError.browserUnavailable(report.issues.joined(separator: "; "))
-                }
-                throw BrowserTabBrokerError.handleMissing
-            }
-            guard result.stopped.succeeded else {
-                let detail = result.stopped.issues.isEmpty
-                    ? "owned root/group cleanup is incomplete"
-                    : result.stopped.issues.joined(separator: "; ")
-                throw BrowserTabBrokerError.browserUnavailable(detail)
-            }
-            if let issue = result.profileIssue {
-                throw BrowserTabBrokerError.browserUnavailable(issue)
-            }
-            ownedDirectories.remove(retired.dataDirectory)
-            retirement = nil
-            if startingDirectory == retired.dataDirectory {
-                startingProcess = nil
-                startingDirectory = nil
-            }
-            guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-        }
-        try await willLaunchBrowser()
-        guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-        let executableURL = try await launchOperations.resolveExecutable()
-        guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-
-        let generation = UUID()
-        let dataDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalCodexBrowserBroker-\(generation.uuidString)", isDirectory: true)
-        try launchOperations.createProfile(dataDirectory)
-        ownedDirectories.insert(dataDirectory)
-        var launchedProcess: (any BrowserOwnedChild)?
-        do {
-            // No await between construction and publishing ownership. A shutdown
-            // entering at didSpawn/readiness can therefore find the fresh child.
-            let process = try launchOperations.spawn(
-                executableURL,
-                [
-                    "--remote-debugging-address=127.0.0.1",
-                    "--remote-debugging-port=0",
-                    "--user-data-dir=\(dataDirectory.path)",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-background-networking",
-                    "--disable-background-mode",
-                    "--disable-component-update",
-                    "--new-window",
-                    "about:blank",
-                ]
-            )
-            launchedProcess = process
-            startingProcess = process
-            startingDirectory = dataDirectory
-            try await launchOperations.didSpawn(process, dataDirectory)
-            guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-            let port = try await waitForDevToolsPort(
-                dataDirectory: dataDirectory, process: process
-            )
-            guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-            let transport = SystemChromeDevToolsTransport(port: port)
-            let sessions = BrowserTabSessionBroker(
-                transport: transport, browserGeneration: generation
-            )
-            let launched = BrowserProcess(
-                process: process,
-                dataDirectory: dataDirectory,
-                generation: generation,
-                transport: transport,
-                sessions: sessions
-            )
-            browser = launched
-            startingProcess = nil
-            startingDirectory = nil
-            return launched
-        } catch {
-            if isShuttingDown {
-                // didSpawn/readiness may resume after shutdown has taken ownership.
-                // Join that cached disposal rather than re-stopping/re-removing or
-                // publishing a second cleanup result after the final report.
-                let report = await shutdown()
-                if !report.succeeded {
-                    throw BrowserTabBrokerError.browserUnavailable(
-                        "\(error.localizedDescription); owned shutdown failed: "
-                            + report.issues.joined(separator: "; ")
-                    )
-                }
-                throw error
-            }
-            var cleanupComplete = false
-            var stopSucceeded = true
-            var cleanupIssues = [String]()
-            if let launchedProcess {
-                let stopped = await launchedProcess.stop()
-                stopSucceeded = stopped.succeeded
-                cleanupIssues.append(contentsOf: stopped.issues)
-                if !stopSucceeded && stopped.issues.isEmpty {
-                    cleanupIssues.append("owned root/group cleanup is incomplete")
-                }
-                // Safe deletion does not authorize a later launch after stop issues.
-                if stopped.rootReaped && stopped.groupGone {
-                    if let issue = await removeProfile(dataDirectory) {
-                        cleanupIssues.append(issue)
-                    } else {
-                        cleanupComplete = true
-                    }
-                }
-            } else {
-                if let issue = await removeProfile(dataDirectory) {
-                    cleanupIssues.append(issue)
-                } else {
-                    cleanupComplete = true
-                }
-            }
-            if cleanupComplete {
-                ownedDirectories.remove(dataDirectory)
-                if stopSucceeded && startingDirectory == dataDirectory {
-                    startingProcess = nil
-                    startingDirectory = nil
-                }
-            }
-            // Failed stop ownership stays recorded even if its profile is gone.
-            // Preserve simultaneous stop AND profile errors with the launch error.
-            if !cleanupIssues.isEmpty {
-                let detail = cleanupIssues.joined(separator: "; ")
-                throw BrowserTabBrokerError.browserUnavailable(
-                    "\(error.localizedDescription); owned launch cleanup failed: \(detail)"
-                )
-            }
-            throw error
-        }
-    }
-
-    private func currentBrowser(generation: UUID) throws -> BrowserProcess {
-        guard !isShuttingDown, let browser, browser.process.isRunning else {
-            throw BrowserTabBrokerError.browserUnavailable(
-                "the brokered Chrome process exited"
-            )
-        }
-        guard browser.generation == generation else {
-            throw BrowserTabBrokerError.browserGenerationChanged
-        }
-        return browser
-    }
-
-    private func waitForDevToolsPort(
-        dataDirectory: URL,
-        process: any BrowserOwnedChild
-    ) async throws -> UInt16 {
-        let activePortURL = dataDirectory.appendingPathComponent("DevToolsActivePort")
-        for attempt in 0 ..< 200 {
-            try Task.checkCancellation()
-            guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-            guard process.isRunning else {
-                throw BrowserTabBrokerError.browserUnavailable(
-                    "Chrome exited before remote debugging became ready"
-                )
-            }
-            if let data = try? Data(contentsOf: activePortURL) {
-                let contents = String(decoding: data, as: UTF8.self)
-                let lines = contents.split(
-                    whereSeparator: \.isNewline
-                ).map(String.init)
-                if lines.count >= 2,
-                   let port = UInt16(lines[0]), port > 0,
-                   lines[1].hasPrefix("/devtools/browser/") {
-                    return port
-                }
-            }
-            if attempt < 199 {
-                try await Task.sleep(for: .milliseconds(25))
-            }
-        }
-        throw BrowserTabBrokerError.browserUnavailable(
-            "Chrome did not publish DevToolsActivePort"
-        )
-    }
-
-    private func activatedApplication(
-        processIdentifier: Int32
-    ) async throws -> ActivatedApplication {
-        for attempt in 0 ..< 120 {
-            try Task.checkCancellation()
-            guard !isShuttingDown else { throw BrowserTabBrokerError.handleMissing }
-            let values: (String?, String?, Bool)? = await MainActor.run {
-                guard let application = NSRunningApplication(
-                    processIdentifier: processIdentifier
-                ) else {
-                    return nil
-                }
-                return (
-                    application.bundleIdentifier,
-                    application.localizedName,
-                    application.isTerminated
-                )
-            }
-            if let values,
-               values.0 == "com.google.Chrome",
-               !values.2 {
-                return ActivatedApplication(
-                    processIdentifier: processIdentifier,
-                    bundleIdentifier: values.0 ?? "com.google.Chrome",
-                    localizedName: values.1
-                )
-            }
-            if attempt < 119 {
-                try await Task.sleep(for: .milliseconds(25))
-            }
-        }
-        throw BrowserTabBrokerError.browserUnavailable(
-            "the brokered Chrome process did not register with AppKit"
-        )
-    }
 }

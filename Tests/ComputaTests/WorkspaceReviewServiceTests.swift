@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Computa
@@ -24,6 +25,14 @@ final class WorkspaceReviewServiceTests: XCTestCase, @unchecked Sendable {
         if let root { try FileManager.default.removeItem(at: root) }
         root = nil
         service = nil
+    }
+
+    func testMissingOrRelativeWorkspaceNeverFallsBackToProcessWorkingDirectory() async {
+        for workspace in ["", "."] {
+            await assertFailure(.unavailable("Choose an existing workspace folder to review its files.")) {
+                _ = try await self.service.load(workspace: workspace, scope: .lastTurn)
+            }
+        }
     }
 
     func testUnstagedAndStagedAreDistinctAndStagePreservesWorktree() async throws {
@@ -555,6 +564,134 @@ final class WorkspaceReviewServiceTests: XCTestCase, @unchecked Sendable {
         let unstaged = try await load(.unstaged)
         _ = try await service.mutate(snapshotID: unstaged.id, operation: .revert)
         XCTAssertEqual(try read("code.swift"), "let number = 1\nlet name = \"original\"\n")
+    }
+
+    func testInheritedOutputPipesTimeOutAndServiceRemainsUsable() async throws {
+        try write("code.swift", "changed after retained pipes\n")
+        let fixture = try commandFixture(name: "retained-pipes", trigger: "true", body: """
+        /bin/sleep 30 &
+        printf 'retained stdout\n'
+        printf 'retained stderr\n' >&2
+        exit 0
+        """)
+        service = WorkspaceReviewService(commandExecutableForTesting: fixture.executable, commandTimeoutForTesting: 2)
+        let clock = ContinuousClock(), started = clock.now
+        await assertCommandFailure(containing: "draining inherited pipes") { _ = try await self.load(.unstaged) }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(6))
+        try assertFixtureGroupGone(fixture.pidFile)
+        let recovered = try await load(.unstaged)
+        XCTAssertEqual(recovered.files.count, 1)
+        XCTAssertTrue(recovered.files[0].diff.contains("+changed after retained pipes"))
+    }
+
+    func testBackpressuredInputTimesOutWithoutMutationAndServiceRemainsUsable() async throws {
+        let baseline = (0..<2_000).map { "before \($0) " + String(repeating: "x", count: 100) + "\n" }.joined()
+        let changed = baseline.replacingOccurrences(of: "before", with: "after")
+        try write("backpressure.txt", baseline)
+        _ = try git(["add", "backpressure.txt"])
+        _ = try git(["commit", "-qm", "Input pipe baseline"])
+        try write("backpressure.txt", changed)
+        let fixture = try commandFixture(name: "blocked-input", trigger: """
+        is_apply=false
+        for argument do
+            if [ "$argument" = apply ]; then is_apply=true; fi
+        done
+        "$is_apply"
+        """, body: "exec /bin/sleep 30")
+        service = WorkspaceReviewService(commandExecutableForTesting: fixture.executable, commandTimeoutForTesting: 2)
+        let snapshot = try await load(.unstaged)
+        let file = try XCTUnwrap(snapshot.files.first { $0.path == "backpressure.txt" })
+        XCTAssertFalse(file.truncated)
+        XCTAssertGreaterThan(file.diff.utf8.count, 131_072, "Input must exceed a pipe's buffering capacity")
+        let originalIndex = try Data(contentsOf: root.appendingPathComponent(".git/index"))
+        let clock = ContinuousClock(), started = clock.now
+        await assertCommandFailure(containing: "timed out") {
+            _ = try await self.service.mutate(snapshotID: snapshot.id, operation: .stage, fileID: file.id)
+        }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(6))
+        try assertFixtureGroupGone(fixture.pidFile)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(".git/index")), originalIndex)
+        XCTAssertEqual(try read("backpressure.txt"), changed)
+        let recovered = try await load(.unstaged)
+        XCTAssertEqual(recovered.files.count, 1)
+        _ = try await service.mutate(snapshotID: recovered.id, operation: .stage, fileID: recovered.files[0].id)
+        XCTAssertEqual(try git(["show", ":backpressure.txt"]), changed)
+    }
+
+    func testContinuousOutputCannotStarveDeadlineAndServiceRemainsUsable() async throws {
+        try write("code.swift", "changed after output flood\n")
+        // Nonblocking writes give the producer its own finite fallback even if
+        // the runner regresses and stops draining or checking its deadline.
+        let flood = """
+        import os, sys, time
+        os.set_blocking(1, False)
+        deadline = time.monotonic() + 30
+        chunk = b"review-output-flood\\n" * 4096
+        wrote = False
+        while time.monotonic() < deadline:
+            try:
+                count = os.write(1, chunk)
+                if count > 0 and not wrote:
+                    with open(sys.argv[1], "w") as marker:
+                        marker.write("output-started")
+                    wrote = True
+            except BlockingIOError:
+                time.sleep(0.001)
+        """
+        let markerPath = root.appendingPathComponent(".git/output-flood-started").path
+        let quotedMarker = "'" + markerPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let fixture = try commandFixture(name: "output-flood", trigger: "true", body: "exec /usr/bin/python3 -c '\(flood)' \(quotedMarker)")
+        service = WorkspaceReviewService(commandExecutableForTesting: fixture.executable, commandTimeoutForTesting: 2)
+        let clock = ContinuousClock(), started = clock.now
+        await assertCommandFailure(containing: "timed out") { _ = try await self.load(.unstaged) }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(6))
+        try assertFixtureGroupGone(fixture.pidFile)
+        XCTAssertEqual(try read(".git/output-flood-started"), "output-started", "The writer must run before the timeout")
+        let recovered = try await load(.unstaged)
+        XCTAssertTrue(recovered.files[0].diff.contains("+changed after output flood"))
+    }
+
+    private func commandFixture(name: String, trigger: String, body: String) throws -> (executable: URL, pidFile: URL) {
+        let executable = root.appendingPathComponent(".git/" + name)
+        let marker = root.appendingPathComponent(".git/" + name + "-started")
+        let pidFile = root.appendingPathComponent(".git/" + name + "-pid")
+        func quoted(_ url: URL) -> String { "'" + url.path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let script = """
+        #!/bin/sh
+        should_block() {
+        \(trigger)
+        }
+        if [ ! -e \(quoted(marker)) ] && should_block "$@"; then
+            : > \(quoted(marker))
+            printf '%s\\n' "$$" > \(quoted(pidFile))
+        \(body)
+        fi
+        exec /usr/bin/git "$@"
+
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        return (executable, pidFile)
+    }
+
+    private func assertFixtureGroupGone(_ pidFile: URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        let text = try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try XCTUnwrap(Int32(text), file: file, line: line)
+        XCTAssertGreaterThan(pid, 1, file: file, line: line)
+        guard pid > 1 else { return }
+        // Observation only: the production runner owns all nonzero signals and reaping.
+        let result = Darwin.kill(-pid, 0)
+        let errorNumber = result == -1 ? errno : 0
+        XCTAssertEqual(result, -1, "Owned group must be absent after timeout", file: file, line: line)
+        XCTAssertEqual(errorNumber, ESRCH, file: file, line: line)
+    }
+
+    private func assertCommandFailure(containing message: String, operation: () async throws -> Void,
+                                      file: StaticString = #filePath, line: UInt = #line) async {
+        do { try await operation(); XCTFail("Expected bounded command failure", file: file, line: line) }
+        catch let FileReviewError.commandFailed(detail) {
+            XCTAssertTrue(detail.contains(message), "Unexpected command failure: \(detail)", file: file, line: line)
+        } catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
     }
 
     private func load(_ scope: FileReviewScope, reference: String? = nil) async throws -> FileReviewSnapshot {

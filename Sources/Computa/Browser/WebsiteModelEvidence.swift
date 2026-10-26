@@ -14,16 +14,52 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
         let source: String
     }
 
+    struct ChatSelection: Codable, Equatable, Sendable {
+        struct AutomaticFamily: Codable, Equatable, Sendable {
+            let policy: String
+            let offered: [String]
+        }
+        let family: Identity
+        let power: Identity
+        let automaticFamily: AutomaticFamily
+
+        var dictionary: [String: Any] {
+            ["family": ["key": family.key, "label": family.label],
+             "power": ["key": power.key, "label": power.label],
+             "automaticFamily": ["policy": automaticFamily.policy, "offered": automaticFamily.offered]]
+        }
+
+        static func parse(_ raw: Any?, selected: WebsiteModelChoice) throws -> Self {
+            guard let value = raw as? [String: Any], Set(value.keys) == ["family", "power", "automaticFamily"],
+                  let family = value["family"] as? [String: String], Set(family.keys) == ["key", "label"],
+                  let familyKey = family["key"], let familyLabel = family["label"], familyKey == familyLabel,
+                  WebsiteModelCatalog.plainGPTVersion(familyKey) != nil,
+                  let power = value["power"] as? [String: String], Set(power.keys) == ["key", "label"],
+                  let powerKey = power["key"], let powerLabel = power["label"],
+                  let preset = WebsiteModelChoice.ChatGPTPower(rawValue: powerKey), powerLabel == preset.label,
+                  let automatic = value["automaticFamily"] as? [String: Any], Set(automatic.keys) == ["policy", "offered"],
+                  automatic["policy"] as? String == "highest_offered_plain_gpt",
+                  let offered = automatic["offered"] as? [String],
+                  let highest = WebsiteModelCatalog.highestOfferedPlainGPTFamily(offered) else { throw Failure.unverified }
+            guard familyKey == highest, selected.chatGPTPower == preset,
+                  (preset == .pro ? selected.label == "Pro" || selected.label == familyLabel + " Pro"
+                    : selected.label == powerLabel) else { throw Failure.mismatch }
+            return Self(family: Identity(key: familyKey, label: familyLabel), power: Identity(key: powerKey, label: powerLabel),
+                        automaticFamily: AutomaticFamily(policy: "highest_offered_plain_gpt", offered: offered))
+        }
+    }
+
     enum Failure: Error { case unverified, mismatch }
 
     let selected: Identity
     let response: ResponseIdentity?
     let verification: String
     let source: String?
+    let chatSelection: ChatSelection?
 
     static func parse(_ raw: Any?, provider: String, expected: WebsiteModelChoice? = nil) throws -> Self {
         guard let value = raw as? [String: Any],
-              Set(value.keys).isSubset(of: ["selected", "response", "verification", "source"]),
+              Set(value.keys).isSubset(of: ["selected", "response", "verification", "source", "chatSelection"]),
               let selection = value["selected"] as? [String: String],
               Set(selection.keys) == ["key", "label"],
               let key = selection["key"], let label = selection["label"],
@@ -53,7 +89,23 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
                   ["model_picker_label", "checked_model_option", "selected_model_indicator"].contains(name) else { throw Failure.unverified }
             source = name
         }
-        return Self(selected: Identity(key: key, label: label), response: response, verification: verification, source: source)
+        let selectedChoice = WebsiteModelChoice(provider: provider, key: key, label: label)
+        var chatSelection: ChatSelection?
+        if selectedChoice.chatGPTPower != nil {
+            guard selectedChoice.isSelectable, source == "selected_model_indicator",
+                  response == nil, verification == "website_selection" else { throw Failure.unverified }
+            chatSelection = try ChatSelection.parse(value["chatSelection"], selected: selectedChoice)
+        } else if value["chatSelection"] != nil { throw Failure.unverified }
+        return Self(selected: Identity(key: key, label: label), response: response, verification: verification,
+                    source: source, chatSelection: chatSelection)
+    }
+
+    /// An automatic policy is resolved once per inference. A stable Medium ID
+    /// must not hide a checked family or power change after the first proof.
+    func isSameResolvedSelection(as other: Self) -> Bool {
+        selected == other.selected && chatSelection?.family == other.chatSelection?.family
+            && chatSelection?.power == other.chatSelection?.power
+            && chatSelection?.automaticFamily.policy == other.chatSelection?.automaticFamily.policy
     }
 
     var dictionary: [String: Any] {
@@ -61,6 +113,7 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
                                     "verification": verification]
         if let response { value["response"] = ["key": response.key, "label": response.label, "source": response.source] }
         if let source { value["source"] = source }
+        if let chatSelection { value["chatSelection"] = chatSelection.dictionary }
         return value
     }
 }

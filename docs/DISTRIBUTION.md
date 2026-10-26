@@ -152,7 +152,7 @@ bun Scripts/sign-release.ts \
   --identity 'Developer ID Application: Your Name (TEAMID)'
 ```
 
-The signer signs the bundled agent runtime and Chrome helper with secure
+The signer signs the bundled agent runtime with secure
 timestamps, updates the runtime integrity manifest for the signed executable,
 and seals the app. It never edits the source bundle. Signing alone is not
 notarization.

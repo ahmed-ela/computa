@@ -127,7 +127,7 @@ async fn connection(mut stream: TcpStream, pages: Arc<HashMap<&'static str, Vec<
     .await;
 }
 /// Runs only on 127.0.0.1, with 32 bounded connections. Ctrl-C closes the server;
-/// it neither opens Chrome nor runs a model evaluation.
+/// it neither opens a browser nor runs a model evaluation.
 pub async fn serve_lookup_fixtures(directory: &Path, port: u16) -> Result<()> {
     ensure(port >= 1024, "lookup_port_must_be_1024_through_65535")?;
     let pages = Arc::new(load(directory)?);

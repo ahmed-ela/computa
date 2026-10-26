@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // Source installer. Kept separate from the app's runtime and never run by a model.
-import { lstat, mkdir, mkdtemp, rename } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { checkVersion } from "./version";
+import { retiredBundleResources } from "./retired-bundle-resources";
 
 const bundleID = "com.ahmedelamin.LocalCodex";
 const help = `Build Computa from this checked-out source tree (Apple Silicon macOS only).
@@ -17,7 +18,7 @@ Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-mod
   --no-launch       Install without opening the app.
   --download-model  Explicitly download the pinned Qwen 3.5 4B 4-bit model (~3 GB).
   --signing-identity Use your installed Apple code-signing certificate (exact name
-                    or SHA-1). Required for the optional Chrome extension bridge.
+                    or SHA-1).
   --help            Show this help.
 
 Default: build, prepare the private MLX Python environment, install into
@@ -25,8 +26,8 @@ Default: build, prepare the private MLX Python environment, install into
 --download-model is supplied. Existing apps are backed up; quit Computa and
 legacy Mactopus first. A legacy Mactopus.app is upgraded with its name preserved
 in the backup. If both app names exist, setup stops for you to resolve them.
-Default signing is ad-hoc: chat/native AX work, but Chrome extension pairing is
-unavailable. No macOS/Chrome permissions are auto-granted. See docs/BUILDING.md.`;
+Default signing is ad-hoc. No macOS permissions are auto-granted.
+See docs/BUILDING.md.`;
 
 export interface Options {
   check: boolean;
@@ -259,23 +260,26 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
     "-configuration", "Release", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", derivedData,
     "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "DEVELOPMENT_TEAM=", "build"]);
   const product = join(derivedData, "Build/Products/Release/Computa.app");
-  for (const relative of ["Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
+  for (const relative of ["Contents/MacOS/Computa",
     "Contents/Resources/AgentRuntime/codex-app-server", "Contents/Resources/AgentRuntime/manifest.json",
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) {
     await requireRegular(join(product, relative));
   }
+  // Only this generated product is cleaned. Preserve the previous installed
+  // app intact so it remains a usable backup during an upgrade.
+  for (const directory of [product, join(product, "Contents"), join(product, "Contents/Resources")]) {
+    await requireSafeDirectory(directory);
+  }
+  for (const relative of retiredBundleResources) await rm(join(product, relative), { recursive: true, force: true });
   // The agent builder already signed and hashed its executable. Do not re-sign
   // it here: changing its code signature would invalidate the runtime manifest.
-  await checked(context, ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none",
-    "--identifier", `${bundleID}.ChromeBridgeHost`, "--sign", signingIdentity, join(product, "Contents/Resources/ChromeBridge/ChromeBridgeHost")]);
   await checked(context, ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none", "--sign", signingIdentity, product]);
   await inspectApp(context, product);
   if (options.signingIdentity) {
-    // A similarly named self-signed certificate is not the Chrome bridge's
-    // trust anchor. Verify an Apple chain before installing a signed build.
+    // Verify the explicitly selected Apple certificate before installation.
     await checked(context, ["/usr/bin/codesign", "--verify", "--strict", "-R", "=anchor apple generic", product]);
   } else {
-    context.log("Ad-hoc build: local chat/native AX available; Chrome extension pairing requires --signing-identity with your own Apple certificate.");
+    context.log("Ad-hoc build: macOS permissions may need to be granted again for this build.");
   }
   if (options.buildOnly) { context.log(`Built ${product}`); return { app: product }; }
   await requireStopped(context);
@@ -283,7 +287,7 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
   await checked(context, ["/bin/zsh", "Scripts/install-mlx-runtime.sh", ...(options.downloadModel ? ["--download-model"] : [])]);
   const installed = await installApp(context, product);
   if (!options.downloadModel) context.log("No weights downloaded. Install the pinned model with: /bin/zsh Scripts/install-mlx-runtime.sh --download-model");
-  context.log("Existing chats, preferences, and Chrome tabs were not changed. Grant macOS permissions and pair Chrome yourself if you want computer use.");
+  context.log("Existing chats and preferences were not changed. Grant macOS permissions in Settings to use native computer tools.");
   if (!options.noLaunch) await checked(context, ["/usr/bin/open", installed.app]);
   return installed;
 }

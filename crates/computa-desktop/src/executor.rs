@@ -1,15 +1,14 @@
 //! Main-thread ownership boundary for the Send runtime dispatcher.
 use crate::grounder::NativeGroundingService;
 use crate::native::DesktopEvent;
-use computa_browser::leases::BrowserControl;
 use computa_contracts::{
     Identifier,
     appserver::{DispatchError, ExecutionScope, TurnConclusion},
     ui::AccessMode,
 };
 use computa_harness::{
-    ApprovalGate, BrowserToolLane, Harness, HarnessError, LocalFuture, NativeApproval,
-    browser::RoutingBrowserLane, evidence::FailureEvidenceStore,
+    ApprovalGate, Harness, HarnessError, LocalFuture, NativeApproval,
+    evidence::FailureEvidenceStore,
 };
 use computa_macos::NativeBackend;
 use computa_runtime::NativeCommand;
@@ -97,7 +96,6 @@ impl ApprovalGate for Gate {
 struct Slot {
     scope: ExecutionScope,
     harness: Harness<NativeBackend>,
-    browser: RoutingBrowserLane,
     cancellation: CancellationToken,
 }
 pub struct Executor {
@@ -108,8 +106,6 @@ pub struct Executor {
     proxy: EventLoopProxy<DesktopEvent>,
     mode: Rc<Cell<AccessMode>>,
     evidence: PathBuf,
-    profiles: PathBuf,
-    browser: Option<Arc<dyn BrowserControl>>,
     models: HashMap<Identifier, bool>,
     grounder: Arc<NativeGroundingService>,
 }
@@ -118,7 +114,6 @@ impl Executor {
         proxy: EventLoopProxy<DesktopEvent>,
         mode: Rc<Cell<AccessMode>>,
         evidence: PathBuf,
-        profiles: PathBuf,
         grounder: Arc<NativeGroundingService>,
     ) -> Self {
         Self {
@@ -129,14 +124,9 @@ impl Executor {
             proxy,
             mode,
             evidence,
-            profiles,
-            browser: None,
             models: HashMap::new(),
             grounder,
         }
-    }
-    pub fn set_browser(&mut self, browser: Option<Arc<dyn BrowserControl>>) {
-        self.browser = browser;
     }
     pub fn set_models(&mut self, models: HashMap<Identifier, bool>) {
         self.models = models;
@@ -187,15 +177,11 @@ impl Executor {
                     harness
                         .begin_turn(scope.clone())
                         .map_err(|_| DispatchError::StaleScope)?;
-                    let mut browser =
-                        RoutingBrowserLane::new(self.browser.clone(), self.profiles.clone());
-                    browser.set_turn_authority(harness.authority());
                     self.slots.borrow_mut().insert(
                         scope.task_id.clone(),
                         Slot {
                             scope,
                             harness,
-                            browser,
                             cancellation,
                         },
                     );
@@ -256,7 +242,6 @@ impl Executor {
                                     arguments,
                                     &cancellation,
                                     &mut gate,
-                                    &mut slot.browser,
                                     &mut grounder,
                                 )
                                 .await;
@@ -300,10 +285,9 @@ impl Executor {
                         proxy: self.proxy.clone(),
                         future: Box::pin(async move {
                             let (a, b) = slot.harness.outcome_counts();
-                            let (c, d) = slot.browser.outcome_counts();
-                            let issues = slot.harness.end_turn(&mut slot.browser).await;
-                            let unresolved = a.saturating_add(c).max(u64::from(!issues.is_empty()));
-                            let failed = b.saturating_add(d);
+                            let issues = slot.harness.end_turn().await;
+                            let unresolved = a.max(u64::from(!issues.is_empty()));
+                            let failed = b;
                             let _ = reply.send(TurnConclusion {
                                 unresolved_operations: unresolved,
                                 failed_operations: failed,

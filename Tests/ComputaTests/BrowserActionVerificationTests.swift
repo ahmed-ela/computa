@@ -517,26 +517,6 @@ final class BrowserActionVerificationTests: XCTestCase {
         assertFailure(.staleObservation) { try plan.evaluate(binding: binding, snapshot: retained) }
     }
 
-    func testRegionChangedPlanSurvivesActionLedgerCheckpointWithoutRearmingOrReplay() throws {
-        let binding = binding()
-        let plan = try changedRegionPlan(changedRegionSnapshot(binding, text: "Initial"), binding: binding)
-        var ledger = ComputerActionEvidence(turnID: "turn")
-        try ledger.begin(operationID: "page", tool: "computer_v2_ax", targetID: plan.scope.evidenceTargetID, requiresVerification: true)
-        try ledger.armVerification(operationID: "page", plan: plan)
-        ledger = try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn")
-        try ledger.recordDispatch(operationID: "page", state: .dispatched)
-        XCTAssertThrowsError(try ledger.armVerification(operationID: "page", plan: plan))
-        XCTAssertNotNil(ledger.completionDiagnostic)
-        _ = try ledger.beginPlannedVerificationAttempt(operationID: "page")
-        let after = changedRegionSnapshot(binding, text: "Different", textID: 99)
-        try ledger.recordObservation(id: after.id.uuidString, targetID: plan.scope.evidenceTargetID, properties: [:])
-        let proof = try ledger.verifyPlanned(operationID: "page", observationID: after.id.uuidString, binding: binding, snapshot: after)
-        XCTAssertEqual(proof.expectedValue, "changed")
-        XCTAssertEqual(ledger.operations.count, 1)
-        XCTAssertNil(ledger.completionDiagnostic)
-        XCTAssertEqual(try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn"), ledger)
-    }
-
     func testRegionCandidatesShareCompilerChecksAndRejectStaleObservations() throws {
         let binding = binding()
         let before = changedRegionSnapshot(binding, text: "Observed records")

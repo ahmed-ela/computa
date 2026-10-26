@@ -10,10 +10,7 @@ use computa_contracts::{
     ui::{EntryKind, NativeAction},
 };
 use computa_desktop::grounder::{NativeGroundingConfig, NativeGroundingService};
-use computa_harness::{
-    ApprovalGate, BrowserToolLane, Harness, HarnessError, LocalFuture, NativeApproval,
-    browser::RoutingBrowserLane,
-};
+use computa_harness::{ApprovalGate, Harness, HarnessError, LocalFuture, NativeApproval};
 use computa_macos::{
     MacosBackend, NativeBackend, PermissionGrant, TreeLimits,
     qualification_fixture::{
@@ -95,7 +92,6 @@ impl ApprovalGate for Gate {
             );
             let title = match self.allowed.as_str() {
                 "open" => "Application action",
-                "chrome" => "Isolated browser action",
                 "press" => "Computer action",
                 "click" => "Computer pointer action",
                 _ => "never",
@@ -116,7 +112,6 @@ impl ApprovalGate for Gate {
 struct Slot {
     scope: ExecutionScope,
     harness: Harness<RestrictedBackend>,
-    browser: RoutingBrowserLane,
     cancel: CancellationToken,
 }
 fn text(output: &ToolOutput) -> String {
@@ -134,15 +129,14 @@ fn text(output: &ToolOutput) -> String {
 /// qualify under the source digest of a newly compiled benchmark definition.
 fn gate_source(task: &str) -> String {
     hash(format!(
-        "native-matrix-v1:{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "native-matrix-v1:{}\n{}\n{}\n{}\n{}\n{}\n{}",
         task,
         include_str!("../computa-native-model-qualification.rs"),
         include_str!("mod.rs"),
         include_str!("audit.rs"),
         include_str!("backend.rs"),
         include_str!("../../../../computa-macos/src/bin/computa-native-qualification-fixture.rs"),
-        include_str!("../../../../computa-macos/src/qualification_fixture.rs"),
-        include_str!("../../../../computa-browser/src/qualification.rs")
+        include_str!("../../../../computa-macos/src/qualification_fixture.rs")
     ))
 }
 fn regular(path: &Path, max: u64) -> Result<Vec<u8>> {
@@ -203,25 +197,11 @@ fn expected(task: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-fn allowed(
-    config: &Config,
-    state: &AuditState,
-    name: &str,
-    args: &Value,
-    chrome: Option<&computa_browser::qualification::ChromeFixture>,
-) -> bool {
+fn allowed(config: &Config, state: &AuditState, name: &str, args: &Value) -> bool {
     if state.calls.len() >= 8 {
         return false;
     }
-    if let Some(f) = chrome {
-        return if state.calls.is_empty() {
-            name == "computer_v2_open" && *args == f.open_arguments
-        } else {
-            state.calls.len() <= 3
-                && name == "computer_v2_read_page"
-                && *args == json!({"query":f.heading})
-        };
-    }
+
     if expected(&config.task).get(state.calls.len()).copied() != Some(name) {
         return false;
     }
@@ -261,14 +241,7 @@ fn allowed(
         _ => false,
     }
 }
-fn prompt(
-    config: &Config,
-    marker: &str,
-    chrome: Option<&computa_browser::qualification::ChromeFixture>,
-) -> String {
-    if let Some(f) = chrome {
-        return f.prompt.clone();
-    }
+fn prompt(config: &Config, marker: &str) -> String {
     let open = json!({"bundle_id":BUNDLE_ID,"activation":if config.task=="visual"{"foreground"}else{"none"}});
     match config.task.as_str() {
         "status" => format!(
@@ -317,7 +290,7 @@ async fn background(
     let mut rc = RuntimeConfig::new(config.resources.clone(), home.clone());
     rc.initial_model = config.model_id.clone();
     rc.local_base_url = Some(format!("http://127.0.0.1:{}/v1", config.port));
-    rc.policy = if matches!(config.task.as_str(), "visual" | "chrome") {
+    rc.policy = if matches!(config.task.as_str(), "visual") {
         InteractionPolicy::Foreground
     } else {
         InteractionPolicy::BackgroundOnly
@@ -483,7 +456,7 @@ pub fn run() -> Result<()> {
     if config.trial_id.is_nil()
         || !matches!(
             config.task.as_str(),
-            "status" | "semantic" | "combined" | "visual" | "interrupt" | "chrome"
+            "status" | "semantic" | "combined" | "visual" | "interrupt"
         )
         || config.port < 1024
         || config.port == 1237
@@ -525,25 +498,12 @@ pub fn run() -> Result<()> {
     } else {
         None
     };
-    let chrome = if config.task == "chrome" {
-        Some(computa_browser::qualification::prepare(
-            &config.directory,
-            config.trial_id,
-        )?)
-    } else {
-        None
-    };
-    let marker = chrome
-        .as_ref()
-        .map(|f| f.completion_token.clone())
-        .unwrap_or_else(|| {
-            format!(
-                "COMPUTA_MATRIX_{}_OK_{}",
-                config.task.to_ascii_uppercase(),
-                config.trial_id.simple()
-            )
-        });
-    let prompt = prompt(&config, &marker, chrome.as_ref());
+    let marker = format!(
+        "COMPUTA_MATRIX_{}_OK_{}",
+        config.task.to_ascii_uppercase(),
+        config.trial_id.simple()
+    );
+    let prompt = prompt(&config, &marker);
     let home = PrivateHome::at(config.directory.join("CodexHome"))?;
     let grounder = NativeGroundingService::new(NativeGroundingConfig::bundled(
         config.grounding_resources.clone(),
@@ -616,23 +576,17 @@ pub fn run() -> Result<()> {
                                 .map(OwnedQualificationFixture::process_identifier),
                             executable: child.as_ref().map(|c| c.executable().to_owned()),
                             effects: effects.clone(),
-                            allow_chrome: config.task == "chrome",
-                            chrome_pid: None,
                             initial_foreground: foreground,
                         };
                         let mut harness = Harness::new(backend, scope.policy);
                         harness
                             .begin_turn(scope.clone())
                             .map_err(|_| DispatchError::StaleScope)?;
-                        let mut browser =
-                            RoutingBrowserLane::new(None, config.directory.join("BrowserProfiles"));
-                        browser.set_turn_authority(harness.authority());
                         slots.borrow_mut().insert(
                             scope.task_id.clone(),
                             Slot {
                                 scope,
                                 harness,
-                                browser,
                                 cancel: cancellation,
                             },
                         );
@@ -657,7 +611,7 @@ pub fn run() -> Result<()> {
                         continue;
                     };
                     if cancellation.is_cancelled()
-                        || !allowed(&config, &state.borrow(), &name, &arguments, chrome.as_ref())
+                        || !allowed(&config, &state.borrow(), &name, &arguments)
                     {
                         state
                             .borrow_mut()
@@ -672,7 +626,6 @@ pub fn run() -> Result<()> {
                     let active = active.clone();
                     let state = state.clone();
                     let grounder = grounder.clone();
-                    let chrome = chrome.clone();
                     let task = config.task.clone();
                     let effects = effects.clone();
                     let pid = child
@@ -680,13 +633,7 @@ pub fn run() -> Result<()> {
                         .map(OwnedQualificationFixture::process_identifier);
                     pool.spawner().spawn_local(async move {
                         let action = match name.as_str() {
-                            "computer_v2_open" => {
-                                if task == "chrome" {
-                                    "chrome"
-                                } else {
-                                    "open"
-                                }
-                            }
+                            "computer_v2_open" => "open",
                             "computer_v2_press" => "press",
                             "computer_v2_ground_click" => "click",
                             _ => "none",
@@ -708,7 +655,6 @@ pub fn run() -> Result<()> {
                                 arguments.clone(),
                                 &cancellation,
                                 &mut gate,
-                                &mut slot.browser,
                                 &mut visual,
                             )
                             .await;
@@ -718,19 +664,6 @@ pub fn run() -> Result<()> {
                             args: arguments,
                             output: output.clone(),
                         });
-                        if let Some(f) = chrome.as_ref()
-                            && name == "computer_v2_read_page"
-                            && let Some((controller, attachment)) =
-                                slot.browser.owned_qualification_receipt()
-                            && let Ok(oracle) = computa_browser::qualification::independent_heading(
-                                &*controller,
-                                &attachment,
-                                f,
-                            )
-                            .await
-                        {
-                            state.borrow_mut().oracle = Some(oracle)
-                        }
                         if matches!(task.as_str(), "semantic" | "combined" | "visual")
                             && matches!(name.as_str(), "computer_v2_press" | "computer_v2_verify")
                             && let Some(pid) = pid
@@ -755,14 +688,13 @@ pub fn run() -> Result<()> {
                         let active = active.clone();
                         pool.spawner().spawn_local(async move {
                             let a = slot.harness.outcome_counts();
-                            let b = slot.browser.outcome_counts();
-                            let issues = slot.harness.end_turn(&mut slot.browser).await;
+                            let issues = slot.harness.end_turn().await;
                             slot.cancel.cancel();
                             state.borrow_mut().cleanup.extend(issues);
                             active.set(false);
                             let _ = reply.send(TurnConclusion {
-                                unresolved_operations: a.0 + b.0,
-                                failed_operations: a.1 + b.1,
+                                unresolved_operations: a.0,
+                                failed_operations: a.1,
                             });
                         })?;
                     } else {
@@ -798,25 +730,7 @@ pub fn run() -> Result<()> {
     let rollout_sha = rollout(&home.codex_home, &audit);
     let s = state.borrow();
     let wire = audit.state.lock().map_err(|_| "wire lock")?;
-    let calls_ok = if let Some(f) = &chrome {
-        let calls = s
-            .calls
-            .iter()
-            .map(|c| computa_browser::qualification::QualificationCall {
-                name: c.name.clone(),
-                arguments: c.args.clone(),
-                output: c.output.clone(),
-            })
-            .collect::<Vec<_>>();
-        computa_browser::qualification::verify_tools(
-            f,
-            &calls,
-            &marker,
-            s.approved.iter().filter(|a| a.as_str() == "chrome").count(),
-            s.unexpected.len(),
-        )
-        .is_ok()
-    } else {
+    let calls_ok = {
         s.calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>() == expected(&config.task)
             && s.calls.iter().all(|c| {
                 c.output.success

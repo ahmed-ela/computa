@@ -1,12 +1,49 @@
 # Browser read continuation and evidence contract
 
-`computer_v2_continue({"cursor": "<observed next_cursor>"})` is the preferred
-continuation operation. The runtime, not model history, remembers whether the
-cursor belongs to a Chrome inventory or a semantic page/native read. Legacy
-`computer_v2_tabs(cursor: ...)` and `computer_v2_snapshot(cursor: ...)` remain
-available, but reject cursors from the wrong source.
+## Current built-in browser contract
 
-## New-thread interface
+New chats with the built-in browser configured receive two separate page tools:
+
+| Tool | Arguments | Meaning |
+| --- | --- | --- |
+| `browser_read` | optional `view`, `query` | Capture a fresh selection, starting at its first page. No cursor argument is offered. |
+| `browser_continue` | required nonempty `cursor` | Continue the latest page's exact `next_cursor`; view and query remain fixed. |
+| `browser_tabs` | optional `cursor` | Continue the separate tab inventory; omission or null starts a fresh inventory. |
+
+Page, inventory and native computer cursors are separate. `computer_v2_continue`
+accepts native computer read cursors only. A page cursor issued by `browser_read`
+is consumed by the offered page-continuation tool, not necessarily by the tool
+that issued it. A fresh page read, successful continuation or returned current
+observation replaces older page cursors; admitted input invalidates them.
+Unknown, expired, foreign or malformed cursors never trigger a silent fresh read.
+
+The native engine persists each chat's registered tool identities. Saved chats
+without `browser_continue` retain their recognized legacy
+`browser_read(view?, query?, cursor?)` contract: omitted/null cursor starts a
+fresh read, and a nonempty cursor continues the captured selection. Repeated
+filters must match; changing filters requires a fresh read. Inference refresh
+never adds an unregistered tool or renames historical calls. Exact completed
+historical argument bytes remain unchanged, and custom/MCP schemas do not acquire
+native compatibility rules. Chats with no browser tools still need a new chat.
+
+Continuation reuses the same bounded immutable capture and existing document,
+scope, expiry and publication checks. It creates no new input authority and
+does not reset recovery limits. New `browser_continue` and legacy non-null
+`browser_read.cursor` failures share one normalized failure family; a successful
+fresh read on the same native document cannot refund those failures. No page,
+reference, retry or retained-receipt limit changes accompany this split.
+See [Built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for action-reference
+lifetime, cleanup and the current supported surface. Source tests and installed
+model qualification remain separate evidence.
+
+## Historical contracts and validation
+
+The sections below retain the earlier native/Chrome bridge design and its
+validation record. Removed Chrome tools and browser aliases described there are
+not part of the current offered catalog; the contract above supersedes their
+browser routing. Historical validation counts are not build 240 live results.
+
+## Earlier reference interface
 
 New model threads receive the following tools instead of the legacy snapshot,
 AX action, follow-link, and set-text choices. Resumed legacy threads retain their

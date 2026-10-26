@@ -1,5 +1,18 @@
 // Shared source copied into each standalone private-world provider adapter.
 // Model names come only from the provider's associated picker, never messages.
+// This private-world notification carries no page content and grants no authority.
+function websiteModelDiagnosticPhase(phase) {
+  try {
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+      'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
+    if (typeof input !== 'object' || input === null || !phases.includes(phase)
+      || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
+      || window !== window.top) return;
+    window.webkit?.messageHandlers?.computaModelDiagnostic?.postMessage({
+      ownerToken: input.ownerToken, operationID: input.operationID, phase });
+  } catch { /* An unavailable diagnostic channel must not change adapter behavior. */ }
+}
+websiteModelDiagnosticPhase('adapter_entry');
 function websiteModelNormalize(value) {
   return typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
 }
@@ -12,6 +25,907 @@ function websiteModelChoiceValid(choice) {
 function websiteModelChoiceEqual(left, right) {
   return websiteModelChoiceValid(left) && websiteModelChoiceValid(right)
     && left.key === right.key && left.label === right.label;
+}
+function websiteChatClaimInvocation(request) {
+  if (request?.provider !== 'chatgpt' || typeof window !== 'object' || window !== window.top
+    || location.origin !== 'https://chatgpt.com' || document.URL !== request.expectedURL
+    || typeof request.ownerToken !== 'string' || !request.ownerToken
+    || globalThis.__computaModelOwner !== request.ownerToken
+      && !(globalThis.__computaModelOwner === undefined && request.bindOwner === true)) return null;
+  // A native timeout cannot cancel JavaScript already queued in WebContent.
+  // Claim at adapter entry, before any async hash/read, so a replacement can
+  // revoke an older reader's proof and popup cleanup within the same document.
+  const lease = { owner: request.ownerToken, document };
+  globalThis.__computaChatActiveInvocation = lease;
+  return lease;
+}
+const websiteChatInvocationLease = websiteChatClaimInvocation(input);
+// Chat exposes power presets; the concrete plain GPT family is an independently
+// observed automatic-selection policy, never another advertised model choice.
+const websiteChatPowers = Object.freeze([
+  Object.freeze({ key: 'instant', label: 'Instant' }),
+  Object.freeze({ key: 'medium', label: 'Medium' }),
+  Object.freeze({ key: 'high', label: 'High' }),
+  Object.freeze({ key: 'extra-high', label: 'Extra High' }),
+  Object.freeze({ key: 'pro', label: 'Pro' }),
+]);
+function websiteChatFamilyVersion(label) {
+  if (typeof label !== 'string' || label.length > 128
+    || !/^GPT-[1-9][0-9]*(?:\.(?:0|[1-9][0-9]*))*$/.test(label)) return null;
+  const components = label.slice(4).split('.');
+  while (components.length > 1 && components.at(-1) === '0') components.pop();
+  return components;
+}
+function websiteChatCompareVersions(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const a = left[index] || '0', b = right[index] || '0';
+    if (a.length !== b.length) return a.length > b.length ? 1 : -1;
+    if (a !== b) return a > b ? 1 : -1;
+  }
+  return 0;
+}
+function websiteChatNewestFamily(offered) {
+  if (!Array.isArray(offered) || offered.length < 1 || offered.length > 32) return null;
+  const versions = offered.map(websiteChatFamilyVersion);
+  if (versions.some(version => !version)) return null;
+  let newest = 0;
+  for (let index = 0; index < versions.length; index++) {
+    for (let preceding = 0; preceding < index; preceding++)
+      if (websiteChatCompareVersions(versions[index], versions[preceding]) === 0) return null;
+    if (websiteChatCompareVersions(versions[index], versions[newest]) > 0) newest = index;
+  }
+  return { key: offered[newest], label: offered[newest] };
+}
+function websiteChatPowerValid(power) {
+  return !!power && !Array.isArray(power) && typeof power === 'object'
+    && Object.keys(power).length === 2 && Object.hasOwn(power, 'key') && Object.hasOwn(power, 'label')
+    && websiteChatPowers.some(known => known.key === power.key && known.label === power.label);
+}
+function websiteChatFamilyValid(family) {
+  return !!family && !Array.isArray(family) && typeof family === 'object'
+    && Object.keys(family).length === 2 && Object.hasOwn(family, 'key') && Object.hasOwn(family, 'label')
+    && family.key === family.label && websiteChatFamilyVersion(family.label) !== null;
+}
+function websiteChatPresetChoice(family, power) {
+  if (!websiteChatFamilyValid(family) || !websiteChatPowerValid(power)) return null;
+  const choice = { key: 'chat/latest/' + power.key,
+    label: power.key === 'pro' ? family.label + ' ' + power.label : power.label };
+  return websiteModelChoiceValid(choice) ? choice : null;
+}
+function websiteChatPresetIntentValid(choice) {
+  if (!websiteModelChoiceValid(choice)) return false;
+  const power = websiteChatPowers.find(power => choice.key === 'chat/latest/' + power.key);
+  return !!power && (choice.label === power.label || power.key === 'pro'
+    && choice.label.endsWith(' Pro') && websiteChatFamilyVersion(choice.label.slice(0, -4)) !== null);
+}
+function websiteChatSelectionEvidence(family, power, offered, intent = null) {
+  const newest = websiteChatNewestFamily(offered);
+  let selected = websiteChatPresetChoice(family, power);
+  if (!selected || !newest || newest.key !== family.key) return null;
+  if (intent != null) {
+    if (!websiteChatPresetIntentValid(intent) || intent.key !== selected.key
+      || intent.label !== selected.label && !(power.key === 'pro' && intent.label === power.label)) return null;
+    selected = { key: intent.key, label: intent.label };
+  }
+  return { selected, verification: 'website_selection', source: 'selected_model_indicator',
+    chatSelection: { family: { key: family.key, label: family.label },
+      power: { key: power.key, label: power.label },
+      automaticFamily: { policy: 'highest_offered_plain_gpt', offered: [...offered] } } };
+}
+function websiteChatResolvedSelectionEqual(left, right) {
+  return websiteChatFamilyValid(left?.family) && websiteChatFamilyValid(right?.family)
+    && websiteChatPowerValid(left?.power) && websiteChatPowerValid(right?.power)
+    && left.family.key === right.family.key && left.family.label === right.family.label
+    && left.power.key === right.power.key && left.power.label === right.power.label;
+}
+function websiteChatHeaderPresentation(value, negativeCompact = false) {
+  if (typeof value !== 'string' || value.length > 128) return { kind: 'unknown', power: null };
+  const normalized = websiteModelNormalize(value);
+  const canonical = websiteChatPowers.find(power => power.label === normalized);
+  if (canonical) return { kind: 'canonical', power: canonical };
+  const composite = websiteChatPowers.find(power => 'Thinking effort ' + power.label === normalized);
+  if (composite) return { kind: 'generic_power', power: composite };
+  // Historical textContent reconstruction can lose rendered block separators.
+  // This exact compact grammar is negative evidence only, never model proof.
+  const compact = negativeCompact && websiteChatPowers.find(power => 'Thinking effort' + power.label === normalized);
+  if (compact) return { kind: 'generic_power_compact', power: compact };
+  return { kind: normalized === '' ? 'empty' : normalized === 'Thinking effort' ? 'generic' : 'unknown', power: null };
+}
+function websiteChatHeaderPower(trigger) {
+  return websiteChatHeaderPresentation(trigger?.innerText).power;
+}
+function websiteChatHeaderTextShape(value) {
+  const present = typeof value === 'string';
+  const normalized = present && value.length <= 512 ? websiteModelNormalize(value) : null;
+  const ordinal = present && value.length <= 128
+    ? websiteChatPowers.findIndex(power => power.label === normalized) : -1;
+  const presentation = websiteChatHeaderPresentation(value);
+  return { present, length: present ? Math.min(value.length, 513) : 0,
+    normalizedLength: normalized === null ? null : Math.min(normalized.length, 512),
+    empty: normalized === '', over128: present && value.length > 128,
+    canonicalOrdinal: ordinal < 0 ? null : ordinal, generic: normalized === 'Thinking effort',
+    presentation: presentation.kind,
+    powerOrdinal: presentation.power ? websiteChatPowers.findIndex(power => power.key === presentation.power.key) : null };
+}
+// Generic chrome carries no model value. This predicate supplies only negative
+// continuity after a full associated-menu proof on this exact owned header.
+function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computaChatPresetPin) {
+  if (!state.closedPresentation || !websiteChatPowerValid(power)) return false;
+  if (state.headerPower) return state.headerPower.key === power.key;
+  return state.headerPresentation && pin?.genericHeaderVerified === state.trigger
+    && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
+    && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
+}
+function websiteChatHeaderMutationMismatch(records, trigger, expected) {
+  if (!trigger || !expected) return false;
+  const different = value => {
+    const power = websiteChatHeaderPresentation(value, true).power;
+    return !!power && power.key !== expected.key;
+  };
+  if (different(trigger.innerText)) return true;
+  // Current ancestry loses an attached header child that changed and detached
+  // before delivery. Undo structural records, then replay their exact lineage.
+  // The bounded reconstruction supplies only negative drift evidence.
+  if (records.length > 512) return true;
+  const parents = new Map(), children = new Map(), text = new Map(), afterText = new Map();
+  const parent = node => parents.has(node) ? parents.get(node) : node?.parentNode || node?.parentElement || null;
+  const bounded = value => typeof value === 'string' && value.length <= 128 ? value : null;
+  for (const record of records) if (record.type === 'childList') {
+    const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
+    if (nodes.length > 128) return true;
+    const candidates = children.get(record.target) || new Set();
+    for (const node of nodes) candidates.add(node);
+    children.set(record.target, candidates);
+  }
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (record.type === 'childList') {
+      for (const node of record.addedNodes || []) if (parent(node) === record.target) parents.set(node, null);
+      for (const node of record.removedNodes || []) parents.set(node, record.target);
+    } else if (record.type === 'characterData') {
+      afterText.set(record, text.has(record.target) ? text.get(record.target) : bounded(record.target?.textContent));
+      text.set(record.target, bounded(record.oldValue));
+    }
+    if (parents.size + text.size > 4_096) return true;
+  }
+  const suppressed = node => node === trigger && node.nodeType === 1
+    && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null);
+  const headerTarget = node => {
+    for (let depth = 0; node && depth < 64; depth++, node = parent(node)) {
+      if (suppressed(node)) return false;
+      if (node === trigger) return true;
+    }
+    return node ? null : false;
+  };
+  const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
+    if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
+    if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
+    // AX suppression below the header does not hide rendered innerText. These
+    // bounded records can only reject a pin, including after a node detaches.
+    if (node.nodeType !== 1 || suppressed(node)) return '';
+    const current = [...(node.childNodes || [])];
+    if (current.length > 128) return null;
+    const candidates = new Set([...current, ...(children.get(node) || [])]);
+    if (candidates.size > 128) return null;
+    let value = '';
+    budget.depth++;
+    for (const child of candidates) if (parent(child) === node) {
+      const part = textAt(child, budget);
+      if (part === null || value.length + part.length > 128) { budget.depth--; return null; }
+      value += part;
+    }
+    budget.depth--;
+    return value;
+  };
+  for (const record of records) {
+    if (record.type === 'characterData') {
+      const owned = headerTarget(record.target);
+      if (owned === null || owned && (bounded(record.oldValue) === null || afterText.get(record) === null
+        || different(record.oldValue) || different(afterText.get(record)))) return true;
+      text.set(record.target, afterText.get(record));
+    } else if (record.type === 'childList') {
+      for (const node of record.removedNodes || []) {
+        const owned = headerTarget(node), value = owned ? textAt(node) : '';
+        if (owned === null || owned && (value === null || different(value))) return true;
+        if (parent(node) === record.target) parents.set(node, null);
+      }
+      for (const node of record.addedNodes || []) {
+        parents.set(node, record.target);
+        const owned = headerTarget(node), value = owned ? textAt(node) : '';
+        if (owned === null || owned && (value === null || different(value))) return true;
+      }
+    }
+  }
+  return false;
+}
+function websiteChatInvalidatePin(pin, reason, facts = null) {
+  pin.invalidated = true;
+  // Preserve the first finite cause. This records negative evidence only;
+  // it cannot revive a selection or change any model/ownership guard.
+  if (!pin.invalidationReason && ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(reason)) {
+    pin.invalidationReason = reason;
+    pin.invalidationFacts = facts;
+  }
+}
+function websiteChatTrackPinnedHeader(pin, trigger) {
+  if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
+  pin.headerTrigger = trigger;
+  if (pin.headerObserver) return;
+  pin.headerObserver = new MutationObserver(records => websiteChatObservePinnedHeader(pin, trigger, records));
+  pin.headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true,
+    characterDataOldValue: true });
+}
+function websiteChatObservePinnedHeader(pin, trigger, records) {
+  if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
+    || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
+  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
+}
+function websiteChatDrainPinnedMutations(pin) {
+  // Only private model observers are drained. The shared notification observer
+  // also owns product-mode evidence and must retain all of its pending records.
+  if (pin?.headerTrigger) websiteChatObservePinnedHeader(pin, pin.headerTrigger, pin.headerObserver?.takeRecords?.() || []);
+  if (pin) websiteChatObservePinnedMutations(pin.semanticObserver?.takeRecords?.() || [], pin);
+}
+function websiteChatTrackPinnedControls(pin, state) {
+  if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document
+    || !websiteChatFamilyValid(pin.selection?.family) || !websiteChatPowerValid(pin.selection?.power)) return;
+  pin.controls = pin.controls || new WeakMap();
+  if (!pin.semanticObserver) {
+    pin.semanticObserver = new MutationObserver(records => websiteChatObservePinnedMutations(records, pin));
+    pin.semanticObserver.observe(document.documentElement || document, { subtree: true,
+      attributes: true, attributeOldValue: true, attributeFilter: ['aria-valuenow', 'aria-checked'] });
+  }
+  const slider = state.slider || state.semanticSlider;
+  if (slider) pin.controls.set(slider, { attribute: 'aria-valuenow',
+    value: String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)) });
+  for (const control of state.familyControls) pin.controls.set(control.node,
+    { attribute: 'aria-checked', value: String(control.choice?.key === pin.selection.family.key) });
+}
+function websiteChatObservePinnedMutations(records, pin = globalThis.__computaChatPresetPin) {
+  if (!pin || pin.invalidated === true || !pin.controls || pin.owner !== globalThis.__computaModelOwner
+    || globalThis.__computaChatPresetPin !== pin || pin.document !== document
+    || window !== window.top || location.origin !== 'https://chatgpt.com') return;
+  // Track only previously observed semantic controls. Mounting a popup, updating
+  // its visibility, or setting the same selected value cannot invalidate it.
+  // Old values preserve an observable switch-and-restore in one mutation batch.
+  for (const record of records) {
+    if (record.type !== 'attributes') continue;
+    const expected = pin.controls.get(record.target);
+    if (!expected || record.attributeName !== expected.attribute) continue;
+    const value = record.target.getAttribute(expected.attribute);
+    if (value !== expected.value || record.oldValue != null && record.oldValue !== expected.value) {
+      websiteChatInvalidatePin(pin, 'semantic_mutation', {
+        attribute: record.attributeName, nodeConnected: record.target.isConnected === true,
+        attributePresent: value !== null, currentMatches: value === expected.value,
+        oldMatches: record.oldValue === null || record.oldValue === expected.value,
+      });
+      return;
+    }
+  }
+}
+function websiteChatPickerState() {
+  const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
+  const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden';
+  const visible = node => physical(node) && !node.closest('[inert], [aria-hidden="true"]');
+  const outside = node => !!node && !node.closest(boundary);
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('disabled') === null
+    && node.getAttribute('aria-disabled') !== 'true';
+  const nodes = selector => [...document.querySelectorAll(selector)].slice(0, 256);
+  const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]')
+    .filter(node => physical(node) && outside(node) && /^Select ChatGPT model(?:$|[ ,])/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
+  const triggers = triggerCandidates.filter(node => node.getAttribute('aria-label') === 'Select ChatGPT model'
+    && node.getAttribute('aria-haspopup') === 'menu');
+  const trigger = triggers.length === 1 ? triggers[0] : null;
+  const physicalMenus = nodes('[role="menu"], [role="listbox"], [role="dialog"]').filter(node => physical(node) && outside(node));
+  const allMenus = physicalMenus.filter(visible);
+  const controlledID = trigger?.getAttribute('aria-controls');
+  const associated = allMenus.filter(menu => menu.getAttribute('role') === 'menu'
+    && typeof controlledID === 'string' && controlledID.length > 0 && controlledID.length <= 256
+    && !/\s/.test(controlledID) && menu.getAttribute('id') === controlledID);
+  const topMenu = associated.length === 1 ? associated[0] : null;
+  const family = node => {
+    if (!node || !physical(node) || !outside(node)) return null;
+    const raw = node.innerText || node.textContent || '';
+    if (raw.length > 512) return null;
+    const lines = raw.split('\n').map(websiteModelNormalize).filter(Boolean);
+    if (lines.length < 1 || lines.length > 2 || lines.length === 2
+      && !/^Leaving on [A-Z][a-z]+ [0-9]{1,2}$/.test(lines[1])) return null;
+    const label = lines[0];
+    if (label.length > 128 || !/^GPT-[0-9]+(?:\.[0-9]+)*(?: [A-Za-z][A-Za-z0-9-]*)?$/.test(label)) return null;
+    return { key: label, label };
+  };
+  const familyRows = topMenu ? [...topMenu.querySelectorAll('[role="menuitemradio"]')].slice(0, 128)
+    .filter(node => enabled(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const familyControls = familyRows.map(node => ({ node, choice: family(node) }));
+  const familyChoices = familyControls.map(control => control.choice).filter(Boolean);
+  const checked = familyControls.filter(control => control.node.getAttribute('aria-checked') === 'true');
+  const plain = familyChoices.filter(choice => websiteChatFamilyVersion(choice.label));
+  const newest = websiteChatNewestFamily(plain.map(choice => choice.label));
+  const physicalPowerItems = topMenu ? [...topMenu.querySelectorAll('[role="menuitem"][aria-label="Power"]')].slice(0, 3)
+    .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const powerItems = physicalPowerItems.filter(visible);
+  const powerItem = powerItems.length === 1 ? powerItems[0] : null;
+  const physicalPowerItem = physicalPowerItems.length === 1 ? physicalPowerItems[0] : null;
+  const physicalSliders = physicalPowerItems.length === 1 ? [...physicalPowerItems[0].querySelectorAll('[role="slider"]')].slice(0, 3)
+    .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const sliders = powerItem ? physicalSliders : [];
+  const physicalSlider = physicalSliders.length === 1 ? physicalSliders[0] : null;
+  const slider = sliders.length === 1 ? sliders[0] : null;
+  // Physically rendered metadata can be accessibility-hidden anywhere below
+  // Power. Only its visible, enabled menuitem owns input; suppression at that
+  // item or above remains forbidden by visible(), independently of the thumb.
+  const metadataScoped = node => physical(node) && !!powerItem && powerItem.contains(node)
+    && node.closest('[role="menuitem"][aria-label="Power"]') === powerItem
+    && node.closest('[role="menu"]') === topMenu;
+  const metadataSuppressedWithinPower = selector => {
+    const suppressed = physicalSlider?.closest(selector);
+    return !!suppressed && !!physicalPowerItem && suppressed !== physicalPowerItem
+      && physicalPowerItem.contains(suppressed);
+  };
+  const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
+    || !!node.closest('[disabled], [aria-disabled="true"]'));
+  const rawValue = physicalSlider?.getAttribute('aria-valuenow');
+  const shapePowerIndex = physicalSlider && physicalSlider.tagName.toLowerCase() === 'span'
+    && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
+    && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
+    ? Number(rawValue) : null;
+  const recognizedPowerIndex = metadataScoped(slider) ? shapePowerIndex : null;
+  const powerUnavailable = recognizedPowerIndex !== null && (!enabled(powerItem) || metadataDisabled(slider));
+  const powerIndex = powerUnavailable ? null : recognizedPowerIndex;
+  const secondaries = topMenu ? [...topMenu.querySelectorAll('button, [role="menuitem"]')].slice(0, 128)
+    .filter(node => enabled(node) && outside(node) && node.closest('[role="menu"]') === topMenu
+      && websiteModelNormalize(node.getAttribute('aria-label') || node.innerText || node.textContent) === 'Select model') : [];
+  const secondary = secondaries.length === 1 ? secondaries[0] : null;
+  const duplicate = familyChoices.some((choice, index) => familyChoices.some((other, otherIndex) => index !== otherIndex && choice.key === other.key))
+    || plain.length > 0 && !newest;
+  const indicatorInvalid = familyControls.some(control => !control.choice
+    || !['true', 'false'].includes(control.node.getAttribute('aria-checked'))
+    || /^GPT-[0-9]+(?:\.[0-9]+)*$/.test(control.choice.label) && !websiteChatFamilyVersion(control.choice.label))
+    || sliders.length > 1 || powerItems.length > 1 || !!slider && recognizedPowerIndex === null;
+  const headerPower = enabled(trigger) ? websiteChatHeaderPower(trigger) : null;
+  const closedPresentation = enabled(trigger) && !topMenu && allMenus.length === 0
+    && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+    && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  const headerPresentation = websiteModelNormalize(trigger?.innerText) === 'Thinking effort';
+  const semanticSlider = shapePowerIndex !== null && physicalPowerItem
+    && physicalSlider.closest('[role="menuitem"][aria-label="Power"]') === physicalPowerItem
+    && physicalSlider.closest('[role="menu"]') === topMenu ? physicalSlider : null;
+  return { provider: 'chatgpt', trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary,
+    headerPower, headerPresentation, closedPresentation, semanticSlider,
+    nestedMenu: familyRows.length ? topMenu : null, menus: topMenu ? [topMenu] : [], allMenus, physicalMenus,
+    controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
+    familyControls, offered: plain.map(choice => choice.label), newest,
+    checkedFamily: checked.length === 1 && websiteChatFamilyValid(checked[0].choice) ? checked[0].choice : null,
+    powerItem, slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerDiagnostic: {
+      physicalItemCount: physicalPowerItems.length, physicalSliderCount: physicalSliders.length,
+      itemVisible: !!powerItem, itemEnabled: enabled(powerItem), sliderPhysical: physical(physicalSlider),
+      sliderInertSelf: !!physicalSlider && physicalSlider.getAttribute('inert') !== null,
+      sliderInertAncestor: !!physicalSlider?.parentElement?.closest('[inert]'),
+      sliderAriaHidden: !!physicalSlider?.closest('[aria-hidden="true"]'), sliderDisabled: metadataDisabled(physicalSlider),
+      metadataWithinPower: metadataScoped(physicalSlider),
+      metadataInertWithinPower: metadataSuppressedWithinPower('[inert]'),
+      metadataAriaHiddenWithinPower: metadataSuppressedWithinPower('[aria-hidden="true"]'),
+      powerInertAtOrAbove: !!physicalPowerItem?.closest('[inert]'),
+      powerAriaHiddenAtOrAbove: !!physicalPowerItem?.closest('[aria-hidden="true"]'),
+      shapeRecognized: shapePowerIndex !== null, ordinal: recognizedPowerIndex },
+    mode: familyRows.length ? 'family' : powerIndex !== null && secondary ? 'power' : topMenu ? 'unknown' : 'closed',
+    duplicate, conflicting: familyRows.length > 0 && !!slider, indicatorInvalid, selectionAmbiguous: checked.length > 1,
+    navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
+    physical, visible, enabled, family };
+}
+async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
+  const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
+  const mutable = typeof freshGuard === 'function';
+  let until = Date.now() + 1_800;
+  // Only the private first-insert final guard may carry time already spent on
+  // editor readiness. Other reads retain their original independent budget.
+  const cappedFirstInsert = !mutable && request.action === 'insert' && request.submissionSequence === 1
+    && request.expectedModelChoice?.key === 'chat/latest/instant' && context?.action === 'insert'
+    && context.scope === 'action_final_guard' && context.firstInsertDeadline !== undefined;
+  if (cappedFirstInsert) {
+    if (!Number.isSafeInteger(context.firstInsertDeadline) || context.firstInsertDeadline < 0)
+      return { error: 'model_unverified' };
+    until = Math.min(until, context.firstInsertDeadline);
+    if (Date.now() >= until) return { error: 'model_unverified' };
+  }
+  const owned = () => window === window.top && location.origin === 'https://chatgpt.com'
+    && document === originalDocument && document.URL === url && globalThis.__computaModelOwner === owner
+    && owner === request.ownerToken && websiteChatInvocationLease != null
+    && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && (!mutable || freshGuard(false) === true);
+  let trigger = null, selectionChanged = false, dismissedPopup = null, readStage = 'initial_observation';
+  let primaryOpened = false, secondaryOpened = false, closeAttempted = false, observedProof = false;
+  let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
+  let remount = null, remountClaimed = false;
+  let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
+  let headerReadiness = null;
+  const tracked = new Map();
+  const observeHeader = records => {
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
+      selectionChanged = true;
+      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation');
+    }
+  };
+  const headerObserver = new MutationObserver(observeHeader);
+  const observeControls = records => {
+    if (mutable && !proofLocked) return;
+    if (records.some(record => {
+      if (record.type !== 'attributes' || !tracked.has(record.target)
+        || !['aria-valuenow', 'aria-checked', 'aria-selected'].includes(record.attributeName)) return false;
+      const expected = tracked.get(record.target)[record.attributeName];
+      return record.target.getAttribute(record.attributeName) !== expected
+        || record.oldValue != null && record.oldValue !== expected;
+    })) selectionChanged = true;
+    if (remount) websiteChatObservePinnedMutations(records, remount.pin);
+  };
+  const observer = new MutationObserver(observeControls);
+  observer.observe(document.documentElement || document, { subtree: true, attributes: true, attributeOldValue: true,
+    attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
+  const failure = code => {
+    const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness,
+      readContext: {
+        scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
+          ? context.scope : 'unknown',
+        action: ['inspect', 'enableTemporary', 'prepare', 'insert', 'sendReady', 'submit', 'stop', 'discoverModels',
+          'selectModel', 'modelDiagnostic', 'verifyModel'].includes(context?.action) ? context.action : 'unknown',
+        selectionAttemptPresent: !!selection && typeof selection === 'object',
+        selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
+        selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
+        recoveryEligible: prepareOpening !== null || insertOpening !== null },
+      readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
+        sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
+  };
+  const state = () => {
+    if (!owned()) throw failure('document_changed');
+    const pin = globalThis.__computaChatPresetPin;
+    if (remount && (pin !== remount.pin || pin.headerTrigger !== remount.previous
+      || !websiteChatResolvedSelectionEqual(pin.selection, remount.selection))) throw failure('model_mismatch');
+    if (remount) websiteChatDrainPinnedMutations(pin);
+    if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
+      throw failure('model_mismatch');
+    const current = websiteChatPickerState();
+    if (remount && (remount.previous.isConnected !== false || current.trigger !== remount.replacement)) {
+      websiteChatInvalidatePin(pin, 'header_replaced');
+      throw failure('model_mismatch');
+    }
+    if (current.triggerCount !== 1 || !current.trigger || trigger && current.trigger !== trigger
+      || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
+      || current.navigationAmbiguous || current.allMenus.some(menu => menu !== current.topMenu)) throw failure('model_unverified');
+    if (current.powerUnavailable) throw failure(mutable ? 'model_unavailable' : 'model_unverified');
+    trigger = trigger || current.trigger;
+    if (!headerObserved) {
+      headerObserved = true;
+      headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+    }
+    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key) throw failure('model_mismatch');
+    if (headerExpected && current.closedPresentation && !current.headerPower && !current.headerPresentation)
+      throw failure('model_unverified');
+    if (pin) {
+      if (!remount && pin.headerTrigger && pin.headerTrigger !== trigger) {
+        websiteChatDrainPinnedMutations(pin);
+        // SPA route creation can remount the header without changing the model.
+        // Only a fresh readonly proof may provisionally observe its replacement;
+        // the original selection and every negative observation remain pinned.
+        if (!mutable && !remountClaimed && pin.invalidated !== true && pin.owner === owner && pin.document === document
+          && pin.headerTrigger.isConnected === false && current.closedPresentation && current.enabled(trigger)
+          && websiteChatFamilyValid(pin.selection?.family) && websiteChatPowerValid(pin.selection?.power)
+          && (current.headerPower?.key === pin.selection.power.key || current.headerPresentation)
+          && websiteChatPresetIntentValid(expected)
+          && expected.key === 'chat/latest/' + pin.selection.power.key) {
+          remount = { pin, previous: pin.headerTrigger, replacement: trigger,
+            selection: { family: { ...pin.selection.family }, power: { ...pin.selection.power } } };
+          remountClaimed = true;
+          headerExpected = pin.selection.power;
+        } else websiteChatTrackPinnedHeader(pin, trigger);
+      } else if (!remount) websiteChatTrackPinnedHeader(pin, trigger);
+      if (pin.invalidated === true) throw failure('model_mismatch');
+      if (current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+        !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))) throw failure('model_mismatch');
+    }
+    websiteModelTrackReadUI(current);
+    for (const node of [current.slider || current.semanticSlider, ...current.familyControls.map(control => control.node)].filter(Boolean))
+      if (!tracked.has(node)) tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
+        'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
+    websiteChatTrackPinnedControls(pin, current);
+    return current;
+  };
+  const wait = async condition => {
+    const changed = await websiteModelWaitForChange(until, () => !owned() || selectionChanged || condition());
+    if (!owned()) throw failure('document_changed');
+    if (!changed) throw failure('model_unverified');
+    return state();
+  };
+  const pickerClosed = current => current.trigger === trigger && current.enabled(trigger)
+    && !current.topMenu && current.allMenus.length === 0
+    && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+    && [null, 'closed'].includes(trigger.getAttribute('data-state')) && (!!current.headerPower || current.headerPresentation);
+  const acknowledgeFamilyClose = current => {
+    if (!mutable || attempt.familyClicked !== true || attempt.familyCloseAcknowledged === true) return;
+    if (!pickerClosed(current) || current.trigger !== attempt.selectionTrigger || freshGuard() !== true)
+      throw failure('model_unverified');
+    attempt.familyCloseAcknowledged = true;
+  };
+  const readonlyOpeningSelectionIntact = (saved, current) => {
+    const pin = globalThis.__computaChatPresetPin;
+    const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
+    return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
+      && document.URL === request.expectedURL && location.pathname === '/'
+      && saved.owner === owner && saved.document === originalDocument
+      && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
+      && saved.attempt.completed === true && saved.recoveryClaimed !== true
+      && websiteModelChoiceEqual(saved.attempt.choice, expected)
+      && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
+      && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
+      && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved)
+      && websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
+      && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro')
+      && pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true
+      && pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin)
+      && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
+      && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
+      && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
+      && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+      && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+  };
+  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
+    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
+    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
+  const insertComposer = current => {
+    const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
+      .filter(node => current.enabled(node));
+    return candidates.length === 1 ? candidates[0] : null;
+  };
+  const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
+  const insertOpeningIntact = current => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record;
+    const composer = saved?.composer;
+    const value = insertComposerValue(composer);
+    return readonlyOpeningSelectionIntact(saved, current)
+      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+      && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
+      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
+      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
+      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
+      && record.root === null && record.body === null && record.expansionAttempted === false
+      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
+      && typeof request.prompt === 'string' && request.prompt === saved.prompt
+      && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
+      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
+      && globalThis.__computaModelFirstPrompt === request.prompt
+      && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
+      && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
+  };
+  const drainOpeningEvidence = () => {
+    observeHeader(headerObserver.takeRecords?.() || []);
+    observeControls(observer.takeRecords?.() || []);
+    websiteChatDrainPinnedMutations(globalThis.__computaChatPresetPin);
+    return state();
+  };
+  const close = async () => {
+    const current = state();
+    if (!current.topMenu) {
+      if (pickerClosed(current)) { acknowledgeFamilyClose(current); return; }
+      if (Date.now() >= until) throw failure('model_unverified');
+      readStage = 'close_settlement_pending';
+      const after = await wait(() => pickerClosed(websiteChatPickerState()));
+      acknowledgeFamilyClose(after);
+      readStage = 'close_acknowledged';
+      return;
+    }
+    // A lost Escape acknowledgement is not permission to dispatch it again.
+    if (dismissedPopup === current.topMenu) throw failure('model_unverified');
+    dismissedPopup = current.topMenu;
+    if (mutable && attempt.familyClicked === true && attempt.familyCloseAcknowledged !== true)
+      attempt.selectionCloseAttempted = true;
+    closeAttempted = true; readStage = 'close_requested';
+    if (!websiteModelDismissOwnedPicker('chatgpt', trigger, current.topMenu)) throw failure('model_unverified');
+    readStage = 'close_unconfirmed';
+    if (Date.now() >= until && !pickerClosed(websiteChatPickerState())) throw failure('model_unverified');
+    const after = await wait(() => pickerClosed(websiteChatPickerState()));
+    acknowledgeFamilyClose(after);
+    readStage = 'close_acknowledged';
+  };
+  const openPicker = async () => {
+    let current = state();
+    if (current.mode === 'power' || current.mode === 'family') return current;
+    if (!mutable && ['prepare', 'insert'].includes(request.action) && context?.scope === 'action_final_guard' && primaryOpened && !genericPowerRecheck)
+      throw failure('model_unverified');
+    if (current.topMenu) { await close(); current = state(); }
+    if (!current.enabled(trigger)) throw failure('model_unverified');
+    const recoveryEligible = !genericPowerRecheck && mutable && attempt.familyCloseAcknowledged === true
+      && attempt.postFamilyOpeningClaimed !== true;
+    if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
+    const completed = globalThis.__computaModelSelection;
+    if (!genericPowerRecheck && !mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
+      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
+      // Spend the first prepare observation even when its opening succeeds.
+      // Later prepares cannot acquire a new recovery allowance.
+      const pin = globalThis.__computaChatPresetPin;
+      prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
+        recoveryClaimed: false,
+        resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      current = drainOpeningEvidence();
+      if (!prepareOpeningIntact(current)) prepareOpening = null;
+    }
+    const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
+    if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
+      && completed?.completed === true && prepared?.phase === 'prepared' && prepared.firstInsertOpening == null) {
+      // The prepared record spends its first post-insert observation even when
+      // that opening succeeds. This never repeats editor input or Send.
+      const pin = globalThis.__computaChatPresetPin;
+      const composer = insertComposer(current);
+      insertOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
+        recoveryClaimed: false, state: submission, record: prepared, composer, editorValue: insertComposerValue(composer), prompt: request.prompt,
+        canonical: prepared.canonical, fingerprint: prepared.fingerprint,
+        resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      prepared.firstInsertOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) insertOpening = null;
+    }
+    if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
+    primaryOpened = true; readStage = 'primary_open_requested';
+    trigger.click();
+    const powerAcknowledged = () => {
+      const observed = websiteChatPickerState();
+      return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
+    };
+    if (!genericPowerRecheck && (prepareOpening !== null || insertOpening !== null)) {
+      const acknowledgementDeadline = Math.min(until, Date.now() + 900);
+      let clockRejected = false;
+      const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
+        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
+      current = drainOpeningEvidence();
+      // A delayed acknowledgement wins; never toggle an already opened menu.
+      if (!acknowledged && !powerAcknowledged()) {
+        if (clockRejected || Date.now() < acknowledgementDeadline
+          || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
+        (prepareOpening || insertOpening).recoveryClaimed = true;
+        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+        trigger.click();
+        current = await wait(powerAcknowledged);
+      }
+    } else if (recoveryEligible) {
+      // Preserve the existing fresh post-family allowance within the original
+      // deadline. A consumed opening grants only one new chrome action, never
+      // selection proof, a family/power retry, or an established-read replay.
+      let clockRejected = false;
+      const acknowledged = await websiteModelWaitForChange(Math.min(until, Date.now() + 900),
+        () => !owned() || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
+      if (!owned()) throw failure('document_changed');
+      current = state();
+      if (!acknowledged) {
+        if (clockRejected || Date.now() >= until || attempt.openingRecoveryAttempted === true || freshGuard() !== true
+          || current.trigger !== attempt.selectionTrigger || !current.enabled(trigger) || current.topMenu
+          || current.allMenus.length || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(trigger.getAttribute('data-state'))) throw failure('model_unverified');
+        attempt.openingRecoveryAttempted = true;
+        readStage = 'primary_open_recovery_requested';
+        trigger.click();
+        current = await wait(powerAcknowledged);
+      }
+    } else current = await wait(powerAcknowledged);
+    dismissedPopup = null;
+    return current;
+  };
+  const familyView = async () => {
+    let current = state();
+    if (current.mode === 'family') return current;
+    current = await openPicker();
+    if (current.mode === 'family') return current;
+    if (!current.secondary || !current.enabled(trigger)) throw failure('model_unverified');
+    secondaryOpened = true; readStage = 'secondary_open_requested';
+    current.secondary.click();
+    return wait(() => websiteChatPickerState().mode === 'family');
+  };
+  const changePower = async target => {
+    let current = await openPicker();
+    if (current.mode !== 'power') throw failure('model_unverified');
+    while (current.powerIndex !== target) {
+      if (!mutable || Date.now() >= until || typeof window.KeyboardEvent !== 'function') throw failure('model_mismatch');
+      const before = current.powerIndex, direction = target > before ? 1 : -1;
+      if (attempt.powerEvents >= 4) throw failure('model_unverified');
+      const powerItem = current.powerItem, slider = current.slider;
+      powerItem.focus?.({ preventScroll: true });
+      current = state();
+      if (current.powerItem !== powerItem || current.slider !== slider || current.powerIndex !== before
+        || !current.enabled(trigger) || !current.enabled(powerItem)) throw failure('model_unverified');
+      attempt.powerEvents++;
+      const key = direction === 1 ? 'ArrowRight' : 'ArrowLeft';
+      powerItem.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+      current = await wait(() => websiteChatPickerState().powerIndex !== before);
+      if (current.powerIndex !== before + direction) throw failure('model_unverified');
+    }
+    return current;
+  };
+  try {
+    let initial = state();
+    if (initial.topMenu) { await close(); initial = state(); }
+    // Only the first mutable selection may observe an empty, still-hydrating
+    // label. Waiting spends the same proof deadline and dispatches no input.
+    const initialText = websiteChatHeaderTextShape(initial.trigger?.innerText);
+    if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
+      && initial.closedPresentation && initialText.present && initialText.empty && !initialText.over128
+      && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
+      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
+      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      headerReadiness = { startedEmpty: true, outcome: 'waiting', reason: null };
+      readStage = 'initial_header_empty_wait';
+      let rejected = null;
+      const reject = reason => { rejected = reason; return true; };
+      const ready = () => {
+        if (rejected) return true;
+        if (!owned()) return reject('ownership_changed');
+        if (globalThis.__computaChatPresetPin || globalThis.__computaModelSelection !== attempt
+          || attempt.completed !== false || attempt.powerEvents !== 0 || attempt.familyClicked !== false
+          || primaryOpened || secondaryOpened || closeAttempted || observedProof) return reject('state_changed');
+        let current;
+        try { current = state(); } catch { return reject('state_changed'); }
+        if (!current.closedPresentation || current.trigger !== trigger) return reject('state_changed');
+        const text = websiteChatHeaderTextShape(current.trigger.innerText);
+        if (current.headerPower || current.headerPresentation) return true;
+        if (!text.present || !text.empty || text.over128) return reject('unknown_header');
+        return false;
+      };
+      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      ready();
+      if (!changed || Date.now() >= until || rejected) {
+        headerReadiness.outcome = 'rejected';
+        headerReadiness.reason = rejected || 'deadline';
+        readStage = 'initial_header_empty_rejected';
+        return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
+      }
+      initial = state();
+      headerReadiness.outcome = 'recognized';
+      readStage = 'initial_header_hydrated';
+    }
+    if (!initial.closedPresentation || !initial.headerPower && !initial.headerPresentation) return failure('model_unverified');
+    const genericHeader = !initial.headerPower;
+    const headerIndex = initial.headerPower ? websiteChatPowers.findIndex(power => power.key === initial.headerPower.key) : null;
+    const expectedIndex = expected ? websiteChatPowers.findIndex(power => 'chat/latest/' + power.key === expected.key) : null;
+    if (expectedIndex !== null && (expectedIndex < 0 || expectedIndex > 4)) return failure('model_unverified');
+    if (!mutable && headerIndex !== null && expectedIndex !== null && headerIndex !== expectedIndex) return failure('model_mismatch');
+    if (!mutable && expectedIndex !== null) headerExpected = websiteChatPowers[expectedIndex];
+    let powerState = await openPicker();
+    // The generic label authorizes inspection only, never a requested/default
+    // power. A remembered Family panel without fresh Power remains unverified.
+    if (genericHeader && powerState.mode !== 'power') return failure('model_unverified');
+    const startingPower = headerIndex ?? powerState.powerIndex;
+    const desiredPower = expectedIndex ?? startingPower;
+    if (!Number.isInteger(startingPower) || !Number.isInteger(desiredPower)) return failure('model_unverified');
+    if (powerState.mode === 'power' && powerState.powerIndex !== startingPower) return failure(mutable ? 'model_unverified' : 'model_mismatch');
+    if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
+    if (mutable) {
+      if (powerState.mode !== 'power') return failure('model_unverified');
+      powerState = await changePower(desiredPower);
+      headerExpected = websiteChatPowers[desiredPower];
+    }
+    let familyState = await familyView();
+    if (!familyState.newest) return failure('model_unverified');
+    if (mutable && familyState.checkedFamily?.key !== familyState.newest.key) {
+      const candidates = familyState.familyControls.filter(control => control.choice?.key === familyState.newest.key);
+      if (candidates.length !== 1 || attempt.familyClicked || !familyState.enabled(trigger)) return failure('model_unverified');
+      attempt.familyClicked = true;
+      attempt.selectionTrigger = trigger;
+      candidates[0].node.click();
+      await wait(() => {
+        const now = websiteChatPickerState();
+        return now.mode !== 'family' || now.checkedFamily?.key === now.newest?.key;
+      });
+      const afterSelection = state();
+      if (afterSelection.mode !== 'family') await close();
+      familyState = await familyView();
+      if (familyState.semanticSlider && familyState.semanticSlider.getAttribute('aria-valuenow') !== String(desiredPower))
+        return failure('model_mismatch');
+    }
+    if (!familyState.checkedFamily || familyState.checkedFamily.key !== familyState.newest.key) return failure('model_mismatch');
+    const family = familyState.checkedFamily, offered = familyState.offered;
+    if (genericHeader && mutable) { observer.takeRecords?.(); tracked.clear(); }
+    proofLocked = true;
+    for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
+      tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
+        'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
+    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness });
+    observedProof = true; readStage = 'family_proof_observed';
+    await close();
+    let final = state();
+    let finalPower = final.headerPower;
+    if (final.headerPresentation && !finalPower) {
+      // Family selection can reset power. Reopen once for fresh associated
+      // Power proof; never repair a mismatch or invent a Back/navigation action.
+      genericPowerRecheck = true;
+      prepareOpening = null; insertOpening = null;
+      const checkedPower = await openPicker();
+      if (checkedPower.mode !== 'power' || !checkedPower.power) return failure('model_unverified');
+      if (checkedPower.powerIndex !== desiredPower) return failure('model_mismatch');
+      finalPower = checkedPower.power;
+      finalPowerState = checkedPower;
+      await close();
+      observeHeader(headerObserver.takeRecords?.() || []);
+      observeControls(observer.takeRecords?.() || []);
+      final = state();
+    }
+    if (!final.closedPresentation || !final.headerPower && !final.headerPresentation || !finalPower) return failure('model_unverified');
+    if (finalPower.key !== websiteChatPowers[desiredPower].key
+      || final.headerPower && final.headerPower.key !== finalPower.key) return failure('model_mismatch');
+    const evidence = websiteChatSelectionEvidence(family, finalPower, offered, expected);
+    if (!evidence || expected && !websiteModelChoiceEqual(expected, evidence.selected)) return failure('model_mismatch');
+    if (!owned() || selectionChanged || mutable && freshGuard() !== true) return failure('model_unverified');
+    const pin = globalThis.__computaChatPresetPin;
+    if (pin && (pin.owner !== owner || pin.document !== document || pin.invalidated === true
+      || !websiteChatResolvedSelectionEqual(pin.selection, evidence.chatSelection))) return failure('model_mismatch');
+    if (remount) {
+      // Drain undelivered negative evidence before the synchronous reference
+      // transfer. No await or website action may intervene in this commit.
+      observeHeader(headerObserver.takeRecords?.() || []);
+      observeControls(observer.takeRecords?.() || []);
+      websiteChatDrainPinnedMutations(pin);
+      const commit = state();
+      if (Date.now() >= until || !owned() || selectionChanged || pin.invalidated === true
+        || !pickerClosed(commit) || commit.headerPower && commit.headerPower.key !== remount.selection.power.key
+        || !commit.headerPower && (!commit.headerPresentation || finalPower.key !== remount.selection.power.key)
+        || !websiteChatResolvedSelectionEqual(remount.selection, evidence.chatSelection)) return failure('model_mismatch');
+      pin.headerObserver?.disconnect?.();
+      pin.headerObserver = null;
+      pin.headerTrigger = trigger;
+      websiteChatTrackPinnedHeader(pin, trigger);
+      remount = null;
+    }
+    if (expected && !pin) {
+      if (!mutable) return failure('model_unverified');
+      globalThis.__computaChatPresetPin = { owner, document, selection: evidence.chatSelection };
+      websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, familyState);
+      if (finalPowerState) websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, finalPowerState);
+      websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
+    }
+    if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    const provedPin = globalThis.__computaChatPresetPin;
+    if (provedPin?.owner === owner && provedPin.document === originalDocument
+      && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
+      && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
+      provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
+    return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
+  } catch (error) {
+    return error?.error ? error : failure('model_unverified');
+  } finally {
+    observer.disconnect?.();
+    headerObserver.disconnect?.();
+    if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
+      try { await close(); } catch { }
+    }
+  }
+}
+async function websiteChatPickerAction(request, fresh, freshGuard) {
+  if (request.action === 'modelDiagnostic') return { modelDiagnostic: websiteModelDiagnostic(websiteChatPickerState()) };
+  if (!fresh || typeof freshGuard !== 'function') return { error: 'not_fresh' };
+  const discovery = request.action === 'discoverModels', choice = request.modelChoice;
+  if (!discovery && !websiteChatPresetIntentValid(choice))
+    return { error: 'model_unverified' };
+  const slot = discovery ? '__computaModelDiscovery' : '__computaModelSelection';
+  const previous = globalThis[slot];
+  if (previous?.completed) {
+    if (discovery) return { modelChoices: previous.choices };
+    if (!websiteModelChoiceEqual(previous.choice, choice)) return { error: 'model_mismatch' };
+    const result = await websiteChatObserveSelection(request, choice, null, null,
+      { scope: 'completed_selection', action: request.action });
+    return result.error ? result : { selected: true, modelEvidence: result.modelEvidence };
+  }
+  if (previous?.started) return { error: 'model_unverified' };
+  const current = websiteChatPickerState();
+  if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0)
+    return { pending: true, modelDiagnostic: websiteModelDiagnostic(current) };
+  const attempt = globalThis[slot] = { choice, started: true, completed: false, powerEvents: 0, familyClicked: false };
+  const result = await websiteChatObserveSelection(request, discovery ? null : choice, freshGuard, attempt,
+    { scope: 'post_selection', action: request.action });
+  if (result.error) return result;
+  attempt.completed = true;
+  attempt.choices = result.modelChoices;
+  return discovery ? result : { selected: true, modelEvidence: result.modelEvidence, modelDiagnostic: result.modelDiagnostic };
 }
 function websiteModelReadonlyChoiceValid(request) {
   return websiteModelChoiceValid(request.expectedModelChoice)
@@ -73,6 +987,7 @@ async function websiteModelReplacementObservation(request, capturedCount, snapsh
     || !identityMatches()) return null;
   if (websiteModelReplacementObservationAttempted) return null;
   websiteModelReplacementObservationAttempted = true;
+  websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   const replacementFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const current = access.roots();
@@ -87,7 +1002,7 @@ function websiteModelFamilyLabel(provider, value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 120 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   const pattern = provider === 'chatgpt' ? /^(?:Latest|GPT-[0-9]+(?:\.[0-9]+)?(?: [A-Za-z][A-Za-z0-9-]*)?)$/
-    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro)$/
+    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$/
       : /^(?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?$/;
   return pattern.test(label) ? label : null;
 }
@@ -95,11 +1010,12 @@ function websiteModelSafeTriggerLabel(value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 160 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   if (label === 'Select ChatGPT model') return label;
-  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite))$/.test(label)) return label;
+  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon))$/.test(label)) return label;
   if (/^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label)) return label;
   return null;
 }
 function websiteModelPickerState(provider) {
+  if (provider === 'chatgpt') return websiteChatPickerState();
   const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [data-testid="assistant-message"], [data-testid="user-message"], model-response, user-query, [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
@@ -110,7 +1026,7 @@ function websiteModelPickerState(provider) {
   const isTrigger = node => {
     const label = websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '';
     return provider === 'chatgpt' ? label === 'Select ChatGPT model'
-      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite)$/.test(label)
+      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
   const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
@@ -167,6 +1083,11 @@ function websiteModelPickerState(provider) {
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       if (upgrades) continue;
       const choice = family(option);
+      // Gemini also selects a separate thinking-effort row in this menu.
+      // Its indicator neither proves nor invalidates the model selection.
+      // Keep unknown selected rows subject to the ambiguity checks below.
+      if (provider === 'gemini' && !choice && option.getAttribute('role') === 'menuitem'
+          && ['Low', 'High'].some(label => named(option, label))) continue;
       let indicatorSelected = false;
       if (provider === 'gemini' && option.getAttribute('role') === 'menuitem') {
         const markers = [...option.querySelectorAll('[aria-label="Selected"]')].slice(0, 128)
@@ -261,6 +1182,46 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
   }
+  if (state.provider === 'chatgpt') {
+    diagnostic.chatPower = state.powerDiagnostic;
+    const pin = globalThis.__computaChatPresetPin;
+    diagnostic.chatPin = {
+      present: !!pin, invalidated: pin?.invalidated === true,
+      invalidationReason: ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(pin?.invalidationReason)
+        ? pin.invalidationReason : null,
+      sameHeader: !!pin?.headerTrigger && pin.headerTrigger === state.trigger,
+      headerConnected: pin?.headerTrigger?.isConnected === true,
+      semantic: pin?.invalidationReason === 'semantic_mutation'
+        && ['aria-valuenow', 'aria-checked'].includes(pin?.invalidationFacts?.attribute)
+        && ['nodeConnected', 'attributePresent', 'currentMatches', 'oldMatches']
+          .every(key => typeof pin.invalidationFacts[key] === 'boolean')
+        ? { attribute: pin.invalidationFacts.attribute,
+          nodeConnected: pin.invalidationFacts.nodeConnected, attributePresent: pin.invalidationFacts.attributePresent,
+          currentMatches: pin.invalidationFacts.currentMatches, oldMatches: pin.invalidationFacts.oldMatches } : null,
+    };
+    diagnostic.chatHeader = { canonicalRecognized: !!state.headerPower, closed: state.closedPresentation,
+      openPresentationRecognized: state.headerPresentation,
+      presentation: websiteChatHeaderPresentation(state.trigger?.innerText).kind,
+      ordinal: state.headerPower ? websiteChatPowers.findIndex(power => power.key === state.headerPower.key) : null,
+      menuMode: ['power', 'family', 'unknown', 'closed'].includes(state.mode) ? state.mode : 'unknown' };
+    const header = state.trigger;
+    const headerChildren = [];
+    for (let index = 0; index < Math.min(header?.childNodes?.length || 0, 4); index++)
+      headerChildren.push(header.childNodes[index]);
+    diagnostic.chatHeader.textShape = {
+      innerText: websiteChatHeaderTextShape(header?.innerText), textContent: websiteChatHeaderTextShape(header?.textContent),
+      childCount: Math.min(header?.childNodes?.length || 0, 33),
+      children: headerChildren.map(node => ({
+        kind: node.nodeType === 1 ? 'element' : node.nodeType === 3 ? 'text' : 'other',
+        tag: ['span', 'div', 'svg', 'path'].includes(node.tagName?.toLowerCase()) ? node.tagName.toLowerCase() : 'other',
+        visible: node.nodeType === 1 ? state.visible(node) : null,
+        text: websiteChatHeaderTextShape(node.textContent) })) };
+    const readiness = readObservation?.headerReadiness;
+    if (readiness?.startedEmpty === true && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
+      diagnostic.chatHeader.readiness = { startedEmpty: true, outcome: readiness.outcome,
+        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
+          ? readiness.reason : null };
+  }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
   const root = responseRoots.filter(node => state.physical(node)).at(-1);
@@ -301,8 +1262,9 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition) {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null, observeEditorControls = false) {
   if (condition()) return Promise.resolve(true);
+  websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
     let finished = false, timer;
     const observer = new MutationObserver(() => { if (condition()) finish(true); });
@@ -311,12 +1273,28 @@ function websiteModelWaitForChange(until, condition) {
       finished = true;
       observer.disconnect?.();
       if (typeof clearTimeout === 'function') clearTimeout(timer);
+      websiteModelDiagnosticPhase('model_wait_done');
       resolve(changed);
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'aria-checked',
-        'aria-selected', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert'] });
-    timer = setTimeout(() => finish(false), Math.max(1, until - Date.now()));
+        'aria-selected', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert',
+        ...(observeEditorControls === true ? ['id', 'contenteditable', 'data-testid'] : [])] });
+    const milliseconds = Math.max(1, Math.min(10_000, Math.ceil(until - Date.now())));
+    const clock = window.webkit?.messageHandlers?.computaModelClock;
+    if (clock && typeof input?.operationID === 'string') {
+      try {
+        // A native reply expires this wait only. All existing conditions and
+        // model/owner guards must still supply their own positive proof.
+        Promise.resolve(clock.postMessage({ ownerToken: input.ownerToken,
+          operationID: input.operationID, milliseconds })).then(() => finish(false), () => {
+            if (!finished) { onClockFailure?.(); finish(false); }
+          });
+      } catch { onClockFailure?.(); finish(false); }
+    } else {
+      // Standalone fixtures and nonnative adapters retain the bounded fallback.
+      timer = setTimeout(() => finish(false), milliseconds);
+    }
     if (condition()) finish(true); // A synchronous mount cannot fall between read and arm.
   });
 }
@@ -386,17 +1364,26 @@ function websiteModelIgnoreOwnPickerMutation(record) {
   const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
   if (!target || target.closest?.(boundary)) return false;
   const belongs = node => !!node && scope.roots.some(root => root === node || root.contains(node));
+  const controlledPortal = node => {
+    const menu = node.closest?.('[role="menu"], [role="dialog"], [role="listbox"]');
+    return !!menu && scope.ids.includes(menu.getAttribute('id'))
+      && !menu.closest?.(boundary) && !menu.querySelector?.(boundary);
+  };
   if (record.type === 'attributes') {
     // Real selection/fallback attributes and response content always wake the
     // native reader. Only this observation's menu visibility/chrome is omitted.
     if (!['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'class', 'style', 'hidden', 'inert', 'data-state'].includes(record.attributeName)) return false;
+    const ownedChrome = belongs(target) || controlledPortal(target);
     if (scope.provider === 'gemini' && record.attributeName === 'class' && target.isConnected
-      && target.getAttribute('role') === 'menuitem' && belongs(target)) {
+      && target.getAttribute('role') === 'menuitem' && ownedChrome) {
       // Gemini's actual model rows use a selected token plus an aria-labelled
       // icon, not checked radios. Active/focus changes remain picker chrome.
       if (record.oldValue === undefined || /(?:^|\s)selected(?:\s|$)/.test(record.oldValue || '') !== target.classList.contains('selected')) return false;
     }
-    return belongs(target) || ['aria-hidden', 'inert', 'style'].includes(record.attributeName)
+    // A newly mounted portal can deliver visibility records before the next
+    // awaited read tracks its root. Its exact aria-controls ID owns only this
+    // chrome; selected attributes and message boundaries still notify above.
+    return ownedChrome || ['aria-hidden', 'inert', 'style'].includes(record.attributeName)
       && scope.roots.some(root => target.contains(root));
   }
   if (record.type !== 'childList') return false;
@@ -426,6 +1413,13 @@ function websiteModelHitTestTarget(node) {
   } catch { return false; }
 }
 async function websiteModelReadEvidence(provider, expected, openingRecovery = null, context = null) {
+  websiteModelDiagnosticPhase('model_proof');
+  if (provider === 'chatgpt') {
+    if (!websiteChatPresetIntentValid(expected))
+      return { error: 'model_unverified' };
+    const result = await websiteChatObserveSelection(input, expected, null, null, context);
+    return result.error ? result : { modelEvidence: result.modelEvidence };
+  }
   if (!websiteModelChoiceValid(expected)) return { error: 'model_unverified' };
   const owner = globalThis.__computaModelOwner, url = document.URL;
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
@@ -606,6 +1600,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {
+  if (state.provider === 'chatgpt') return websiteChatPickerAction(request, fresh, freshGuard);
   const diagnostic = () => ({ modelDiagnostic: websiteModelDiagnostic(state) });
   if (request.action === 'modelDiagnostic') return { ...diagnostic(), modelEvidence: state.evidence };
   if (!fresh) return { error: 'not_fresh', ...diagnostic() };
@@ -698,6 +1693,7 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
   return { pending: true, modelEvidence: state.evidence };
 }
 async function websiteModelFinalGuard(provider, request, observed, currentTemporary = null) {
+  websiteModelDiagnosticPhase('final_model_guard');
   if (observed.error || request.action === 'stop' || request.expectedModelChoice == null
     || ['discoverModels', 'selectModel', 'modelDiagnostic'].includes(request.action)) return observed;
   const proof = await websiteModelReadEvidence(provider, request.expectedModelChoice, null,

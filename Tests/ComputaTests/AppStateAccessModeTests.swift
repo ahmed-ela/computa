@@ -58,6 +58,49 @@ final class AppStateAccessModeTests: XCTestCase {
         XCTAssertFalse(reopened.approvalGateBlocksInteraction)
     }
 
+    func testPersistedFullAccessAndLaterAskAreBoundToQueuedContinuation() async throws {
+        let preferences = makePreferences()
+        preferences.set("fullAccess", forKey: accessModePreferenceKey)
+        let runtime = AccessModeRuntime()
+        let task = AgentTask(id: "access-policy-task", title: "Access policy", summary: "", status: .draft,
+                             workspace: "/fixture", model: LocalModelCatalog.defaultModelID)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: preferences)
+        let first = await state.submit(prompt: "First exact prompt", toTaskID: task.id)
+        XCTAssertTrue(first)
+        let queued = await state.submitOrQueue(prompt: "Second exact prompt", toTaskID: task.id)
+        XCTAssertTrue(queued)
+        let beforeCompletion = await runtime.recordedSubmissions()
+        XCTAssertEqual(beforeCompletion.count, 1, "A running turn must retain its original execution policy")
+        XCTAssertTrue(state.setAccessMode(.askEveryTime))
+        state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
+        try await waitUntil { await runtime.recordedSubmissions().count == 2 }
+        let submissions = await runtime.recordedSubmissions()
+        XCTAssertEqual(submissions, [
+            .init(prompt: "First exact prompt", taskID: task.id, modelID: task.model, accessMode: .fullAccess),
+            .init(prompt: "Second exact prompt", taskID: task.id, modelID: task.model, accessMode: .askEveryTime),
+        ])
+    }
+
+    func testOlderAdapterRejectsFullAccessWithoutSendingItsRestrictedSubmission() async throws {
+        let runtime = LegacyAccessModeRuntime()
+        do {
+            try await runtime.submit(prompt: "No silent downgrade", toTaskID: "fixture", modelID: "fixture", accessMode: .fullAccess)
+            XCTFail("An adapter must explicitly implement Full access")
+        } catch {
+            XCTAssertEqual(error as? AgentRuntimeCapabilityError, .accessModeUnsupported)
+        }
+        let count = await runtime.submissionCount
+        XCTAssertEqual(count, 0)
+        let preferences = makePreferences()
+        preferences.set("fullAccess", forKey: accessModePreferenceKey)
+        let task = AgentTask(id: "unsupported-access-task", title: "Unsupported", summary: "", status: .draft,
+                             workspace: "/fixture", model: LocalModelCatalog.defaultModelID)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: preferences)
+        let submitted = await state.submit(prompt: "Keep Full or reject", toTaskID: task.id)
+        XCTAssertFalse(submitted)
+        XCTAssertEqual(state.tasks.first?.entries.last?.title, "Prompt was not delivered")
+    }
+
     func testPersistedFullAccessAutomaticallyApprovesTheFirstRequest() async throws {
         let preferences = makePreferences()
         preferences.set("fullAccess", forKey: accessModePreferenceKey)
@@ -400,14 +443,32 @@ private enum AccessModeTestError: Error {
     case rejected
 }
 
+private actor LegacyAccessModeRuntime: AgentRuntimeClient {
+    nonisolated let providerName = "Legacy access fixture"
+    private(set) var submissionCount = 0
+    func loadTasks() async throws -> [AgentTask] { [] }
+    nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws { submissionCount += 1 }
+    func interrupt(taskID: AgentTask.ID) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+}
+
 private actor AccessModeRuntime: AgentRuntimeClient {
     struct Call: Equatable, Sendable {
         let requestID: String
         let approved: Bool
     }
 
+    struct Submission: Equatable, Sendable {
+        let prompt: String
+        let taskID: AgentTask.ID
+        let modelID: String
+        let accessMode: AccessMode
+    }
+
     nonisolated let providerName = "Access mode test"
     private var calls: [Call] = []
+    private var submissions: [Submission] = []
     private var handler: (@Sendable (String, Bool) async throws -> Void)?
 
     func setHandler(_ value: (@Sendable (String, Bool) async throws -> Void)?) {
@@ -415,9 +476,13 @@ private actor AccessModeRuntime: AgentRuntimeClient {
     }
 
     func recordedCalls() -> [Call] { calls }
+    func recordedSubmissions() -> [Submission] { submissions }
     func loadTasks() async throws -> [AgentTask] { [] }
     nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+        submissions.append(.init(prompt: prompt, taskID: taskID, modelID: modelID, accessMode: accessMode))
+    }
     func interrupt(taskID: AgentTask.ID) async throws {}
 
     func resolveApproval(requestID: String, approved: Bool) async throws {

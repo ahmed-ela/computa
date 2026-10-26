@@ -47,13 +47,6 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         }
     }
 
-    func testInventoryCursorOrPageSizeChangesCannotResetRetryIdentity() {
-        let first = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs", arguments: ["cursor": UUID().uuidString])
-        for size in [1, 25, 100] {
-            XCTAssertEqual(first, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs",
-                arguments: ["cursor": UUID().uuidString, "page_size": size]))
-        }
-    }
     func testVerificationAcceptsOnlyFiniteObservedPropertyContract() throws {
         var arguments = fixture()
         let value = try ComputerOutcomeToolContract.validate(arguments)
@@ -125,11 +118,11 @@ final class ComputerExecutionSafetyTests: XCTestCase {
 
     func testChangingOpaqueCapabilitiesDoesNotResetRetryBudget() {
         let one = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: [
-            "snapshot_id": "one", "capture_id": "capture-one", "candidate_token": "candidate-one", "cursor": "page-one",
+            "snapshot_id": "one", "capture_id": "capture-one", "cursor": "page-one",
             "element_index": 7, "text": "requested query",
         ])
         let two = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: [
-            "snapshot_id": "two", "capture_id": "capture-two", "candidate_token": "candidate-two", "cursor": "page-two",
+            "snapshot_id": "two", "capture_id": "capture-two", "cursor": "page-two",
             "element_index": 7, "text": "requested query",
         ])
         XCTAssertEqual(one, two)
@@ -149,12 +142,67 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         XCTAssertTrue(key.contains("snapshot_id=literal user text"))
     }
 
+    func testLegacyAndSplitContinuationsShareFailureBudgetWithoutFreshReadRefund() {
+        let legacy = ComputerUnchangedAttemptGuard.key(tool: "browser_read",
+            arguments: ["cursor": "old", "view": "content"])
+        let split = ComputerUnchangedAttemptGuard.key(tool: "browser_continue",
+            arguments: ["cursor": "different"])
+        XCTAssertEqual(legacy, split)
+        for arguments in [[String: Any](), ["cursor": NSNull()], ["cursor": 42],
+                          ["cursor": "", "view": "all"]] {
+            XCTAssertEqual(split, ComputerUnchangedAttemptGuard.key(tool: "browser_continue", arguments: arguments))
+        }
+        XCTAssertEqual(legacy, ComputerUnchangedAttemptGuard.key(tool: "browser_read",
+            arguments: ["cursor": "changed", "query": "another query", "view": "all"]))
+        let fresh = ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: [:])
+        XCTAssertNotEqual(fresh, split)
+        XCTAssertEqual(fresh, ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["cursor": NSNull()]))
+        var guardrail = ComputerUnchangedAttemptGuard()
+        let scope = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        guardrail.observedBrowserReadScope(scope)
+        XCTAssertFalse(guardrail.failed(key: legacy))
+        guardrail.succeeded(key: fresh)
+        guardrail.observedBrowserReadScope(scope)
+        XCTAssertFalse(guardrail.failed(key: split))
+        XCTAssertTrue(guardrail.failed(key: legacy))
+        guardrail.succeeded(key: split)
+        XCTAssertFalse(guardrail.failed(key: legacy), "Only an actual matching successful continuation resets this family")
+        XCTAssertFalse(guardrail.failed(key: split))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: scope.bindingHandle, committedDocumentID: UUID()))
+        XCTAssertFalse(guardrail.failed(key: split), "A genuinely changed native document establishes a new read scope")
+    }
+
     func testObservedStableControlIdentitySurvivesSnapshotReindexing() {
         let first: [String: Any] = ["snapshot_id": "one", "element_index": 7, "text": "query"]
         let later: [String: Any] = ["snapshot_id": "two", "element_index": 22, "text": "query"]
         let key = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: first, observedElementIdentity: "node:50")
         XCTAssertEqual(key, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: later, observedElementIdentity: "node:50"))
         XCTAssertNotEqual(key, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_set_text", arguments: later, observedElementIdentity: "node:51"))
+    }
+
+    func testBrowserUnknownReferencesShareOneRoutingBudgetAcrossKindsAndFillText() {
+        let keys = (0..<3).map { index in
+            ComputerUnchangedAttemptGuard.key(tool: index == 0 ? "browser_click" : "browser_fill",
+                arguments: [index == 0 ? "click_ref" : "fill_ref": UUID().uuidString, "text": "different \(index)"])
+        }
+        XCTAssertEqual(Set(keys), ["browser-reference-routing"])
+        var guardrail = ComputerUnchangedAttemptGuard()
+        XCTAssertFalse(guardrail.failed(key: keys[0])); XCTAssertFalse(guardrail.failed(key: keys[1]))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: UUID(), committedDocumentID: UUID()))
+        XCTAssertTrue(guardrail.failed(key: keys[2]), "A read scope cannot refund unknown-reference routing failures")
+    }
+
+    func testBrowserCanonicalTargetBudgetExcludesTokensAndRowsButPreservesFillIntent() {
+        let identity = "physical-tab:committed-document:loader:backend-node"
+        let first = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "one", "text": "query"], observedElementIdentity: identity)
+        let next = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "query"], observedElementIdentity: identity)
+        XCTAssertEqual(first, next)
+        XCTAssertNotEqual(first, ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "other"], observedElementIdentity: identity))
+        XCTAssertNotEqual(first, ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["fill_ref": "two", "text": "query"], observedElementIdentity: "other-physical-target"))
+        var guardrail = ComputerUnchangedAttemptGuard()
+        XCTAssertFalse(guardrail.failed(key: first)); XCTAssertFalse(guardrail.failed(key: next))
+        guardrail.observedBrowserReadScope(.init(bindingHandle: UUID(), committedDocumentID: UUID()))
+        XCTAssertTrue(guardrail.failed(key: first), "New observations and tokens do not refund native target failures")
     }
 
     func testOnlySuccessfulMatchingOperationResetsItsRetryBudget() {
@@ -165,6 +213,34 @@ final class ComputerExecutionSafetyTests: XCTestCase {
         XCTAssertTrue(guardrail.failed(key: "failed-input"))
         guardrail.succeeded(key: "failed-input")
         XCTAssertFalse(guardrail.failed(key: "failed-input"))
+    }
+
+    func testVerifiedBrowserReadScopeClearsOnlyReadFailuresAndSameScopeCannotRefundThem() {
+        var guardrail = ComputerUnchangedAttemptGuard()
+        let first = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        let second = EmbeddedBrowserReadFailureScope(bindingHandle: UUID(), committedDocumentID: UUID())
+        let read = ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["view": "content", "cursor": "old"])
+        let mutation = ComputerUnchangedAttemptGuard.key(tool: "browser_fill", arguments: ["text": "query", "fill_ref": "ref"], observedElementIdentity: "physical-node")
+        let native = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_snapshot", arguments: [:])
+        guardrail.observedBrowserReadScope(first)
+        for key in [read, mutation, native] {
+            XCTAssertFalse(guardrail.failed(key: key)); XCTAssertFalse(guardrail.failed(key: key))
+        }
+        guardrail.observedBrowserReadScope(first)
+        XCTAssertTrue(guardrail.failed(key: read), "An already-bound target cannot refund failures")
+        guardrail.observedBrowserReadScope(second)
+        XCTAssertFalse(guardrail.failed(key: read), "A different native binding starts its own read attempt budget")
+        XCTAssertTrue(guardrail.failed(key: mutation), "Changing tabs cannot forgive failed input")
+        XCTAssertTrue(guardrail.failed(key: native), "Native computer failures remain independent")
+        XCTAssertFalse(guardrail.failed(key: read))
+        guardrail.succeeded(key: ComputerUnchangedAttemptGuard.key(tool: "browser_read", arguments: ["view": "all"]))
+        XCTAssertTrue(guardrail.failed(key: read), "An unrelated fresh read still does not reset the matching failure")
+        let replacementDocument = EmbeddedBrowserReadFailureScope(
+            bindingHandle: second.bindingHandle, committedDocumentID: UUID())
+        guardrail.observedBrowserReadScope(replacementDocument)
+        XCTAssertFalse(guardrail.failed(key: read), "A committed replacement in the same tab starts a new read scope")
+        XCTAssertTrue(guardrail.failed(key: mutation), "Document replacement cannot forgive failed input")
+        XCTAssertTrue(guardrail.failed(key: native))
     }
 
     private func fixture() -> [String: Any] {

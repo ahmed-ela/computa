@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -56,10 +57,14 @@ async function trustedRuntime() {
   return { binary, pin, binarySHA256: manifest.binarySHA256 };
 }
 
-function literal(source: string, name: string) {
+function literal(source: string, name: string, ancestors = new Set<string>()): string {
+  if (!/^[A-Za-z][A-Za-z0-9]*$/.test(name) || ancestors.has(name)) throw new Error(`Invalid app constant reference: ${name}`);
   const match = source.match(new RegExp(`static let ${name} = """\\n([\\s\\S]*?)\\n    """`));
-  if (!match || match[1].includes("\\(")) throw new Error(`Not an un-interpolated app literal: ${name}`);
-  return match[1].split("\n").map(line => line.startsWith("    ") ? line.slice(4) : line).join("\n");
+  if (!match) throw new Error(`App literal unavailable: ${name}`);
+  const text = match[1].split("\n").map(line => line.startsWith("    ") ? line.slice(4) : line).join("\n")
+    .replace(/\\\(([A-Za-z][A-Za-z0-9]*)\)/g, (_, reference) => literal(source, reference, new Set([...ancestors, name])));
+  if (text.includes("\\(")) throw new Error(`Unsupported app literal expression: ${name}`);
+  return text;
 }
 
 async function appInstructions() {
@@ -71,14 +76,26 @@ async function appInstructions() {
     base: base.split("\n").map(line => line.startsWith("                ") ? line.slice(16) : line).join("\n"),
     // Match the app's reference-tool developer bundle. Legacy scope and the
     // model-specific Swift base additions are intentionally separate coverage.
-    developer: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "commandLine"]
+    developer: ["nativeScope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"]
       .map(name => literal(app, name)).join("\n\n"),
+    compact: literal(app, "compactionPrompt"),
   };
 }
 
-function message(text: string) {
-  return { type: "message", id: "msg_fixture", role: "assistant", status: "completed",
+function message(text: string, phase: "commentary" | "final_answer" = "final_answer") {
+  return { type: "message", id: "msg_fixture_" + crypto.randomUUID(), role: "assistant", status: "completed", phase,
     content: [{ type: "output_text", text, annotations: [] }] };
+}
+
+// Assert the native model HTTP input, before either website or Chat Completions
+// translation can discard phase. Content/IDs must survive, not just a role label.
+function assertAssistantPhase(body: Json, expected: ReturnType<typeof message>) {
+  const matches = body.input.filter((item: Json) => item.id === expected.id);
+  expect(matches).toHaveLength(1);
+  expect(matches[0].role).toBe("assistant");
+  expect(matches[0].phase).toBe(expected.phase);
+  // Empty response annotations are not input message fields in the native model.
+  expect(matches[0].content).toEqual(expected.content.map(({ type, text }) => ({ type, text })));
 }
 
 function sse(output: Json[]) {
@@ -109,7 +126,8 @@ class Rpc {
   readonly frames: Json[] = [];
   readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void }>();
   private nextID = 0;
-  readonly process: ReturnType<typeof Bun.spawn>;
+  readonly process: ChildProcessWithoutNullStreams;
+  private readonly exited: Promise<number | null>;
   private readonly reader: Promise<void>;
   private readonly stderr: Promise<string>;
   failure: Error | undefined;
@@ -118,25 +136,30 @@ class Rpc {
     // The entire owned process tree may contact this fixture's loopback model;
     // attempted external network is denied, including unexpected startup calls.
     const policy = '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))';
-    this.process = Bun.spawn(["/usr/bin/sandbox-exec", "-p", policy, binary, "--listen", "stdio://",
+    this.process = spawn("/usr/bin/sandbox-exec", ["-p", policy, binary, "--listen", "stdio://",
       "-c", "project_root_markers=[]", "-c", "allow_login_shell=false",
       "-c", 'cli_auth_credentials_store="file"', "-c", 'mcp_oauth_credentials_store="file"'], {
       cwd: workspace, env: { HOME: join(home, "ProcessHome"), CODEX_HOME: home,
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin", LANG: "en_US.UTF-8" },
-      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    this.stderr = new Response(this.process.stderr).text();
+    this.exited = new Promise((resolve, reject) => { this.process.once("exit", resolve); this.process.once("error", reject); });
+    this.stderr = (async () => {
+      let output = "";
+      for await (const chunk of this.process.stderr) {
+        output += chunk.toString();
+        if (output.length > 65_536) throw new Error("Private fixture stderr exceeded its budget.");
+      }
+      return output;
+    })();
     this.reader = this.read();
   }
 
   private async read() {
-    const reader = (this.process.stdout as ReadableStream<Uint8Array>).getReader();
     const decoder = new TextDecoder();
     let pending = "";
     try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      for await (const value of this.process.stdout) {
         pending += decoder.decode(value, { stream: true });
         if (pending.length > 2_000_000) throw new Error("Oversized private fixture RPC frame.");
         for (;;) {
@@ -203,8 +226,8 @@ class Rpc {
   }
   async close() {
     (this.process.stdin as any).end();
-    try { await bounded(this.process.exited, "owned App Server exit", 5000); }
-    catch { this.process.kill("SIGTERM"); await bounded(this.process.exited, "owned App Server termination", 5000); }
+    try { await bounded(this.exited, "owned App Server exit", 5000); }
+    catch { this.process.kill("SIGTERM"); await bounded(this.exited, "owned App Server termination", 5000); }
     await this.reader;
     await this.stderr;
   }
@@ -240,6 +263,15 @@ function assertRules(body: Json, rules: { base: string; developer: string }) {
   expect(body.instructions).toBe(rules.base);
   expect(developerContains(body, rules.developer)).toBe(true);
 }
+
+test("instruction literal reader expands shared constants and rejects executable or cyclic interpolation", () => {
+  const shared = 'static let shared = """\n    exact shared rule\n    """';
+  const outer = 'static let outer = """\n    before\n    \\(shared)\n    after\n    """';
+  expect(literal(shared + "\n" + outer, "outer")).toBe("before\nexact shared rule\nafter");
+  expect(() => literal(outer.replace("shared", "outer"), "outer")).toThrow();
+  expect(() => literal(outer.replace("shared", "run()"), "outer")).toThrow();
+  expect(() => literal(outer, "outer")).toThrow();
+});
 
 test("instruction oracle rejects identical quoted text outside the developer role", () => {
   const rules = { base: "PRIVATE_BASE", developer: "PRIVATE_DEVELOPER_SCOPE\n\nPRIVATE_DEVELOPER_COMMANDS" };
@@ -320,11 +352,24 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
   let baselineCliSchemas: Json[] | undefined;
   let regularSchemaAssertions = 0;
   let compactSchemaAssertions = 0;
+  const nativeRequestKinds: string[] = [];
   const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/responses") return new Response("fixture", { status: 404 });
     try {
       const body = await request.json() as Json;
       requests.push(body);
+      // Maintenance classification must come from the pinned engine's native
+      // transport metadata, never the maintenance prompt's wording or tools.
+      const headerMetadata = request.headers.get("x-codex-turn-metadata");
+      expect(typeof headerMetadata).toBe("string");
+      const native = JSON.parse(headerMetadata!);
+      expect(native.request_kind).toBe(compacting ? "compaction" : "turn");
+      expect(typeof native.thread_id).toBe("string");
+      expect(typeof native.turn_id).toBe("string");
+      const bodyMetadata = body.client_metadata?.["x-codex-turn-metadata"];
+      expect(typeof bodyMetadata).toBe("string");
+      expect(JSON.parse(bodyMetadata)).toEqual(native);
+      nativeRequestKinds.push(native.request_kind);
       const plan = plans.shift();
       if (!plan) throw new Error("Unexpected model inference.");
       if (compacting) {
@@ -340,18 +385,20 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
   const config = { "project_root_markers": [], "allow_login_shell": false,
     "features.shell_snapshot": false, "features.shell_snapshot_v2": false,
     "memories.use_memories": false, "skills.include_instructions": false,
-    "include_permissions_instructions": false, "include_apps_instructions": false, "include_environment_context": false,
+    "include_permissions_instructions": true, "include_apps_instructions": false, "include_environment_context": true,
     "features.plugins": false, "features.apps": false, "features.browser_use": false, "features.computer_use": false,
     "features.goals": false, "features.image_generation": false, "features.in_app_browser": false,
     "features.multi_agent": false, "features.multi_agent_v2": false,
     "features.shell_tool": true, "features.unified_exec": true, "features.view_image": false,
     "features.sleep_tool": false, "features.workspace_dependencies": false,
     "web_search": "disabled", "model_context_window": 32768, "model_auto_compact_token_limit": 28000,
+    "compact_prompt": rules.compact,
     "model_providers.computa_fixture": { name: "Private instruction fixture", base_url: `http://127.0.0.1:${endpoint.port}/v1`,
       wire_api: "responses", requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } };
   // macOS refuses nested sandbox-exec profiles. The outer owned-process
   // sandbox denies external network; only the scripted /usr/bin/printf runs.
-  // This fixture differs from the app's workspace-write thread sandbox.
+  // This instruction fixture uses the app's permissions boilerplate, but its
+  // outer sandbox and inner approval policy differ from both app access modes.
   const common = { model, modelProvider: "computa_fixture", cwd: workspace, sandbox: "danger-full-access",
     approvalPolicy: "on-request", baseInstructions: rules.base, developerInstructions: rules.developer, config };
   let rpc: Rpc | undefined;
@@ -363,20 +410,30 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
         inputSchema: { type: "object", properties: {}, additionalProperties: false } }] });
     const threadID = started.thread.id;
 
+    const commentary = message("Checking the private terminal fixture.", "commentary");
+    const terminalFinal = message("CLI fixture complete");
+    const nativeFinal = message("Native fixture complete");
     let terminalCall: Json | undefined;
     let dynamicCall: Json | undefined;
     plans.push(body => {
       assertRules(body, rules);
       expect(offered(body).map((tool: Json) => tool.name)).toContain("write_stdin");
       terminalCall = functionCall(body, "exec_command", { cmd: `/usr/bin/printf '${toolMarker}\\n'`, workdir: workspace, max_output_tokens: 1000 });
-      return [terminalCall];
-    }, body => { assertRules(body, rules); assertToolContinuation(body, terminalCall!, toolMarker); return [message("CLI fixture complete")]; });
+      return [commentary, terminalCall];
+    }, body => {
+      assertRules(body, rules); assertToolContinuation(body, terminalCall!, toolMarker);
+      assertAssistantPhase(body, commentary);
+      return [terminalFinal];
+    });
     await rpc.turn(threadID, "Read the private protocol fixture's terminal status.");
     const command = rpc.frames.find(frame => frame.method === "item/completed" && frame.params.item.type === "commandExecution");
     expect(command?.params.item.exitCode).toBe(0);
     expect(command?.params.item.aggregatedOutput).toContain(toolMarker);
-    plans.push(body => { assertRules(body, rules); dynamicCall = functionCall(body, "computer_v2_status", {}); return [dynamicCall]; }, body => {
-      assertRules(body, rules); assertToolContinuation(body, dynamicCall!, dynamicMarker); return [message("Native fixture complete")];
+    plans.push(body => {
+      assertRules(body, rules); assertAssistantPhase(body, commentary); assertAssistantPhase(body, terminalFinal);
+      dynamicCall = functionCall(body, "computer_v2_status", {}); return [dynamicCall];
+    }, body => {
+      assertRules(body, rules); assertToolContinuation(body, dynamicCall!, dynamicMarker); return [nativeFinal];
     });
     await rpc.turn(threadID, "Read the private fixture's native status.");
     expect(rpc.frames.filter(frame => frame.method === "item/tool/call")).toHaveLength(1);
@@ -388,12 +445,16 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       expect(offered(body).map((tool: Json) => tool.name)).toContain("computer_v2_status");
       assertToolContinuation(body, terminalCall!, toolMarker);
       assertToolContinuation(body, dynamicCall!, dynamicMarker);
+      for (const item of [commentary, terminalFinal, nativeFinal]) assertAssistantPhase(body, item);
       return [message("Cold resume complete")];
     });
     await rpc.turn(threadID, "Continue after reopening the private fixture.");
 
     plans.push(body => {
       assertRules(body, rules); expect(offered(body)).toHaveLength(0);
+      const prompt = body.input.at(-1);
+      expect(prompt.role).toBe("user");
+      expect(prompt.content).toEqual([{ type: "input_text", text: rules.compact }]);
       return [message("Private fixture summary: terminal and native status completed. No action remains pending.")];
     });
     const compactStart = rpc.frames.length;
@@ -402,7 +463,13 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       await rpc.request("thread/compact/start", { threadId: threadID });
       await rpc.completed(threadID, compactStart);
     } finally { compacting = false; }
-    plans.push(body => { assertRules(body, rules); expect(offered(body).length).toBeGreaterThan(0); return [message("Post-compaction complete")]; });
+    plans.push(body => {
+      assertRules(body, rules); expect(offered(body).length).toBeGreaterThan(0);
+      expect(contains(body, rules.compact)).toBe(false);
+      const currentUser = body.input.filter((item: Json) => item.type === "message" && item.role === "user").at(-1);
+      expect(currentUser.content).toEqual([{ type: "input_text", text: "Continue after context maintenance." }]);
+      return [message("Post-compaction complete")];
+    });
     await rpc.turn(threadID, "Continue after context maintenance.");
 
     const history = Array.from({ length: 80 }, (_, i) => ({ type: "message", role: i % 2 ? "assistant" : "user",
@@ -440,13 +507,16 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
     expect(developerOverrideObserved).toHaveLength(2);
     expect(regularSchemaAssertions).toBe(9);
     expect(compactSchemaAssertions).toBe(1);
+    expect(nativeRequestKinds).toEqual(["turn", "turn", "turn", "turn", "turn", "compaction", "turn", "turn", "turn", "turn"]);
     console.log(JSON.stringify({ verified: true, sourceCommit: runtime.pin.sourceCommit, binarySHA256: runtime.binarySHA256,
       actualModelRequests: requests.length, builtinTerminalContinuation: true, dynamicToolContinuation: true,
       exactTerminalSchemasRetained: regularSchemaAssertions, noToolsCompactionRequests: compactSchemaAssertions,
-      coldResume: true, noToolsCompaction: true, postCompaction: true, syntheticHistoryMessages: 80,
+      explicitAssistantPhaseCurrentTurnAndColdResume: true,
+      coldResume: true, noToolsCompaction: true, exactAppCompactionPrompt: true, postCompaction: true, syntheticHistoryMessages: 80,
+      nativeRequestKindHeaderAndBodyAgree: true, nativeRequestKinds,
       coldResumeDeveloperOverrideObserved: developerOverrideObserved, coldResumeBaseOverrideObserved: true,
       fixtureThreadSandbox: "danger-full-access inside outbound-denying OS sandbox",
-      appLiteralSections: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "commandLine"],
+      appLiteralSections: ["nativeScope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"],
       modelSpecificSwiftBaseAdditionsNotInstantiated: true, realChatGPTBehavior: false, externalNetworkDenied: true }));
   } catch (error) {
     throw modelFailure ?? error;
