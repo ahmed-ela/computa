@@ -59,7 +59,8 @@ allowance with invalid JSON. After the failed session has an exact saved closed
 receipt, one fresh inference receives the same frozen canonical request plus a
 fixed truthful renderer reminder, under the original deadline and inference/byte
 budgets. Prior fulfilled tool results remain in canonical history; no failed
-reply text or call IDs are released, and no completed tool action is replayed.
+reply text or call IDs are released. The recovery path does not dispatch prior
+tool calls; accepted results remain in canonical history.
 Other failures, changed ownership/model/product state, uncertain cleanup and an
 already-spent allowance remain terminal. A deferred model check requires one
 fresh complete inspection with an unchanged classified body before recovery.
@@ -76,10 +77,29 @@ direct operation replay path. Failure-only resource diagnostics retain at most
 two strictly bounded public script-asset HTTP errors from the same inspection;
 missing/zero status is unknown, not a network-failure conclusion.
 
-Signed candidate261 build/install and live qualification remain pending. The
-planned checks are a fresh three-turn browser chain and a separate two-command
-terminal continuation control. Record recovery separately from a clean first
-pass and retain failed attempts; source checks do not establish live recovery.
+Installed signed test build261, source `dc9fafc7e1ba74c78591b7572bae6c1ade88e64b`,
+passed the attachment and same-chat ODE phases in 130.376s and 74.974s respectively
+(eight/two native calls; nine/three fully verified website responses). Its send
+phase failed after 297.433s: five native calls, seven website attempts, five
+released responses and two renderer failures. The first failure recovered once
+and filled the body; the following inference failed again and exhausted the
+allowance. The fixture had two GETs and zero POSTs. All started inferences closed.
+The separate two-command terminal control passed in 53.414s with three verified
+website responses. This establishes partial recovery, not reliable browser sends.
+
+A later Inspector experiment failed before any tool execution because page
+inspection timed out after debugger interaction. It captured no renderer error
+and is not a natural renderer failure or passing qualification. Manual cleanup
+closed the session; the fixture stopped and temporary Safari developer features
+were restored off. Original failed evidence remains preserved.
+
+Build262 adds an explicitly armed, passive private diagnostic of the renderer's
+committed error snapshot. Public source identifies the runner snapshot and
+lifecycle fields; no renderer methods are invoked and the diagnostic cannot
+authorize response acceptance, tools or recovery. It runs only after the existing
+full failure proof. Resource timing now also recognizes the current async chunk
+paths and modulepreloads; these observations do not prove module execution.
+The renderer root cause and installed262 qualification are still pending.
 
 ## Candidate148: one bounded ChatGPT format correction
 

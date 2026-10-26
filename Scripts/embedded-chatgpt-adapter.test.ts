@@ -2443,6 +2443,20 @@ describe('ChatGPT resource timing finite diagnostic', () => {
     expect(f.scheduledDelays.length).toBe(before.timers); expect(f.observers.length).toBe(before.observers);
     expect(JSON.stringify(diagnostic)).not.toContain('https:');
   });
+  test('failure timing includes current async renderer chunks and modulepreloads without inferring execution', async () => {
+    let now = 100.25;
+    const entries = [
+      ended('https://chatgpt.com/cdn/assets/async/641521.fd69f85d55.js', { initiatorType: 'script', responseStatus: 503 }),
+      ended('https://chatgpt.com/cdn/assets/633146.510c2d4c2a.js', { initiatorType: 'link', responseStatus: 200 }),
+      ended('https://chatgpt.com/cdn/assets/async/550464.48704311ca.js', { initiatorType: 'link', responseStatus: 0 })
+    ];
+    const { f, send } = await sent({ now: () => now, getEntriesByType: () => entries }); now = 200;
+    expect((await f.diagnose()).resourceTimingDiagnostic.scriptResources).toEqual({
+      count: 3, unknownStatusCount: 1, httpFailureCount: 1, failuresTruncated: false,
+      failures: [{ asset: '641521.fd69f85d55.js', responseStatus: 503, startOffsetMs: 1, durationMs: 50 }]
+    });
+    expect(send.clicks).toBe(1);
+  });
   test('public script resource projection rejects hostile names aliases and unapproved filenames', async () => {
     let now = 100.25;
     const names = ['https://private.example/cdn/assets/1.abcdef0123.js', 'https://chatgpt.com.evil.invalid/cdn/assets/1.abcdef0123.js',

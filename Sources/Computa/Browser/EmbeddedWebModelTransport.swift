@@ -1,6 +1,7 @@
 import AppKit
 import CoreFoundation
 import CryptoKit
+import Darwin
 import Foundation
 import OSLog
 @preconcurrency import WebKit
@@ -496,6 +497,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
+    private var rendererFailureDiagnosticDefaultsForTesting: UserDefaults?
+    private var rendererFailureDiagnosticSourceForTesting: String?
+    private var rendererFailureDiagnosticSinkForTesting: ((Data) -> Void)?
+
+    func setRendererFailureDiagnosticForTesting(defaults: UserDefaults, source: String?, sink: @escaping (Data) -> Void) {
+        rendererFailureDiagnosticDefaultsForTesting = defaults
+        rendererFailureDiagnosticSourceForTesting = source
+        rendererFailureDiagnosticSinkForTesting = sink
+    }
     #endif
 
     init(browser: EmbeddedBrowserSession, geminiPostBlockDiagnostic: Bool? = nil) {
@@ -1955,6 +1965,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        let original = observed["text"] as? String, let current = proven["text"] as? String,
                        original.utf8.elementsEqual(current.utf8),
                        (try? validatedModelEvidence(proven, session: session)) != nil {
+                        await captureArmedRendererFailureDiagnostic(session, deadline: deadline)
                         throw Failure.responseRenderingFailed
                     }
                 }
@@ -5032,6 +5043,155 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 Self.inspectionLog.error("submissionBody id=\(id, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
             }
         }
+    }
+
+    /// Explicitly armed, single-use troubleshooting only. This projection is
+    /// never response evidence and cannot change the error or recovery outcome.
+    private func captureArmedRendererFailureDiagnostic(_ session: Session, deadline: ContinuousClock.Instant) async {
+        let key = "ComputaRendererFailureDiagnosticExpiresAt"
+        #if DEBUG
+        let defaults = rendererFailureDiagnosticDefaultsForTesting ?? UserDefaults.standard
+        #else
+        let defaults = UserDefaults.standard
+        #endif
+        let now = Date().timeIntervalSince1970
+        guard let expiry = defaults.object(forKey: key) as? NSNumber,
+              CFGetTypeID(expiry) != CFBooleanGetTypeID(), expiry.doubleValue.isFinite,
+              expiry.doubleValue > now, expiry.doubleValue <= now + 600 else { return }
+        // Consume only after the caller's completed response and model proof.
+        defaults.removeObject(forKey: key)
+        #if DEBUG
+        let source = rendererFailureDiagnosticDefaultsForTesting == nil
+            ? Self.rendererFailureDiagnosticScript() : rendererFailureDiagnosticSourceForTesting
+        #else
+        let source = Self.rendererFailureDiagnosticScript()
+        #endif
+        guard !Task.isCancelled, let generation = session.documentGeneration,
+              let url = session.view.url, let script = source else { return }
+        let end = min(deadline, ContinuousClock.now + .milliseconds(500))
+        func current() -> Bool {
+            !Task.isCancelled && ContinuousClock.now < end && sessions[session.token] === session
+                && browser.webView(for: session.tabID) === session.view
+                && browser.documentGeneration(for: session.tabID) == generation
+                && session.view.url == url && session.currentSubmissionVerified && !session.pendingSubmission
+        }
+        guard current() else { return }
+        let result = EmbeddedScriptResult()
+        let data: Data
+        do {
+            data = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    result.install(continuation)
+                    result.setTimeout(Task { @MainActor in
+                        do { try await Task.sleep(until: end, clock: .continuous) }
+                        catch { return }
+                        result.complete(.failure(Failure.pageUnavailable))
+                    })
+                    session.view.callAsyncJavaScript(script, arguments: ["input": [
+                        "expectedURL": url.absoluteString, "expectedUserCount": session.sequence,
+                        "expectedResponseCount": session.baseline + 1]], in: nil, in: .page) { reply in
+                        guard case .success(let raw) = reply, let raw,
+                              let safe = Self.sanitizedRendererStateDiagnostic(raw),
+                              let encoded = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]),
+                              encoded.count <= 8_192 else {
+                            result.complete(.failure(Failure.pageUnavailable)); return
+                        }
+                        result.complete(.success(encoded))
+                    }
+                }
+            } onCancel: { result.complete(.failure(CancellationError())) }
+        } catch {
+            Self.inspectionLog.notice("rendererStateDiagnostic version=1 status=unavailable")
+            return
+        }
+        guard current(), let projection = try? JSONSerialization.jsonObject(with: data),
+              let sessionID = UUID(uuidString: session.token) else { return }
+        let captureID = UUID()
+        let record: [String: Any] = ["version": 1, "captureID": captureID.uuidString,
+            "sessionID": sessionID.uuidString, "sequence": session.sequence,
+            "capturedAt": ISO8601DateFormatter().string(from: Date()), "projection": projection]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), encoded.count <= 8_192 else { return }
+        #if DEBUG
+        if let sink = rendererFailureDiagnosticSinkForTesting { sink(encoded); return }
+        #endif
+        guard Self.saveRendererFailureDiagnostic(encoded, captureID: captureID) else { return }
+        Self.inspectionLog.notice("rendererStateDiagnostic version=1 status=saved captureID=\(captureID.uuidString, privacy: .public)")
+    }
+
+    nonisolated static func sanitizedRendererStateDiagnostic(_ raw: Any) -> [String: Any]? {
+        func keys(_ value: [String: Any], _ expected: [String]) -> Bool { Set(value.keys) == Set(expected) }
+        func integer(_ value: Any?, _ range: ClosedRange<Int>) -> Bool {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue else { return false }
+            return number.doubleValue >= Double(range.lowerBound) && number.doubleValue <= Double(range.upperBound)
+        }
+        func boolean(_ value: Any?) -> Bool { value.map { CFGetTypeID($0 as CFTypeRef) == CFBooleanGetTypeID() } == true }
+        func nullableBoolean(_ value: Any?) -> Bool { value is NSNull || boolean(value) }
+        let stages: Set<String> = ["host_error", "invalid_payload", "payload_too_large", "runtime_error", "callback_error",
+            "frame_load_error", "frame_timeout", "protocol_mismatch", "worker_start_error", "worker_timeout", "messenger_error", "other"]
+        func stage(_ value: Any?) -> Bool { value is NSNull || (value as? String).map(stages.contains) == true }
+        guard let value = raw as? [String: Any], integer(value["version"], 1...1), let status = value["status"] as? String else { return nil }
+        if status == "unavailable" {
+            let reasons: Set<String> = ["committed_runner_snapshot_missing", "context_mismatch", "copy_ambiguous", "copy_budget", "copy_missing",
+                "dom_budget", "dom_property_budget", "failure_body_mismatch", "failure_shape_mismatch", "fiber_cycle", "fiber_missing_or_ambiguous",
+                "message_scope_mismatch", "read_failed", "response_busy", "runner_ambiguous", "state_changed"]
+            guard keys(value, ["version", "status", "reason"]), let reason = value["reason"] as? String, reasons.contains(reason) else { return nil }
+            return value
+        }
+        guard status == "captured", keys(value, ["version", "status", "ancestorDepth", "snapshotVersion", "treeIsNull", "error", "lifecycle", "runnerDisposed", "frame"]),
+              integer(value["ancestorDepth"], 0...15), integer(value["snapshotVersion"], 1...1_000_000),
+              boolean(value["treeIsNull"]), value["treeIsNull"] as? Bool == true, nullableBoolean(value["runnerDisposed"]),
+              let error = value["error"] as? [String: Any], keys(error, ["name", "message", "messageTruncated", "publicStack", "stage"]),
+              let name = error["name"] as? String, name.range(of: #"\A[A-Za-z][A-Za-z0-9_]{0,63}\z"#, options: .regularExpression) != nil,
+              boolean(error["messageTruncated"]), stage(error["stage"]),
+              let stack = error["publicStack"] as? String, stack.utf8.count <= 512,
+              let lifecycle = value["lifecycle"] as? [String: Any],
+              keys(lifecycle, ["failureStage", "frameReady", "frameRecovering", "workerReady", "firstSnapshotSucceeded"]), stage(lifecycle["failureStage"]),
+              ["frameReady", "frameRecovering", "workerReady", "firstSnapshotSucceeded"].allSatisfy({ nullableBoolean(lifecycle[$0]) }),
+              let frame = value["frame"] as? [String: Any],
+              keys(frame, ["readyResolved", "disposed", "retired", "retriedPreReadyFrame", "moduleErrorPresent", "policyDenied"]),
+              ["readyResolved", "disposed", "retired", "retriedPreReadyFrame", "policyDenied"].allSatisfy({ nullableBoolean(frame[$0]) }),
+              boolean(frame["moduleErrorPresent"]) else { return nil }
+        if let message = error["message"] as? String {
+            guard message.utf8.count <= 512, !message.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+        } else if !(error["message"] is NSNull) { return nil }
+        let frames = stack.isEmpty ? [] : stack.components(separatedBy: "\n")
+        let publicFrame = #"\Ahttps://(?:chatgpt\.com/cdn/assets/(?:async/)?[0-9]{1,6}\.[0-9a-f]{10}\.js|cdn\.platform\.openai\.com/deployments/dil/v[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,128}\.(?:js|html)):[0-9]{1,7}:[0-9]{1,7}\z"#
+        guard frames.count <= 4, frames.allSatisfy({ $0.range(of: publicFrame, options: .regularExpression) != nil }) else { return nil }
+        return value
+    }
+
+    private static func saveRendererFailureDiagnostic(_ data: Data, captureID: UUID) -> Bool {
+        let manager = FileManager.default
+        guard let support = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return false }
+        let directory = support.appendingPathComponent("ComputaRendererFailureDiagnostic", isDirectory: true)
+        do {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let attributes = try manager.attributesOfItem(atPath: directory.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                  (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid() else { return false }
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            let path = directory.appendingPathComponent(captureID.uuidString + ".json").path
+            let descriptor = Darwin.open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+            guard descriptor >= 0 else { return false }
+            defer { Darwin.close(descriptor) }
+            let written = data.withUnsafeBytes { bytes in Darwin.write(descriptor, bytes.baseAddress, bytes.count) }
+            guard written == data.count else { try? manager.removeItem(atPath: path); return false }
+            return true
+        } catch { return false }
+    }
+
+    private static func rendererFailureDiagnosticScript() -> String? {
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "chatgpt-renderer-failure-diagnostic", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8), source.utf8.count <= 32_768 { return source }
+        }
+        return nil
     }
 
     private func script(for provider: Provider) -> String? {

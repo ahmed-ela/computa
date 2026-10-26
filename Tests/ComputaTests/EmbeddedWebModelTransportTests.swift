@@ -13022,3 +13022,81 @@ extension EmbeddedWebModelTransportTests {
         }
     }
 }
+
+extension EmbeddedWebModelTransportTests {
+    func testRendererStateDiagnosticArmIsOptionalFiniteAndSingleUse() async throws {
+        let key = "ComputaRendererFailureDiagnosticExpiresAt"
+        for kind in ["absent", "boolean", "expired", "too_far", "missing_source", "armed"] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Private diagnostic does not authorize a response")
+            defer { fixture.shutdown() }
+            try await installRendererRecoveryFailureFixture(view)
+            let suite = "ComputaRendererDiagnosticTests." + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            switch kind {
+            case "boolean": defaults.set(true, forKey: key)
+            case "expired": defaults.set(Date().timeIntervalSince1970 - 1, forKey: key)
+            case "too_far": defaults.set(Date().timeIntervalSince1970 + 3_600, forKey: key)
+            case "missing_source", "armed": defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
+            default: break
+            }
+            var captures: [Data] = []
+            fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+                source: kind == "missing_source" ? nil : "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; return {version:1,status:'unavailable',reason:'committed_runner_snapshot_missing'};") { captures.append($0) }
+            for _ in 0..<2 {
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("The failure must remain terminal") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseRenderingFailed, kind) }
+            }
+            let calls = try await evaluate(view, "return window.fixtureRendererDiagnosticCalls||0;") as? Int
+            XCTAssertEqual(calls, kind == "armed" ? 1 : 0, kind)
+            XCTAssertEqual(captures.count, kind == "armed" ? 1 : 0, kind)
+            if ["armed", "missing_source"].contains(kind) { XCTAssertNil(defaults.object(forKey: key)) }
+            if let capture = captures.first {
+                XCTAssertLessThanOrEqual(capture.count, 8_192)
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: capture) as? [String: Any])
+                XCTAssertEqual(record["sessionID"] as? String, UUID(uuidString: token)?.uuidString)
+                XCTAssertEqual(record["sequence"] as? Int, 1)
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererStateDiagnosticTimeoutDoesNotChangeFailureOrRepeatPageWork() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "A diagnostic timeout is not an inference retry")
+        defer { fixture.shutdown() }
+        try await installRendererRecoveryFailureFixture(view)
+        let suite = "ComputaRendererDiagnosticTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "ComputaRendererFailureDiagnosticExpiresAt"
+        defaults.set(Date().timeIntervalSince1970 + 60, forKey: key)
+        var captures: [Data] = []
+        fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+            source: "window.fixtureRendererDiagnosticCalls=(window.fixtureRendererDiagnosticCalls||0)+1; await new Promise(()=>{}); return null;") { captures.append($0) }
+        let began = ContinuousClock.now
+        do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Original renderer failure expected") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseRenderingFailed) }
+        let elapsed = ContinuousClock.now - began
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(450))
+        XCTAssertLessThan(elapsed, .seconds(2), "The diagnostic must not extend to the ordinary30s inspection budget")
+        XCTAssertTrue(captures.isEmpty); XCTAssertNil(defaults.object(forKey: key))
+        let calls = try await evaluate(view, "return window.fixtureRendererDiagnosticCalls||0;") as? Int
+        XCTAssertEqual(calls, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testRendererStateDiagnosticSanitizerRejectsArbitraryFieldsAndInvalidTypes() {
+        let valid: [String: Any] = ["version": 1, "status": "unavailable", "reason": "context_mismatch"]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(valid))
+        for mutation: [String: Any] in [valid.merging(["pageText": "PRIVATE_SENTINEL"], uniquingKeysWith: { _, new in new }),
+            ["version": true, "status": "unavailable", "reason": "context_mismatch"],
+            ["version": 1, "status": "unavailable", "reason": "PRIVATE_SENTINEL"],
+            ["version": 1, "status": "captured", "error": "PRIVATE_SENTINEL"]] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(mutation))
+        }
+    }
+}

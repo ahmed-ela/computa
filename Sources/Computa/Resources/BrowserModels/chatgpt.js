@@ -4007,8 +4007,10 @@ function chatGPTResourceTimingDiagnostic(phase) {
           : url.pathname === '/backend-api/f/conversation/prepare' ? 'preparation' : null;
         // A public chunk basename is the only retained resource identifier.
         // Reject aliases, queries and fragments instead of normalizing them.
-        if (scripts && entry.initiatorType === 'script' && entry.name === url.origin + url.pathname) {
-          asset = /^\/cdn\/assets\/([0-9]{1,6}\.[0-9a-f]{10}\.js)$/.exec(url.pathname)?.[1] || null;
+        // Current renderer chunks live under async/ and modulepreload entries
+        // use the link initiator. Neither observation proves module execution.
+        if (scripts && ['script', 'link'].includes(entry.initiatorType) && entry.name === url.origin + url.pathname) {
+          asset = /^\/cdn\/assets\/(?:async\/)?([0-9]{1,6}\.[0-9a-f]{10}\.js)$/.exec(url.pathname)?.[1] || null;
         }
       } catch { continue; }
       if (asset) {
