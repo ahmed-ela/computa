@@ -248,6 +248,8 @@ final class AppStateQueueTests: XCTestCase {
         let (state, runtime) = fixture()
         await runtime.rejectNextSubmissionBeforeDispatch()
         _ = await state.submitOrQueue(prompt: "Keep this message", toTaskID: taskID)
+        XCTAssertEqual(state.selectedTask?.status, .failed)
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt was not delivered")
         XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
         XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, false)
         XCTAssertTrue(state.canChangeModel(for: taskID))

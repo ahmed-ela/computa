@@ -23,6 +23,17 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
             XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse)
             XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "unsupported_website_response")
         }
+        // This unit fixture calls the server directly. Supply the same normal
+        // terminal-turn finish handoff that CodexAppServerRuntime performs;
+        // it closes the existing lease without retrying the failed inference.
+        let beforeCleanup = await base.ledger()
+        XCTAssertEqual(beforeCleanup.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll"])
+        let issues = await server.fixtureFinish(taskID: "email-card-terminal")
+        XCTAssertTrue(issues.isEmpty)
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.receiptSaved, true)
         let ledger = await base.ledger()
         XCTAssertEqual(ledger.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
         let prompts = await base.prompts()

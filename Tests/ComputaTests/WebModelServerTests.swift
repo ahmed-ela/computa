@@ -458,14 +458,15 @@ final class WebModelServerTests: XCTestCase {
                 replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
             let blocked = root.appendingPathComponent("cleanup")
+            let receiptTransport = ReceiptBlockingFixtureTransport(base: base, blockedDirectory: blocked)
             if persistence {
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(
-                    ReceiptBlockingFixtureTransport(base: base, blockedDirectory: blocked), defaultChatChoice: syntheticChatGPTChoice))
+                    receiptTransport, defaultChatChoice: syntheticChatGPTChoice))
             } else { await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base)) }
             let request = try turnRequest(input: [["role": "user", "content": "A tool call requiring durable closure"]], model: syntheticChatGPTModelID)
             do { _ = try await server.fixtureInfer(request, taskID: "fresh-cleanup"); XCTFail("Unconfirmed/unsaved closure must withhold tool output") }
             catch { }
-            if persistence { try FileManager.default.removeItem(at: blocked) }
+            if persistence { try await receiptTransport.restoreReceiptDirectory() }
             let receipt = await server.retryWebsiteSessionCleanup(taskID: websiteInferenceFixtureTaskID("fresh-cleanup"),
                 runtimeGeneration: websiteInferenceFixtureGeneration)
             XCTAssertEqual(receipt.outcome, .closed); XCTAssertTrue(receipt.receiptSaved)
@@ -1333,7 +1334,7 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(before.filter { $0 == "webProviderSend" }.count, 2)
         XCTAssertEqual(before.filter { $0 == "webProviderFinish" }.count, 1)
         do { _ = try await server.fixtureInfer(turnRequest(input: next), taskID: "closed-unsaved"); XCTFail("No retry while cleanup persistence is pending") } catch { }
-        try FileManager.default.removeItem(at: blocked)
+        try await transport.restoreReceiptDirectory()
         let issues = await server.fixtureFinish(taskID: "closed-unsaved")
         XCTAssertTrue(issues.isEmpty)
         let after = await base.operations()
@@ -1420,7 +1421,7 @@ final class WebModelServerTests: XCTestCase {
         } catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.cleanupFailed.localizedDescription) }
         let before = await base.operations()
         XCTAssertEqual(before, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
-        try FileManager.default.removeItem(at: blocked)
+        try await transport.restoreReceiptDirectory()
         let issues = await server.fixtureFinish(taskID: "persistence")
         XCTAssertTrue(issues.isEmpty)
         let savedReceipts = await server.latestCleanupReceipts()
@@ -2264,9 +2265,32 @@ private actor ReceiptBlockingFixtureTransport: WebModelTransport {
         let value = try await base.request(operation: operation, params: params)
         if operation == "webProviderFinish", !blocked {
             blocked = true
-            try Data("owned-fixture-blocks-first-receipt".utf8).write(to: blockedDirectory)
+            // Admission now reserves both journal directories before Start.
+            // Preserve that state while making only receipt persistence fail;
+            // throwing during Finish would simulate a different physical result.
+            if FileManager.default.fileExists(atPath: blockedDirectory.path) {
+                try FileManager.default.moveItem(at: blockedDirectory, to: savedDirectory)
+            }
+            do { try blocker.write(to: blockedDirectory) }
+            catch {
+                if FileManager.default.fileExists(atPath: savedDirectory.path) {
+                    try? FileManager.default.moveItem(at: savedDirectory, to: blockedDirectory)
+                }
+                throw error
+            }
         }
         return value
+    }
+    private var savedDirectory: URL { blockedDirectory.appendingPathExtension("before-fixture-block") }
+    private var blocker: Data { Data("owned-fixture-blocks-first-receipt".utf8) }
+    func restoreReceiptDirectory() throws {
+        guard blocked, try Data(contentsOf: blockedDirectory) == blocker else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try FileManager.default.removeItem(at: blockedDirectory)
+        if FileManager.default.fileExists(atPath: savedDirectory.path) {
+            try FileManager.default.moveItem(at: savedDirectory, to: blockedDirectory)
+        }
     }
 }
 

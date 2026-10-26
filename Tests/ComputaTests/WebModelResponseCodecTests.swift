@@ -1253,7 +1253,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                 expectedToolDefinitions: XCTUnwrap(expected["tools"] as? [[String: Any]]))
             XCTAssertEqual(prepared.runtimeInstructions, ComputaAgentInstructions.webInferenceContract(
                 offeredFunctions: ["browser_open": "browser_open", "apply_patch": "apply_patch"],
-                customToolNames: ["apply_patch"], includedInstructionText: trusted), name)
+                customToolNames: ["apply_patch"], includedInstructionText: trusted,
+                compactNativeContext: true), name)
             XCTAssertEqual(prepared.offeredToolNames, ["browser_open", "apply_patch"])
             XCTAssertTrue(prepared.runtimeInstructions.contains(ComputaAgentInstructions.codeEditing) == trusted.isEmpty, name)
             XCTAssertTrue(prepared.runtimeInstructions.contains(ComputaAgentInstructions.builtInBrowser) == trusted.isEmpty, name)

@@ -1728,7 +1728,12 @@ final class AppState {
                 guard let currentIndex = tasks.firstIndex(where: { $0.id == taskID }) else {
                     return .uncertain(error.localizedDescription)
                 }
-                tasks[currentIndex].status = .waiting
+                // Submission can fail before a native turn exists, so no later
+                // taskStatusChanged event will necessarily correct this state.
+                // A user cancellation remains paused; other terminal errors
+                // must not look like a task that is still waiting to run.
+                let cancelled = error is CancellationError
+                tasks[currentIndex].status = cancelled ? .waiting : .failed
                 let rejectedBeforeDispatch: Bool
                 if case .embeddedRequired? = error as? WebModelServer.Failure {
                     rejectedBeforeDispatch = true
@@ -1741,7 +1746,8 @@ final class AppState {
                 } else { rejectedBeforeDispatch = false }
                 let failure = TimelineEntry(
                     kind: .system,
-                    title: rejectedBeforeDispatch ? "Prompt was not delivered" : "Prompt delivery unconfirmed",
+                    title: rejectedBeforeDispatch ? "Prompt was not delivered"
+                        : cancelled ? "Prompt delivery unconfirmed" : "Agent error",
                     body: error.localizedDescription,
                     activityGroupID: entry.id
                 )

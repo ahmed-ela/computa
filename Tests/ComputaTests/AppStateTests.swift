@@ -590,7 +590,7 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testRejectedTurnKeepsConnectedTransportAndReturnsTaskToWaiting() async {
+    func testRejectedTurnKeepsConnectedTransportAndMarksTaskFailedWithoutClaimingNonDelivery() async {
         let task = AgentTask(
             id: "thread-live-2",
             title: "Offline model",
@@ -609,10 +609,32 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.queuedPrompts[task.id]?.first?.status, .failed)
         XCTAssertTrue(state.pausedQueueTaskIDs.contains(task.id))
         XCTAssertEqual(state.connectionState, .connected(provider: "Rejecting runtime"))
-        XCTAssertEqual(state.selectedTask?.status, .waiting)
-        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt delivery unconfirmed")
+        XCTAssertEqual(state.selectedTask?.status, .failed)
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Agent error")
         XCTAssertEqual(state.queuedPrompts[task.id]?.first?.deliveryUncertain, true,
                        "A generic runtime error does not prove that delivery never occurred")
+    }
+
+    @MainActor
+    func testCancelledSubmissionRemainsWaitingAndRequiresExplicitQueueRecovery() async {
+        let task = AgentTask(id: "cancelled-submission", title: "Cancelled", summary: "Before",
+                             status: .draft, workspace: "/tmp", model: "Local provider")
+        let runtime = RejectingRuntime(tasks: [task], cancelSubmission: true)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: isolatedTestPreferences())
+        await state.startRuntime()
+
+        let accepted = await state.submitOrQueue(prompt: "Cancel this submission", toTaskID: task.id)
+
+        XCTAssertTrue(accepted, "The accepted local prompt is retained for explicit recovery")
+        XCTAssertEqual(state.selectedTask?.status, .waiting)
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt delivery unconfirmed")
+        XCTAssertEqual(state.queuedPrompts[task.id]?.first?.status, .failed)
+        XCTAssertEqual(state.queuedPrompts[task.id]?.first?.deliveryUncertain, true,
+                       "Cancellation alone cannot prove the remote turn was never accepted")
+        XCTAssertTrue(state.pausedQueueTaskIDs.contains(task.id))
+        XCTAssertFalse(state.activeTurnTaskIDs.contains(task.id))
+        XCTAssertFalse(state.isBusy(taskID: task.id))
+        XCTAssertEqual(state.connectionState, .connected(provider: runtime.providerName))
     }
 
     @MainActor
@@ -1017,6 +1039,7 @@ private struct RejectingRuntime: AgentRuntimeClient {
     }
 
     let tasks: [AgentTask]
+    var cancelSubmission = false
     let providerName = "Rejecting runtime"
 
     func loadTasks() async throws -> [AgentTask] { tasks }
@@ -1026,6 +1049,7 @@ private struct RejectingRuntime: AgentRuntimeClient {
     }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
+        if cancelSubmission { throw CancellationError() }
         throw TurnRejected()
     }
 
