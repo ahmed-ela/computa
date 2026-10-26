@@ -2596,3 +2596,21 @@ Build 268 samples the current expression hash and public caller at four fixed
 call-count checkpoints. Periodic samples are explicitly distinguished from
 slow-call records; they retain the same finite diagnostic boundaries and
 provide no response or tool authority.
+
+### Build 268: one instrumented pass, attribution still pending
+
+The preserved maintenance phase completed in 40.096 seconds, followed by a
+successful synthetic mailbox task in 136.047 seconds. All eight website
+inferences were verified and closed, with no inference failures or correction
+retry. Six native browser calls produced exactly one local POST with the
+requested recipient, subject and body; the current tool result and final
+answer reported its matching receipt. Independent audit verified the delivery,
+exact literals, journal hashes and fixture cleanup. This qualifies one armed
+run only; the source change added sampling and is not a root-cause fix.
+
+Success did not trigger the failure-only page diagnostic, so its caller
+samples were not retained. The chat is now compacted: precompaction trace
+history is preserved, but later continuations are not the identical failing
+maintenance case. Build 269 adds a separate, explicit, one-shot successful-
+response diagnostic arm to retain finite regex samples during intermittent
+success, while leaving normal response authority and failure capture intact.

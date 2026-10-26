@@ -104,6 +104,28 @@ describe('private ChatGPT renderer failure diagnostic', () => {
     state.records = []; expect(f.run().regex).toEqual({ version: 3, stopReason: 'limit', callCount: 100, totalDurationMs: 5500, maxDurationMs: 5430, saturated: false, records: [] });
     state.expiresAtUnixSeconds = Date.now() / 1000 - 1; expect(f.run().regex).toBeUndefined();
   });
+  test('keeps regex-only success diagnostics separate from renderer failure authority', () => {
+    const f = fixture(), expiry = Date.now() / 1000 + 100;
+    const regex = {version:3,stopReason:'active',records:[],callCount:250000,totalDurationMs:2300,maxDurationMs:21,saturated:false};
+    const state: any = {...regex,expiresAtUnixSeconds:expiry};
+    let snapshotCalls = 0;
+    Object.defineProperty(state,'snapshot',{value:()=>{snapshotCalls++;throw new Error('Never invoke page snapshot')}});
+    Object.defineProperty(f.window,'__computaRendererRegexDiagnosticV1',{value:state});
+    f.leaf.text = 'Successful answer content must never be projected'; f.copy.connected = false;
+    const mode = {mode:'regex',expectedExpiryUnixSeconds:expiry};
+    expect(f.run(mode)).toEqual({version:1,status:'regex_captured',regex});
+    expect(snapshotCalls).toBe(0); expect(f.calls()).toBe(0);
+    expect(f.run().status).toBe('unavailable');
+    for (const wrong of [{...mode,expectedExpiryUnixSeconds:expiry+1},{...mode,expectedUserCount:2},
+      {...mode,expectedResponseCount:2},{...mode,expectedURL:'https://chatgpt.com/c/changed'},
+      {...mode,mode:'unknown'},{mode:'regex'},{...mode,unexpected:true}]) {
+      expect(f.run(wrong).status).toBe('unavailable');
+    }
+    const stop = new Element('BUTTON',{'data-testid':'stop-button'},'Stop'); f.assistant.append(stop);
+    expect(f.run(mode).reason).toBe('response_busy'); stop.connected = false;
+    state.expiresAtUnixSeconds = Date.now()/1000-1;
+    expect(f.run({...mode,expectedExpiryUnixSeconds:state.expiresAtUnixSeconds}).reason).toBe('regex_unavailable');
+  });
   test('includes only current finite startup records and keeps an unarmed capture unchanged', () => {
     const f = fixture(); expect(f.run().startup).toBeUndefined();
     const event = { realm: 'worker', operation: 'harden_worker', phase: 'returned', artifactId: 'DrCNBd66',

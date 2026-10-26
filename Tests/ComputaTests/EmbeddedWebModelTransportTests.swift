@@ -13158,6 +13158,189 @@ extension EmbeddedWebModelTransportTests {
             "publicStack": "https://chatgpt.com/cdn/assets/async/123456.0123456789.js:1:456"]]]
     }
 
+    private func rendererSuccessDiagnosticFixtureSource(delay: Int = 0) throws -> String {
+        let projection: [String: Any] = ["version": 1, "status": "regex_captured", "regex": rendererRegexDiagnosticFixture()]
+        let json = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: projection), encoding: .utf8))
+        return "window.fixtureRendererSuccessCalls=(window.fixtureRendererSuccessCalls||0)+1;"
+            + "await new Promise(resolve=>setTimeout(resolve,\(delay))); return \(json);"
+    }
+
+    func testRendererSuccessDiagnosticRequiresMatchingFiniteSecondArmAndIsSingleUse() async throws {
+        let failureKey = "ComputaRendererFailureDiagnosticExpiresAt", successKey = "ComputaRendererSuccessDiagnosticExpiresAt"
+        for kind in ["absent", "mismatch", "boolean", "expired", "too_far", "missing_source", "armed"] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Success diagnostic arm fixture \(kind)")
+            defer { fixture.shutdown() }
+            let suite = "ComputaRendererSuccessTests." + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let expiry = Date().timeIntervalSince1970 + (kind == "expired" ? -1 : kind == "too_far" ? 3_600 : 60)
+            defaults.set(expiry, forKey: failureKey)
+            if kind != "absent" { defaults.set(kind == "mismatch" ? expiry - 1 : expiry, forKey: successKey) }
+            if kind == "boolean" { defaults.set(true, forKey: successKey) }
+            var captures: [Data] = []
+            fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+                source: kind == "missing_source" ? nil : try rendererSuccessDiagnosticFixtureSource()) { captures.append($0) }
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+            try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            let calls = try await evaluate(view, "return window.fixtureRendererSuccessCalls||0;") as? Int
+            XCTAssertEqual(calls, kind == "armed" ? 1 : 0, kind)
+            XCTAssertEqual(captures.count, kind == "armed" ? 1 : 0, kind)
+            XCTAssertEqual(defaults.double(forKey: failureKey), expiry, "Success does not consume the failure arm")
+            if ["armed", "missing_source"].contains(kind) { XCTAssertNil(defaults.object(forKey: successKey)) }
+            if let capture = captures.first {
+                XCTAssertLessThanOrEqual(capture.count, 4_096)
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: capture) as? [String: Any])
+                XCTAssertEqual(record["kind"] as? String, "verified_response_regex")
+                XCTAssertEqual(record["sessionID"] as? String, UUID(uuidString: token)?.uuidString)
+                XCTAssertEqual(record["sequence"] as? Int, 1)
+                XCTAssertEqual(record["documentGeneration"] as? String,
+                    fixture.browser.documentGeneration(for: try XCTUnwrap(fixture.createdTabs.last))?.uuidString)
+                XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererSuccessDiagnostic(record["projection"]))
+                XCTAssertNil(complete["projection"])
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererSuccessDiagnosticTimeoutOrInvalidDataDoesNotChangeVerifiedResponse() async throws {
+        for timeout in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Discard a failed optional success diagnostic")
+            defer { fixture.shutdown() }
+            let suite = "ComputaRendererSuccessTests." + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let expiry = Date().timeIntervalSince1970 + 60
+            defaults.set(expiry, forKey: "ComputaRendererFailureDiagnosticExpiresAt")
+            defaults.set(expiry, forKey: "ComputaRendererSuccessDiagnosticExpiresAt")
+            var captures: [Data] = []
+            fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+                source: timeout ? try rendererSuccessDiagnosticFixtureSource(delay: 1_000)
+                    : "window.fixtureRendererSuccessCalls=1; return {version:1,status:'regex_captured',regex:{text:'PRIVATE_SENTINEL'}};") { captures.append($0) }
+            try await Task.sleep(for: .milliseconds(1_650))
+            let began = ContinuousClock.now
+            let complete = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            let elapsed = ContinuousClock.now - began
+            XCTAssertEqual(complete["state"] as? String, "complete")
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+            if timeout { XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(450)) }
+            XCTAssertLessThan(elapsed, .milliseconds(900), "Only the optional500ms read budget may delay completion")
+            XCTAssertTrue(captures.isEmpty)
+            XCTAssertNil(defaults.object(forKey: "ComputaRendererSuccessDiagnosticExpiresAt"))
+            let calls = try await evaluate(view, "return window.fixtureRendererSuccessCalls||0;") as? Int
+            XCTAssertEqual(calls, 1)
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererSuccessDiagnosticDiscardsCancelledOrClosedViewRead() async throws {
+        for cancelled in [true, false] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Diagnostic cannot preserve stale completion proof")
+            defer { fixture.shutdown() }
+            let suite = "ComputaRendererSuccessTests." + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let expiry = Date().timeIntervalSince1970 + 60
+            defaults.set(expiry, forKey: "ComputaRendererFailureDiagnosticExpiresAt")
+            defaults.set(expiry, forKey: "ComputaRendererSuccessDiagnosticExpiresAt")
+            var captures: [Data] = []
+            fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+                source: try rendererSuccessDiagnosticFixtureSource(delay: 300)) { captures.append($0) }
+            try await Task.sleep(for: .milliseconds(1_650))
+            let polling = Task { @MainActor in
+                _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            }
+            defer { polling.cancel() }
+            let limit = ContinuousClock.now + .seconds(2)
+            while try await evaluate(view, "return window.fixtureRendererSuccessCalls||0;") as? Int != 1 {
+                guard ContinuousClock.now < limit else { XCTFail("Success read was not dispatched"); return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            if cancelled { polling.cancel() }
+            else { fixture.browser.closeTab(try XCTUnwrap(fixture.createdTabs.last)) }
+            do { _ = try await polling.value; XCTFail("Cancelled or stale proof must not publish") }
+            catch {
+                if cancelled { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+            }
+            XCTAssertTrue(captures.isEmpty)
+            XCTAssertNil(defaults.object(forKey: "ComputaRendererSuccessDiagnosticExpiresAt"))
+            if cancelled { _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token]) }
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererSuccessDiagnosticWaitsForOrdinaryCompletionProof() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Diagnostic requires the ordinary completion footer")
+        defer { fixture.shutdown() }
+        let suite = "ComputaRendererSuccessTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let expiry = Date().timeIntervalSince1970 + 60
+        defaults.set(expiry, forKey: "ComputaRendererFailureDiagnosticExpiresAt")
+        defaults.set(expiry, forKey: "ComputaRendererSuccessDiagnosticExpiresAt")
+        var captures: [Data] = []
+        fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults,
+            source: try rendererSuccessDiagnosticFixtureSource()) { captures.append($0) }
+        _ = try await evaluate(view, "document.querySelector('button[aria-label=\"Copy\"]').disabled=true; return true;")
+        try await Task.sleep(for: .milliseconds(1_650))
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertTrue(captures.isEmpty)
+        XCTAssertEqual(defaults.double(forKey: "ComputaRendererSuccessDiagnosticExpiresAt"), expiry)
+        let calls = try await evaluate(view, "return window.fixtureRendererSuccessCalls||0;") as? Int
+        XCTAssertEqual(calls, 0)
+        _ = try await evaluate(view, "document.querySelector('button[aria-label=\"Copy\"]').disabled=false; return true;")
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(captures.count, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testRendererSuccessDiagnosticSchemaCannotBeUsedAsFailureEvidence() {
+        let valid: [String: Any] = ["version": 1, "status": "regex_captured", "regex": rendererRegexDiagnosticFixture()]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererSuccessDiagnostic(valid))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererStateDiagnostic(valid))
+        for change: [String: Any] in [["version": true], ["status": "captured"], ["status": "unavailable"],
+            ["text": "PRIVATE_SENTINEL"], ["regex": ["input": "PRIVATE_SENTINEL"]]] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererSuccessDiagnostic(
+                valid.merging(change, uniquingKeysWith: { _, next in next })))
+        }
+    }
+
+    func testRendererSuccessDiagnosticCannotAmendAlreadyAcceptedResponse() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Freeze the verified response before optional diagnostics")
+        defer { fixture.shutdown() }
+        let suite = "ComputaRendererSuccessTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let expiry = Date().timeIntervalSince1970 + 60
+        defaults.set(expiry, forKey: "ComputaRendererFailureDiagnosticExpiresAt")
+        defaults.set(expiry, forKey: "ComputaRendererSuccessDiagnosticExpiresAt")
+        var captures: [Data] = []
+        fixture.transport.setRendererFailureDiagnosticForTesting(defaults: defaults, source: """
+            document.querySelector('[data-markdown-text-style="assistant-message"]').textContent = 'CHANGED_AFTER_ACCEPTANCE';
+            document.querySelector('button[aria-label="Copy"]').disabled = true;
+            window.fixtureModelSelect(window.fixtureModelInitialLabel);
+            \(try rendererSuccessDiagnosticFixtureSource())
+            """) { captures.append($0) }
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        let changed = try await evaluate(view, "return document.querySelector('[data-markdown-text-style=\"assistant-message\"]').textContent;") as? String
+        XCTAssertEqual(changed, "CHANGED_AFTER_ACCEPTANCE")
+        XCTAssertEqual(captures.count, 1, "Diagnostic data may be kept but cannot amend the already accepted output")
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     private func rendererStateWithRegexFixture(_ regex: Any) -> [String: Any] {
         ["version": 1, "status": "captured", "ancestorDepth": 0, "snapshotVersion": 1,
          "treeIsNull": true, "runnerDisposed": false,

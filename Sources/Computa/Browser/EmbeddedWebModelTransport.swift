@@ -2104,6 +2104,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                             session.responseProfile?.mark(.transportComplete)
                             logModelNativeLifecycle(session, phase: .completion)
+                            // Freeze the ordinary accepted response before an
+                            // optional diagnostic read can yield. The read has
+                            // no authority to amend this completed snapshot.
+                            let completedResponse = try snapshot(session)
+                            let diagnosticGeneration = session.documentGeneration
+                            let diagnosticURL = session.view.url
+                            let diagnosticSequence = session.sequence
+                            if await captureArmedRendererSuccessDiagnostic(session, deadline: deadline) {
+                                // The optional read cannot make a proof survive
+                                // cancellation or a changed native owner/document.
+                                try Task.checkCancellation()
+                                try checkProviderGate(session)
+                                guard sessions[session.token] === session,
+                                      browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+                                guard browser.documentGeneration(for: session.tabID) == diagnosticGeneration else {
+                                    throw Failure.ownershipFailure(.documentGenerationAfter)
+                                }
+                                guard session.view.url == diagnosticURL else { throw Failure.ownershipFailure(.routeAfter) }
+                                guard session.state == "complete", session.sequence == diagnosticSequence,
+                                      session.currentSubmissionVerified, !session.pendingSubmission,
+                                      session.currentSubmission?.sequence == diagnosticSequence else {
+                                    throw Failure.ownershipFailure(.javaScriptSubmission)
+                                }
+                            }
+                            return completedResponse
                         }
                     }
                 }
@@ -5078,6 +5103,94 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               CFGetTypeID(expiry) != CFBooleanGetTypeID(), expiry.doubleValue.isFinite,
               expiry.doubleValue > now, expiry.doubleValue <= now + 600 else { return nil }
         return expiry.doubleValue
+    }
+
+    /// A second explicit arm permits one successful-response diagnostic. Its
+    /// result is never response evidence; invalid or late data is discarded.
+    /// Returns only whether a page read was dispatched, for native revalidation.
+    private func captureArmedRendererSuccessDiagnostic(_ session: Session, deadline: ContinuousClock.Instant) async -> Bool {
+        let key = "ComputaRendererSuccessDiagnosticExpiresAt"
+        #if DEBUG
+        let defaults = rendererFailureDiagnosticDefaultsForTesting ?? UserDefaults.standard
+        #else
+        let defaults = UserDefaults.standard
+        #endif
+        guard session.provider == .chatgpt, !session.isDiscovery, session.state == "complete",
+              session.modelChoice != nil, session.modelSelectionVerified, !session.modelVerificationPending,
+              session.modelEvidence != nil,
+              let expiry = rendererDiagnosticExpiry(),
+              let successExpiry = defaults.object(forKey: key) as? NSNumber,
+              CFGetTypeID(successExpiry) != CFBooleanGetTypeID(), successExpiry.doubleValue == expiry else { return false }
+        defaults.removeObject(forKey: key)
+        #if DEBUG
+        let source = rendererFailureDiagnosticDefaultsForTesting == nil
+            ? Self.rendererFailureDiagnosticScript() : rendererFailureDiagnosticSourceForTesting
+        #else
+        let source = Self.rendererFailureDiagnosticScript()
+        #endif
+        guard !Task.isCancelled, let generation = session.documentGeneration,
+              let url = session.view.url, let script = source else { return false }
+        let sequence = session.sequence
+        let end = min(deadline, ContinuousClock.now + .milliseconds(500))
+        func current() -> Bool {
+            !Task.isCancelled && ContinuousClock.now < end && Date().timeIntervalSince1970 < expiry
+                && rendererDiagnosticExpiry() == expiry && sessions[session.token] === session
+                && browser.webView(for: session.tabID) === session.view
+                && browser.documentGeneration(for: session.tabID) == generation
+                && session.view.url == url && session.state == "complete" && session.sequence == sequence
+                && session.currentSubmissionVerified && !session.pendingSubmission
+                && session.currentSubmission?.sequence == sequence
+        }
+        guard current() else { return false }
+        let result = EmbeddedScriptResult()
+        let data: Data
+        do {
+            data = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    result.install(continuation)
+                    result.setTimeout(Task { @MainActor in
+                        do { try await Task.sleep(until: end, clock: .continuous) }
+                        catch { return }
+                        result.complete(.failure(Failure.pageUnavailable))
+                    })
+                    session.view.callAsyncJavaScript(script, arguments: ["input": [
+                        "mode": "regex", "expectedURL": url.absoluteString,
+                        "expectedUserCount": sequence, "expectedResponseCount": session.baseline + 1,
+                        "expectedExpiryUnixSeconds": expiry]], in: nil, in: .page) { reply in
+                        guard case .success(let raw) = reply,
+                              let safe = Self.sanitizedRendererSuccessDiagnostic(raw),
+                              let encoded = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]) else {
+                            result.complete(.failure(Failure.pageUnavailable)); return
+                        }
+                        result.complete(.success(encoded))
+                    }
+                }
+            } onCancel: { result.complete(.failure(CancellationError())) }
+        } catch { return true }
+        guard current(), let projection = try? JSONSerialization.jsonObject(with: data),
+              let sessionID = UUID(uuidString: session.token) else { return true }
+        let captureID = UUID()
+        let record: [String: Any] = ["version": 1, "kind": "verified_response_regex",
+            "captureID": captureID.uuidString, "sessionID": sessionID.uuidString,
+            "documentGeneration": generation.uuidString, "sequence": sequence,
+            "capturedAt": ISO8601DateFormatter().string(from: Date()), "projection": projection]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+              encoded.count <= 4_096 else { return true }
+        #if DEBUG
+        if let sink = rendererFailureDiagnosticSinkForTesting { sink(encoded); return true }
+        #endif
+        if Self.saveRendererFailureDiagnostic(encoded, captureID: captureID) {
+            Self.inspectionLog.notice("rendererSuccessDiagnostic version=1 status=saved captureID=\(captureID.uuidString, privacy: .public)")
+        }
+        return true
+    }
+
+    nonisolated static func sanitizedRendererSuccessDiagnostic(_ raw: Any?) -> [String: Any]? {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "status", "regex"],
+              let version = value["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.doubleValue == 1, value["status"] as? String == "regex_captured",
+              let regex = value["regex"], validRendererRegexDiagnostic(regex) else { return nil }
+        return value
     }
 
     /// Explicitly armed, single-use troubleshooting only. This projection is

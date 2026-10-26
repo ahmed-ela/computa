@@ -1,6 +1,8 @@
 // Private, expiry-armed synthetic diagnostic. Evaluate once in WKContentWorld.page only
 // after native validates the current owned renderer failure and private arm.
-// input: { expectedURL, expectedResponseCount, expectedUserCount }.
+// Failure input: { expectedURL, expectedResponseCount, expectedUserCount }.
+// Separately armed success diagnostics add { mode: "regex", expectedExpiryUnixSeconds }.
+// The regex-only result is never accepted by the renderer-failure path.
 // No site functions, runner methods, accessors, writes, hooks, or network calls.
 return (() => {
   const unavailable = reason => ({ version: 1, status: 'unavailable', reason });
@@ -113,7 +115,11 @@ return (() => {
     } catch { return undefined; }
   };
   try {
-    if (!input || Object.keys(input).sort().join(',') !== 'expectedResponseCount,expectedURL,expectedUserCount'
+    const regexOnly = own(input, 'mode') === 'regex';
+    const expectedKeys = regexOnly ? 'expectedExpiryUnixSeconds,expectedResponseCount,expectedURL,expectedUserCount,mode'
+      : 'expectedResponseCount,expectedURL,expectedUserCount';
+    if (!input || Object.keys(input).sort().join(',') !== expectedKeys
+      || regexOnly && (typeof input.expectedExpiryUnixSeconds !== 'number' || !Number.isFinite(input.expectedExpiryUnixSeconds))
       || typeof input.expectedURL !== 'string' || input.expectedURL.length > 2048
       || document.URL !== input.expectedURL || location.origin !== 'https://chatgpt.com' || window !== window.top
       || !Number.isInteger(input.expectedResponseCount) || input.expectedResponseCount < 1 || input.expectedResponseCount > 64
@@ -136,6 +142,16 @@ return (() => {
       return unavailable('message_scope_mismatch');
     if ([...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible))
       return unavailable('response_busy');
+    if (regexOnly) {
+      const state = own(window, '__computaRendererRegexDiagnosticV1');
+      if (own(state, 'expiresAtUnixSeconds') !== input.expectedExpiryUnixSeconds) return unavailable('regex_unavailable');
+      const regex = regexProjection();
+      if (!regex) return unavailable('regex_unavailable');
+      if (document.URL !== input.expectedURL || !assistant.isConnected) return unavailable('state_changed');
+      // Native has already verified the response. This separate finite payload
+      // contains no answer text and supplies no completion or tool authority.
+      return { version: 1, status: 'regex_captured', regex };
+    }
     const body = assistant.getAttribute('data-markdown-text-style') === 'assistant-message' ? assistant
       : assistant.querySelector('[data-markdown-text-style="assistant-message"]')
         || assistant.querySelector('.markdown') || assistant.querySelector('[data-message-author-role="assistant"]')
