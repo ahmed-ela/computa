@@ -114,6 +114,12 @@ provider errors were projected into the same `Waiting` state as interruptions.
   correction attempt remains charged. Keep ownership, cancellation, correction
   deadlines and no-replay checks. A limit still stops execution; its persistent
   error tells the user to review earlier actions before continuing.
+- Refresh completion guidance after canonical history on every website response.
+  A final message ends the turn; an unfinished action is not a completed result.
+  Plans, summaries and partial observations are final deliverables when requested.
+  Preserve necessary clarification, governing-rule refusals, observed blockers,
+  permissions, Stop and no-replay behavior. This addresses instruction ambiguity;
+  model adherence still requires live qualification.
 - Preserve closed journals in a durable SQLite archive before removing them
   from the bounded active set. Recover interrupted retirement under the shared
   writer lock, retain historical identity checks, and protect unresolved or

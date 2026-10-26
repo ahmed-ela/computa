@@ -2953,3 +2953,46 @@ The next instruction candidate addresses an actual presentation ambiguity:
 the fresh response handoff allowed unqualified plans/summaries as final messages,
 while completion guidance could be deduplicated into earlier canonical history.
 That is an improvement hypothesis, not proof of the model's internal cause.
+
+
+### Build 279: final controlled qualification
+
+Installed signed, non-notarized 0.7.0 (279), source `8eb532d`, completed all four
+fresh normal ChatGPT Chat/Instant tasks with the unchanged frozen prompts:
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Read library hours and send the fact | 69.372 s | 9 | 8 | Pass |
+| Identify attachment and send its name | 80.725 s | 11 | 10 | Pass |
+| Read schedule and send the fact | 69.477 s | 8 | 7 | Pass |
+| Two separate terminal commands | 22.599 s | 3 | 2 | Pass |
+
+All 31 inferences passed model, ownership, submission and release verification,
+and all owned website sessions closed. The 27 native calls succeeded without
+errors or correction attempts. Each browser fixture recorded exactly one POST
+with the required source fact and fields, independently matched to its current
+browser receipt and final answer. The terminal returned both actual expected
+outputs with exit zero. All four exact catalog audits were complete. Every
+completion observer armed and used the normal verified quiet fallback.
+
+The library test continued beyond the earlier premature-final point. The
+attachment task also completed its eleventh response after ten browser actions.
+These are bounded qualification passes with the new completion instructions,
+not proof of the model's internal cause or universal reliability. Build276,
+277 and278 failures remain recorded; no failed action was automatically replayed.
+
+The final instruction/codec run passed 144 tests after updating two obsolete
+assertions (six failures in the initial run): completion text is now intentionally
+fresh, and its measured handoff-size bound changed. Other deduplication, request
+fidelity, tool-choice and no-tools tests remain enforced. The shared guidance
+adds 107 unescaped bytes to the native contract and at most 483 to a previously
+deduplicated fresh handoff. The preceding budget/history change passed 26 focused
+native/real-WebKit tests. These are separate runs, not a new whole-app suite.
+
+Fixture processes and task-created tabs were closed, with all listeners absent.
+No Inspector session was used for these four tasks; user tabs were preserved.
+A read-only preservation check retained all 564 original journal files byte-exact,
+with no pending retirement and a healthy archive. No real email was sent, no
+release was published, and no PR was merged. The original uncaptured build270
+empty-response failure remains unattributed, as detailed in
+`CHATGPT-EMPTY-RESPONSE.md`.
