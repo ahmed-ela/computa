@@ -197,7 +197,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
-        case usageLimited(Provider), responseFailed(Provider)
+        case usageLimited(Provider), responseFailed(Provider), responseRenderingFailed
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
@@ -208,6 +208,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in_required"
             case .usageLimited: "website_usage_limit"
             case .responseFailed: "website_response_failed"
+            case .responseRenderingFailed: "website_response_rendering_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
             case .ownershipFailure: "website_ownership_unverified"
@@ -222,6 +223,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in"
             case .usageLimited: "wait_for_quota_reset"
             case .responseFailed: "inspect_website"
+            case .responseRenderingFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
             case .ownershipFailure: "inspect_website"
@@ -264,6 +266,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .responseFailed(let provider): "\(provider.displayName)'s website reported that the response failed to load. Check its page in Computa's built-in browser before starting a new task. No prompt was replayed."
+            case .responseRenderingFailed: "ChatGPT could not render its response. The failed response supplied no tool calls or final answer."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
@@ -395,6 +398,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let fields: [String: Any]
             let responseNotice: String?
             let answerScope: String?
+            let rendererGuard: String?
         }
         var responseProgressInspection: ResponseProgressInspection?
         var responseProgressEmitted = false
@@ -488,6 +492,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var rendererGuardDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
@@ -592,6 +597,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setResponseProgressDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         responseProgressDiagnosticObserverForTesting = observer
+    }
+
+    func setRendererGuardDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        rendererGuardDiagnosticObserverForTesting = observer
     }
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
@@ -1413,14 +1422,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Only ended resource observations, never dispatch, upload or acceptance proof.
     static func sanitizedResourceTimingDiagnostic(_ raw: Any?, phase: String, sequence: Int) -> String? {
-        let keys: Set<String> = ["kind", "phase", "sequence", "available", "sendMarkAvailable", "scanTruncated",
+        var keys: Set<String> = ["kind", "phase", "sequence", "available", "sendMarkAvailable", "scanTruncated",
                                  "scannedCount", "conversationCount", "preparationCount", "observations",
                                  "observationsTruncated", "absenceInconclusive"]
         guard ["send", "completion", "failure"].contains(phase), (1...10_000).contains(sequence),
-              let value = raw as? [String: Any], Set(value.keys) == keys,
+              let value = raw as? [String: Any],
               let kind = value["kind"] as? String,
-              ["chatgpt_resource_timing_v1", "chatgpt_resource_timing_v2"].contains(kind), value["phase"] as? String == phase,
+              ["chatgpt_resource_timing_v1", "chatgpt_resource_timing_v2", "chatgpt_resource_timing_v3"].contains(kind),
+              value["phase"] as? String == phase,
               ComputerToolArgumentContract.exactInt64(value["sequence"]) == Int64(sequence) else { return nil }
+        let hasScripts = kind == "chatgpt_resource_timing_v3"
+        if hasScripts {
+            guard phase == "failure" else { return nil }
+            keys.insert("scriptResources")
+        }
+        guard Set(value.keys) == keys else { return nil }
         func integer(_ raw: Any?, maximum: Int64) -> Int? {
             guard let number = ComputerToolArgumentContract.exactInt64(raw), (0...maximum).contains(number) else { return nil }
             return Int(number)
@@ -1442,7 +1458,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let timingKeys = ["requestStartOffsetMs", "responseStartOffsetMs", "responseEndOffsetMs"]
         var sampleKeys: Set<String> = ["endpoint", "initiator", "startOffsetMs", "durationMs", "transferBytes",
                                       "encodedBodyBytes", "decodedBodyBytes", "responseStatusAvailable", "responseStatus"]
-        if kind == "chatgpt_resource_timing_v2" { sampleKeys.formUnion(timingKeys) }
+        if kind != "chatgpt_resource_timing_v1" { sampleKeys.formUnion(timingKeys) }
         var samples: [[String: Any]] = []
         for sample in observations {
             guard Set(sample.keys) == sampleKeys, let endpoint = sample["endpoint"] as? String,
@@ -1454,7 +1470,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard let number = integer(sample[key], maximum: key.hasSuffix("Ms") ? 3_600_000 : 2_147_483_647) else { return nil }
                 projected[key] = number
             }
-            if kind == "chatgpt_resource_timing_v2" {
+            if kind != "chatgpt_resource_timing_v1" {
                 var previous = projected["startOffsetMs"] as? Int ?? 0
                 for key in timingKeys {
                     if sample[key] is NSNull { projected[key] = NSNull(); continue }
@@ -1473,6 +1489,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               samples.filter({ $0["endpoint"] as? String == "preparation" }).count <= preparation else { return nil }
         safe["scannedCount"] = scanned; safe["conversationCount"] = conversation; safe["preparationCount"] = preparation
         safe["observations"] = samples
+        if hasScripts {
+            let scriptKeys: Set<String> = ["count", "unknownStatusCount", "httpFailureCount", "failuresTruncated", "failures"]
+            guard let scripts = value["scriptResources"] as? [String: Any], Set(scripts.keys) == scriptKeys,
+                  let count = integer(scripts["count"], maximum: 256), count + conversation + preparation <= scanned,
+                  let unknown = integer(scripts["unknownStatusCount"], maximum: 256),
+                  let failed = integer(scripts["httpFailureCount"], maximum: 256), unknown + failed <= count,
+                  let truncated = firstUserDiagnosticBool(scripts["failuresTruncated"]), truncated == (failed > 2),
+                  let failures = scripts["failures"] as? [[String: Any]], failures.count == min(failed, 2) else { return nil }
+            var projected: [[String: Any]] = []
+            for failure in failures {
+                guard Set(failure.keys) == ["asset", "responseStatus", "startOffsetMs", "durationMs"],
+                      let asset = failure["asset"] as? String, asset.utf8.count <= 20,
+                      asset.range(of: #"\A[0-9]{1,6}\.[0-9a-f]{10}\.js\z"#, options: .regularExpression) != nil,
+                      let status = integer(failure["responseStatus"], maximum: 599), status >= 400,
+                      let start = integer(failure["startOffsetMs"], maximum: 3_600_000),
+                      let duration = integer(failure["durationMs"], maximum: 3_600_000) else { return nil }
+                projected.append(["asset": asset, "responseStatus": status, "startOffsetMs": start, "durationMs": duration])
+            }
+            safe["scriptResources"] = ["count": count, "unknownStatusCount": unknown, "httpFailureCount": failed,
+                "failuresTruncated": truncated, "failures": projected]
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 2_048 else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
@@ -1884,6 +1921,43 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard session.submitted, session.firstUserFingerprint != nil, !session.pendingSubmission else {
                     throw Failure.ownershipFailure(.promotionFirstUser)
                 }
+                // Preserve finite timing from this same admitted inspection.
+                // A terminal website error must not discard its observations or
+                // require another page read, wait, or Send to diagnose it.
+                logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "failure")
+                // A completed inline renderer failure can use the server's
+                // existing single correction allowance. Require fresh proof
+                // for this exact submitted response; diagnostic projections
+                // and pending model continuity never authorize recovery.
+                func completedRendererFailure(_ value: [String: Any]) -> Bool {
+                    value["responseLoadFailed"] as? Bool == true
+                        && value["responseFailureKind"] as? String == "renderer"
+                        && value["temporary"] as? Bool == true
+                        && session.currentSubmissionVerified && !session.pendingSubmission
+                        && session.currentSubmission?.sequence == session.sequence
+                        && count(value, "userCount") == session.sequence
+                        && count(value, "responseCount") == session.baseline + 1
+                        && value["busy"] as? Bool == false && value["answerComplete"] as? Bool == true
+                }
+                if completedRendererFailure(observed), session.modelChoice != nil {
+                    var proven = observed
+                    if observed["modelVerificationPending"] as? Bool == true {
+                        // Completion normally performs this final positive
+                        // picker proof. The error bypasses completion, so do
+                        // it once here before granting recovery, with the same
+                        // absolute deadline and exact failed body recheck.
+                        proven = try await page(session, action: "inspect",
+                            recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                            allowPendingChatGPTModelVerification: false,
+                            maximumWait: min(inspectionTimeout, deadline - .now))
+                    }
+                    if completedRendererFailure(proven), proven["modelVerificationPending"] == nil,
+                       let original = observed["text"] as? String, let current = proven["text"] as? String,
+                       original.utf8.elementsEqual(current.utf8),
+                       (try? validatedModelEvidence(proven, session: session)) != nil {
+                        throw Failure.responseRenderingFailed
+                    }
+                }
                 throw Failure.responseFailed(.chatgpt)
             }
             let response = observed["text"] as? String ?? ""
@@ -2038,7 +2112,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.responseProgressInspection = Self.sanitizedResponseProgressInspection(observed).map {
                 .init(sequence: session.sequence, generation: generation, fields: $0,
                       responseNotice: Self.sanitizedResponseNoticeDiagnostic(observed["responseNoticeDiagnostic"]),
-                      answerScope: Self.sanitizedAnswerScopeDiagnostic(observed["answerScopeDiagnostic"]))
+                      answerScope: Self.sanitizedAnswerScopeDiagnostic(observed["answerScopeDiagnostic"]),
+                      rendererGuard: Self.responseRendererGuardDiagnostic(observed))
             }
         }
         if let raw = observed["quotaDiagnostic"] as? String {
@@ -2145,6 +2220,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if inspectionCurrent, let scope = cached?.answerScope {
             Self.inspectionLog.error("answerScopeDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(scope, privacy: .public)")
         }
+        if inspectionCurrent, let renderer = cached?.rendererGuard {
+            #if DEBUG
+            rendererGuardDiagnosticObserverForTesting?(renderer)
+            #endif
+            Self.inspectionLog.error("rendererGuardDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(renderer, privacy: .public)")
+        }
+    }
+
+    /// Only the existing finite renderer projection from the admitted read;
+    /// response bodies, class names and other code-structure fields stay out.
+    private static func responseRendererGuardDiagnostic(_ observed: [String: Any]) -> String? {
+        guard let completion = observed["completionEvidence"] as? [String: Any],
+              let structure = completion["codeStructure"] as? [String: Any],
+              let raw = structure["rendererGuard"], let safe = sanitizedRendererGuardDiagnostic(raw),
+              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys) else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// The fixed adapter's fresh quota receipt can pin an empty initial

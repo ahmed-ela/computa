@@ -1888,6 +1888,75 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertLessThanOrEqual(try XCTUnwrap(parsed(capped)).utf8.count, 2_048)
     }
 
+    func testResourceTimingV3OnlyProjectsBoundedPublicScriptHTTPFailuresInFailurePhase() throws {
+        let failure: [String: Any] = ["asset": "633146.1f9c264032.js", "responseStatus": 404,
+                                      "startOffsetMs": 1, "durationMs": 50]
+        let scripts: [String: Any] = ["count": 3, "unknownStatusCount": 1, "httpFailureCount": 1,
+                                      "failuresTruncated": false, "failures": [failure]]
+        let valid: [String: Any] = ["kind": "chatgpt_resource_timing_v3", "phase": "failure", "sequence": 1,
+            "available": true, "sendMarkAvailable": true, "scanTruncated": false, "scannedCount": 3,
+            "conversationCount": 0, "preparationCount": 0, "observations": [[String: Any]](),
+            "observationsTruncated": false, "absenceInconclusive": true, "scriptResources": scripts]
+        func parsed(_ value: [String: Any], phase: String = "failure") -> String? {
+            EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(value, phase: phase, sequence: 1)
+        }
+        XCTAssertNotNil(parsed(valid))
+        for phase in ["send", "completion"] {
+            var invalid = valid; invalid["phase"] = phase
+            XCTAssertNil(parsed(invalid, phase: phase))
+        }
+        for key in scripts.keys {
+            var nested = scripts; nested.removeValue(forKey: key)
+            var invalid = valid; invalid["scriptResources"] = nested
+            XCTAssertNil(parsed(invalid), key)
+        }
+        for (key, bad): (String, Any) in [("count", true), ("count", 257), ("count", 4),
+            ("unknownStatusCount", -1), ("unknownStatusCount", 3), ("httpFailureCount", 0),
+            ("httpFailureCount", 2), ("failuresTruncated", true), ("failures", [failure, failure, failure]),
+            ("url", "PRIVATE_CANARY")] {
+            var nested = scripts; nested[key] = bad; var invalid = valid; invalid["scriptResources"] = nested
+            XCTAssertNil(parsed(invalid), key)
+        }
+        for (key, bad): (String, Any) in [("asset", "https://chatgpt.com/cdn/assets/633146.1f9c264032.js"),
+            ("asset", "633146.1F9C264032.js"), ("asset", "633146.1f9c264032.js?PRIVATE"),
+            ("asset", "633146.1f9c264032.js\n"), ("asset", "633146.1f9c264032.js#PRIVATE"),
+            ("asset", "1633146.1f9c264032.js"), ("asset", "633146.1f9c2640320.js"), ("asset", "PRIVATE.js"),
+            ("responseStatus", 0), ("responseStatus", 200), ("responseStatus", 399), ("responseStatus", 600),
+            ("responseStatus", true), ("responseStatus", NSNull()), ("startOffsetMs", -1),
+            ("durationMs", 3_600_001), ("durationMs", 0.5), ("durationMs", true), ("url", "PRIVATE_CANARY")] {
+            var row = failure; row[key] = bad; var nested = scripts; nested["failures"] = [row]
+            var invalid = valid; invalid["scriptResources"] = nested
+            XCTAssertNil(parsed(invalid), key)
+        }
+        for key in failure.keys {
+            var row = failure; row.removeValue(forKey: key); var nested = scripts; nested["failures"] = [row]
+            var invalid = valid; invalid["scriptResources"] = nested
+            XCTAssertNil(parsed(invalid), key)
+        }
+        var absent = valid
+        absent["scannedCount"] = 0
+        absent["scriptResources"] = ["count": 0, "unknownStatusCount": 0, "httpFailureCount": 0,
+            "failuresTruncated": false, "failures": [[String: Any]]()]
+        absent["available"] = false; absent["sendMarkAvailable"] = false
+        XCTAssertNotNil(parsed(absent))
+        var invalid = absent; invalid["scriptResources"] = scripts
+        XCTAssertNil(parsed(invalid))
+        let maximum: [String: Any] = ["endpoint": "conversation", "initiator": "xmlhttprequest", "startOffsetMs": 3_600_000,
+            "durationMs": 3_600_000, "requestStartOffsetMs": 3_600_000, "responseStartOffsetMs": 3_600_000,
+            "responseEndOffsetMs": 3_600_000, "transferBytes": 2_147_483_647, "encodedBodyBytes": 2_147_483_647,
+            "decodedBodyBytes": 2_147_483_647, "responseStatusAvailable": true, "responseStatus": 599]
+        let maximumFailure: [String: Any] = ["asset": "999999.abcdef0123.js", "responseStatus": 599,
+                                             "startOffsetMs": 3_600_000, "durationMs": 3_600_000]
+        var capped = valid; capped["scannedCount"] = 256; capped["scanTruncated"] = true
+        capped["conversationCount"] = 128; capped["observationsTruncated"] = true
+        capped["observations"] = Array(repeating: maximum, count: 4)
+        capped["scriptResources"] = ["count": 128, "unknownStatusCount": 0, "httpFailureCount": 128,
+            "failuresTruncated": true, "failures": Array(repeating: maximumFailure, count: 2)]
+        let safe = try XCTUnwrap(parsed(capped))
+        XCTAssertLessThanOrEqual(safe.utf8.count, 2_048)
+        for privateValue in ["PRIVATE", "https:", "/cdn", "url", "headers"] { XCTAssertFalse(safe.contains(privateValue)) }
+    }
+
     func testResourceTimingPublishesOwnedSendAndStableCompletionWithoutExtraInput() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt)); defer { fixture.shutdown() }
         var diagnostics: [String] = []
@@ -1911,6 +1980,59 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created"); XCTAssertEqual(diagnostics.count, 2)
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testInlineRendererFailureRetainsSameInspectionDiagnosticsWithoutAnotherReadOrSend() async throws {
+        for retainCopy in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_RENDERER_FAILURE_PROMPT")
+            defer { fixture.shutdown() }
+            var timings: [String] = [], renderers: [String] = [], evaluations: [String] = []
+            fixture.transport.setResourceTimingDiagnosticObserverForTesting { timings.append($0) }
+            fixture.transport.setRendererGuardDiagnosticObserverForTesting { renderers.append($0) }
+            _ = try await evaluate(view, """
+                const main = document.createElement('main'), messages = document.getElementById('messages');
+                document.body.append(main); main.append(messages);
+                const answer = messages.querySelector('[data-markdown-text-style="assistant-message"]');
+                const portal = document.createElement('div'); portal.className = 'PortalBoundary-Fixture Renderer-Fixture';
+                const renderer = document.createElement('div'); renderer.className = 'DilRenderer-Fixture DilResponseRoot-Fixture';
+                const leaf = document.createElement('div'); leaf.textContent = 'This response couldn’t load';
+                renderer.append(leaf); portal.append(renderer); answer.replaceChildren(portal);
+                if (!\(retainCopy ? "true" : "false")) messages.querySelectorAll('button').forEach(button => button.remove());
+                return true;
+                """)
+            fixture.transport.setBeforePageResultValidationForTesting { evaluations.append($0) }
+            let began = ContinuousClock.now
+            for _ in 0..<2 {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A renderer error cannot publish a response, even when Copy is present")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                                         retainCopy ? .responseRenderingFailed : .responseFailed(.chatgpt)) }
+            }
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(3))
+            XCTAssertEqual(evaluations.filter { $0 == "inspect" }.count, retainCopy ? 2 : 1)
+            XCTAssertFalse(evaluations.contains("failedPageDiagnostic"), "The terminal observation must reuse the admitted read")
+            XCTAssertEqual(timings.count, 1); XCTAssertEqual(renderers.count, 1)
+            let timing = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(timings.first).utf8)) as? [String: Any])
+            XCTAssertEqual(timing["phase"] as? String, "failure")
+            XCTAssertEqual(timing["sequence"] as? Int, 1)
+            XCTAssertEqual(timing["absenceInconclusive"] as? Bool, true)
+            let renderer = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(renderers.first).utf8)) as? [String: Any])
+            XCTAssertEqual(renderer["reason"] as? String, "matched")
+            XCTAssertEqual(renderer["rawKnownLabel"] as? Bool, true)
+            XCTAssertEqual(renderer["guardBodyIsExtractedAnswer"] as? Bool, true)
+            for diagnostic in timings + renderers {
+                for privateValue in ["PRIVATE", "This response", "PortalBoundary-", "https:", token] {
+                    XCTAssertFalse(diagnostic.contains(privateValue))
+                }
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertEqual(timings.count, 1); XCTAssertEqual(renderers.count, 1)
+            try await assertHumanTabIntact(fixture)
+        }
     }
 
     func testDeadlineDiagnosticDiscardsAnOwnedViewRemovedBeforePublication() async throws {
@@ -12745,5 +12867,158 @@ private final class FixtureScriptResult: @unchecked Sendable {
         lock.unlock()
         timer?.cancel()
         pending?.resume(with: value)
+    }
+}
+
+
+@MainActor
+extension EmbeddedWebModelTransportTests {
+    private func installRendererRecoveryFailureFixture(_ view: WKWebView) async throws {
+        _ = try await evaluate(view, """
+            const main = document.createElement('main'), messages = document.getElementById('messages');
+            document.body.append(main); main.append(messages);
+            const answer = messages.querySelector('[data-markdown-text-style="assistant-message"]');
+            const portal = document.createElement('div'); portal.className = 'PortalBoundary-Fixture Renderer-Fixture';
+            const renderer = document.createElement('div'); renderer.className = 'DilRenderer-Fixture DilResponseRoot-Fixture';
+            const leaf = document.createElement('div'); leaf.textContent = 'This response couldn’t load';
+            renderer.append(leaf); portal.append(renderer); answer.replaceChildren(portal);
+            return true;
+            """)
+    }
+
+    func testRendererRecoveryRefusesBusyAndExtraCurrentResponses() async throws {
+        for mutation in ["busy", "extra_response"] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Do not recover an incomplete or ambiguous response")
+            defer { fixture.shutdown() }
+            try await installRendererRecoveryFailureFixture(view)
+            _ = try await evaluate(view, mutation == "busy" ? """
+                const stop = document.createElement('button'); stop.id = 'fixture-renderer-stop';
+                stop.setAttribute('data-testid', 'stop-button'); stop.textContent = 'Stop generating';
+                document.body.append(stop); return true;
+                """ : """
+                const answer = document.querySelector('[data-markdown-text-style="assistant-message"]');
+                document.getElementById('messages').append(answer.parentElement.cloneNode(true)); return true;
+                """)
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A \(mutation) renderer error cannot become a recoverable current response")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt), mutation) }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await evaluate(view, "document.getElementById('fixture-renderer-stop')?.remove(); return true;")
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererRecoveryRefusesExtraUserAndMissingOrChangedModel() async throws {
+        for mutation in ["extra_user", "missing_model", "changed_model"] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep renderer recovery bound to current ownership and model")
+            defer { fixture.shutdown() }
+            try await installRendererRecoveryFailureFixture(view)
+            let script: String
+            switch mutation {
+            case "extra_user":
+                script = """
+                    const user = document.querySelector('[data-message-author-role="user"]');
+                    window.fixtureExtraRendererUser = user.cloneNode(true);
+                    document.getElementById('messages').append(window.fixtureExtraRendererUser); return true;
+                    """
+            case "missing_model":
+                script = """
+                    window.fixtureRemovedRendererModel = document.getElementById('fixture-model-trigger');
+                    window.fixtureRemovedRendererModel.remove(); return true;
+                    """
+            default: script = "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+            }
+            _ = try await evaluate(view, script)
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A \(mutation) observation cannot authorize renderer recovery")
+            } catch {
+                let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                XCTAssertNotEqual(failure, .responseRenderingFailed, mutation)
+                if mutation == "changed_model" { XCTAssertEqual(failure, .modelMismatch) }
+                if mutation == "missing_model" {
+                    XCTAssertTrue(failure == .modelMismatch || failure == .modelUnverified, "Unexpected missing-model rejection: \(failure)")
+                }
+                if mutation == "extra_user" {
+                    if case .ownershipFailure = failure {} else {
+                        XCTFail("Expected an ownership rejection, received \(failure)")
+                    }
+                }
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await evaluate(view, """
+                if (window.fixtureRemovedRendererModel) document.body.append(window.fixtureRemovedRendererModel);
+                return true;
+                """)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, mutation == "extra_user" ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: mutation == "extra_user" ? fixture.createdTabs.last : nil)
+        }
+    }
+
+    func testRendererRecoveryDoesNotPromoteLiteralOrMismatchedRendererLabels() async throws {
+        for mutation in ["literal_label", "different_label"] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Do not promote an unclassified label into renderer recovery")
+            defer { fixture.shutdown() }
+            try await installRendererRecoveryFailureFixture(view)
+            _ = try await evaluate(view, """
+                const main = document.querySelector('main');
+                const answer = main.querySelector('[data-markdown-text-style="assistant-message"]');
+                if (\(mutation == "literal_label" ? "true" : "false")) answer.textContent = 'This response couldn’t load';
+                else answer.querySelector('.DilRenderer-Fixture > div').textContent = 'This response could not load';
+                const notice = document.createElement('div'), label = document.createElement('span'), retry = document.createElement('button');
+                label.textContent = 'Load failed'; retry.textContent = 'Retry';
+                window.fixtureRendererRetryClicks = 0; retry.addEventListener('click', () => window.fixtureRendererRetryClicks++);
+                notice.append(label, retry); main.append(notice); return true;
+                """)
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A generic load error plus \(mutation) cannot become renderer recovery")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt), mutation) }
+            let retryClicks = try await evaluate(view, "return window.fixtureRendererRetryClicks;") as? Int
+            XCTAssertEqual(retryClicks, 0)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testRendererRecoveryRequiresOneFreshModelInspectionAndUnchangedAnswer() async throws {
+        for changeAnswer in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Reprove only this completed renderer failure")
+            defer { fixture.shutdown() }
+            try await installRendererRecoveryFailureFixture(view)
+            let pickerBefore = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+            var inspections = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect" else { return }
+                inspections += 1
+                guard changeAnswer, inspections == 1 else { return }
+                do {
+                    _ = try await self.evaluate(view, """
+                        document.querySelector('.DilRenderer-Fixture > div').textContent = '{"type":"message","text":"Changed after the failed-body observation"}';
+                        return true;
+                        """)
+                } catch { XCTFail("Unable to install changed-answer fixture: \(error)") }
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A failed renderer cannot publish an answer")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    changeAnswer ? .responseFailed(.chatgpt) : .responseRenderingFailed)
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertEqual(inspections, 2, "The initial deferred read permits exactly one full positive model inspection")
+            let pickerAfter = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+            XCTAssertGreaterThan(try XCTUnwrap(pickerAfter), try XCTUnwrap(pickerBefore),
+                "Recovery needs a fresh positive model proof rather than only pending continuity")
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
     }
 }

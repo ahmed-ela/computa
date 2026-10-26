@@ -6,6 +6,81 @@ Gemini and Claude implementation and qualification are on hold at the user's
 request. The remaining remote API cases are also held while ChatGPT is the
 priority. Existing provider options were not removed by this scope change.
 
+## Candidate261: verified ChatGPT renderer failure recovery
+
+The October 25 local / October 26 UTC reproduction ran the unchanged installed
+0.7.0 (260), source `7ab31b63a0e97dddccceca2e4b72085d44785d05`, with normal ChatGPT
+Chat / Instant. Candidate261 source changes were not installed during this
+baseline. A new chat performed the same delayed synthetic-account attachment
+lookup, ODE follow-up, and then synthetic send used to investigate the earlier
+failure. Original failures remain preserved.
+
+| Baseline phase | Duration | Native calls | Website inferences | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Delayed attachment | 152.278 s | 9 | 10 | Exact staff sender, topic, body, filename and source verified |
+| Same-chat ODE follow-up | 81.635 s | 2 | 3 | Fresh announcement, time, attachment filename and source verified |
+| Same-chat synthetic send | 206.980 s | 4 | 5 | Fifth inference failed with `website_response_failed`; no delivery |
+
+The two read phases had no native failures or compactions and thirteen complete
+Instant/Temporary/submission/response/release proofs. The send's first four
+inferences also passed those proofs. It opened the local mailbox, navigated to
+Compose, and filled the recipient and subject; it never filled the body or
+clicked Send. The fixture recorded two GETs and zero POSTs. No real email network
+was involved. All eighteen started website inferences had saved closed cleanup
+receipts, including the failed fifth send inference. Root UI inspection confirmed
+the final error, task-tab cleanup, Instant selection and an empty composer. The
+owned fixture process and listener were independently confirmed absent after its
+exact session was interrupted.
+
+Finite native logs identify the failing branch: the current assistant body
+matched the inline DIL renderer's exact “This response couldn’t load” label,
+with 27 UTF-16 units / 29 UTF-8 bytes. Current submission, view and document
+were verified; the selected model had been proved before Send. That retained
+model evidence alone does not establish a fresh final model check. An enabled Copy control did not convert that renderer
+error into a valid model response. No Retry widget was observed. The failed
+inference's submission proof was not published to the lifecycle journal before
+failure; the separate native progress diagnostic establishes that its current
+submission had been verified.
+
+Outbound UTF-8 sizes were 116,967, 134,704, 141,824, 149,210 and 156,590 bytes.
+The first four passed and the fifth failed. The earlier failure at 134,517 bytes
+and this sequence do not establish a size threshold. Both exact failure windows
+had no observed navigation-rejection event. Historical WebKit log matches were
+termination-eligibility checks and assertion calls, not an observed crash or
+memory-limit callback. Missing logs are inconclusive; neither WebKit version,
+blocked blob navigation nor a terminated process is established as the cause.
+The underlying renderer exception remains unknown, and the generic native
+“high demand” wrapper is not evidence of provider capacity. The ordinary decoder
+observer reported `runtime_unsupported`, so no decoded-program cause was captured.
+
+The recovery admits only a native, fully verified current ChatGPT
+inline renderer failure. It shares the existing durable one-use correction
+allowance with invalid JSON. After the failed session has an exact saved closed
+receipt, one fresh inference receives the same frozen canonical request plus a
+fixed truthful renderer reminder, under the original deadline and inference/byte
+budgets. Prior fulfilled tool results remain in canonical history; no failed
+reply text or call IDs are released, and no completed tool action is replayed.
+Other failures, changed ownership/model/product state, uncertain cleanup and an
+already-spent allowance remain terminal. A deferred model check requires one
+fresh complete inspection with an unchanged classified body before recovery.
+This is a bounded mitigation, not a
+claim that the provider's renderer exception has been repaired.
+
+Source validation passed: 448 JavaScript adapter tests (15,562 assertions) and
+58 focused native tests, zero failures/skips, with unchanged source hashes during
+each run. Native coverage includes fresh model proof, changed-answer rejection,
+exact preserved `browser_fill` arguments/output, mixed renderer/JSON failures,
+restart/remap, legacy correction journals, cleanup/deadline/budget/cancellation,
+frozen browser catalogs and error presentation. Independent review found no new
+direct operation replay path. Failure-only resource diagnostics retain at most
+two strictly bounded public script-asset HTTP errors from the same inspection;
+missing/zero status is unknown, not a network-failure conclusion.
+
+Signed candidate261 build/install and live qualification remain pending. The
+planned checks are a fresh three-turn browser chain and a separate two-command
+terminal continuation control. Record recovery separately from a clean first
+pass and retain failed attempts; source checks do not establish live recovery.
+
 ## Candidate148: one bounded ChatGPT format correction
 
 A verified ChatGPT reply that fails strict JSON parsing can receive one fresh

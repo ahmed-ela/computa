@@ -3853,23 +3853,26 @@ function chatGPTInlineRendererGuardStructure(answer, enabledScopedCopies) {
     knownScopedCopyOutsideDIL: knownDIL ? enabledScopedCopies.some(copy => !state.dil.contains(copy)) : null };
 }
 function chatGPTResponseLoadFailed(visible) {
-  if (chatGPTInlineRendererLoadFailed(visible)) return true;
+  return chatGPTResponseFailureKind(visible) !== null;
+}
+function chatGPTResponseFailureKind(visible) {
+  if (chatGPTInlineRendererLoadFailed(visible)) return 'renderer';
   // Abort-only website error evidence from this admitted read. A single small
   // direct widget can use plain text or nested labels, including in a dialog.
   // Never widen the search to main or another ancestor, accept an answer, or Retry.
   const protectedContent = '[data-message-author-role], [data-markdown-text-style], article[data-turn], [data-user-message-bubble], .markdown, pre, code, #prompt-textarea, [contenteditable], textarea, [role="menu"], [role="menubar"], [role="navigation"], [role="complementary"], nav, aside';
   const retries = [...document.querySelectorAll('main button')].filter(node => visible(node)
     && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
-  if (retries.length !== 1) return false;
+  if (retries.length !== 1) return null;
   const retry = retries[0], region = retry.parentElement, main = retry.closest('main');
-  if (chatGPTAlertAsideLoadFailed(retry, main, visible)) return true;
+  if (chatGPTAlertAsideLoadFailed(retry, main, visible)) return 'load';
   if (retry.disabled || retry.getAttribute('aria-disabled') === 'true' || retry.closest(protectedContent)
     || !region || !main || region === main || !visible(region)
     || ['MAIN', 'BODY', 'HTML'].includes(region.tagName) || region.closest('main') !== main
     || region.childElementCount > 4 || region.querySelectorAll('*').length > 128
-    || region.querySelector(protectedContent + ', input, select, a[href], [role="dialog"], dialog')) return false;
+    || region.querySelector(protectedContent + ', input, select, a[href], [role="dialog"], dialog')) return null;
   const buttons = [...region.querySelectorAll('button')].filter(visible);
-  if (buttons.length !== 1 || buttons[0] !== retry) return false;
+  if (buttons.length !== 1 || buttons[0] !== retry) return null;
   const interactiveRoles = new Set(['button', 'checkbox', 'combobox', 'grid', 'gridcell', 'link', 'listbox',
     'menu', 'menubar', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'radiogroup',
     'scrollbar', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab', 'tablist', 'textbox', 'toolbar',
@@ -3880,24 +3883,24 @@ function chatGPTResponseLoadFailed(visible) {
     || (['A', 'AREA'].includes(node.tagName) && node.getAttribute('href') !== null)
     || (node.tagName === 'LABEL' && node.getAttribute('for') !== null);
   for (let ancestor = region; ancestor; ancestor = ancestor.parentElement) {
-    if (nonLabelControl(ancestor, false)) return false;
+    if (nonLabelControl(ancestor, false)) return null;
     if (ancestor === main) break;
   }
   let knownLabels = 0;
   for (const node of region.childNodes) {
     if (node === retry || node.nodeType === 8) continue;
-    if (node.nodeType !== 1 && node.nodeType !== 3) return false;
+    if (node.nodeType !== 1 && node.nodeType !== 3) return null;
     if (node.nodeType === 1 && !visible(node)) continue;
-    if (node.nodeType === 1 && [node, ...node.querySelectorAll('*')].some(child => nonLabelControl(child))) return false;
-    if (node.nodeType === 1 && [...node.querySelectorAll('*')].some(child => !visible(child) && (child.textContent || '').trim())) return false;
+    if (node.nodeType === 1 && [node, ...node.querySelectorAll('*')].some(child => nonLabelControl(child))) return null;
+    if (node.nodeType === 1 && [...node.querySelectorAll('*')].some(child => !visible(child) && (child.textContent || '').trim())) return null;
     const text = node.textContent || '';
-    if (text.length > 128) return false;
+    if (text.length > 128) return null;
     const label = text.replace(/\s+/g, ' ').trim();
     if (!label) continue;
-    if (label !== 'Load failed') return false;
+    if (label !== 'Load failed') return null;
     knownLabels += 1;
   }
-  return knownLabels === 1;
+  return knownLabels === 1 ? 'load' : null;
 }
 // Diagnostic relationship facts only. This never classifies a response as failed,
 // changes readiness/ownership, clicks Retry or supplies completion evidence.
@@ -3970,10 +3973,12 @@ function chatGPTResourceTimingDiagnostic(phase) {
       || claim.userCount !== globalThis.__computaModelLastSubmissionCount
       || !Number.isInteger(claim.sequence) || claim.sequence !== claim.userCount + 1
       || claim.sequence < 1 || claim.sequence > 10_000) return null;
-    const result = { kind: 'chatgpt_resource_timing_v2', phase, sequence: claim.sequence,
+    const scripts = phase === 'failure' ? { count: 0, unknownStatusCount: 0, httpFailureCount: 0,
+      failuresTruncated: false, failures: [] } : null;
+    const result = { kind: scripts ? 'chatgpt_resource_timing_v3' : 'chatgpt_resource_timing_v2', phase, sequence: claim.sequence,
       available: false, sendMarkAvailable: false, scanTruncated: false, scannedCount: 0,
       conversationCount: 0, preparationCount: 0, observations: [], observationsTruncated: false,
-      absenceInconclusive: true };
+      absenceInconclusive: true, ...(scripts ? { scriptResources: scripts } : {}) };
     const timing = window.performance;
     if (!timing || typeof timing.now !== 'function' || typeof timing.getEntriesByType !== 'function') return result;
     const now = timing.now();
@@ -3994,13 +3999,35 @@ function chatGPTResourceTimingDiagnostic(phase) {
         || !Number.isFinite(entry.duration) || entry.duration < 0 || entry.duration > 3_600_000
         || entry.startTime - claim.mark > 3_600_000
         || !byteCount(entry.transferSize) || !byteCount(entry.encodedBodySize) || !byteCount(entry.decodedBodySize)) continue;
-      let endpoint;
+      let endpoint, asset = null;
       try {
         const url = new URL(entry.name);
         if (url.origin !== 'https://chatgpt.com' || url.username || url.password) continue;
         endpoint = url.pathname === '/backend-api/f/conversation' ? 'conversation'
           : url.pathname === '/backend-api/f/conversation/prepare' ? 'preparation' : null;
+        // A public chunk basename is the only retained resource identifier.
+        // Reject aliases, queries and fragments instead of normalizing them.
+        if (scripts && entry.initiatorType === 'script' && entry.name === url.origin + url.pathname) {
+          asset = /^\/cdn\/assets\/([0-9]{1,6}\.[0-9a-f]{10}\.js)$/.exec(url.pathname)?.[1] || null;
+        }
       } catch { continue; }
+      if (asset) {
+        const status = entry.responseStatus;
+        if (status !== undefined && (typeof status !== 'number' || !Number.isInteger(status)
+          || (status !== 0 && (status < 100 || status > 599)))) continue;
+        scripts.count++;
+        if (status === undefined || status === 0) scripts.unknownStatusCount++;
+        else if (status >= 400) {
+          scripts.httpFailureCount++;
+          scripts.failures.push({ asset, responseStatus: status,
+            startOffsetMs: Math.floor(entry.startTime - claim.mark), durationMs: Math.floor(entry.duration) });
+          if (scripts.failures.length > 2) scripts.failures.shift();
+          scripts.failuresTruncated = scripts.httpFailureCount > 2;
+        }
+        // Zero transfer/body bytes can mean cache or unavailable metadata.
+        // Only a positive HTTP error status contributes failure evidence.
+        continue;
+      }
       if (!endpoint) continue;
       const responseStatusAvailable = typeof entry.responseStatus === 'number';
       if (responseStatusAvailable && (!Number.isInteger(entry.responseStatus) || entry.responseStatus < 0 || entry.responseStatus > 599)) continue;
@@ -4230,7 +4257,8 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const conversationIdentity = conversationIdentities.length === 1 ? conversationIdentities[0] : null;
   if (expectedConversationIdentity && conversationIdentity !== expectedConversationIdentity) return { error: "conversation_changed", detail: "conversation_identity" };
   const enabled = node => visible(node) && !node.disabled && node.getAttribute("aria-disabled") !== "true";
-  const responseLoadFailed = action === 'inspect' && chatGPTResponseLoadFailed(visible);
+  let responseFailureKind = action === 'inspect' ? chatGPTResponseFailureKind(visible) : null;
+  const responseLoadFailed = responseFailureKind !== null;
   const responseNoticeDiagnostic = action === 'inspect' ? chatGPTResponseNoticeDiagnostic(visible) : null;
   const find = selectors => selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(visible);
   const labelled = (nodes, expression) => [...nodes].filter(visible).find(node => expression.test(
@@ -4284,6 +4312,11 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const interrupted = !!claudeStatus && (claudeStatus.textContent || "").trim().replace(/’/g, "'") === "Claude's response was interrupted.";
   const claudeStreaming = provider === "claude" && [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(visible);
   const answer = answers.at(-1);
+  // Only the exact classified body selected by response extraction can grant
+  // the renderer-specific recovery path. The logged structure is diagnostic
+  // only; a different selected body keeps the ordinary terminal load error.
+  if (responseFailureKind === 'renderer' && chatGPTInlineRendererState?.body !== answer)
+    responseFailureKind = 'load';
   let responseExtraction; const extractionStarted = chatGPTSyncWorkStart();
   try { responseExtraction = modelResponseExtraction(answer); }
   finally { chatGPTSyncWorkEnd(1, extractionStarted); }
@@ -4324,13 +4357,17 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     : find(['button[aria-label="Temporary chat"]']));
   const state = { ...(modelState.modelVerificationPending ? { modelVerificationPending: true } : { modelEvidence: modelState.evidence }), url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
-    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic,
+    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseFailureKind, responseNoticeDiagnostic,
     ...(provider === 'chatgpt' ? { answerScopeDiagnostic: chatGPTAnswerScopeDiagnostic(answer) } : {}),
     text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   chatGPTPreparationRecord('providerSetupMs', setupStarted);
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
-    const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;
+    // A renderer error may still have Copy controls, or no completion controls
+    // at all. Keep its finite ended-resource facts on this already-owned read;
+    // they never authorize a response or trigger a second inspection/retry.
+    const resourceTimingDiagnostic = responseLoadFailed ? chatGPTResourceTimingDiagnostic('failure')
+      : answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;
     // Native can decline this generic diagnostic on an established reply.
     // Keep fresh/empty shapes observable and preserve every proof above.
     const includeDebugStructure = input.requestDebugStructure !== false || userCount === 0 || answers.length === 0;

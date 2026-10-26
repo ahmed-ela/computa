@@ -300,6 +300,271 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         }
     }
 
+    func testRendererFailureClosesExactSessionBeforeOneFreshInference() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let base = FormatCorrectionFixtureTransport(replies: ["UNACCEPTED_RENDERER_CONTENT", valid],
+            pollFailures: [1: .responseRenderingFailed])
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let output = try await server.fixtureInfer(request(), taskID: "renderer-positive")
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: output) as? [String: Any])
+        let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?["name"] as? String, "exec_command")
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish",
+            "webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        XCTAssertEqual(Set(ledger.filter { $0.operation == "webProviderStart" }.compactMap(\.token)).count, 2)
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 2)
+        XCTAssertTrue(prompts[1].hasPrefix(prompts[0]))
+        XCTAssertTrue(prompts[1].contains("The website could not render the previous reply"))
+        XCTAssertFalse(prompts[1].contains("rejected as invalid JSON"))
+        XCTAssertFalse(prompts[1].contains("UNACCEPTED_RENDERER_CONTENT"))
+        let task = websiteInferenceFixtureTaskID("renderer-positive"), turn = websiteInferenceFixtureTaskID("renderer-positive:turn")
+        let records = try WebsiteSessionCleanupStore(directory: root.appendingPathComponent("cleanup"))
+            .transactionRecords(for: task, turnID: turn)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.receiptSaved && $0.outcome == .closed })
+        let journal = try transactionJournal(root: root, task: "renderer-positive")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertEqual(journal.first { $0["phase"] as? String == "failed" }?["errorCode"] as? String,
+            "website_response_rendering_failed")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "complete" }.count, 1)
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 1)
+        let corrections = try correctionRecords(root: root)
+        XCTAssertEqual(corrections.count, 3)
+        XCTAssertTrue(corrections.allSatisfy { $0.reason == .rendererFailure })
+    }
+
+    func testRendererAndInvalidJSONShareOneAllowanceInEitherOrder() async throws {
+        for order in ["renderer-renderer", "renderer-json", "json-renderer"] {
+            let errors: [Int: EmbeddedWebModelTransport.Failure] = order == "renderer-renderer"
+                ? [1: .responseRenderingFailed, 2: .responseRenderingFailed]
+                : order == "renderer-json" ? [1: .responseRenderingFailed] : [2: .responseRenderingFailed]
+            let root = try canonicalFormatCorrectionFixtureRoot()
+            let base = FormatCorrectionFixtureTransport(replies: [malformed, malformed, valid], pollFailures: errors)
+            let server = try await makeServer(storageDirectory: root)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            await assertRejected(server, task: order)
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2, order)
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderFinish" }.count, 1, order)
+            let records = try correctionRecords(root: root)
+            XCTAssertEqual(records.count, 3)
+            XCTAssertEqual(records.first?.reason, order == "json-renderer" ? .invalidJSON : .rendererFailure)
+            XCTAssertFalse(try transactionJournal(root: root, task: order).contains { $0["phase"] as? String == "release_verified" })
+        }
+    }
+
+    func testRendererRecoveryPreservesFulfilledBrowserFillAndNextRequestExactlyOnce() async throws {
+        let fill = #"{"type":"tool_calls","calls":[{"name":"browser_fill","arguments":{"ref":"field-fixture","text":"fixture@example.test"}}]}"#
+        let click = #"{"type":"tool_calls","calls":[{"name":"browser_click","arguments":{"ref":"submit-fixture"}}]}"#
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let base = FormatCorrectionFixtureTransport(replies: [fill, "UNACCEPTED_RENDERER_CONTENT", click,
+            #"{"type":"message","text":"Observed fixture receipt."}"#], pollFailures: [2: .responseRenderingFailed])
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let tools: [[String: Any]] = [
+            ["type": "function", "name": "browser_fill", "parameters": ["type": "object", "properties":
+                ["ref": ["type": "string"], "text": ["type": "string"]]]],
+            ["type": "function", "name": "browser_click", "parameters": ["type": "object", "properties": ["ref": ["type": "string"]]]]]
+        var input: [[String: Any]] = [["role": "user", "content": "Fill the fixture and submit it once."]]
+        var releasedNames: [String] = []
+        for expected in ["browser_fill", "browser_click"] {
+            let bytes = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "stream": false,
+                "input": input, "tools": tools])
+            let output = try await server.fixtureInfer(bytes, taskID: "renderer-after-fill")
+            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: output) as? [String: Any])
+            let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertEqual(calls.first?["name"] as? String, expected)
+            if expected == "browser_fill" {
+                let arguments = try XCTUnwrap(calls.first?["arguments"] as? String)
+                let literal = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String])
+                XCTAssertEqual(literal, ["ref": "field-fixture", "text": "fixture@example.test"])
+            }
+            releasedNames += calls.compactMap { $0["name"] as? String }
+            input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
+                "output": expected == "browser_fill" ? "Observed exact field value fixture@example.test" : "Observed fixture receipt"]]
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "stream": false,
+            "input": input, "tools": tools])
+        _ = try await server.fixtureInfer(bytes, taskID: "renderer-after-fill")
+        XCTAssertEqual(releasedNames, ["browser_fill", "browser_click"], "Rejected inference has no released tool call ID")
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 4)
+        let failedCanonical = try canonicalRequestBytes(in: prompts[1])
+        XCTAssertEqual(try canonicalRequestBytes(in: prompts[2]), failedCanonical,
+            "The correction must preserve the complete admitted next request byte for byte")
+        let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: failedCanonical) as? [String: Any])
+        let history = try XCTUnwrap(canonical["input"] as? [[String: Any]])
+        XCTAssertEqual(history.count, 3)
+        XCTAssertEqual(history[1]["name"] as? String, "browser_fill")
+        XCTAssertEqual(history[1]["arguments"] as? String, input[1]["arguments"] as? String)
+        XCTAssertEqual(history[2]["call_id"] as? String, input[2]["call_id"] as? String)
+        XCTAssertEqual(history[2]["output"] as? String, "Observed exact field value fixture@example.test")
+        XCTAssertFalse(prompts[2].contains("UNACCEPTED_RENDERER_CONTENT"))
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 4)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderFinish" }.count, 4)
+        let journal = try transactionJournal(root: root, task: "renderer-after-fill")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 3)
+    }
+
+    func testRendererClaimSurvivesRestartAndTaskRemapWithoutRenewingAllowance() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let first = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(first, defaultChatChoice: syntheticChatGPTChoice))
+        _ = try await server.fixtureInfer(request(), taskID: "renderer-before-restart", threadID: "stable-renderer-thread", turnID: "stable-renderer-turn")
+        _ = await server.shutdown()
+        let second = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let restarted = try await makeServer(storageDirectory: root)
+        await restarted.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(second, defaultChatChoice: syntheticChatGPTChoice))
+        await assertRejected(restarted, task: "renderer-remapped", thread: "stable-renderer-thread", turn: "stable-renderer-turn")
+        let ledger = await second.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 1)
+    }
+
+    func testRendererRecoveryRequiresCleanupPersistenceDeadlineAndCurrentContext() async throws {
+        for scenario in ["cleanup-failed", "receipt-missing", "deadline", "transport", "maintenance", "retained", "missing-proof", "model"] {
+            let root = try canonicalFormatCorrectionFixtureRoot()
+            let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], cleanupFails: scenario == "cleanup-failed",
+                cleanupDelay: scenario == "deadline" ? .milliseconds(100) : .zero,
+                mismatchesSecondModel: scenario == "model", pollFailures: [1: .responseRenderingFailed],
+                firstSendMutation: scenario == "missing-proof" ? "proof" : nil)
+            let server = try await makeServer(storageDirectory: root)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            if scenario == "receipt-missing" {
+                await base.setFirstFinishHook {
+                    let directory = root.appendingPathComponent("cleanup")
+                    try? FileManager.default.removeItem(at: directory)
+                    try? Data("blocked".utf8).write(to: directory)
+                }
+            } else if scenario == "transport" {
+                await base.setFirstFinishHook {
+                    await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(
+                        FormatCorrectionFixtureTransport(replies: []), defaultChatChoice: syntheticChatGPTChoice))
+                }
+            } else if scenario == "deadline" {
+                await server.setTimeoutsForTesting(readiness: .seconds(1), response: .milliseconds(50))
+            } else if scenario == "retained" { await server.retainChatGPTConversationForTesting() }
+            else if scenario == "maintenance" {
+                let task = websiteInferenceFixtureTaskID(scenario), thread = websiteInferenceFixtureTaskID(scenario + ":thread")
+                let preparation = UUID(uuidString: websiteInferenceFixtureTaskID(scenario + ":preparation"))!
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, runtimeGeneration: websiteInferenceFixtureGeneration,
+                    preparationID: preparation, isMaintenance: true)
+            }
+            await assertRejected(server, task: scenario)
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 1, scenario)
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, scenario == "model" ? 2 : 1, scenario)
+        }
+    }
+
+    func testRendererRecoveryCancellationFinishesCleanupWithoutStartingAgain() async throws {
+        let gate = FormatCorrectionGate()
+        let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
+        let server = try await makeServer()
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        await base.setFirstFinishHook { await gate.pause() }
+        let data = try request()
+        let operation = Task { try await server.fixtureInfer(data, taskID: "renderer-cancel") }
+        addTeardownBlock { operation.cancel(); await gate.release() }
+        for _ in 0..<1_000 {
+            if await gate.isPaused() { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard await gate.isPaused() else { return XCTFail("Renderer recovery must reach exact cleanup barrier") }
+        let cancellation = Task { await server.fixtureCancel(taskID: "renderer-cancel") }
+        for _ in 0..<1_000 {
+            if await server.isRetiringForTesting(taskID: websiteInferenceFixtureTaskID("renderer-cancel")) { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let retiring = await server.isRetiringForTesting(taskID: websiteInferenceFixtureTaskID("renderer-cancel"))
+        XCTAssertTrue(retiring)
+        await gate.release()
+        do { _ = try await operation.value; XCTFail("Cancelled recovery cannot release output") } catch { }
+        let issues = await cancellation.value
+        XCTAssertTrue(issues.isEmpty)
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 1)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderFinish" }.count, 1)
+    }
+
+    func testRendererRecoveryConsumesUnchangedInferenceAndCumulativePromptBudgets() async throws {
+        for byteLimit in [false, true] {
+            let base = FormatCorrectionFixtureTransport(replies: Array(repeating: valid, count: 20),
+                pollFailures: [1: .responseRenderingFailed])
+            let server = try await makeServer()
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            let task = "renderer-budget-\(byteLimit)"
+            var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command"]]
+            var accepted = 0, reached = false
+            for _ in 0..<18 {
+                let data = try request(input: input)
+                var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                object["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: task)]
+                let nextPromptBytes = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: object)).prompt.utf8.count
+                do {
+                    let output = try await server.fixtureInfer(data, taskID: task)
+                    accepted += 1
+                    let response = try XCTUnwrap(JSONSerialization.jsonObject(with: output) as? [String: Any])
+                    let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
+                    input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
+                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed fixture result"]]
+                } catch {
+                    XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
+                    let prompts = await base.prompts()
+                    XCTAssertEqual(prompts.count, accepted + 1, "The failed renderer inference spends one normal slot")
+                    XCTAssertTrue(byteLimit
+                        ? prompts.reduce(0) { $0 + $1.utf8.count } + nextPromptBytes > WebModelServer.maximumTurnPromptUTF8Bytes
+                        : prompts.count == WebModelServer.maximumTurnInferences)
+                    reached = true
+                    break
+                }
+            }
+            XCTAssertTrue(reached)
+        }
+    }
+
+    func testOnlyExactRendererFailureFromResponsePollCanRecover() async throws {
+        for (index, failure) in [EmbeddedWebModelTransport.Failure.responseFailed(.chatgpt),
+            .ownershipFailure(.javaScriptSubmission), .modelUnavailable, .signInRequired, .humanVerificationRequired(.chatgpt), .deadline].enumerated() {
+            let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: failure])
+            let server = try await makeServer()
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            await assertRejected(server, task: "generic-failure-\(index)")
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 1)
+        }
+        for operation in ["webProviderStart", "webProviderSend"] {
+            let base = FormatCorrectionFixtureTransport(replies: [valid], earlyRendererFailureOperation: operation)
+            let server = try await makeServer()
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+            await assertRejected(server, task: "early-renderer-" + operation)
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 1)
+        }
+    }
+
+    private func canonicalRequestBytes(in prompt: String) throws -> Data {
+        let start = try XCTUnwrap(prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n"))
+        let end = try XCTUnwrap(prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start.upperBound..<prompt.endIndex))
+        return Data(prompt[start.upperBound..<end.lowerBound].utf8)
+    }
+    private func correctionRecords(root: URL) throws -> [WebsiteModelFormatCorrectionStore.Record] {
+        try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("evidence/format-corrections-v1"), includingPropertiesForKeys: nil)
+            .map { try JSONDecoder().decode(WebsiteModelFormatCorrectionStore.Record.self, from: Data(contentsOf: $0)) }
+    }
+    private func transactionJournal(root: URL, task: String) throws -> [[String: Any]] {
+        let taskID = websiteInferenceFixtureTaskID(task), turnID = websiteInferenceFixtureTaskID(task + ":turn")
+        return try Data(contentsOf: root.appendingPathComponent("evidence/transactions/" + taskID + "/" + turnID + ".jsonl"))
+            .split(separator: 10).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+    }
+
     private func makeServer(storageDirectory: URL? = nil) async throws -> WebModelServer {
         let root = try storageDirectory ?? canonicalFormatCorrectionFixtureRoot()
         return try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
@@ -331,16 +596,23 @@ private actor FormatCorrectionFixtureTransport: WebModelTransport {
     private let secondResponseMutation: String?
     private let firstSendDelay: Duration
     private let secondStartDelay: Duration
+    private let pollFailures: [Int: EmbeddedWebModelTransport.Failure]
+    private let firstSendMutation: String?
+    private let earlyRendererFailureOperation: String?
     private var starts = 0
     private var finishes = 0
     private var firstFinishHook: (@Sendable () async -> Void)?
     private var secondPollHook: (@Sendable () async -> Void)?
     init(replies: [String], cleanupFails: Bool = false, cleanupDelay: Duration = .zero, mismatchesSecondModel: Bool = false,
-         secondResponseMutation: String? = nil, firstSendDelay: Duration = .zero, secondStartDelay: Duration = .zero) {
+         secondResponseMutation: String? = nil, firstSendDelay: Duration = .zero, secondStartDelay: Duration = .zero,
+         pollFailures: [Int: EmbeddedWebModelTransport.Failure] = [:], firstSendMutation: String? = nil,
+         earlyRendererFailureOperation: String? = nil) {
         self.replies = replies; self.cleanupFails = cleanupFails; self.cleanupDelay = cleanupDelay
         self.mismatchesSecondModel = mismatchesSecondModel
         self.secondResponseMutation = secondResponseMutation
         self.firstSendDelay = firstSendDelay; self.secondStartDelay = secondStartDelay
+        self.pollFailures = pollFailures; self.firstSendMutation = firstSendMutation
+        self.earlyRendererFailureOperation = earlyRendererFailureOperation
     }
     func setFirstFinishHook(_ hook: @escaping @Sendable () async -> Void) { firstFinishHook = hook }
     func setSecondPollHook(_ hook: @escaping @Sendable () async -> Void) { secondPollHook = hook }
@@ -355,6 +627,7 @@ private actor FormatCorrectionFixtureTransport: WebModelTransport {
             let token = UUID().uuidString.lowercased()
             active[token] = ""
             entries.append(.init(operation: operation, token: token))
+            if earlyRendererFailureOperation == operation { throw EmbeddedWebModelTransport.Failure.responseRenderingFailed }
             snapshot = ["sessionToken": token, "state": "ready"]
             if starts == 2, mismatchesSecondModel {
                 let other = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/high", label: "High")
@@ -367,11 +640,17 @@ private actor FormatCorrectionFixtureTransport: WebModelTransport {
             entries.append(.init(operation: operation, token: token))
             switch operation {
             case "webProviderSend":
+                if earlyRendererFailureOperation == operation { throw EmbeddedWebModelTransport.Failure.responseRenderingFailed }
                 sentPrompts.append(try XCTUnwrap(input["prompt"]))
                 if sentPrompts.count == 1, firstSendDelay > .zero { try await Task.sleep(for: firstSendDelay) }
                 active[token] = replies.isEmpty ? #"{"type":"message","text":"fallback"}"# : replies.removeFirst()
                 snapshot = ["state": "running"]
-            case "webProviderPoll": snapshot = ["state": "complete", "text": active[token]!]
+            case "webProviderPoll":
+                // Fault injection is after a fully admitted Send and only at
+                // response polling, matching the native typed-error contract.
+                if starts == 2 { await secondPollHook?() }
+                if let failure = pollFailures[sentPrompts.count] { throw failure }
+                snapshot = ["state": "complete", "text": active[token]!]
             case "webProviderFinish", "webProviderCancel":
                 finishes += 1
                 if finishes == 1 { await firstFinishHook?() }
@@ -382,8 +661,10 @@ private actor FormatCorrectionFixtureTransport: WebModelTransport {
             }
         }
         var prepared = syntheticPreparedWebsiteSnapshot(snapshot)
+        if operation == "webProviderSend", sentPrompts.count == 1, firstSendMutation == "proof" {
+            prepared["modelProofContext"] = ["submittedPromptFingerprint": String(repeating: "0", count: 64)]
+        }
         if starts == 2, operation == "webProviderPoll" {
-            await secondPollHook?()
             switch secondResponseMutation {
             case "work": prepared["productModeEvidence"] = ["product": "chatgpt", "mode": "work", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]
             case "proof": prepared["modelProofContext"] = ["submittedPromptFingerprint": String(repeating: "0", count: 64)]

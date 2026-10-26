@@ -237,6 +237,45 @@ final class WebsiteModelFormatCorrectionStoreTests: XCTestCase {
         }
     }
 
+    func testLegacyClaimStillSpendsRendererAllowanceAndCanCloseWithoutRewrite() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)
+        let ticket = try claim(store), claimed = try XCTUnwrap(files(directory).first)
+        try rewrite(claimed) { $0.removeValue(forKey: "reason") }
+        let legacy = try Data(contentsOf: claimed)
+        let restarted = Store(directory: directory)
+        XCTAssertEqual(try record(claimed).ticket.reason, .invalidJSON)
+        XCTAssertThrowsError(try restarted.claim(taskID: UUID().uuidString.lowercased(), threadID: thread, turnID: turn,
+            firstInferenceID: UUID(), firstSessionToken: UUID(), secondInferenceID: UUID(), reason: .rendererFailure))
+        try restarted.recordClosed(ticket, cleanupAttemptID: UUID())
+        try restarted.finish(ticket, secondInferenceID: ticket.secondInferenceID, secondSessionToken: UUID(), outcome: .responseValidated)
+        XCTAssertEqual(try Data(contentsOf: claimed), legacy)
+        XCTAssertEqual(try files(directory).count, 3)
+    }
+
+    func testCorrectionReasonIsBoundAcrossEveryPhaseAndCannotMintNewAllowance() throws {
+        for firstReason in [Store.Reason.invalidJSON, .rendererFailure] {
+            let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)
+            let ticket = try store.claim(taskID: task, threadID: thread, turnID: turn,
+                firstInferenceID: UUID(), firstSessionToken: UUID(), secondInferenceID: UUID(), reason: firstReason)
+            let other: Store.Reason = firstReason == .invalidJSON ? .rendererFailure : .invalidJSON
+            XCTAssertThrowsError(try store.claim(taskID: task, threadID: thread, turnID: turn,
+                firstInferenceID: UUID(), firstSessionToken: UUID(), secondInferenceID: UUID(), reason: other))
+            let forged = Store.Ticket(id: ticket.id, taskID: ticket.taskID, threadID: ticket.threadID, turnID: ticket.turnID,
+                firstInferenceID: ticket.firstInferenceID, firstSessionToken: ticket.firstSessionToken,
+                secondInferenceID: ticket.secondInferenceID, reason: other)
+            XCTAssertThrowsError(try store.recordClosed(forged, cleanupAttemptID: UUID()))
+            try store.recordClosed(ticket, cleanupAttemptID: UUID())
+            let closed = try XCTUnwrap(files(directory).first { $0.lastPathComponent.contains("first_closed") })
+            try rewrite(closed) { $0["reason"] = other.rawValue }
+            XCTAssertThrowsError(try store.finish(ticket, secondInferenceID: ticket.secondInferenceID,
+                secondSessionToken: UUID(), outcome: .responseValidated))
+            XCTAssertThrowsError(try claim(store, turnID: UUID().uuidString.lowercased()))
+            XCTAssertEqual(try files(directory).count, 2)
+        }
+    }
+
     func testCapacityReservesClosureAndOutcomeBeforeGrantingAClaim() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)

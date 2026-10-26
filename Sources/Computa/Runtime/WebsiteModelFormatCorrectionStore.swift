@@ -1,11 +1,14 @@
 import Foundation
 import Darwin
 
-/// A permanent, per-native-turn budget for one website format correction.
+/// A permanent, per-native-turn budget for one website response correction.
 /// Each exclusive record is durable before its caller can advance. No prompt,
 /// reply, tool arguments, URL, or provider-reported usage enters this journal.
 struct WebsiteModelFormatCorrectionStore: Sendable {
     enum Failure: Error { case unavailable }
+    enum Reason: String, Codable, Sendable {
+        case invalidJSON = "invalid_json", rendererFailure = "renderer_failure"
+    }
     enum Outcome: String, Codable, Sendable {
         case responseValidated = "response_validated", invalidJSON = "invalid_json", failed, cancelled
         case timedOut = "timed_out", budgetExhausted = "budget_exhausted"
@@ -18,6 +21,14 @@ struct WebsiteModelFormatCorrectionStore: Sendable {
         let firstInferenceID: UUID
         let firstSessionToken: UUID
         let secondInferenceID: UUID
+        let reason: Reason
+
+        init(id: UUID, taskID: String, threadID: String, turnID: String, firstInferenceID: UUID,
+             firstSessionToken: UUID, secondInferenceID: UUID, reason: Reason = .invalidJSON) {
+            self.id = id; self.taskID = taskID; self.threadID = threadID; self.turnID = turnID
+            self.firstInferenceID = firstInferenceID; self.firstSessionToken = firstSessionToken
+            self.secondInferenceID = secondInferenceID; self.reason = reason
+        }
     }
     enum Phase: String, Codable, Hashable, Sendable { case claimed, firstClosed = "first_closed", finished }
     struct Record: Codable, Equatable, Sendable {
@@ -36,11 +47,13 @@ struct WebsiteModelFormatCorrectionStore: Sendable {
         let secondStarted: Bool
         let secondSessionToken: UUID?
         let outcome: Outcome?
+        // Omitted by pre-recovery records; preserve their canonical encoding.
+        let reason: Reason?
 
         var ticket: Ticket {
             .init(id: correctionID, taskID: taskID, threadID: threadID, turnID: turnID,
                   firstInferenceID: firstInferenceID, firstSessionToken: firstSessionToken,
-                  secondInferenceID: secondInferenceID)
+                  secondInferenceID: secondInferenceID, reason: reason ?? .invalidJSON)
         }
         var isValid: Bool {
             guard schemaVersion == 1, scope == "website_format_correction_not_native_execution", usageUnknown,
@@ -64,12 +77,12 @@ struct WebsiteModelFormatCorrectionStore: Sendable {
     let directory: URL
 
     func claim(taskID: String, threadID: String, turnID: String, firstInferenceID: UUID,
-               firstSessionToken: UUID, secondInferenceID: UUID) throws -> Ticket {
+               firstSessionToken: UUID, secondInferenceID: UUID, reason: Reason = .invalidJSON) throws -> Ticket {
         guard [taskID, threadID, turnID].allSatisfy(Self.validIdentity),
               firstInferenceID != secondInferenceID else { throw Failure.unavailable }
         let ticket = Ticket(id: UUID(), taskID: taskID, threadID: threadID, turnID: turnID,
                             firstInferenceID: firstInferenceID, firstSessionToken: firstSessionToken,
-                            secondInferenceID: secondInferenceID)
+                            secondInferenceID: secondInferenceID, reason: reason)
         return try withInventory { handles, inventory in
             guard inventory.groups[key(ticket)] == nil,
                   inventory.count + inventory.reserved + 3 <= Self.maximumRecords else { throw Failure.unavailable }
@@ -113,7 +126,7 @@ struct WebsiteModelFormatCorrectionStore: Sendable {
               firstInferenceID: ticket.firstInferenceID, firstSessionToken: ticket.firstSessionToken,
               secondInferenceID: ticket.secondInferenceID, phase: phase, usageUnknown: true,
               cleanupAttemptID: cleanupAttemptID, secondStarted: secondStarted,
-              secondSessionToken: secondSessionToken, outcome: outcome)
+              secondSessionToken: secondSessionToken, outcome: outcome, reason: ticket.reason)
     }
     private struct Inventory {
         let groups: [String: [Phase: Record]]

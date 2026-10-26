@@ -832,7 +832,6 @@ actor WebModelServer {
             // Finite sizes only: no prompt, account data, URLs or authority tokens.
             Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
         }
-        let correctionPrompt = request.prompt + Self.formatCorrectionReminder
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)
             guard !session.provesNativeContinuation || current != nil else { throw Failure.modelUnverified }
@@ -842,6 +841,8 @@ actor WebModelServer {
             return current
         }
         attempts: while true {
+            var correctionCandidate: (reason: WebsiteModelFormatCorrectionStore.Reason, session: Session,
+                deadline: ContinuousClock.Instant, evidence: WebsiteModelEvidence?, snapshot: [String: Any]?)?
             do {
                 try requireCurrentContext()
                 guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
@@ -902,7 +903,7 @@ actor WebModelServer {
                               request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
                         else { throw Failure.turnLimit }
                     }
-                    prompt = correctionTicket == nil ? request.prompt : correctionPrompt
+                    prompt = correctionTicket.map { request.prompt + Self.correctionReminder(for: $0.reason) } ?? request.prompt
                     var params = ["provider": provider]
                     if let choice {
                         guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
@@ -1065,8 +1066,16 @@ actor WebModelServer {
                     try requireCurrentContext()
                     let revision = try await session.transport.changeRevision(sessionToken: session.token)
                     guard ContinuousClock.now < end else { throw Failure.deadline }
-                    let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token],
-                        submissionFailureSink: submissionFailureSink)
+                    let value: [String: Any]
+                    do {
+                        value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token],
+                            submissionFailureSink: submissionFailureSink)
+                    } catch {
+                        if (error as? EmbeddedWebModelTransport.Failure) == .responseRenderingFailed {
+                            correctionCandidate = (.rendererFailure, session, end, nil, nil)
+                        }
+                        throw error
+                    }
                     try requireCurrentContext()
                     guard ContinuousClock.now < end else { throw Failure.deadline }
                     switch value["state"] as? String {
@@ -1095,56 +1104,8 @@ actor WebModelServer {
                             if let diagnostic {
                                 captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
-                                if diagnostic.reason == .invalidJSON, correctionTicket == nil,
-                                   provider == "chatgpt", !context.isMaintenance,
-                                   session.provesNativeContinuation, !session.retainsConversation,
-                                   session.sequence == 1, session.baselineResponseCount == 0,
-                                   session.resolvedModel != nil,
-                                   session.turnInferenceCount < Self.maximumTurnInferences,
-                                   correctionPrompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
-                                   correctionPrompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count,
-                                   ContinuousClock.now < end, let correctionStore,
-                                   let firstToken = UUID(uuidString: session.token),
-                                   let ticket = try? correctionStore.claim(taskID: taskID, threadID: context.threadID,
-                                       turnID: context.turnID, firstInferenceID: inferenceID,
-                                       firstSessionToken: firstToken, secondInferenceID: UUID()) {
-                                    // Claim is durable before any corrective await.
-                                    // The rejected bytes confer no output authority.
-                                    correctionTicket = ticket
-                                    correctionSource = session
-                                    try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
-                                        session: session, phase: "failed", errorCode: Self.errorPresentation(for: Failure.malformedReply(diagnostic)).code)
-                                    rejectionRecordedID = inferenceID
-                                    if let authorization = requestMetadata {
-                                        let snapshot = await session.transport.stopRequestMetadata(sessionToken: session.token)
-                                        if (try? requireCurrentContext(includeResponseDeadline: false)) != nil,
-                                           let snapshot, authorization.isCurrent {
-                                            _ = authorization.persist(snapshot, inferenceID: inferenceID, sessionToken: firstToken)
-                                        }
-                                        authorization.revoke()
-                                        await session.transport.revokeRequestMetadata(sessionToken: session.token)
-                                        requestMetadata = nil
-                                        session.requestMetadata = nil
-                                        sessions[taskID] = session
-                                        lease = session
-                                    }
-                                    // Cleanup always settles, even when cancellation
-                                    // or the original deadline expires in this await.
-                                    let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
-                                        runtimeGeneration: context.runtimeGeneration, trigger: .inference)
-                                    guard closed.receipt.outcome == .closed,
-                                          closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
-                                          closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
-                                    guard closed.receipt.receiptSaved, closed.issues.isEmpty,
-                                          let cleanupID = UUID(uuidString: closed.receipt.attemptID) else { throw Failure.persistenceRequired }
-                                    do { try correctionStore.recordClosed(ticket, cleanupAttemptID: cleanupID) }
-                                    catch { throw Failure.persistenceRequired }
-                                    lease = nil
-                                    yielded = nil
-                                    closedHandoff = nil
-                                    try requireCurrentContext()
-                                    inferenceID = ticket.secondInferenceID
-                                    continue attempts
+                                if diagnostic.reason == .invalidJSON {
+                                    correctionCandidate = (.invalidJSON, session, end, evidence, value)
                                 }
                                 throw Failure.malformedReply(diagnostic)
                             }
@@ -1241,6 +1202,77 @@ actor WebModelServer {
                 }
                 throw Failure.deadline
             } catch {
+                var terminalError = error
+                do {
+                    // Both failure reasons share one durable per-turn allowance.
+                    // Native renderer errors carry no response or tool authority.
+                    if let candidate = correctionCandidate {
+                        let reason = candidate.reason
+                        try requireCurrentContext()
+                        let prompt = request.prompt + Self.correctionReminder(for: reason)
+                        var session = candidate.session
+                        if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
+                              session.provesNativeContinuation, !session.retainsConversation,
+                              session.sequence == 1, session.baselineResponseCount == 0,
+                              session.resolvedModel != nil, session.documentGeneration != nil,
+                              !session.submittedPromptFingerprint.isEmpty,
+                              sessions[taskID]?.token == session.token,
+                              session.turnInferenceCount < Self.maximumTurnInferences,
+                              prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
+                              prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count,
+                              ContinuousClock.now < candidate.deadline, let correctionStore,
+                              let firstToken = UUID(uuidString: session.token),
+                              let ticket = try? correctionStore.claim(taskID: taskID, threadID: context.threadID,
+                                  turnID: context.turnID, firstInferenceID: inferenceID,
+                                  firstSessionToken: firstToken, secondInferenceID: UUID(), reason: reason) {
+                            // Claim is durable before any corrective await. Failed output never
+                            // contributes call IDs or modifies the frozen canonical request.
+                            correctionTicket = ticket
+                            correctionSource = session
+                            if let snapshot = candidate.snapshot {
+                                try recordEvidence(candidate.evidence, snapshot: snapshot, taskID: taskID, inferenceID: inferenceID,
+                                    session: session, phase: "failed", errorCode: Self.errorPresentation(for: error).code)
+                            } else {
+                                try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                                    provider: provider, modelID: request.model, sessionToken: session.token, phase: "failed",
+                                    errorCode: Self.errorPresentation(for: error).code, sequence: session.sequence,
+                                    baseline: session.baselineResponseCount, turnScoped: session.retainsConversation)
+                            }
+                            rejectionRecordedID = inferenceID
+                            if let authorization = requestMetadata {
+                                let diagnostic = await session.transport.stopRequestMetadata(sessionToken: session.token)
+                                if (try? requireCurrentContext(includeResponseDeadline: false)) != nil,
+                                   let diagnostic, authorization.isCurrent {
+                                    _ = authorization.persist(diagnostic, inferenceID: inferenceID, sessionToken: firstToken)
+                                }
+                                authorization.revoke()
+                                await session.transport.revokeRequestMetadata(sessionToken: session.token)
+                                requestMetadata = nil
+                                session.requestMetadata = nil
+                                sessions[taskID] = session
+                                lease = session
+                            }
+                            // Cleanup always settles, even when cancellation or the original
+                            // absolute response deadline expires in this await.
+                            let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
+                                runtimeGeneration: context.runtimeGeneration, trigger: .inference)
+                            guard closed.receipt.outcome == .closed,
+                                  closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
+                                  closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
+                            guard closed.receipt.receiptSaved, closed.issues.isEmpty,
+                                  let cleanupID = UUID(uuidString: closed.receipt.attemptID) else { throw Failure.persistenceRequired }
+                            do { try correctionStore.recordClosed(ticket, cleanupAttemptID: cleanupID) }
+                            catch { throw Failure.persistenceRequired }
+                            lease = nil
+                            yielded = nil
+                            closedHandoff = nil
+                            try requireCurrentContext()
+                            inferenceID = ticket.secondInferenceID
+                            continue attempts
+                        }
+                    }
+                } catch { terminalError = error }
+                let error = terminalError
                 if let correctionTicket, let correctionStore, !correctionFinished {
                     let second = inferenceID == correctionTicket.secondInferenceID ? lease : nil
                     let outcome: WebsiteModelFormatCorrectionStore.Outcome
@@ -1307,12 +1339,19 @@ actor WebModelServer {
         }
     }
 
-    private static let formatCorrectionReminder = """
+    private static func correctionReminder(for reason: WebsiteModelFormatCorrectionStore.Reason) -> String {
+        let failure: String
+        switch reason {
+        case .invalidJSON: failure = "The entire previous website reply was rejected as invalid JSON."
+        case .rendererFailure: failure = "The website could not render the previous reply. Computa accepted no response or tool calls from that inference."
+        }
+        return """
 
 
-    COMPUTA FORMAT CORRECTION — ONE ATTEMPT
-    The entire previous website reply was rejected as invalid JSON. Fulfil the unchanged canonical request above using exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence. Keep the original offered tools, tool choice, permissions, arguments, and history authoritative. This corrects formatting only: do not invent results or repeat actions already completed in the canonical history.
-    """
+        COMPUTA RESPONSE CORRECTION — ONE ATTEMPT
+        \(failure) Fulfil the unchanged canonical request above using exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence. Keep the original offered tools, tool choice, permissions, arguments, and history authoritative. Do not invent results or repeat actions already completed in the canonical history.
+        """
+    }
 
 
     /// An unsuccessful HTTP write cannot make this particular handoff reusable.

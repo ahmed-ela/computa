@@ -2308,11 +2308,38 @@ describe('ChatGPT resource timing finite diagnostic', () => {
     expect(diagnostic.observations[2].responseStatus).toBe(0); expect(diagnostic.absenceInconclusive).toBe(true);
     const before = { clicks: send.clicks, observers: f.observers.length, timers: f.scheduledDelays.length, reads };
     const failed = await f.diagnose();
-    expect(failed.resourceTimingDiagnostic).toEqual({ ...diagnostic, phase: 'failure' });
+    expect(failed.resourceTimingDiagnostic).toEqual({ ...diagnostic, kind: 'chatgpt_resource_timing_v3', phase: 'failure',
+      scriptResources: { count: 0, unknownStatusCount: 0, httpFailureCount: 0, failuresTruncated: false, failures: [] } });
     expect(failed).not.toHaveProperty('submissionProof'); expect(failed).not.toHaveProperty('firstUserVerified');
     expect(send.clicks).toBe(before.clicks); expect(f.observers.length).toBe(before.observers); expect(f.scheduledDelays.length).toBe(before.timers);
     expect(reads).toBe(before.reads + 1); expect(f.world.__computaChatResourceTimingClaim).toBe(claim);
     for (const secret of ['PRIVATE', firstMarker, 'https:', 'backend-api', 'name', 'upload']) expect(JSON.stringify(failed.resourceTimingDiagnostic)).not.toContain(secret);
+  });
+  test('terminal renderer inspection retains failure timing with or without completion controls and no extra read', async () => {
+    for (const retainCopy of [false, true]) {
+      let now = 100.25, entries: any[] = [], reads = 0;
+      const { f, prompt, send } = await sent({ now: () => now, getEntriesByType: () => { reads++; return entries; } });
+      now = 200; entries = [ended(undefined, { responseStatus: 200 })];
+      f.appendUser(prompt); f.body.querySelector('main')!.append(f.answer.parentElement!);
+      f.answer.children.forEach(child => { child.connected = false; child.parentElement = null; });
+      f.answer.text = ''; f.answer.children = [];
+      const portal = new Element('DIV', { class: 'PortalBoundary-Fixture Renderer-Fixture' });
+      const renderer = new Element('DIV', { class: 'DilRenderer-Fixture DilResponseRoot-Fixture' });
+      renderer.append(new Element('DIV', {}, 'This response couldn’t load')); portal.append(renderer); f.answer.append(portal);
+      const copy = f.messages.querySelector('button[aria-label="Copy"]')!;
+      if (!retainCopy) copy.connected = false;
+      const before = { reads, clicks: send.clicks, timers: f.scheduledDelays.length, observers: f.observers.length };
+      const failed = await f.inspect({ expectedUserCounts: [1] });
+      expect(failed.firstUserVerified).toBe(true); expect(failed.responseLoadFailed).toBe(true);
+      expect(failed.answerComplete).toBe(retainCopy);
+      expect(failed.completionEvidence.codeStructure.rendererGuard.reason).toBe('matched');
+      expect(failed.resourceTimingDiagnostic).toMatchObject({ phase: 'failure', sequence: 1, conversationCount: 1,
+        observations: [{ endpoint: 'conversation', responseStatus: 200 }], absenceInconclusive: true });
+      expect(reads).toBe(before.reads + 1); expect(send.clicks).toBe(before.clicks);
+      expect(f.scheduledDelays.length).toBe(before.timers); expect(f.observers.length).toBe(before.observers);
+      for (const privateValue of ['PRIVATE', firstMarker, 'https:', 'backend-api'])
+        expect(JSON.stringify(failed.resourceTimingDiagnostic)).not.toContain(privateValue);
+    }
   });
   test('public request and response timing offsets are finite ordered or explicitly unknown', async () => {
     let now = 100.25, entries: any[] = [];
@@ -2321,7 +2348,7 @@ describe('ChatGPT resource timing finite diagnostic', () => {
       entries = [ended(undefined, { requestStart: 110.5, responseStart: 130.1, ...changes })];
       const result = await f.diagnose();
       expect(result).not.toHaveProperty('submissionProof'); expect(result).not.toHaveProperty('firstUserVerified');
-      expect(result.resourceTimingDiagnostic.kind).toBe('chatgpt_resource_timing_v2');
+      expect(result.resourceTimingDiagnostic.kind).toBe('chatgpt_resource_timing_v3');
       return result.resourceTimingDiagnostic.observations[0];
     };
     expect(await read({ headers: 'PRIVATE_HEADERS', cookies: 'PRIVATE_COOKIES' })).toEqual({
@@ -2366,7 +2393,7 @@ describe('ChatGPT resource timing finite diagnostic', () => {
     const { f, send } = await sent({ now: () => now, getEntriesByType: () => names.map(name => ended(name)) }); now = 200;
     const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
     expect(diagnostic.conversationCount).toBe(1); expect(diagnostic.observations).toHaveLength(1);
-    for (const secret of ['PRIVATE', 'http', 'backend-api', 'name', 'url', 'header', 'body']) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    for (const secret of ['PRIVATE', 'http:', 'https:', 'backend-api', 'name', 'url', 'header', 'body']) expect(JSON.stringify(diagnostic)).not.toContain(secret);
     expect(send.clicks).toBe(1);
   });
   test('resource metadata cannot follow foreign owner document claim sequence or crossed native contexts', async () => {
@@ -2393,6 +2420,45 @@ describe('ChatGPT resource timing finite diagnostic', () => {
       preparationCount: 0, observationsTruncated: true, absenceInconclusive: true });
     expect(diagnostic.observations).toHaveLength(4); expect(diagnostic.observations[3].startOffsetMs).toBe(300);
     expect(JSON.stringify(diagnostic).length).toBeLessThanOrEqual(2_048); expect(entries).toHaveLength(300); expect(send.clicks).toBe(1);
+  });
+  test('failure timing records only ended exact public scripts with positive HTTP errors', async () => {
+    let now = 100.25, reads = 0, entries: any[] = [];
+    const { f, send, result } = await sent({ now: () => now, getEntriesByType: () => { reads++; return entries; } });
+    expect(result.resourceTimingDiagnostic.kind).toBe('chatgpt_resource_timing_v2');
+    expect(result.resourceTimingDiagnostic).not.toHaveProperty('scriptResources');
+    now = 200;
+    const asset = (id: number, status?: unknown, extra: Record<string, unknown> = {}) => ended(
+      `https://chatgpt.com/cdn/assets/${id}.abcdef0123.js`, { initiatorType: 'script', responseStatus: status, ...extra });
+    entries = [asset(1, 404), asset(2, 500), asset(3, 503), asset(4, undefined), asset(5, 0),
+      asset(6, 200, { transferSize: 0, encodedBodySize: 0, decodedBodySize: 0 }), asset(7, 304),
+      asset(8, 404, { startTime: 100.2 }), asset(9, 404, { responseEnd: 0 }), asset(10, 404, { responseEnd: 201 }),
+      asset(11, 404, { initiatorType: 'fetch' }), asset(12, 600), asset(13, 99), asset(14, true), asset(15, '404')];
+    const before = { reads, timers: f.scheduledDelays.length, observers: f.observers.length };
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    expect(diagnostic).toMatchObject({ kind: 'chatgpt_resource_timing_v3', phase: 'failure', absenceInconclusive: true,
+      scriptResources: { count: 7, unknownStatusCount: 2, httpFailureCount: 3, failuresTruncated: true,
+        failures: [{ asset: '2.abcdef0123.js', responseStatus: 500, startOffsetMs: 1, durationMs: 50 },
+          { asset: '3.abcdef0123.js', responseStatus: 503, startOffsetMs: 1, durationMs: 50 }] } });
+    expect(reads).toBe(before.reads + 1); expect(send.clicks).toBe(1);
+    expect(f.scheduledDelays.length).toBe(before.timers); expect(f.observers.length).toBe(before.observers);
+    expect(JSON.stringify(diagnostic)).not.toContain('https:');
+  });
+  test('public script resource projection rejects hostile names aliases and unapproved filenames', async () => {
+    let now = 100.25;
+    const names = ['https://private.example/cdn/assets/1.abcdef0123.js', 'https://chatgpt.com.evil.invalid/cdn/assets/1.abcdef0123.js',
+      'https://PRIVATE@chatgpt.com/cdn/assets/1.abcdef0123.js', 'https://chatgpt.com/cdn/assets/1.abcdef0123.js?PRIVATE',
+      'https://chatgpt.com/cdn/assets/1.abcdef0123.js#PRIVATE', 'https://chatgpt.com/cdn/assets/1.abcdef0123.js?',
+      'https://chatgpt.com:443/cdn/assets/1.abcdef0123.js', 'https://chatgpt.com/cdn/assets/../assets/1.abcdef0123.js',
+      'https://chatgpt.com/cdn/assets/%31.abcdef0123.js', 'https://chatgpt.com/cdn/assets/1.ABCDEF0123.js',
+      'https://chatgpt.com/cdn/assets/1234567.abcdef0123.js', 'https://chatgpt.com/cdn/assets/1.abcdef01234.js',
+      'https://chatgpt.com/cdn/assets/PRIVATE.js', 'https://chatgpt.com/cdn/assets/1.abcdef0123.js/'];
+    const { f, send } = await sent({ now: () => now, getEntriesByType: () => names.map(name => ended(name,
+      { initiatorType: 'script', responseStatus: 404 })) }); now = 200;
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    expect(diagnostic.scriptResources).toEqual({ count: 0, unknownStatusCount: 0, httpFailureCount: 0,
+      failuresTruncated: false, failures: [] });
+    for (const secret of ['PRIVATE', 'https:', 'abcdef', 'url', 'name']) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    expect(send.clicks).toBe(1);
   });
 });
 
@@ -2554,7 +2620,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
     expect(observed.text).toBe('This response couldn’t load');
     expect(observed.answerComplete).toBe(true);
-    expect(observed.responseLoadFailed).toBe(true);
+    expect(observed.responseLoadFailed).toBe(true); expect(observed.responseFailureKind).toBe('renderer');
     expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
     expect(f.temporary.clicks).toBe(temporaryClicks); expect(f.composer.events).toEqual([]);
   });
@@ -2567,7 +2633,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const copy = f.messages.querySelector('button[aria-label="Copy"]')!;
     copy.connected = false;
     const observed = await f.inspect();
-    expect(observed.responseLoadFailed).toBe(true); expect(observed.answerComplete).toBe(false);
+    expect(observed.responseLoadFailed).toBe(true); expect(observed.responseFailureKind).toBe('renderer'); expect(observed.answerComplete).toBe(false);
     expect(observed.text).toBe('This response couldn’t load'); expect(copy.clicks).toBe(0);
     expect(f.composer.events).toEqual([]);
   });
@@ -2636,7 +2702,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'leaf-tabindex') e.leaf.values.tabindex = '-1';
       const observed = await f.inspect();
       expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
-      expect(observed.responseLoadFailed).toBe(true);
+      expect(observed.responseLoadFailed).toBe(true); expect(observed.responseFailureKind).toBe('renderer');
       expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'matched', rawKnownLabel: true,
         guardBodyIsExtractedAnswer: true });
       expect(observed.text).toBe('This response couldn’t load');
@@ -2654,7 +2720,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       replaceAnswer(f, wrapper);
       const observed = await f.inspect();
       expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
-      expect(observed.responseLoadFailed).toBe(false); expect(observed.text).toBe('This response couldn’t load');
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull(); expect(observed.text).toBe('This response couldn’t load');
       expect(observed.answerComplete).toBe(true); expect(wrapper.clicks).toBe(0); expect(f.composer.events).toEqual([]);
     }
   });
@@ -2665,7 +2731,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const stop = new Element('BUTTON', { 'aria-label': 'Stop generating' }); f.body.append(stop);
     const observed = await f.inspect();
     expect(observed.error).toBeUndefined(); expect(observed.busy).toBe(true);
-    expect(observed.responseLoadFailed).toBe(true); expect(stop.clicks).toBe(0);
+    expect(observed.responseLoadFailed).toBe(true); expect(observed.responseFailureKind).toBe('renderer'); expect(stop.clicks).toBe(0);
     expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0); expect(f.composer.events).toEqual([]);
   });
 
@@ -2701,7 +2767,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'css-after') child.afterContent = '"Generated author text"';
       if (variant === 'unknown-css') child.beforeContent = '';
       const observed = await f.inspect(variant === 'user-bubble' ? { expectedUserCounts: [1, 2] } : {});
-      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       expect(observed.completionEvidence.codeStructure.rendererGuard.rawKnownLabel).toBeNull();
       expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0); expect(f.composer.events).toEqual([]);
     }
@@ -2724,7 +2790,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'classes') decoration.values.class = Array.from({ length: 17 }, (_, i) => `layout${i}`).join(' ');
       if (variant === 'class-length') decoration.values.class = 'x'.repeat(65);
       const observed = await f.inspect();
-      expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       expect(observed.completionEvidence.codeStructure.rendererGuard.reason).toBe({ depth: 'tree_depth', nodes: 'node_budget',
         children: 'children_budget', classes: 'class_budget', 'class-length': 'class_budget' }[variant]);
       expect(observed.completionEvidence.codeStructure.rendererGuard.visitedNodeCount).toBeLessThanOrEqual(65);
@@ -2738,7 +2804,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       replaceAnswer(f, e.portal);
       if (bodyIsRoot) delete f.answer.parentElement!.values['data-turn'];
       const observed = await f.inspect();
-      expect(observed.responseLoadFailed).toBe(true);
+      expect(observed.responseLoadFailed).toBe(true); expect(observed.responseFailureKind).toBe('renderer');
       const facts = observed.completionEvidence.codeStructure.rendererGuard;
       expect(Object.keys(facts).sort()).toEqual(['reason', 'subject', 'visitedNodeCount', 'rawKnownLabel', 'trimmedKnownLabel',
         'guardBodyIsExtractedAnswer', 'bodyIsRoot', 'knownScopedCopyOutsideDIL', 'rejectedDisplayContents'].sort());
@@ -2755,7 +2821,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const f = fixture({ userPrompt: 'Preserve the existing strict label predicate' }), e = rendererError();
     e.leaf.text = ' This response couldn’t load\n'; replaceAnswer(f, e.portal);
     const observed = await f.inspect();
-    expect(observed.responseLoadFailed).toBe(false);
+    expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
     expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'raw_label_differs',
       subject: 'text_leaf', rawKnownLabel: false, trimmedKnownLabel: true, guardBodyIsExtractedAnswer: true,
       bodyIsRoot: false, knownScopedCopyOutsideDIL: true, rejectedDisplayContents: null });
@@ -2772,7 +2838,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       // This later bad label must not replace the first rejected predicate.
       e.leaf.text = 'A later mismatched label';
       const observed = await f.inspect();
-      expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       const facts = observed.completionEvidence.codeStructure.rendererGuard;
       expect(facts).toMatchObject({ reason: variant === 'no-main' ? 'conversation_boundary_missing' : 'node_not_visible',
         subject: variant === 'no-main' ? 'root' : 'dil_pair', rawKnownLabel: null, trimmedKnownLabel: null,
@@ -2789,7 +2855,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const hiddenBody = new Element('DIV', { 'data-markdown-text-style': 'assistant-message', hidden: '' }, 'Hidden unrelated answer');
     laterRoot.append(hiddenBody); f.messages.append(laterRoot);
     const observed = await f.inspect();
-    expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+    expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
     expect(observed.text).toBe('This response couldn’t load');
     expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'body_not_visible', subject: 'body',
       guardBodyIsExtractedAnswer: false, bodyIsRoot: false, knownScopedCopyOutsideDIL: null,
@@ -2809,7 +2875,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
         wrapper.append(e.portal); replaceAnswer(f, wrapper);
       }
       const observed = await f.inspect();
-      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       expect(observed.text).toContain('This response couldn’t load'); expect(f.composer.events).toEqual([]);
     }
   });
@@ -2835,7 +2901,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
         replaceAnswer(f, new Element('DIV', {}, 'This response couldn’t load'));
       }
       const observed = await f.inspect();
-      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       expect(f.composer.events).toEqual([]);
     }
   });
@@ -2853,7 +2919,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       const observed = await f.inspect({ expectedUserCounts: [1, 2] });
       expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
       expect(observed.text).toBe('This response couldn’t load');
-      expect(observed.responseLoadFailed).toBe(false); expect(f.composer.events).toEqual([]);
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull(); expect(f.composer.events).toEqual([]);
     }
   });
 
@@ -2865,7 +2931,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       const observed = await f.inspect();
       expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
       expect(observed.text).toBe('This response couldn’t load');
-      expect(observed.responseLoadFailed).toBe(false); expect(f.composer.events).toEqual([]);
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull(); expect(f.composer.events).toEqual([]);
     }
   });
 
@@ -2912,7 +2978,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'deep-tree') { let node = new Element('DIV'); const top = node; for (let i = 0; i < 9; i++) { const child = new Element('DIV'); node.append(child); node = child; } e.portal.append(top); }
       if (variant === 'nested-author') e.leaf.values['data-message-author-role'] = 'assistant';
       const observed = await f.inspect();
-      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(observed.responseFailureKind).toBeNull();
       expect(f.composer.events).toEqual([]);
       expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
     }
