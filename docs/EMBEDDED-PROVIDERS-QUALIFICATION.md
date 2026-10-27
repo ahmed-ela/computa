@@ -3372,4 +3372,46 @@ timing without writing private proof state. It covers exact recovery, altered
 body, ignored expansion, partial detachment and repeated collapse, with native
 fingerprint, one-Send/view and cleanup assertions. Final validation passed all
 474 adapter tests / 18,055 assertions and 17 focused native tests on unchanged
-source. Installed build286 live qualification remains pending.
+source.
+
+### Build 286 live result: ownership recovered, separate format rejection
+
+The new 26-character marker seed reached verified submission and response
+ownership. Its first-bound diagnostic shows the provisional recovery reading all
+57,824 canonical characters after both original nodes detached. This is live
+evidence that the captured pre-adoption remount path now recovers. The completed
+answer was instead rejected as `unsupported_website_response`: the page exposed
+one 26-character paragraph, no code block, and no JSON envelope. The exact reply
+was not armed for capture, so matching length does not prove its contents. The
+task failed after 8.782 seconds with no tools, and its owned session has a saved
+closed receipt. This is separate from the original uncaptured blank response.
+
+A fresh harmless diagnostic on the same build used the existing nonce-scoped
+payload capture and an exact-task rejected-reply arm. The watcher armed after
+native identity appeared, during `start_requested`, 8.863 seconds before native
+completion. The full 57,869-byte outbound payload was retained with matching
+hashes. This independent request returned exactly `HI` in 9.117 seconds, with
+zero tools, verified ChatGPT Chat/Instant ownership and a saved closed receipt.
+The rejected-reply arm remained unused and was removed by its file identity.
+This passing request does not explain or erase the earlier format failure.
+
+Both captures are preserved under `candidate286-plan/fresh-send/setup-failure-capture/`
+and `candidate286-reply-diagnostic/` in the same evidence root. No failed seed or
+uncertain action was replayed. Browser/action qualification remains outstanding.
+
+### Build 287: keep exact-answer formatting beside the final envelope example
+
+The captured build286 prompt already contained the exact-answer rule, but it
+was 5,720 characters before the end of the 8,316-character response handoff.
+The rule now follows the tool-specific guidance, beside the final output syntax
+and examples. It explicitly explains that Computa
+displays `message.text`, with an example preserving the user's exact `OK`
+answer inside the message envelope. This is an instruction-salience mitigation
+for the observed format failure, not proof of why the model omitted its envelope.
+Strict parsing, complete ownership/model checks and no replay of uncertain
+actions are unchanged. Independent source review found no blocker.
+All 171 focused instruction, response-codec and format-correction tests passed
+on frozen source, including the existing prompt-size ceilings and all 25
+format-correction/no-replay cases. The unchanged adapter and ownership code
+retain build286's 474 adapter tests and 17 focused native tests. Live build287
+qualification remains pending.

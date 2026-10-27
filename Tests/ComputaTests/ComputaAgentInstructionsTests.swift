@@ -1447,6 +1447,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let format = try XCTUnwrap(handoff.range(of: "Return exactly one fenced JSON code block"))
         XCTAssertLessThan(rule.upperBound, format.lowerBound, "The return-only decision belongs immediately before the required envelope format")
         XCTAssertTrue(handoff.contains("truthful limitations and refusals in message.text"))
+        let exactAnswerExample = #"{"type":"message","text":"OK"}"#
+        XCTAssertTrue(handoff.contains(exactAnswerExample))
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(exactAnswerExample, request: request, requireEnvelope: true), .message("OK"))
         let message = try JSONSerialization.data(withJSONObject: ["type": "message", "text": contents])
         let fenced = "```json\n" + String(decoding: message, as: UTF8.self) + "\n```"
         XCTAssertEqual(try WebModelResponseCodec.parseReply(fenced, request: request, requireEnvelope: true), .message(contents))

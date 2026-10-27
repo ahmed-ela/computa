@@ -691,18 +691,19 @@ enum ComputaAgentInstructions {
         and object function arguments.
         \(customContract)
 
-        User reply-format constraints apply to unwrapped message.text; still use one
-        JSON envelope. Put file-only results, truthful limitations and refusals in message.text.
         \(commandHandoff)
         \(browserAddressHandoff)
         \(diagnosticHandoff)
         \(selectionContract)
         \(literalIdentifiers)
+        User reply-format constraints apply to unwrapped message.text; still use one
+        JSON envelope. Put file-only results, truthful limitations and refusals in message.text.
         \(responseFormatInstructions)
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR
-        {"type":"message","text":"Your answer or truthful remaining limitation"}
+        For "reply exactly OK" (Computa displays only message.text):
+        {"type":"message","text":"OK"}
         Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
