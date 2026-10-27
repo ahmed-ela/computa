@@ -3088,3 +3088,46 @@ case, while the live batch composition remains unknown. The subsequent candidate
 narrows only provably irrelevant editor presentation changes and records finite
 mutation categories on first invalidation. Unknown or ambiguous batches must
 still fail closed; no submitted action is replayed.
+
+### Build 282: bounded mutation fix validated; live qualification awaits sign-in
+
+Installed signed, non-notarized 0.7.0 (282), source `3a1a0da`, with executable
+SHA-256 `b88d7e3060fbb11a0e74e280dbb5565d881ecde531e486fa952725a01bca3e32`.
+The source, signature and copied resources matched the build receipt.
+
+The mutation change excludes only class/style records on the unique current
+editor when a bounded whole-batch provenance check proves disjointness. Any
+structural/text/relabel ambiguity, referenced label dependency, unknown shape
+or exceeded classification bound disables that exception. The existing 512
+relevant-record bound and transient Work-selection checks remain. First failure
+freezes finite type/scope counts and the private submission phase; no message
+text, attribute values or arbitrary identifiers enter those diagnostics.
+
+The final ChatGPT adapter run passed 458 tests / 16,188 assertions. Seven focused
+native product-proof/diagnostic tests passed, including strict histogram parsing,
+log bounds and withholding output without current product/model/body proof.
+Independent code review found no remaining material blocker. These results do
+not establish what comprised build281's unretained mutation batch or prove the
+original build270 failure's cause.
+
+The new neutral setup failed after 1.480 seconds with `sign_in_required`, before
+insertion or submission was recorded. Native logs show a settled sign-in blocker
+after an initial inspection, with zero user/assistant messages. The exact failure
+and unconfirmed cleanup receipts were retained. Neither planned send fixture was
+started; the mutation change and form-submission behavior remain unqualified live
+on this build. There was no refresh, automatic retry or replay of either failed
+setup.
+
+Read-only inspection of the normal built-in browser also reached ChatGPT's login
+page. Google's existing account showed signed out and required passkey/password
+verification. The user was asked to complete that sign-in in the browser. The
+saved persistent profile identity and profile/cookie lifecycle code are unchanged;
+there is no evidence of a newly created profile or direct human-cookie deletion
+by inference cleanup. Expiry, session-only persistence and server-side credential
+rotation remain hypotheses, not an attributed logout cause.
+
+The prior build281 process was closed to install this build, disposing its
+physical views. That is not proof of remote website-session cleanup; its saved
+unconfirmed state remains. The build282 failed view and the ordinary sign-in tab
+are retained while authentication is pending. No real email was replayed, no
+fixture listener remains from build280, and no release or merge was performed.
