@@ -3204,5 +3204,63 @@ Earlier runs remain preserved: they caught overly broad reference handling,
 inaccurate synthetic DOM movement/record shapes, an opaque native lifecycle
 error, and assertions against cached idle-poll readiness instead of the guarded
 Send boundary. The final tests exercise the guarded operation and retain the
-original negative assertions. Build283's installed live qualification is still
-pending; no old failed inference will be replayed.
+original negative assertions. Installed build283 was then tested with a new
+neutral seed; no old failed inference was replayed.
+
+
+### Build 283 live capture: full first-message proof followed by collapse
+
+Installed 0.7.0 (283), source `0f72b3069514bd17ef83198e6733f964efcedc21`,
+passed the signed-in normal Chat UI check (Chat selected, Work unselected,
+composer present). Its new neutral Instant seed failed after 5.802 seconds.
+The native task settled to Failed with `website_ownership_unverified` and
+`ownership_reason=first_user_message`; no tools or local mailbox actions ran.
+
+The request-bound diagnostics record a complete 57,824-character first message
+at 22:59:42.695533 UTC, a unique final session marker, a matching private
+fingerprint, and intact snapshot identities. After the root-to-local-conversation
+route transition, the next inspect at 22:59:43.145422 UTC saw a 10,240-character
+prefix and one scoped expansion control. The final marker was absent. Native
+still had one confirmed user, a verified current submission, and the same owned
+document/view. No mutation-budget rejection appears in this captured window.
+
+The first expansion had succeeded; the subsequent bound-message path could not
+expand again because expansion authority was restricted to the pending initial
+binding. The evidence establishes a collapsed representation after binding. It
+does not distinguish the same DOM nodes collapsing from a message remount, and
+does not establish the original uncaptured build270 blank-answer cause. The
+failed view and exact native/website/cleanup journals were retained; cleanup
+remains unconfirmed. No failed prompt was replayed.
+
+Evidence: `work/action-reliability-20261027-capture/candidate283-plan/fresh-send/`
+`setup-failure-capture/independent-failure-summary.json`, the 22-record
+`first-user-diagnostics.json`, and the exact 158-row provider window. Diagnostic
+expansion-text fields retain the earlier successful expansion and must not be
+misread as current full-body evidence after the collapse.
+
+
+### Bound first-message display recovery
+
+A separate native capability now permits one display-only expansion while the
+sole, already verified first submission is still running. It requires current
+native and private first-message/submission fingerprints, the same physical
+root/body, owner, document and route, and current selected-model, Chat-product
+and temporary-session guards. It grants no Send, new binding, replacement-node
+or cleanup authority. A collapsed prefix only admits the local display attempt;
+acceptance still requires the entire canonical body and a fresh SHA-256 match,
+followed by the ordinary submission and response checks. Failed or incomplete
+claims remain spent, and another collapse cannot trigger another expansion.
+Finite root/body/native-pin flags distinguish later rejection cases without
+recording page content.
+
+The full adapter suite passed 467 tests / 17,044 assertions on unchanged source.
+Independent source review found no blocker within this one-recovery, same-node
+scope. The first native run preserved three helper failures: the deliberately
+busy fixture exposes `pendingSubmissionContext`, while the helper had required
+final `modelProofContext`. The helper was corrected to verify both native
+fingerprints in the pending context and still require final model evidence on
+completion. No production admission rule was changed for that test correction.
+The corrected native run passed all nine focused tests on unchanged source,
+including real WebKit recovery, changed/ignored/repeated/remounted bodies,
+cleanup/cancellation, original unbound expansion and native-certified route
+continuation. Installed build284 live qualification remains pending.

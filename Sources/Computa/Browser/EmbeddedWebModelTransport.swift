@@ -2755,7 +2755,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let projected = sanitizedQueryTemplateDiagnostic(query) else { return nil }
             safe["queryTemplate"] = projected
         }
-        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
+        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion",
+                    "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
@@ -3072,7 +3073,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var context: [String: Any] = [:]
         if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
             context = ["kind": "first_user_context", "provider": provider.rawValue]
-            for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
+            for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion",
+                        "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches", "privatePinPresent", "expectedFingerprintPresent",
                         "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
                 if let value = summary.removeValue(forKey: key) { context[key] = value }
             }
@@ -3725,6 +3727,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.sequence == 1 && session.confirmedUsers == 0 && session.pendingSubmission
             && session.temporary && session.firstUserFingerprint == nil
             && session.modelSelectionVerified && session.modelChoice != nil
+        // A verified first message can collapse again while its reply is still
+        // running. This separate grant permits one local display recovery; JS
+        // must retain the same physical nodes and re-prove the complete digest.
+        // Cleanup and other actions never inherit this inspection capability.
+        let allowBoundFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
+            && !session.isDiscovery && session.state == "running" && session.submitted
+            && session.sequence == 1 && session.confirmedUsers == 1 && !session.pendingSubmission
+            && session.currentSubmissionVerified && session.temporary && session.firstUserFingerprint != nil
+            && session.currentSubmission.map { $0.sequence == 1 && $0.outboundFingerprint == session.firstUserFingerprint } == true
+            && session.modelSelectionVerified && session.modelChoice != nil
         var routeContinuation = firstUserExpansionRouteContinuation
         var routeRefreshAvailable = refreshChangedRoute
         if let preceding = routeContinuation.last {
@@ -3750,6 +3762,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowFirstUserBinding": action == "inspect" && session.sequence == 1
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
+            "allowBoundFirstUserExpansion": allowBoundFirstUserExpansion,
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
@@ -3851,7 +3864,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         if let choice = session.modelChoice {
-            if allowFirstUserExpansion {
+            if allowFirstUserExpansion || allowBoundFirstUserExpansion {
                 input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
             }
             if action == "selectModel" { input["modelChoice"] = ["key": choice.key, "label": choice.label] }

@@ -2219,7 +2219,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
         const allowed = new Set(['kind', 'provider', 'reason', 'scope', 'action', 'userCount', 'root', 'body', 'textLength',
           'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
-          'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
+          'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'allowBoundFirstUserExpansion',
+          'boundRootSame', 'boundBodySame', 'boundNativePinMatches', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
           'bodyInnerTextLength', 'bodyTextContentLength', 'rootRenderedTextLength', 'rootTextContentLength', 'firstPromptLength',
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',

@@ -5119,6 +5119,43 @@ function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
 // from this diagnostic. In particular a pre-claim context failure must not be
 // lost merely because the expansion was correctly refused.
 let chatGPTFirstUserExpansionAdmissionFailure = null;
+function chatGPTBoundFirstUserExpansionPins(candidate) {
+  const state = candidate.state, record = candidate.record, pinned = globalThis.__computaModelFirstProof;
+  return input.action === 'inspect' && input.allowBoundFirstUserExpansion === true
+    && input.allowFirstUserBinding !== true && input.allowFirstUserExpansion !== true
+    && state === globalThis.__computaChatSubmissionState && chatGPTSubmissionContext(state)
+    && state.pending == null && state.lastVerified === record && record?.phase === 'verified' && record.sequence === 1
+    && record.document === document && record.owner === input.ownerToken && record.replacement == null
+    && input.submissionSequence === 1 && input.submissionMarker === record.marker
+    && record.root === candidate.root && record.body === candidate.body
+    && record.marker === candidate.marker && record.canonical === candidate.canonical
+    && typeof record.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.fingerprint)
+    && record.fingerprint === candidate.fingerprint && record.fingerprint === input.expectedFirstUserFingerprint
+    && pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint && chatGPTSubmissionPins(record)
+    && websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    && websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice);
+}
+function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
+  const reject = reason => { chatGPTFirstUserExpansionAdmissionFailure = reason; return null; };
+  if (input.suppressFirstUserExpansionClaim === true) return reject('suppressed');
+  if (input.action !== 'inspect') return reject('action');
+  if (input.allowBoundFirstUserExpansion !== true) return reject('binding');
+  if (globalThis.__computaModelBoundFirstExpansion != null) return reject('claim_spent');
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
+  if (typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker)) return reject('marker');
+  if (typeof prompt !== 'string' || prompt.length > 180_000
+    || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)) return reject('prompt');
+  if (!websiteModelChoiceValid(input.firstUserExpansionModelChoice)) return reject('model_choice');
+  const canonical = chatGPTSubmissionCanonical(prompt);
+  if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
+    || rendered.includes(`Computa session marker: ${marker}`)) return reject('text_prefix');
+  const candidate = { bound: true, state, record, fingerprint: record?.fingerprint,
+    root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
+    document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
+  const failure = chatGPTFirstUserExpansionContextFailure(candidate);
+  return failure === null ? candidate : reject(failure);
+}
 function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
   const reject = reason => { chatGPTFirstUserExpansionAdmissionFailure = reason; return null; };
@@ -5155,7 +5192,7 @@ function chatGPTFirstUserExpansionContextFailure(candidate) {
   if (globalThis.__computaModelLastSubmissionCount !== 0) return 'submission_count';
   if (globalThis.__computaModelFirstMarker !== candidate.marker) return 'marker';
   if (globalThis.__computaModelFirstPrompt !== candidate.prompt) return 'prompt';
-  if (globalThis.__computaModelFirstProof != null) return 'private_pin';
+  if (candidate.bound ? !chatGPTBoundFirstUserExpansionPins(candidate) : globalThis.__computaModelFirstProof != null) return 'private_pin';
   if (!chatGPTProductModeProof()) return 'product';
   if (!chatGPTTemporaryVerified()) return 'temporary';
   if (roots[0] !== candidate.root || !candidate.root.isConnected) return 'root';
@@ -5487,7 +5524,8 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
 async function chatGPTExpandFirstUser(candidate) {
   // One private claim survives timeout/reinspection. It grants only this local
   // display expansion, never Send, lineage, cleanup, or another attempt.
-  globalThis.__computaModelFirstExpansion = candidate;
+  if (candidate.bound) globalThis.__computaModelBoundFirstExpansion = candidate;
+  else globalThis.__computaModelFirstExpansion = candidate;
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
     const intact = () => chatGPTFirstUserExpansionContext(candidate)
@@ -5603,18 +5641,19 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     }
     result.bodySelection = selection;
     Object.assign(result, chatGPTProductProofFailureDiagnostic());
-    Object.assign(result, globalThis.__computaModelFirstExpansion?.textDiagnostic || {});
-    const outcome = globalThis.__computaModelFirstExpansion?.outcome;
+    const expansion = globalThis.__computaModelBoundFirstExpansion || globalThis.__computaModelFirstExpansion;
+    Object.assign(result, expansion?.textDiagnostic || {});
+    const outcome = expansion?.outcome;
     if (chatGPTFirstUserExpansionAdmissionFailure !== null)
       result.expansionAdmissionFailure = chatGPTFirstUserExpansionAdmissionFailure;
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)
-      ? outcome : input.allowFirstUserExpansion === true ? 'ineligible' : 'not_requested';
-    const contextFailure = globalThis.__computaModelFirstExpansion?.contextFailure;
+      ? outcome : input.allowFirstUserExpansion === true || input.allowBoundFirstUserExpansion === true ? 'ineligible' : 'not_requested';
+    const contextFailure = expansion?.contextFailure;
     if (['frame', 'provider', 'origin', 'owner', 'user_count', 'submission', 'submission_count', 'marker', 'prompt',
       'private_pin', 'product', 'temporary', 'root', 'body', 'conversation_route', 'conversation_identity', 'url',
       'continuation', 'deadline'].includes(contextFailure)) result.expansionContextFailure = contextFailure;
-    const modelError = globalThis.__computaModelFirstExpansion?.modelFailure?.error;
+    const modelError = expansion?.modelFailure?.error;
     if (chatGPTExpansionModelErrors.includes(modelError)) result.expansionModelError = modelError;
     const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
     const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
@@ -5678,6 +5717,15 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
       submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
       markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true, allowFirstUserExpansion: input.allowFirstUserExpansion === true,
       privatePinPresent: pinned != null, expectedFingerprintPresent: input.expectedFirstUserFingerprint != null };
+    if (input.allowBoundFirstUserExpansion === true || globalThis.__computaModelFirstProof != null) {
+      const record = globalThis.__computaChatSubmissionState?.lastVerified;
+      diagnostic.allowBoundFirstUserExpansion = input.allowBoundFirstUserExpansion === true;
+      diagnostic.boundRootSame = record?.sequence === 1 && record.root === root;
+      diagnostic.boundBodySame = record?.sequence === 1 && record.body === body;
+      diagnostic.boundNativePinMatches = record?.sequence === 1 && pinned?.marker === marker
+        && pinned?.fingerprint === record.fingerprint && input.expectedFirstUserFingerprint === record.fingerprint
+        && chatGPTSubmissionPins(record);
+    }
     Object.assign(diagnostic, chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots));
     if (scope === 'first_insert' || scope === 'first_submit') {
       diagnostic.firstPromptPresent = typeof globalThis.__computaModelFirstPrompt === 'string';
@@ -5703,7 +5751,7 @@ function chatGPTFirstUserFailure(reason, scope, captured = {}, allowSubmittedUse
   const debugStructure = firstUserRejectionDiagnostic
     || chatGPTFirstUserStructure(reason, scope, captured, allowSubmittedUser, fingerprint);
   if (debugStructure) firstUserRejectionDiagnostic = debugStructure;
-  const modelDiagnostic = globalThis.__computaModelFirstExpansion?.modelFailure?.modelDiagnostic;
+  const modelDiagnostic = (globalThis.__computaModelBoundFirstExpansion || globalThis.__computaModelFirstExpansion)?.modelFailure?.modelDiagnostic;
   return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
     ...(modelDiagnostic ? { modelDiagnostic } : {}) };
 }
@@ -5784,6 +5832,12 @@ if (ownedUserCount > 0) {
     if (optimistic) return optimistic;
   }
   const consumedExpansion = globalThis.__computaModelFirstExpansion;
+  const consumedBoundExpansion = globalThis.__computaModelBoundFirstExpansion;
+  // A display recovery is one-shot too. Even a later complete body cannot
+  // revive a failed/unfinished claim or turn it into submission authority.
+  if (consumedBoundExpansion != null && (consumedBoundExpansion.outcome !== 'expanded'
+    || consumedBoundExpansion.verified !== true))
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   let expansionRejected = false;
   if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
     && input.firstUserExpansionRouteContinuation != null) {
@@ -5798,7 +5852,9 @@ if (ownedUserCount > 0) {
     // on a later read after failure, replacement, or a different full body.
     return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   let expansion; const expansionStarted = chatGPTSyncWorkStart();
-  try { expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered); }
+  try { expansion = globalThis.__computaModelFirstProof != null && input.allowBoundFirstUserExpansion === true
+    ? chatGPTBoundFirstUserExpansionCandidate(ownedMessages[0], first, rendered)
+    : chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered); }
   finally { chatGPTSyncWorkEnd(4, expansionStarted); }
   if (expansion) {
     expansionRejected = !await chatGPTExpandFirstUser(expansion);
@@ -5825,6 +5881,9 @@ if (ownedUserCount > 0) {
   websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  if (expansion?.bound && (!chatGPTFirstUserExpansionContext(expansion)
+    || rendered !== expansion.canonical || fingerprint !== expansion.fingerprint))
+    return chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
     { snapshotIntact: snapshotUnchanged(true), fingerprint }, chatGPTTemporaryVerified())
     || await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
@@ -5866,6 +5925,8 @@ if (ownedUserCount > 0) {
         identity: () => null, temporary: chatGPTTemporaryVerified })
       || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', {}, input.action === 'submit');
   if (observed.error) return observed;
+  if (expansion?.bound && !chatGPTFirstUserExpansionContext(expansion))
+    return chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard');
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   if (!pinned) {
@@ -5881,7 +5942,9 @@ if (ownedUserCount > 0) {
       ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
-  return chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
+  const finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
+  if (expansion?.bound && !finalized.error) expansion.verified = true;
+  return finalized;
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');
