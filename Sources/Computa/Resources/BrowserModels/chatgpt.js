@@ -3546,7 +3546,7 @@ function chatGPTProductModeDiagnostic(state) {
 }
 function chatGPTProductProofFailureDiagnostic() {
   const proof = globalThis.__computaChatProductMode;
-  const reasons = ['work_selected', 'mutation_overflow', 'group_overflow', 'work_overflow', 'contradictory_controls',
+  const reasons = ['work_selected', 'mutation_overflow', 'mutation_scan_overflow', 'mutation_uninspectable', 'product_history_ambiguous', 'group_overflow', 'work_overflow', 'contradictory_controls',
     'owner', 'document', 'frame', 'origin', 'route', 'not_ready', 'temporary_unclaimed'];
   if (!proof?.invalidated || !reasons.includes(proof.invalidationReason)) return {};
   const diagnostic = { productProofFailure: proof.invalidationReason };
@@ -3597,6 +3597,95 @@ function chatGPTControlExposed(node) {
 function chatGPTObserveProductMutations(proof, state, records) {
   if (proof.invalidated) return;
   const groups = proof.groups, works = proof.works;
+  const limits = { relevant: 4_096, records: 8_192, visits: 16_384, children: 4_096, depth: 128 };
+  let analysisFailure = null, visits = 0;
+  const unavailable = reason => { if (!analysisFailure) analysisFailure = reason; return []; };
+  const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
+  const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
+  const ancestry = new Map(), containments = new Map();
+  const contains = (ancestor, node) => {
+    if (!ancestor || !node) return false;
+    const cached = containments.get(ancestor);
+    if (cached?.has(node)) return cached.get(node);
+    if (!charge()) return false;
+    if (!ancestry.has(node)) {
+      const chain = new Set(); let current = node;
+      for (; current && chain.size <= limits.depth; current = current.parentElement) {
+        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable'); return false; }
+        chain.add(current);
+      }
+      if (current) { unavailable('mutation_scan_overflow'); return false; }
+      ancestry.set(node, chain);
+    }
+    const result = ancestry.get(node).has(ancestor), values = cached || new Map();
+    values.set(node, result); containments.set(ancestor, values); return result;
+  };
+  // Inspect actual nodes before considering semantic candidates. No selector
+  // result or added/removed list may silently discard an unexamined tail.
+  const elements = root => {
+    if (subtrees.has(root)) return subtrees.get(root);
+    const result = [], stack = [{ node: root, depth: 0 }], seen = new Set();
+    try {
+      while (stack.length) {
+        const { node, depth } = stack.pop();
+        if (!charge()) return [];
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable');
+        if (depth > limits.depth) return unavailable('mutation_scan_overflow');
+        seen.add(node);
+        if (node.nodeType === 1) result.push(node);
+        if (![1, 9, 11].includes(node.nodeType)) continue;
+        const children = node.childNodes;
+        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable');
+        if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
+          return unavailable('mutation_scan_overflow');
+        for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
+      }
+      subtrees.set(root, result); return result;
+    } catch { return unavailable('mutation_uninspectable'); }
+  };
+  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
+    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
+  const candidates = (root, kind) => {
+    const cached = candidateLists.get(root) || {};
+    if (cached[kind]) return cached[kind];
+    const result = [];
+    for (const node of elements(root)) {
+      if (!charge()) return [];
+      if (kind === 'controls' ? control(node) : node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null)
+        result.push(node);
+    }
+    cached[kind] = result; candidateLists.set(root, cached); return result;
+  };
+  let labelInventory = null;
+  const labelData = () => {
+    if (labelInventory) return labelInventory;
+    const ids = new Map(), references = new Set(), referrers = new Map();
+    for (const node of elements(document.documentElement)) {
+      if (!charge()) break;
+      const id = node.getAttribute('id');
+      if (id) { const matches = ids.get(id) || []; matches.push(node); ids.set(id, matches); }
+      const value = node.getAttribute('aria-labelledby');
+      if (value != null) {
+        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable'); break; }
+        for (const token of value.trim().split(/\s+/)) if (token) {
+          references.add(token); const referring = referrers.get(token) || new Set(); referring.add(node); referrers.set(token, referring);
+        }
+      }
+    }
+    labelInventory = { ids, references, referrers }; return labelInventory;
+  };
+  const labelledGroup = node => {
+    if (!node || node.nodeType !== 1) return false;
+    if (groupNames.has(node)) return groupNames.get(node);
+    let named = false;
+    const label = node.getAttribute('aria-label'), id = node.getAttribute('aria-labelledby');
+    if (label != null) named = websiteModelNormalize(label) === 'Composer mode';
+    else if (typeof id === 'string' && id && id.length <= 256 && !/\s/.test(id)) {
+      const labels = labelData().ids.get(id) || [];
+      named = labels.length === 1 && state.physical(labels[0]) && websiteModelNormalize(labels[0].textContent) === 'Composer mode';
+    }
+    groupNames.set(node, named); return named;
+  };
   // Rendering a conversation is not a product-mode event. Tracked product
   // nodes take precedence even after moving into a message or detaching.
   const messageBoundary = '[data-message-author-role="user"], [data-message-author-role="assistant"], '
@@ -3604,11 +3693,10 @@ function chatGPTObserveProductMutations(proof, state, records) {
     + 'article[data-turn="user"], article[data-turn="assistant"], [data-user-message-bubble]';
   const tracked = [...groups, ...works];
   const touchesTracked = node => !!node && tracked.some(control => control === node
-    || control.contains(node) || node.contains?.(control));
+    || contains(control, node) || contains(node, control));
   const containsGroup = node => {
     if (node?.nodeType !== 1) return false;
-    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')];
-    return candidates.length > 128 || candidates.some(candidate => state.labelledGroup(candidate));
+    return candidates(node, 'labels').some(labelledGroup) || !!analysisFailure;
   };
   const messageOnly = record => {
     // State transitions stay relevant until structural records establish which
@@ -3617,22 +3705,31 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const element = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
     if (!element?.closest(messageBoundary) || touchesTracked(record.target)) return false;
     // A new/moved product group in a message is still relevant to provenance.
-    for (let node = element; node; node = node.parentElement) if (state.labelledGroup(node)) return false;
+    for (let node = element; node; node = node.parentElement) {
+      if (!charge() || labelledGroup(node)) return false;
+    }
     if (record.type === 'attributes' && record.attributeName === 'aria-label' && record.oldValue === 'Composer mode') return false;
     return [...(record.addedNodes || []), ...(record.removedNodes || [])]
       .every(node => !touchesTracked(node) && !containsGroup(node));
   };
   // Only the exact current editor can qualify for this presentation exclusion.
   // It does not extend to ancestors, arbitrary page nodes or product controls.
-  const composerCandidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
-    + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))];
+  const composerCandidates = elements(document.documentElement).filter(node => {
+    if (!charge()) return false;
+    const editable = node.getAttribute('contenteditable') === 'true', textarea = node.tagName?.toLowerCase() === 'textarea';
+    return node.getAttribute('id') === 'prompt-textarea' && (editable || textarea)
+      || editable && (node.parentElement?.closest('#prompt-textarea') || node.getAttribute('aria-label') === 'Ask ChatGPT')
+      || textarea && node.getAttribute('data-testid') === 'prompt-textarea';
+  });
   const composer = composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
     && composerCandidates[0].isConnected ? composerCandidates[0] : null;
   const productNodes = [...tracked, ...(state.groups || []), state.work].filter(Boolean);
-  const intersects = (left, right) => !!left && !!right && (left === right || left.contains?.(right) || right.contains?.(left));
+  const intersects = (left, right) => !!left && !!right && (left === right || contains(left, right) || contains(right, left));
   const emptyNodes = value => value == null || Number.isInteger(value.length) && value.length === 0;
+  const observedAttributes = new Set(globalThis.__computaModelSignal?.attributeNames || []);
   const knownRecord = record => !!record && !!record.target
     && (record.type === 'attributes' && record.target.nodeType === 1 && typeof record.attributeName === 'string'
+        && observedAttributes.has(record.attributeName)
         && emptyNodes(record.addedNodes) && emptyNodes(record.removedNodes)
       || record.type === 'characterData' && record.target.nodeType === 3
       || record.type === 'childList' && record.target.nodeType === 1
@@ -3646,8 +3743,8 @@ function chatGPTObserveProductMutations(proof, state, records) {
     // An outside mode group may obtain its label through an editor-related ID.
     // Class/style can change that label's physical visibility without moving
     // either node. Bounded ID intersections suffice; no label text is read.
-    const descendants = [...composer.querySelectorAll('[id]')];
-    const references = [...document.querySelectorAll('[aria-labelledby]')];
+    const descendants = elements(composer).filter(node => node !== composer && node.getAttribute('id') != null);
+    const references = elements(document.documentElement).filter(node => node.getAttribute('aria-labelledby') != null);
     if (descendants.length > 128 || references.length > 128) return true;
     const sources = [composer, ...descendants];
     let ancestor = composer.parentElement, depth = 0;
@@ -3665,7 +3762,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const presentationBatchSafe = () => {
     if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
       || productNodes.some(node => intersects(node, composer)) || containsGroup(composer)
-      || composer.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]').length
+      || candidates(composer, 'controls').length
       || editorCanAffectReferencedLabel()) return false;
     for (const record of records) {
       if (!knownRecord(record)) return false;
@@ -3707,48 +3804,130 @@ function chatGPTObserveProductMutations(proof, state, records) {
   // relevant record. Unrelated message rendering does not consume that budget.
   for (const record of records) {
     countRecord(record);
-    if (knownRecord(record) && (messageOnly(record) || ignorePresentation && presentationAttribute(record))) ignored++;
+    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable'); break; }
+    if (record.type === 'childList' && record.addedNodes.length + record.removedNodes.length > limits.children) {
+      relevant.push(record); unavailable('mutation_scan_overflow'); break;
+    }
+    if (messageOnly(record) || ignorePresentation && presentationAttribute(record)) ignored++;
     else relevant.push(record);
-    if (relevant.length > 512) break;
+    if (analysisFailure || relevant.length > limits.relevant || relevant.length + ignored >= limits.records) break;
   }
   Object.freeze(histogram.types); Object.freeze(histogram.scopes); Object.freeze(histogram.composerAttributes); Object.freeze(histogram);
   const counts = { relevant: relevant.length, ignored, histogram };
   const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
+  if (analysisFailure) { invalidate(analysisFailure); return; }
+  if (records.length > limits.records || relevant.length > limits.relevant) { invalidate('mutation_overflow'); return; }
+  const ownedControls = new Set(works);
+  const historicallyOwnedNodes = new Set(works);
+  const ownControl = node => { ownedControls.add(node); if (ownedControls.size > 128) unavailable('mutation_scan_overflow'); };
   const trackWork = (node, observedInTrackedGroup = false) => {
-    const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => group.contains(node));
+    const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => contains(group, node));
     if (!state.modeControl(node, trackedGroup)) return;
     works.add(node);
+    if (works.size > 128) { unavailable('work_overflow'); return; }
     if (node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-checked') === 'true') invalidate('work_selected');
   };
-  const register = (node, allowNewGroups) => {
+  const register = (node, allowNewGroups, historicalOutsideRoot = false) => {
     if (!node || node.nodeType !== 1) return;
-    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 128);
-    for (const candidate of candidates) if (allowNewGroups && state.namedGroup(candidate)) groups.add(candidate);
-    const owned = groups.has(node) || [...groups].some(group => group.contains(node));
-    if (owned) for (const candidate of [node, ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
-      trackWork(candidate);
+    for (const candidate of candidates(node, 'labels')) {
+      if (!charge()) return;
+      if (historicalOutsideRoot && allowNewGroups && !groups.has(candidate)
+        && labelledGroup(candidate) && !state.outside(candidate)
+        && (candidate === node || !contains(node, candidate.closest(messageBoundary)))) {
+        unavailable('product_history_ambiguous'); return;
+      }
+      if (allowNewGroups && state.outside(candidate) && labelledGroup(candidate)) {
+        groups.add(candidate); if (groups.size > 64) { unavailable('group_overflow'); return; }
+      }
+    }
+    const owned = groups.has(node) || [...groups].some(group => contains(group, node));
+    if (owned) for (const candidate of candidates(node, 'controls')) {
+      if (!charge()) return;
+      ownControl(candidate); trackWork(candidate);
+    }
   };
   if (state.group) groups.add(state.group);
+  if (groups.size > 64 || works.size > 128) { invalidate(groups.size > 64 ? 'group_overflow' : 'work_overflow'); return; }
   if (state.work) trackWork(state.work);
+  for (const group of groups) register(group, false);
+  if (analysisFailure) { invalidate(analysisFailure); return; }
   // Process structural provenance before attribute records. A control can be
   // mounted, switched to Work, switched back and detached within one batch.
-  for (const record of relevant.slice(0, 512)) if (knownRecord(record) && record.type === 'childList') {
+  for (const record of relevant) if (record.type === 'childList') {
     // A detached group authored in a message cannot become trusted just
     // because its final ancestry no longer contains that message boundary.
     const allowNewGroups = state.outside(record.target);
     register(record.target, allowNewGroups);
-    const ownedTarget = groups.has(record.target) || [...groups].some(group => group.contains(record.target));
-    for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])].slice(0, 128)) {
-      register(node, allowNewGroups);
-      if (ownedTarget && node?.nodeType === 1) for (const candidate of [node,
-        ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
-        trackWork(candidate, true);
+    const ownedTarget = groups.has(record.target) || [...groups].some(group => contains(group, record.target));
+    if (record.addedNodes.length + record.removedNodes.length > limits.children) { unavailable('mutation_scan_overflow'); break; }
+    for (const node of [...record.addedNodes, ...record.removedNodes]) {
+      elements(node);
+      register(node, allowNewGroups, true);
+      if (ownedTarget) for (const descendant of elements(node)) {
+        if (!charge()) break;
+        historicallyOwnedNodes.add(descendant);
+        if (historicallyOwnedNodes.size > limits.children) { unavailable('mutation_scan_overflow'); break; }
+      }
+      if (ownedTarget && node?.nodeType === 1) for (const candidate of candidates(node, 'controls')) {
+        if (!charge()) break;
+        ownControl(candidate); trackWork(candidate, true);
+      }
+      if (analysisFailure) break;
     }
+    if (analysisFailure) break;
   }
+  if (analysisFailure) { invalidate(analysisFailure); return; }
   if (groups.size > 64) { invalidate('group_overflow'); return; }
   if (works.size > 128) { invalidate('work_overflow'); return; }
-  if (relevant.length > 512) { invalidate('mutation_overflow'); return; }
-  if (state.contradictory) invalidate('contradictory_controls');
+  if (state.contradictory) { invalidate('contradictory_controls'); return; }
+  // A later current label cannot explain a historical label or referenced-ID
+  // transition. Keep that uncertainty negative instead of inventing provenance.
+  const relevantRecords = new Set(relevant);
+  const controlName = node => websiteModelNormalize(node.getAttribute('aria-label') || node.innerText || node.textContent);
+  const potentialLabelHistory = relevant.some(record => record.type === 'characterData'
+    ? ['Chat', 'Work', 'Composer mode'].includes(websiteModelNormalize(record.oldValue || ''))
+    : record.type === 'attributes' && (record.attributeName === 'aria-label'
+      && [record.oldValue, record.target.getAttribute('aria-label')].some(value => ['Chat', 'Work', 'Composer mode'].includes(websiteModelNormalize(value || '')))
+      || ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true' && controlName(record.target) === 'Work'
+      || record.attributeName === 'role' && ['button', 'radio', 'switch', 'checkbox'].includes(record.oldValue) && controlName(record.target) === 'Work'));
+  const productReferrers = new Map();
+  const potentialReferrer = node => {
+    if (productReferrers.has(node)) return productReferrers.get(node);
+    const potential = potentialLabelHistory || groups.has(node) || ownedControls.has(node)
+      || candidates(node, 'controls').some(candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
+    productReferrers.set(node, potential); return potential;
+  };
+  let productReferenceData = null;
+  const referencedSources = () => {
+    if (productReferenceData) return productReferenceData;
+    const data = labelData(), sources = new Set(), ids = new Set();
+    for (const [id, nodes] of data.referrers) if ([...nodes].some(potentialReferrer)) {
+      ids.add(id); for (const node of data.ids.get(id) || []) sources.add(node);
+    }
+    productReferenceData = { sources, ids }; return productReferenceData;
+  };
+  for (const record of records) {
+    const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+    if (!charge()) break;
+    if (record.type === 'attributes') {
+      const name = record.attributeName;
+      if (relevantRecords.has(record) && (name === 'aria-labelledby' && potentialReferrer(target) || name === 'aria-label'
+        && [record.oldValue, target.getAttribute('aria-label')].some(value => ['Composer mode', 'Work'].includes(websiteModelNormalize(value || '')))
+        ) || name === 'id' && [record.oldValue, target.getAttribute('id')].some(value => value && referencedSources().ids.has(value))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      if (name === 'role' && [record.oldValue, target.getAttribute('role')].some(value => ['button', 'radio', 'switch', 'checkbox'].includes(value))
+        && (historicallyOwnedNodes.has(target) || ownedControls.has(target) || [...groups].some(group => contains(group, target)))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+    } else if (record.type === 'childList' || record.type === 'characterData') {
+      if ([...ownedControls].some(node => node === target || contains(node, target))
+        || [...referencedSources().sources].some(node => node === target || contains(node, target))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+    }
+  }
+  if (analysisFailure) { invalidate(analysisFailure); return; }
   if (relevant.some(record => record?.type === 'attributes'
     && ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true'
     && works.has(record.target))) invalidate('work_selected');
@@ -4876,17 +5055,17 @@ if (input.action === 'failedPageDiagnostic') {
   return chatGPTObservationDiagnosticResult({ failureDiagnostic: chatGPTFailedPageDiagnostic(), ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) });
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
-  const signal = { ownerToken: input.ownerToken, observer: null };
-  signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
-  // The HTML element can be replaced without replacing this Document or owner.
-  // Observe its parent so replacement and the new subtree still wake a fresh read.
-  signal.observer.observe(document, {
-    subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
-    attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
+  const signal = { ownerToken: input.ownerToken, observer: null,
+    attributeNames: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style", "id",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
       "data-user-message-bubble", "data-talvt-turn-state", "data-content-search-turn-key",
-      "data-chatgpt-selection-message-id", "data-tool-call-id", "role"]
+      "data-chatgpt-selection-message-id", "data-tool-call-id", "role"] };
+  signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
+  // Observe the document so replacement and the new subtree remain visible.
+  signal.observer.observe(document, {
+    subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
+    attributeFilter: signal.attributeNames
   });
   globalThis.__computaModelSignal = signal;
 }

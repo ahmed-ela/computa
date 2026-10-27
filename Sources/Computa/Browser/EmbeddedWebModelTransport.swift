@@ -2577,7 +2577,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
         "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
-    private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "group_overflow", "work_overflow",
+    private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "mutation_scan_overflow",
+        "mutation_uninspectable", "product_history_ambiguous", "group_overflow", "work_overflow",
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
     private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]

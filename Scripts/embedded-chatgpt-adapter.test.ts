@@ -49,7 +49,11 @@ class Element {
   getAttribute(name: string) { return this.values[name] ?? null; }
   getClientRects() { return this.isConnected && !this.zeroRects && this.values['data-fixture-display'] !== 'contents' && !this.closest('[hidden]') ? [{}] : []; }
   getBoundingClientRect() { return { left: 0, top: this.rect * 40, width: 100, height: 30 }; }
-  append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
+  append(...children: Element[]) { children.forEach(child => {
+    // Native append moves an existing node instead of leaving it in two trees.
+    if (child.parentElement) child.parentElement.children = child.parentElement.children.filter(existing => existing !== child);
+    child.parentElement = this; this.children.push(child);
+  }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
   compareDocumentPosition(other: Element): number {
     if (other === this) return 0;
@@ -4270,6 +4274,7 @@ describe("embedded ChatGPT fixed adapter", () => {
     expect(f.observers[0].options?.attributeFilter).toContain("aria-hidden");
     expect(f.observers[0].options?.attributeFilter).toContain("data-turn");
     expect(f.observers[0].options?.attributeFilter).toContain("data-user-message-bubble");
+    expect(f.observers[0].options?.attributeFilter).toContain("id");
     for (const attribute of ['data-talvt-turn-state', 'data-content-search-turn-key',
       'data-chatgpt-selection-message-id', 'data-tool-call-id', 'role'])
       expect(f.observers[0].options?.attributeFilter).toContain(attribute);

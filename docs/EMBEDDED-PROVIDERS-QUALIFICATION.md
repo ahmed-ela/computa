@@ -3089,7 +3089,7 @@ narrows only provably irrelevant editor presentation changes and records finite
 mutation categories on first invalidation. Unknown or ambiguous batches must
 still fail closed; no submitted action is replayed.
 
-### Build 282: bounded mutation fix validated; live qualification awaits sign-in
+### Build 282: editor fix validated; live capture identifies structural overflow
 
 Installed signed, non-notarized 0.7.0 (282), source `3a1a0da`, with executable
 SHA-256 `b88d7e3060fbb11a0e74e280dbb5565d881ecde531e486fa952725a01bca3e32`.
@@ -3131,3 +3131,78 @@ physical views. That is not proof of remote website-session cleanup; its saved
 unconfirmed state remains. The build282 failed view and the ordinary sign-in tab
 are retained while authentication is pending. No real email was replayed, no
 fixture listener remains from build280, and no release or merge was performed.
+
+After the user completed sign-in, root verified the normal ChatGPT composer with
+Chat selected and Work off. A new independent seed failed in 136 ms with
+`sign_in_required`. Its exact journal contains only `start_requested` and
+`failed`, with no session token or browser preparation. This was the earlier
+in-memory provider gate, not evidence of another authentication redirect.
+Human sign-in does not clear that gate; the supported prompt-free model refresh
+must successfully discover choices and close its discovery session first.
+
+Root invoked that refresh. The same process subsequently admitted a fresh
+ChatGPT prewarm at 22:36:47 UTC, which the retained gate would prohibit.
+Source-correlated admission supports successful discovery and gate clearance;
+there is no separately persisted discovery-cleanup receipt. Five normal Chat
+choices remained available. No failed inference was replayed.
+
+The next distinct seed failed in 2.352 seconds with `product_mode_unverified`.
+Root observed the native task settle to Failed with its specific error and
+cleanup warning, rather than remaining in Running or Waiting.
+Its first-invalidation histogram finally captures the failing category:
+`send_claimed`, 513 relevant records, zero ignored, 495 `childList` and 18
+attribute changes. Every examined target was classified `other`; none was
+classified as composer, message or tracked product. The earlier editor-only
+exception therefore did not address this live failure. The capture proves
+structural analysis exceeded its capacity; it does not identify those nodes or
+show a Work selection. The candidate repair analyzes a larger finite batch with
+bounded structural work instead of declaring these unknown targets irrelevant.
+
+The submit callback failed after 252 ms. Cleanup observed one rendered user
+prefix of 10,240 characters from the 57,827-character prompt, with submission
+pending and product binding invalid. Cleanup remains unconfirmed, the failed
+view is retained, and no Send retry or local tool ran. Exact diagnostics were
+preserved before any app replacement. The original build270 empty-response
+cause and the earlier logout cause remain unknown.
+
+Offline preparation also caught a fixture defect: its recipient allowlist did
+not match the new case's unique synthetic address. A case-bound adapter now
+changes only that guard and its displayed rejection text, verifies both source
+and effective hashes, and rejects any unexpected source shape. Independent
+in-process checks proved one exact recipient/subject/body delivery and rejected
+a different recipient with HTTP 400 and no additional delivery. These checks
+opened no sockets and are fixture validation, not installed-app qualification.
+
+### Build 283: complete bounded mutation analysis
+
+The scanner now analyzes up to 4,096 relevant records within an 8,192-record
+batch and 16,384 total analysis visits. Traversal, ancestry, classification and
+candidate work share that budget. Child-list width, tree depth, product groups
+and controls have separate finite limits. Per-batch caches avoid repeating
+subtree scans; no added/removed list or candidate tail is silently discarded.
+Uninspectable data, exhausted work budgets and ambiguous product history remain
+terminal. No new page-scope exemption was added.
+
+Structural provenance is processed before historical Work-state checks, including
+changes after the old 512-record cutoff. Tests cover newly mounted, detached,
+relabelled and wrapped/moved controls; role removal; and referenced-label changes
+that are restored within the same batch. The actual observer now includes `id`
+changes. Ordinary model-picker references are kept distinct from product-mode
+label dependencies. These changes address the demonstrated analysis-capacity
+failure without attributing the unrecorded DOM targets or accepting an invalid
+product, model or submission proof.
+
+Final source validation passed 461 adapter tests / 16,347 assertions and eight
+focused native tests. The real WebKit regression delivered a single batch of
+600 child-list changes plus 18 attributes, completed a subsequent synthetic
+response and cleanup, and separately verified that late Work and label-ID
+transitions prevent Send with zero submitted prompts. The native run recorded
+unchanged source hashes. Independent review found no remaining blocker within
+this bounded scope. These are focused suites, not a whole-app test result.
+
+Earlier runs remain preserved: they caught overly broad reference handling,
+inaccurate synthetic DOM movement/record shapes, an opaque native lifecycle
+error, and assertions against cached idle-poll readiness instead of the guarded
+Send boundary. The final tests exercise the guarded operation and retain the
+original negative assertions. Build283's installed live qualification is still
+pending; no old failed inference will be replayed.
