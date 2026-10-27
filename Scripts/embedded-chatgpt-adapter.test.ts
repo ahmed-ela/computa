@@ -1459,6 +1459,98 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     const provisionalAllowance = { allowProvisionalFirstUserExpansion: true, allowBoundFirstUserExpansion: false,
       allowFirstUserBinding: true, allowFirstUserExpansion: true, expectedFirstUserFingerprint: null,
       firstUserExpansionModelChoice: choice };
+    const initialRouteStage = async (remount = false) => {
+      const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE INITIAL ROUTE\n' + 'x'.repeat(40_000));
+      const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
+      oldBody.text = first.outbound.slice(0, 10_240);
+      const initialControl = new Element('BUTTON', { 'aria-label': 'Show more' }); oldRoot.append(initialControl);
+      initialControl.onClick = () => { oldBody.text = first.outbound; };
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/local-chatgpt%3Ainitial-recovery?temporary-chat=true';
+      x.f.onDigest(() => { x.f.document.URL = toURL; x.f.location.pathname = '/c/local-chatgpt%3Ainitial-recovery'; }, first.outbound);
+      const crossed = await x.f.rawRun({ action: 'inspect', expectedUserCounts: [1], ...x.values(first), ...provisionalAllowance });
+      expect(crossed.error).toBeDefined(); expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+      const initial: any = x.f.world.__computaModelFirstExpansion;
+      expect(initial).toMatchObject({ outcome: 'expanded', clicked: true, expandedText: first.outbound });
+      const record: any = (x.f.world.__computaChatSubmissionState as any).pending;
+      expect(record.phase).toBe('send_claimed');
+      let root = oldRoot, body = oldBody, expand = initialControl;
+      if (remount) {
+        const next = replaceRoot(x); root = next.root; body = next.body;
+        expand = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(expand);
+      }
+      body.text = first.outbound.slice(0, 10_240); expand.onClick = () => { body.text = first.outbound; };
+      const continuation = { ...provisionalAllowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] };
+      return { x, first, oldRoot, oldBody, root, body, expand, initialControl, initial, record, continuation };
+    };
+
+    test('initial successful expansion recaptures a collapsed first route using the same deadline and outbound proof', async () => {
+      for (const remount of [false, true]) {
+        const { x, first, record, root, body, expand, initialControl, initial, continuation } = await initialRouteStage(remount);
+        const originalDeadline = initial.deadline, digests = x.f.digestInputs.length;
+        const result = await x.observe(first, continuation);
+        expect(result.error).toBeUndefined(); expect(result.firstUserFingerprint).toBe(first.fingerprint);
+        expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ initialRoute: true, verified: true, deadline: originalDeadline });
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.phase).toBe('verified');
+        expect(x.f.digestInputs.slice(digests).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(initialControl.clicks + (remount ? expand.clicks : 0)).toBe(2); expect(x.send.clicks).toBe(1);
+        expect(initial.initialTransitionDiagnostic).toMatchObject({ initialExpansionSucceeded: true, initialExpansionCanonicalMatches: true,
+          initialExpansionRootSame: !remount, initialExpansionBodySame: !remount,
+          initialExpansionOldRootConnected: !remount, initialExpansionOldBodyConnected: !remount, initialExpansionDeadlineLive: true });
+        body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, allowance));
+        expect(initialControl.clicks + (remount ? expand.clicks : 0)).toBe(2);
+      }
+    });
+
+    test('initial route recapture rejects failed, inexact or expired predecessors and keeps first finite facts', async () => {
+      for (const mutation of ['failed', 'timeout', 'unfinished', 'ascii_only', 'expired', 'suppressed', 'no_chain',
+        'foreign_chain', 'native_pin', 'native_round', 'pending_phase', 'mixed_body', 'prefix']) {
+        const { x, first, oldRoot, oldBody, body, expand, initial, record, continuation } = await initialRouteStage();
+        const overrides: any = { ...continuation };
+        if (['failed', 'timeout', 'unfinished'].includes(mutation)) initial.outcome = mutation === 'unfinished' ? 'claimed' : mutation;
+        if (mutation === 'ascii_only') initial.expandedText = first.outbound.replace('PRIVATE INITIAL', 'PRIVATE  INITIAL');
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+        if (mutation === 'suppressed') overrides.suppressFirstUserExpansionClaim = true;
+        if (mutation === 'no_chain') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'foreign_chain') overrides.firstUserExpansionRouteContinuation = [{ fromURL: 'https://chatgpt.com/c/foreign', toURL: x.f.document.URL }];
+        if (mutation === 'native_pin') overrides.expectedFirstUserFingerprint = first.fingerprint;
+        if (mutation === 'native_round') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'pending_phase') record.phase = 'prepared';
+        if (mutation === 'mixed_body') {
+          const next = new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text);
+          oldRoot.children = oldRoot.children.map(node => node === oldBody ? next : node); next.parentElement = oldRoot;
+          oldBody.connected = false; oldBody.parentElement = null;
+        }
+        if (mutation === 'prefix') body.text = '!' + body.text.slice(1);
+        const result = await x.observe(first, overrides); denied(result);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1); expect(x.f.world.__computaModelBoundFirstExpansion).toBeUndefined();
+        if (mutation !== 'no_chain') {
+          const facts = initial.initialTransitionDiagnostic;
+          expect(facts.initialExpansionSucceeded).toBe(!['failed', 'timeout', 'unfinished'].includes(mutation));
+          expect(facts.initialExpansionCanonicalMatches).toBe(mutation !== 'ascii_only');
+          expect(facts.initialExpansionDeadlineLive).toBe(mutation !== 'expired');
+          const frozen = { ...facts }; body.text = first.outbound;
+          denied(await x.observe(first, overrides)); expect(initial.initialTransitionDiagnostic).toEqual(frozen);
+        }
+      }
+    });
+
+    test('initial route recovery never renews its deadline or admits changed bytes during a fresh hash', async () => {
+      for (const mutation of ['deadline', 'text', 'root', 'native_record']) {
+        const { x, first, body, expand, initial, record, continuation } = await initialRouteStage(true);
+        if (mutation === 'deadline') expand.onClick = () => { body.text = first.outbound; x.f.advanceTime(2_000); };
+        else x.f.onDigest(() => {
+          if (mutation === 'text') body.text += '!';
+          if (mutation === 'root') replaceRoot(x);
+          if (mutation === 'native_record') record.fingerprint = '0'.repeat(64);
+        }, first.outbound);
+        denied(await x.observe(first, continuation));
+        expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ deadline: initial.deadline });
+        body.text = first.outbound; denied(await x.observe(first, continuation));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+        expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+      }
+    });
     const provisionalStage = async (initialExpansion = false) => {
       const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PROVISIONAL PROMPT\n' + 'x'.repeat(40_000));
       const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];

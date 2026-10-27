@@ -2582,6 +2582,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
     private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]
+    private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
+        "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
+        "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
     private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
@@ -2761,6 +2764,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
+                safe[key] = flag
+            }
+        }
+        if firstUserInitialExpansionFlags.contains(where: { value[$0] != nil }) {
+            guard provider == .chatgpt else { return nil }
+            for key in firstUserInitialExpansionFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
                 safe[key] = flag
             }
         }
@@ -3069,6 +3079,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             bodyObservation["kind"] = "first_user_body"; bodyObservation["provider"] = provider.rawValue
             for key in ["action", "scope"] { bodyObservation[key] = summary[key] }
         }
+        // Retain the original claim's finite facts separately from a later
+        // generic continuation rejection. No text, route or proof is exported.
+        var initialExpansion: [String: Any] = [:]
+        for key in firstUserInitialExpansionFlags {
+            if let value = summary.removeValue(forKey: key) { initialExpansion[key] = value }
+        }
+        if !initialExpansion.isEmpty {
+            initialExpansion["kind"] = "first_user_initial_expansion"; initialExpansion["provider"] = provider.rawValue
+            for key in ["action", "scope"] { initialExpansion[key] = summary[key] }
+        }
         // Keep optional context separate if the full summary exceeds the same
         // existing log cap. Adding diagnostics must not discard the branch.
         var context: [String: Any] = [:]
@@ -3083,6 +3103,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
+            + (initialExpansion.isEmpty ? [] : [initialExpansion])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
             + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
             + (queryObservation.isEmpty ? [] : [queryObservation]) + children {
@@ -3102,6 +3123,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_body\"") {
                 event = "firstUserBody"
+            }
+            else if safe.contains("\"kind\":\"first_user_initial_expansion\"") {
+                event = "firstUserInitialExpansion"
             }
             else if safe.contains("\"kind\":\"first_user_text\"") {
                 event = "firstUserText"

@@ -2221,6 +2221,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
           'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'allowBoundFirstUserExpansion', 'allowProvisionalFirstUserExpansion',
           'boundRootSame', 'boundBodySame', 'boundOldRootConnected', 'boundOldBodyConnected', 'boundNativePinMatches',
+          'initialExpansionSucceeded', 'initialExpansionCanonicalMatches', 'initialExpansionRootSame', 'initialExpansionBodySame',
+          'initialExpansionOldRootConnected', 'initialExpansionOldBodyConnected', 'initialExpansionDeadlineLive',
           'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
           'bodyInnerTextLength', 'bodyTextContentLength', 'rootRenderedTextLength', 'rootTextContentLength', 'firstPromptLength',
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',

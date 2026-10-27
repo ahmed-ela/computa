@@ -3415,3 +3415,58 @@ on frozen source, including the existing prompt-size ceilings and all 25
 format-correction/no-replay cases. The unchanged adapter and ownership code
 retain build286's 474 adapter tests and 17 focused native tests. Live build287
 qualification remains pending.
+
+### Build 287 live capture: initial expansion before the first ownership pin
+
+The signed installed build287 (`5e8a0d511be7c301d1c6da9656fc9e5373d95a1c`)
+failed its new seed in 2.680 seconds. Native accepted the initial root-to-local
+route transition at 23:39:09.749621 UTC; the next JavaScript inspection rejected
+the initial expansion continuation about 50 milliseconds later. No private or
+native first-message fingerprint had yet been adopted. The current body showed
+the 10,240-character prefix of the 57,843-character prompt. Earlier retained
+expansion diagnostics show a complete ASCII-whitespace-equivalent body; these
+facts neither prove exact bytes nor establish current ownership.
+
+The initial continuation supports an unchanged complete original body or a
+URL-only interruption, but cannot recapture a display that collapses or remounts
+after expansion and before first binding. Its generic continuation rejection
+does not identify which individual predicate failed in this live capture.
+The bound-node diagnostics refer to an absent `lastVerified` record here, so
+their false values must not be treated as evidence that initial nodes detached.
+Canonical hash and route requirements remain authoritative.
+
+The rejected-reply watcher armed at `start_requested`; no reply reached the
+codec, and its unused arm was removed. The specific ownership error persisted
+as Failed, cleanup remains unconfirmed, and no seed, tool or action was replayed.
+Exact journals, 134 native rows and 17 finite diagnostic records are preserved
+under `candidate287-plan/fresh-send/setup-failure-capture/` in the same evidence
+root. This run does not qualify the format mitigation or browser actions.
+
+### Build 288: recapture initial display after a certified route transition
+
+A successful initial expansion may now use the existing single display-recovery
+claim after the native first-route classifier discards a crossed observation.
+It requires the original exact expanded text, the same pending sequence-one
+outbound proof, the unchanged document/owner/model, and the original deadline.
+The current message must be unique and contain the exact prefix, with either
+the same physical root/body or both old nodes detached and replaced together.
+The normal local expansion guards still apply, including native suppression.
+Its complete current canonical text and SHA-256 must pass ordinary first-message
+adoption. No old prefix, cached display result or rejected observation grants
+ownership or a tool call, and no Send is repeated.
+
+Failed, unfinished, inexact or expired predecessors, partial replacement,
+changed bytes, foreign route edges and altered outbound bindings remain errors.
+The original expansion's seven finite boolean facts are latched before generic
+continuation rejection can overwrite its state, and logged separately under
+the existing per-record bound. No prompt text or URL is added to logs.
+
+Frozen validation passed 477 adapter tests / 18,623 assertions and 21 focused
+native tests. The new actual-WebKit test changes normal DOM/history after a
+real digest completes and before the initial private pin, without writing proof
+state. Both same-body collapse and full remount recover with one original Send;
+wrong content, mixed-node replacement, expiration and unfinished expansion fail.
+Existing route-promotion, unchanged deadline, cleanup and no-repeat regressions
+also pass. The instruction/codec/no-replay source is unchanged from build287's
+171-test passing cohort. Independent review found no remaining blocker; live
+build288 qualification remains pending.

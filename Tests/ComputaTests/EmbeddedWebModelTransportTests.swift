@@ -6257,6 +6257,130 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testInitialExpandedDisplayRecaptureAfterCertifiedRouteRequiresFreshCompleteProof() async throws {
+        for condition in ["same_body", "remount", "changed", "partial_remount", "expired", "unfinished"] {
+            let succeeds = condition == "same_body" || condition == "remount"
+            let route = "/c/local-chatgpt%3Ainitial-display-recapture?temporary-chat=true"
+            let page = condition == "unfinished"
+                ? Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
+                    earlyExpansionScript: "history.pushState({}, '', '\(route)');")
+                : Self.collapsedFirstUserPage()
+            let fixture = try Fixture(page: page)
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil); fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await fixturePhaseProbe("initial_recapture_start") { try await startChoice(choice, in: fixture) }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await fixturePhaseProbe("initial_recapture_ready") { try await waitForState("ready", fixture.transport, token: token) }
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            // Trigger the real route boundary after complete display expansion,
+            // before the first digest can install either private or native proof.
+            // This wrapper observes adapter state; it never writes proof/claim state.
+            if condition != "unfinished" {
+                _ = try await evaluate(view, """
+                    const original = crypto.subtle.digest.bind(crypto.subtle);
+                    crypto.subtle.digest = async (...arguments_) => {
+                      const result = await original(...arguments_);
+                      const candidate = globalThis.__computaModelFirstExpansion;
+                      if (!globalThis.__fixtureInitialRecaptureBoundary && candidate?.outcome === 'expanded'
+                        && !globalThis.__computaModelFirstProof && location.pathname === '/') {
+                        globalThis.__fixtureInitialRecaptureBoundary = {
+                          outcome: candidate.outcome, deadline: candidate.deadline,
+                          exactBody: candidate.expandedText === candidate.canonical,
+                          privatePinned: !!globalThis.__computaModelFirstProof,
+                          pendingPhase: globalThis.__computaChatSubmissionState?.pending?.phase
+                        };
+                        history.pushState({}, '', '\(route)');
+                      }
+                      return result;
+                    }; return true;
+                    """, world: privateWorld)
+            }
+            var changed = false, originalDeadline: Double?
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                guard checkpoint == .routeAccepted, !changed else { return }
+                changed = true
+                let before = try? await self.evaluate(view, """
+                    const claim = globalThis.__computaModelFirstExpansion;
+                    return { outcome: claim?.outcome, deadline: claim?.deadline,
+                      exactBody: claim?.expandedText === claim?.canonical,
+                      privatePinned: !!globalThis.__computaModelFirstProof,
+                      pendingPhase: globalThis.__computaChatSubmissionState?.pending?.phase };
+                    """, world: privateWorld) as? [String: Any]
+                XCTAssertEqual(before?["privatePinned"] as? Bool, false, condition)
+                XCTAssertEqual(before?["pendingPhase"] as? String, "send_claimed", condition)
+                if condition != "unfinished" {
+                    XCTAssertEqual(before?["outcome"] as? String, "expanded", condition)
+                    XCTAssertEqual(before?["exactBody"] as? Bool, true, condition)
+                }
+                originalDeadline = before?["deadline"] as? Double
+                // Both supported physical shapes are generated through normal
+                // DOM replacement, followed by an ordinary local Show more.
+                try? await self.installBoundFirstUserCollapse(view,
+                    behavior: condition == "remount" ? "remount" : condition == "partial_remount" ? "partial_remount"
+                        : condition == "changed" ? "changed" : "unchanged")
+                if condition == "expired" { try? await Task.sleep(for: .milliseconds(1_900)) }
+            }
+            var complete: [String: Any]?
+            do {
+                _ = try await fixturePhaseProbe("initial_recapture_send") {
+                    try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": String(repeating: "Bound recovery canonical payload line.\n", count: 600)])
+                }
+                complete = try await fixturePhaseProbe("initial_recapture_complete") {
+                    try await waitForState("complete", fixture.transport, token: token)
+                }
+                XCTAssertTrue(succeeds, "An uncertain initial display cannot gain proof: \(condition)")
+            } catch {
+                if succeeds { throw error }
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition)
+            }
+            XCTAssertTrue(changed, "The fixture must cross the actual native route continuation: \(condition)")
+            let clicks = try await evaluate(view,
+                "return {initial:window.fixtureExpansionClicks, recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
+            XCTAssertEqual(clicks?["initial"], 1, condition)
+            XCTAssertEqual(clicks?["recovery"], succeeds || condition == "changed" ? 1 : 0, condition)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            if succeeds {
+                let observed = try XCTUnwrap(complete)
+                XCTAssertEqual(observed["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(observed, choice: choice)
+                let proof = try XCTUnwrap(observed["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
+                let claims = try await evaluate(view, """
+                    return { initialDeadline: globalThis.__computaModelFirstExpansion?.deadline,
+                      recoveryDeadline: globalThis.__computaModelBoundFirstExpansion?.deadline,
+                      recoveryVerified: globalThis.__computaModelBoundFirstExpansion?.verified,
+                      privatePinned: !!globalThis.__computaModelFirstProof };
+                    """, world: privateWorld) as? [String: Any]
+                XCTAssertNotNil(originalDeadline)
+                XCTAssertEqual(claims?["initialDeadline"] as? Double, originalDeadline)
+                XCTAssertEqual(claims?["recoveryDeadline"] as? Double, originalDeadline)
+                XCTAssertEqual(claims?["recoveryVerified"] as? Bool, true)
+                XCTAssertEqual(claims?["privatePinned"] as? Bool, true)
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+                try await assertHumanTabIntact(fixture)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A rejected recapture must remain spent: \(condition)")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition) }
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "failed", condition)
+                let after = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+                XCTAssertEqual(after, clicks?["recovery"], "Cleanup cannot grant another display action")
+                try await assertHumanTabIntact(fixture, retaining: ownedID)
+            }
+        }
+    }
+
     func testOneExpansionContinuesAcrossFirstLocalRouteAndItsPublicPromotionBeforeLineageBinding() async throws {
         let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
             earlyExpansionScript: """
@@ -9798,6 +9922,39 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             var forged = source; forged["productProofFailure"] = invalid
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
+    }
+
+    func testInitialExpansionDiagnosticsRequireCompleteFiniteFlagsAndSeparateBoundedRecord() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let flags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches", "initialExpansionRootSame",
+                     "initialExpansionBodySame", "initialExpansionOldRootConnected", "initialExpansionOldBodyConnected",
+                     "initialExpansionDeadlineLive"]
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
+            "reason": "snapshot_before_action", "scope": "digest", "action": "inspect",
+            "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],
+            "userCount": 1, "textLength": 10_240, "lineCount": 82, "markerOccurrences": 0, "controlDescendants": 0,
+            "markerFinalLine": false, "submitted": true, "markerMatches": true,
+            "expansionOutcome": "context_changed", "expansionContextFailure": "continuation",
+            "initialExpansionBodyText": "private_canary", "initialExpansionURL": "https://private_canary"]
+        for (index, key) in flags.enumerated() { source[key] = index.isMultiple(of: 2) }
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(source), provider: .chatgpt))
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        let observation = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_initial_expansion" })
+        XCTAssertEqual(Set(observation.keys), Set(flags + ["kind", "provider", "scope", "action"]))
+        for (index, key) in flags.enumerated() {
+            XCTAssertEqual(observation[key] as? Bool, index.isMultiple(of: 2))
+            var missing = source; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(missing), provider: .chatgpt))
+            for invalid in ["private_canary", 0, 1, NSNull(), [true]] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+            }
+        }
+        var otherProvider = source; otherProvider["provider"] = "gemini"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(otherProvider), provider: .gemini))
     }
 
     func testChatGPTAlternateBodyDiagnosticsRejectPrivateValuesAndDistinguishUnavailableAnalysis() throws {
