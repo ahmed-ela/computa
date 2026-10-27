@@ -5403,6 +5403,92 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testProvisionalFirstMessageRemountRecoversOnlyExactDispatchedBodyBeforeNativeBinding() async throws {
+        for behavior in ["remount", "remount_changed", "remount_ignored", "partial_remount", "repeat"] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
+                const stop = document.createElement('button'); stop.id = 'fixture-bound-stop';
+                stop.setAttribute('data-testid', 'stop-button'); stop.setAttribute('aria-label', 'Stop generating');
+                stop.textContent = 'Stop generating'; document.body.appendChild(stop);
+                """))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": String(repeating: "Bound recovery canonical payload line.\n", count: 600)])
+            XCTAssertEqual((sent["pendingSubmissionContext"] as? [String: Any])?["firstUserFingerprint"] as? String, "")
+            var remounted = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !remounted else { return }
+                // Observe the private result without writing it. Native has not
+                // accepted this callback yet, so its first fingerprint is absent.
+                let privateOnly = try? await self.evaluate(view, """
+                    const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+                    const pin = globalThis.__computaModelFirstProof;
+                    const root = document.querySelector('[data-message-author-role="user"]');
+                    return record?.sequence === 1 && record.phase === 'verified' && state.pending == null
+                      && record.nativeFirstPinned !== true && record.root === root && record.body?.isConnected === true
+                      && pin?.fingerprint === record.fingerprint && pin.marker === record.marker;
+                    """, world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+                guard privateOnly == true else { return }
+                remounted = true
+                try? await self.installBoundFirstUserCollapse(view, behavior: behavior == "repeat" ? "remount" : behavior)
+                _ = try? await self.evaluate(view, "history.pushState({}, '', '/c/local-chatgpt%3Aprovisional-remount?temporary-chat=true'); return true;")
+            }
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+            var recovered: [String: Any]?
+            if behavior == "remount" || behavior == "repeat" {
+                recovered = try await fixturePhaseProbe("provisional_remount_recover") {
+                    try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                }
+                let context = (recovered?["modelProofContext"] ?? recovered?["pendingSubmissionContext"]) as? [String: Any]
+                XCTAssertEqual((context?["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual((context?["submittedPromptFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual(recovered?["state"] as? String, "running")
+                let recoveredClaim = try await evaluate(view, """
+                    const claim = globalThis.__computaModelBoundFirstExpansion;
+                    const record = globalThis.__computaChatSubmissionState?.lastVerified;
+                    return claim?.provisional === true && claim.verified === true && claim.awaitingNativeRefresh !== true
+                      && record?.root === document.querySelector('[data-message-author-role="user"]') && record.replacement == null;
+                    """, world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+                XCTAssertEqual(recoveredClaim, true)
+                if behavior == "repeat" { _ = try await evaluate(view, "return window.fixtureCollapseBoundUser();") }
+            }
+            if behavior != "remount" {
+                for _ in 0..<2 {
+                    do {
+                        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                        XCTFail("Changed, unexpanded, partial, or repeated private remount cannot bind: \(behavior)")
+                    } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), behavior) }
+                }
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(remounted, "The fixture must cross private verification before native adopts it")
+            let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, behavior == "partial_remount" ? 0 : 1, behavior)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            if behavior == "remount" {
+                _ = try await evaluate(view, "document.getElementById('fixture-bound-stop').remove(); return true;")
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                XCTAssertNotNil(complete["modelProofContext"])
+                XCTAssertNotNil(complete["modelEvidence"])
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+                try await assertHumanTabIntact(fixture)
+            } else {
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "failed")
+                let afterCleanup = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+                XCTAssertEqual(afterCleanup, clicks, "Cleanup cannot revive an unaccepted or spent display claim")
+                try await assertHumanTabIntact(fixture, retaining: ownedID)
+            }
+        }
+    }
+
     /// Bind through native Poll while an actual Stop control keeps the reply
     /// running. Fixture mutations never write private adapter state.
     private func readyBoundFirstUserFixture() async throws -> (Fixture, WKWebView, String, String) {
@@ -9278,7 +9364,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             "markerFinalLine": true, "submitted": true, "markerMatches": true,
             "reason": "binding_not_authorized", "scope": "action_final_guard", "action": "verifyProductMode",
             "allowFirstUserBinding": false, "allowFirstUserExpansion": false,
-            "allowBoundFirstUserExpansion": true, "boundRootSame": true, "boundBodySame": false, "boundNativePinMatches": true, "boundOldRootConnected": false, "boundOldBodyConnected": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
+            "allowBoundFirstUserExpansion": true, "allowProvisionalFirstUserExpansion": false, "boundRootSame": true, "boundBodySame": false, "boundNativePinMatches": true, "boundOldRootConnected": false, "boundOldBodyConnected": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
             "markerValid": true, "firstPromptPresent": true, "firstPromptMatches": true,
             "pinnedFingerprintMatch": true, "nativeFingerprintMatch": false,
             "snapshot": ["rootSame": true, "bodySame": true, "bodyConnected": true, "textSame": true,
@@ -9294,12 +9380,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(values[1]["action"] as? String, "verifyProductMode")
         XCTAssertEqual(values[1]["expectedFingerprintPresent"] as? Bool, false)
         XCTAssertEqual(values[1]["allowBoundFirstUserExpansion"] as? Bool, true)
+        XCTAssertEqual(values[1]["allowProvisionalFirstUserExpansion"] as? Bool, false)
         XCTAssertEqual(values[1]["boundRootSame"] as? Bool, true)
         XCTAssertEqual(values[1]["boundBodySame"] as? Bool, false)
         XCTAssertEqual(values[1]["boundNativePinMatches"] as? Bool, true)
         XCTAssertEqual(values[1]["boundOldRootConnected"] as? Bool, false)
         XCTAssertEqual(values[1]["boundOldBodyConnected"] as? Bool, false)
-        for key in ["allowFirstUserBinding", "allowFirstUserExpansion", "allowBoundFirstUserExpansion",
+        for key in ["allowFirstUserBinding", "allowFirstUserExpansion", "allowBoundFirstUserExpansion", "allowProvisionalFirstUserExpansion",
                     "boundRootSame", "boundBodySame", "boundNativePinMatches", "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
                     "firstPromptPresent", "firstPromptMatches", "pinnedFingerprintMatch", "markerFinalLine", "submitted"] {
             for invalid in [1, 0, "private_canary", NSNull()] as [Any] {

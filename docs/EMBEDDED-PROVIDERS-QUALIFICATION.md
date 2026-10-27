@@ -3319,4 +3319,57 @@ Final native validation passed all 16 focused tests on unchanged source,
 including actual WebKit remount/recollapse and negative cases, cleanup, the
 consumed replacement budget, and the existing Gemini synthetic replacement
 regression. Independent review found no blocker in the final production source.
-Installed build285 live qualification remains pending.
+Installed build285 was then exercised with a fresh neutral seed; the earlier
+private-only binding window found by that run follows.
+
+
+### Build 285 live capture: replacement before native first binding
+
+Installed signed build285 (`6e78627095b19b1623a2ac2c5c261df1edc04a1f`) passed
+normal Chat/profile and exact artifact checks. Its independent neutral seed failed
+in 3.018 seconds. At the first rejection native still had zero confirmed users,
+a pending submission, no adopted first fingerprint, and no verified current
+submission. JavaScript already held a private first-message pin. Both old nodes
+were explicitly detached, while the current root/body differed and contained
+only the 10,240-character prefix of the 57,824-character prompt.
+
+The root-to-local route change was accepted at 23:19:46.147329 UTC; the next
+inspection rejected the private pin about 55 milliseconds later. Initial
+expansion/binding permission was true, but bound-native expansion permission
+was correctly false. No replacement discard or native recovery handoff occurred.
+This exposes a separate timing window between private JS verification and native
+first-fingerprint adoption. Retained earlier expansion text/click facts do not
+establish another recovery click. The specific failure persisted as Failed,
+cleanup remained unconfirmed, and no tool calls, fixture actions or retries ran.
+Exact journals, 142 native rows and 17 finite diagnostic records remain under
+`candidate285-plan/fresh-send/setup-failure-capture/` in the same evidence root.
+
+
+### Build 286: private proof before native first-message adoption
+
+A separate provisional-display capability derives from the existing pending
+first-submission gate, with a dispatched native sequence-one outbound binding
+and no verified native submission or adopted first fingerprint. JavaScript must
+already hold the complete privately verified first record, with its fingerprint
+matching the native outbound proof. Both old nodes must be detached and the
+unique current root/body must be a real replacement. This path uses the same
+durable one-attempt display recovery claim as the native-bound path.
+
+After a guarded expansion, the complete canonical message and hash must still
+match. The existing provisional replacement and ordinary first-message adoption
+then validate the actual new nodes. No native-bound replacement discard or
+refresh certificate is fabricated before native has a first-message pin. Missing
+or inconsistent authority, existing native adoption, same-node provisional
+collapse, altered content, model/hash races and later attempts to restart the
+failed claim through the bound path remain rejected. Cleanup receives no new
+capability.
+
+Focused adapter validation passed 13 groups / 1,708 assertions. Independent
+review found no blocker in the frozen combined source. The new actual-WebKit
+regression replaces the DOM and changes root-to-local route in the result callback
+after private verification but before native validation, matching the captured
+timing without writing private proof state. It covers exact recovery, altered
+body, ignored expansion, partial detachment and repeated collapse, with native
+fingerprint, one-Send/view and cleanup assertions. Final validation passed all
+474 adapter tests / 18,055 assertions and 17 focused native tests on unchanged
+source. Installed build286 live qualification remains pending.

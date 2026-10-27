@@ -2756,7 +2756,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["queryTemplate"] = projected
         }
         for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion",
-                    "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                    "allowBoundFirstUserExpansion", "allowProvisionalFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
                     "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
@@ -3075,7 +3075,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
             context = ["kind": "first_user_context", "provider": provider.rawValue]
             for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion",
-                        "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                        "allowBoundFirstUserExpansion", "allowProvisionalFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
                         "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                         "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
                 if let value = summary.removeValue(forKey: key) { context[key] = value }
@@ -3730,6 +3730,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.sequence == 1 && session.confirmedUsers == 0 && session.pendingSubmission
             && session.temporary && session.firstUserFingerprint == nil
             && session.modelSelectionVerified && session.modelChoice != nil
+        // JavaScript may have privately verified a first message before a
+        // route refresh lets native adopt it. A remount recovery still requires
+        // this already-dispatched native outbound binding, never a new Send.
+        let allowProvisionalFirstUserExpansion = allowFirstUserExpansion && !session.currentSubmissionVerified
+            && session.currentSubmission.map { $0.sequence == 1 && $0.outboundFingerprint.utf8.count == 64 } == true
         // A verified first message can collapse again while its reply is still
         // running. This separate grant permits one local display recovery; JS
         // must retain physical-node lineage and re-prove the complete digest.
@@ -3766,6 +3771,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
             "allowBoundFirstUserExpansion": allowBoundFirstUserExpansion,
+            "allowProvisionalFirstUserExpansion": allowProvisionalFirstUserExpansion,
             // This is the accepted replacement-discard continuation, never a
             // general retry or another permission to click a display control.
             "allowBoundFirstUserRemountRefresh": allowBoundFirstUserExpansion

@@ -1456,6 +1456,88 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       return { ...staged, oldRoot: staged.root, oldBody: staged.body, ...next, expand };
     };
     const fresh = { ...allowance, allowBoundFirstUserRemountRefresh: true };
+    const provisionalAllowance = { allowProvisionalFirstUserExpansion: true, allowBoundFirstUserExpansion: false,
+      allowFirstUserBinding: true, allowFirstUserExpansion: true, expectedFirstUserFingerprint: null,
+      firstUserExpansionModelChoice: choice };
+    const provisionalStage = async (initialExpansion = false) => {
+      const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PROVISIONAL PROMPT\n' + 'x'.repeat(40_000));
+      const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
+      const initialControl = new Element('BUTTON', { 'aria-label': 'Show more' }); oldRoot.append(initialControl);
+      initialControl.onClick = () => { oldBody.text = first.outbound; };
+      x.answer('Verified provisional answer');
+      if (initialExpansion) oldBody.text = first.outbound.slice(0, 10_240);
+      const privateRead = await x.f.rawRun({ action: 'inspect', expectedUserCounts: [1], ...x.values(first),
+        expectedFirstUserFingerprint: null, allowFirstUserBinding: true,
+        allowFirstUserExpansion: true, firstUserExpansionModelChoice: choice });
+      expect(privateRead.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      const record: any = (x.f.world.__computaChatSubmissionState as any).lastVerified;
+      expect(record.nativeFirstPinned).not.toBe(true);
+      const next = replaceRoot(x), expand = new Element('BUTTON', { 'aria-label': 'Show more' }); next.root.append(expand);
+      next.body.text = first.outbound.slice(0, 10_240); expand.onClick = () => { next.body.text = first.outbound; };
+      x.f.document.URL = 'https://chatgpt.com/c/local-chatgpt%3Aprovisional?temporary-chat=true';
+      x.f.location.pathname = '/c/local-chatgpt%3Aprovisional';
+      return { x, first, record, oldRoot, oldBody, ...next, expand, initialControl };
+    };
+
+    test('provisional remount rehashes complete bytes under pending native outbound proof before first adoption', async () => {
+      for (const initialExpansion of [false, true]) {
+        const { x, first, record, root, body, expand, initialControl } = await provisionalStage(initialExpansion);
+        const originalClaim = x.f.world.__computaModelFirstExpansion, digests = x.f.digestInputs.length;
+        const result = await x.observe(first, provisionalAllowance);
+        expect(result.error).toBeUndefined(); expect(result.firstUserFingerprint).toBe(first.fingerprint);
+        expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(digests).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ provisional: true, remount: true, verified: true });
+        expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('awaitingNativeRefresh', true);
+        expect(x.f.world.__computaModelFirstExpansion).toBe(originalClaim);
+        expect(initialControl.clicks).toBe(initialExpansion ? 1 : 0); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+        expect((await x.observe(first)).error).toBeUndefined(); expect(record.nativeFirstPinned).toBe(true);
+        body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, allowance)); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('provisional display permission requires exact private and native pending proof with both old nodes detached', async () => {
+      for (const mutation of ['permission', 'binding', 'initial_expansion', 'native_first', 'already_native_pinned',
+        'native_round', 'private_first', 'record_hash', 'pending', 'old_root', 'old_body', 'same_body', 'refresh', 'choice']) {
+        const { x, first, record, oldRoot, oldBody, root, expand } = await provisionalStage(), overrides: any = { ...provisionalAllowance };
+        if (mutation === 'permission') overrides.allowProvisionalFirstUserExpansion = false;
+        if (mutation === 'binding') overrides.allowFirstUserBinding = false;
+        if (mutation === 'initial_expansion') overrides.allowFirstUserExpansion = false;
+        if (mutation === 'native_first') overrides.expectedFirstUserFingerprint = first.fingerprint;
+        if (mutation === 'already_native_pinned') record.nativeFirstPinned = true;
+        if (mutation === 'native_round') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'private_first') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+        if (mutation === 'pending') (x.f.world.__computaChatSubmissionState as any).pending = { sequence: 1, phase: 'prepared' };
+        if (mutation === 'old_root') { oldRoot.connected = true; oldRoot.values['data-turn'] = 'retired'; }
+        if (mutation === 'old_body') x.f.body.append(oldBody);
+        if (mutation === 'same_body') { record.root = root; record.body = root.children[0]; }
+        if (mutation === 'refresh') overrides.allowBoundFirstUserRemountRefresh = true;
+        if (mutation === 'choice') overrides.firstUserExpansionModelChoice = { key: 'chat/latest/high', label: 'High' };
+        const result = await x.observe(first, overrides); denied(result);
+        expect(expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+        if (result.debugStructure && mutation !== 'permission') expect(JSON.parse(result.debugStructure).allowProvisionalFirstUserExpansion).toBe(true);
+      }
+    });
+
+    test('provisional recovery rejects changed full text or hashing races and cannot later retry as bound', async () => {
+      for (const mutation of ['full_body', 'digest_prefix', 'digest_root', 'digest_pin', 'model_after_expand']) {
+        const { x, first, body, expand } = await provisionalStage();
+        if (mutation === 'full_body') expand.onClick = () => { body.text = first.outbound.slice(0, 20_000) + '!' + first.outbound.slice(20_001); };
+        if (mutation === 'model_after_expand') expand.onClick = () => { body.text = first.outbound; x.picker!.selected('High'); };
+        if (mutation.startsWith('digest')) x.f.onDigest(() => {
+          if (mutation === 'digest_prefix') body.text = first.outbound.slice(0, 10_240);
+          if (mutation === 'digest_root') replaceRoot(x);
+          if (mutation === 'digest_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        }, first.outbound);
+        denied(await x.observe(first, provisionalAllowance));
+        body.text = first.outbound; denied(await x.observe(first, provisionalAllowance));
+        denied(await x.observe(first, { ...allowance, expectedFirstUserFingerprint: first.fingerprint }));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+        expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+      }
+    });
 
     test('remounted collapsed first body is fully certified then discarded before one authorized fresh adoption', async () => {
       const { x, first, record, oldRoot, oldBody, root, body, expand } = await remounted();
