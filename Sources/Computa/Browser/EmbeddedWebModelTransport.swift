@@ -2756,7 +2756,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["queryTemplate"] = projected
         }
         for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion",
-                    "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches", "privatePinPresent", "expectedFingerprintPresent",
+                    "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                    "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
@@ -3074,7 +3075,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
             context = ["kind": "first_user_context", "provider": provider.rawValue]
             for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion",
-                        "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches", "privatePinPresent", "expectedFingerprintPresent",
+                        "allowBoundFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                        "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                         "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
                 if let value = summary.removeValue(forKey: key) { context[key] = value }
             }
@@ -3651,6 +3653,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
+                      allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       preferQuietChatGPTCompletion: Bool = false,
@@ -3729,7 +3732,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.modelSelectionVerified && session.modelChoice != nil
         // A verified first message can collapse again while its reply is still
         // running. This separate grant permits one local display recovery; JS
-        // must retain the same physical nodes and re-prove the complete digest.
+        // must retain physical-node lineage and re-prove the complete digest.
         // Cleanup and other actions never inherit this inspection capability.
         let allowBoundFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
             && !session.isDiscovery && session.state == "running" && session.submitted
@@ -3763,6 +3766,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
             "allowBoundFirstUserExpansion": allowBoundFirstUserExpansion,
+            // This is the accepted replacement-discard continuation, never a
+            // general retry or another permission to click a display control.
+            "allowBoundFirstUserRemountRefresh": allowBoundFirstUserExpansion
+                && allowBoundFirstUserRemountRefresh && !refreshReadOnlyObservation,
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
@@ -4163,7 +4170,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                                      refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      refreshReadOnlyObservation: false,
+                                      allowBoundFirstUserRemountRefresh: provider == .chatgpt && allowBoundFirstUserExpansion,
+                                      allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
                                       maximumWait: evaluationDeadline - .now)

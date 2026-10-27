@@ -3239,7 +3239,7 @@ expansion-text fields retain the earlier successful expansion and must not be
 misread as current full-body evidence after the collapse.
 
 
-### Bound first-message display recovery
+### Build 284: bound first-message display recovery
 
 A separate native capability now permits one display-only expansion while the
 sole, already verified first submission is still running. It requires current
@@ -3263,4 +3263,60 @@ completion. No production admission rule was changed for that test correction.
 The corrected native run passed all nine focused tests on unchanged source,
 including real WebKit recovery, changed/ignored/repeated/remounted bodies,
 cleanup/cancellation, original unbound expansion and native-certified route
-continuation. Installed build284 live qualification remains pending.
+continuation. Installed build284 was subsequently exercised with a fresh neutral seed; its
+failure and physical-identity evidence follow.
+
+
+### Build 284 live capture: collapsed replacement nodes
+
+Signed installed build284, source `a33927c742a3ff74ee3c75d216fd4feb36939ca0`,
+passed normal Chat sign-in and exact installed-artifact checks. A fresh neutral
+seed failed after 2.901 seconds, with no tool calls or released answer. Native
+settled to Failed and retained the specific first-user ownership error.
+
+At 23:09:41.822510 UTC the full 57,824-character first message bound successfully,
+with both physical-node match flags true. At 23:09:42.298346 UTC the native bound
+expansion grant was true and the native/private fingerprint still matched, but
+both `boundRootSame` and `boundBodySame` were false. The currently displayed body
+was a 10,240-character prefix without the marker. This establishes replacement
+of both displayed message nodes after binding, rather than the same-node collapse
+covered by build284. The log alone does not establish whether the old nodes were
+still connected; any replacement recovery must inspect that directly. Cleanup
+had no expansion capability, stayed unconfirmed, and the failed attempt was not
+replayed. Exact native/website/cleanup evidence is retained under
+`candidate284-plan/fresh-send/setup-failure-capture/` in the same evidence root.
+
+
+### Build 285: collapsed replacement recovery with native reinspection
+
+The replacement path retains the verified first-submission record and requires
+both previous nodes to be detached, a unique distinct current root/body, the
+same owner/document/route and pinned native/private/outbound fingerprints. One
+local display claim may expand an exact canonical prefix; a prefix is never
+accepted as message proof. The entire rendered body, unique final marker and
+SHA-256 must match, with current model/product/temporary checks, before emitting
+the existing replacement-observation discard. That read returns no answer or
+ownership proof.
+
+Only the accepted native discard branch grants the explicit one-time refresh
+handoff. The fresh inspect keeps the original deadline and consumed read-refresh
+budget, rehashes the full current body, and adopts only the exact certified
+replacement before ordinary submission/response validation can succeed. A fresh
+inspect cannot start an expansion without its original awaiting claim. Changed
+or missing receipts, partial detachment, replaced nodes, changed text or model,
+second refreshes and cleanup remain conservative failures. The same single
+claim covers either same-node recovery or replacement recovery. Old-node
+connection facts are finite booleans in diagnostics.
+
+Focused JavaScript validation passed ten groups / 1,213 assertions. Review
+caught and fixed a fresh-inspect-without-claim edge before release; earlier full
+runs retain their obsolete source hashes and cannot qualify the final patch.
+The final adapter suite passed 471 tests / 17,560 assertions on unchanged source.
+The initial native run also caught a test expecting an ownership error where the
+foreign-route classifier correctly rejects earlier as `unexpectedPage`; only that
+case assertion was corrected and no-extra-click/no-resend checks remain required.
+Final native validation passed all 16 focused tests on unchanged source,
+including actual WebKit remount/recollapse and negative cases, cleanup, the
+consumed replacement budget, and the existing Gemini synthetic replacement
+regression. Independent review found no blocker in the final production source.
+Installed build285 live qualification remains pending.

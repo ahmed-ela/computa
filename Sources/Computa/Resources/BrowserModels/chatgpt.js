@@ -5125,9 +5125,14 @@ function chatGPTBoundFirstUserExpansionPins(candidate) {
     && input.allowFirstUserBinding !== true && input.allowFirstUserExpansion !== true
     && state === globalThis.__computaChatSubmissionState && chatGPTSubmissionContext(state)
     && state.pending == null && state.lastVerified === record && record?.phase === 'verified' && record.sequence === 1
-    && record.document === document && record.owner === input.ownerToken && record.replacement == null
+    && record.document === document && record.owner === input.ownerToken
+    && (candidate.awaitingNativeRefresh === true ? candidate.remount === true
+      && record.replacement === candidate.replacementReceipt && candidate.replacementReceipt != null : record.replacement == null)
     && input.submissionSequence === 1 && input.submissionMarker === record.marker
-    && record.root === candidate.root && record.body === candidate.body
+    && (candidate.remount ? record.root === candidate.oldRoot && record.body === candidate.oldBody
+      && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false
+      && candidate.root !== candidate.oldRoot && candidate.body !== candidate.oldBody
+      : record.root === candidate.root && record.body === candidate.body)
     && record.marker === candidate.marker && record.canonical === candidate.canonical
     && typeof record.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.fingerprint)
     && record.fingerprint === candidate.fingerprint && record.fingerprint === input.expectedFirstUserFingerprint
@@ -5140,6 +5145,7 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   if (input.suppressFirstUserExpansionClaim === true) return reject('suppressed');
   if (input.action !== 'inspect') return reject('action');
   if (input.allowBoundFirstUserExpansion !== true) return reject('binding');
+  if (input.allowBoundFirstUserRemountRefresh === true) return reject('binding');
   if (globalThis.__computaModelBoundFirstExpansion != null) return reject('claim_spent');
   const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
@@ -5151,10 +5157,38 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
     || rendered.includes(`Computa session marker: ${marker}`)) return reject('text_prefix');
   const candidate = { bound: true, state, record, fingerprint: record?.fingerprint,
+    remount: !!record && (record.root !== root || record.body !== body), oldRoot: record?.root, oldBody: record?.body,
     root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
     document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
   const failure = chatGPTFirstUserExpansionContextFailure(candidate);
   return failure === null ? candidate : reject(failure);
+}
+async function chatGPTCertifyBoundFirstRemount(candidate) {
+  // The former nodes were fully verified on the previous read. They remain
+  // the record's authority until this exact replacement has complete bytes,
+  // a current model proof, and the existing full-hash discard certificate.
+  // A prefix authorizes only the bounded display click, never this receipt.
+  const model = await websiteModelReadEvidence('chatgpt', candidate.modelChoice, null,
+    { scope: 'action_precheck', action: input.action });
+  if (model.error) { chatGPTLatchExpansionModelFailure(candidate, model); return null; }
+  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical) return null;
+  const discarded = await chatGPTFirstReplacementObservation({ ...input, expectedModelChoice: candidate.modelChoice }, 1,
+    { root: candidate.oldRoot, body: candidate.oldBody, text: candidate.canonical },
+    { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
+      identity: () => null, temporary: chatGPTTemporaryVerified });
+  const receipt = candidate.record.replacement;
+  if (discarded?.error !== 'first_user_observation_replaced' || !receipt
+    || receipt.root !== candidate.root || receipt.body !== candidate.body
+    || receipt.oldRoot !== candidate.oldRoot || receipt.oldBody !== candidate.oldBody) return null;
+  candidate.replacementReceipt = receipt;
+  candidate.awaitingNativeRefresh = true;
+  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+    candidate.refreshClaimed = true;
+    return null;
+  }
+  // Return no response or ownership proof. Only native's specifically granted
+  // fresh inspect can consume this exact receipt; it cannot expand again.
+  return discarded;
 }
 function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
@@ -5722,6 +5756,8 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
       diagnostic.allowBoundFirstUserExpansion = input.allowBoundFirstUserExpansion === true;
       diagnostic.boundRootSame = record?.sequence === 1 && record.root === root;
       diagnostic.boundBodySame = record?.sequence === 1 && record.body === body;
+      diagnostic.boundOldRootConnected = record?.sequence === 1 && record.root?.isConnected === true;
+      diagnostic.boundOldBodyConnected = record?.sequence === 1 && record.body?.isConnected === true;
       diagnostic.boundNativePinMatches = record?.sequence === 1 && pinned?.marker === marker
         && pinned?.fingerprint === record.fingerprint && input.expectedFirstUserFingerprint === record.fingerprint
         && chatGPTSubmissionPins(record);
@@ -5833,11 +5869,19 @@ if (ownedUserCount > 0) {
   }
   const consumedExpansion = globalThis.__computaModelFirstExpansion;
   const consumedBoundExpansion = globalThis.__computaModelBoundFirstExpansion;
+  let boundRefresh = null;
   // A display recovery is one-shot too. Even a later complete body cannot
   // revive a failed/unfinished claim or turn it into submission authority.
   if (consumedBoundExpansion != null && (consumedBoundExpansion.outcome !== 'expanded'
-    || consumedBoundExpansion.verified !== true))
-    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    || consumedBoundExpansion.verified !== true)) {
+    const candidate = consumedBoundExpansion, unused = candidate.refreshClaimed !== true;
+    candidate.refreshClaimed = true;
+    if (input.allowBoundFirstUserRemountRefresh !== true || !unused || candidate.remount !== true
+      || candidate.awaitingNativeRefresh !== true || candidate.outcome !== 'expanded'
+      || !chatGPTFirstUserExpansionContext(candidate) || rendered !== candidate.canonical)
+      return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    boundRefresh = candidate;
+  }
   let expansionRejected = false;
   if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
     && input.firstUserExpansionRouteContinuation != null) {
@@ -5852,7 +5896,7 @@ if (ownedUserCount > 0) {
     // on a later read after failure, replacement, or a different full body.
     return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   let expansion; const expansionStarted = chatGPTSyncWorkStart();
-  try { expansion = globalThis.__computaModelFirstProof != null && input.allowBoundFirstUserExpansion === true
+  try { expansion = boundRefresh ? null : globalThis.__computaModelFirstProof != null && input.allowBoundFirstUserExpansion === true
     ? chatGPTBoundFirstUserExpansionCandidate(ownedMessages[0], first, rendered)
     : chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered); }
   finally { chatGPTSyncWorkEnd(4, expansionStarted); }
@@ -5881,8 +5925,9 @@ if (ownedUserCount > 0) {
   websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-  if (expansion?.bound && (!chatGPTFirstUserExpansionContext(expansion)
-    || rendered !== expansion.canonical || fingerprint !== expansion.fingerprint))
+  const boundRecovery = expansion?.bound ? expansion : boundRefresh;
+  if (boundRecovery && (!chatGPTFirstUserExpansionContext(boundRecovery)
+    || rendered !== boundRecovery.canonical || fingerprint !== boundRecovery.fingerprint))
     return chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
     { snapshotIntact: snapshotUnchanged(true), fingerprint }, chatGPTTemporaryVerified())
@@ -5892,6 +5937,8 @@ if (ownedUserCount > 0) {
     || chatGPTFirstUserFailure('snapshot_before_action', 'digest', {}, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
+  if (expansion?.remount) return await chatGPTCertifyBoundFirstRemount(expansion)
+    || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
   firstUserFingerprint = fingerprint;
   const pinned = globalThis.__computaModelFirstProof;
   if (pinned) {
@@ -5925,7 +5972,7 @@ if (ownedUserCount > 0) {
         identity: () => null, temporary: chatGPTTemporaryVerified })
       || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', {}, input.action === 'submit');
   if (observed.error) return observed;
-  if (expansion?.bound && !chatGPTFirstUserExpansionContext(expansion))
+  if (boundRecovery && !chatGPTFirstUserExpansionContext(boundRecovery))
     return chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard');
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
@@ -5943,7 +5990,7 @@ if (ownedUserCount > 0) {
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
   const finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
-  if (expansion?.bound && !finalized.error) expansion.verified = true;
+  if (boundRecovery && !finalized.error) boundRecovery.verified = true;
   return finalized;
 }
 if (input.expectedFirstUserFingerprint != null)

@@ -1449,6 +1449,94 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       expect(result).not.toHaveProperty('firstUserVerified', true); expect(result).not.toHaveProperty('answerComplete', true);
       expect(result).not.toHaveProperty('text');
     };
+    const remounted = async () => {
+      const staged = await stage(), next = replaceRoot(staged.x);
+      const expand = new Element('BUTTON', { 'aria-label': 'Show more' }); next.root.append(expand);
+      expand.onClick = () => { next.body.text = staged.first.outbound; };
+      return { ...staged, oldRoot: staged.root, oldBody: staged.body, ...next, expand };
+    };
+    const fresh = { ...allowance, allowBoundFirstUserRemountRefresh: true };
+
+    test('remounted collapsed first body is fully certified then discarded before one authorized fresh adoption', async () => {
+      const { x, first, record, oldRoot, oldBody, root, body, expand } = await remounted();
+      const oldClaim = x.f.world.__computaModelFirstExpansion, digests = x.f.digestInputs.length;
+      const discarded = await x.observe(first, allowance); denied(discarded);
+      expect(discarded).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+      expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+      expect(record.replacement).toMatchObject({ root, body, oldRoot, oldBody });
+      expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ outcome: 'expanded', awaitingNativeRefresh: true });
+      expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+      expect(x.f.digestInputs.slice(digests).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      const beforeRefresh = x.f.digestInputs.length, current = await x.observe(first, fresh);
+      expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(x.f.digestInputs.slice(beforeRefresh).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+      expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ verified: true, refreshClaimed: true });
+      expect(x.f.world.__computaModelFirstExpansion).toBe(oldClaim);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, fresh)); expect(expand.clicks).toBe(1);
+    });
+
+    test('remount expansion rejects either still-connected former node, duplicates, and mismatched prefixes', async () => {
+      for (const mutation of ['old_root', 'old_body', 'extra_root', 'prefix', 'missing_authority', 'refresh_without_claim']) {
+        const { x, first, oldRoot, oldBody, body, expand } = await remounted();
+        if (mutation === 'old_root') { oldRoot.connected = true; oldRoot.values['data-turn'] = 'retired'; }
+        if (mutation === 'old_body') { oldBody.parentElement = x.f.body; x.f.body.children.push(oldBody); }
+        if (mutation === 'extra_root') x.f.appendUser(first.outbound);
+        if (mutation === 'prefix') body.text = '!' + body.text.slice(1);
+        const result = await x.observe(first, { ...allowance,
+          ...(mutation === 'missing_authority' ? { allowBoundFirstUserExpansion: false } : {}),
+          ...(mutation === 'refresh_without_claim' ? { allowBoundFirstUserRemountRefresh: true } : {}) });
+        denied(result); expect(expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+        if (mutation === 'old_root' || mutation === 'old_body') expect(JSON.parse(result.debugStructure)).toMatchObject({
+          boundOldRootConnected: mutation === 'old_root', boundOldBodyConnected: true });
+      }
+    });
+
+    test('remount receipt cannot be consumed without its specific native handoff or after any failed refresh', async () => {
+      for (const mutation of ['handoff', 'allowance', 'prefix', 'body', 'root', 'receipt', 'receipt_missing', 'native_pin', 'old_reattach', 'digest']) {
+        const { x, first, record, body, oldRoot, expand } = await remounted();
+        expect((await x.observe(first, allowance)).error).toBe('first_user_observation_replaced');
+        const overrides: any = { ...fresh };
+        if (mutation === 'handoff') delete overrides.allowBoundFirstUserRemountRefresh;
+        if (mutation === 'allowance') overrides.allowBoundFirstUserExpansion = false;
+        if (mutation === 'prefix') body.text = first.outbound.slice(0, 10_240);
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'root') replaceRoot(x);
+        if (mutation === 'receipt') record.replacement = { ...record.replacement };
+        if (mutation === 'receipt_missing') record.replacement = null;
+        if (mutation === 'native_pin') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'old_reattach') { oldRoot.connected = true; oldRoot.values['data-turn'] = 'retired'; }
+        if (mutation === 'digest') x.f.onDigest(() => { body.text = first.outbound.slice(0, 10_240); }, first.outbound);
+        denied(await x.observe(first, overrides));
+        body.text = first.outbound; denied(await x.observe(first, fresh));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+        expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+      }
+    });
+
+    test('remount expansion cannot certify changed full text or another replacement during its hashes', async () => {
+      for (const mutation of ['changed_full', 'first_hash', 'certificate_hash', 'model_after_expand']) {
+        const { x, first, body, expand } = await remounted();
+        let hashes = 0;
+        if (mutation === 'changed_full') expand.onClick = () => { body.text = first.outbound.slice(0, 20_000) + '!' + first.outbound.slice(20_001); };
+        if (mutation === 'model_after_expand') expand.onClick = () => {
+          body.text = first.outbound; x.picker!.selected('High');
+        };
+        if (mutation.endsWith('hash')) {
+          const change = () => {
+            hashes += 1;
+            if (hashes === (mutation === 'first_hash' ? 1 : 2)) replaceRoot(x);
+            else x.f.onDigest(change, first.outbound);
+          };
+          x.f.onDigest(change, first.outbound);
+        }
+        const result = await x.observe(first, allowance); denied(result);
+        expect(result.error).not.toBe('first_user_observation_replaced');
+        body.text = first.outbound; denied(await x.observe(first, fresh));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
 
     test('recovers a same-body post-binding collapse after native route adoption and freshly hashes all bytes', async () => {
       for (const initialExpansion of [false, true]) {

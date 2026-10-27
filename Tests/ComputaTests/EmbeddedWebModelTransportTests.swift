@@ -5242,7 +5242,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testBoundFirstMessageDisplayRecoveryRejectsChangedIgnoredRepeatedAndReplacedBodies() async throws {
-        for behavior in ["changed", "ignored", "repeat", "remount"] {
+        for behavior in ["changed", "ignored", "repeat", "partial_remount"] {
             let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
             defer { fixture.shutdown() }
             try await installBoundFirstUserCollapse(view, behavior: behavior)
@@ -5260,7 +5260,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 }
             }
             let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
-            XCTAssertEqual(clicks, behavior == "remount" ? 0 : 1, behavior)
+            XCTAssertEqual(clicks, behavior == "partial_remount" ? 0 : 1, behavior)
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             XCTAssertEqual(fixture.createdTabs.count, 1)
         }
@@ -5272,6 +5272,128 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             defer { fixture.shutdown() }
             let ownedID = try XCTUnwrap(fixture.createdTabs.last)
             try await installBoundFirstUserCollapse(view, behavior: "success")
+            let finished = try await call(fixture.transport, operation, ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 0, operation)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testBoundFirstMessageRemountRecoveryDiscardsThenUsesOneFreshInspect() async throws {
+        let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        try await installBoundFirstUserCollapse(view, behavior: "remount")
+        _ = try await evaluate(view, "history.pushState({}, '', '/c/local-chatgpt%3Abound-remount?temporary-chat=true'); return true;")
+        var inspections: [[String: Any]] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            let value = try? await self.evaluate(view, """
+                const claim = globalThis.__computaModelBoundFirstExpansion;
+                const record = globalThis.__computaChatSubmissionState?.lastVerified;
+                const root = document.querySelector('[data-message-author-role="user"]');
+                return {awaiting:claim?.awaitingNativeRefresh === true, verified:claim?.verified === true,
+                  oldRootDetached:record?.root?.isConnected === false, oldBodyDetached:record?.body?.isConnected === false,
+                  retainedOldIdentity:record?.root !== root,
+                  receiptMatches:!!record?.replacement && record.replacement === claim?.replacementReceipt
+                    && record.replacement.root === root};
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            if let value { inspections.append(value) }
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        let observed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(inspections.count, 2, "Recovery discards once, then uses the existing single fresh-inspect budget")
+        let first = try XCTUnwrap(inspections.first)
+        for key in ["awaiting", "oldRootDetached", "oldBodyDetached", "retainedOldIdentity", "receiptMatches"] {
+            XCTAssertEqual(first[key] as? Bool, true, key)
+        }
+        XCTAssertEqual(first["verified"] as? Bool, false, "The expansion read must not complete ownership or release a response")
+        XCTAssertEqual(inspections.last?["verified"] as? Bool, true)
+        XCTAssertEqual(inspections.last?["retainedOldIdentity"] as? Bool, false)
+        XCTAssertEqual(observed["state"] as? String, "running")
+        let context = (observed["modelProofContext"] ?? observed["pendingSubmissionContext"]) as? [String: Any]
+        XCTAssertEqual(context?["firstUserFingerprint"] as? String, fingerprint)
+        XCTAssertEqual((context?["submittedPromptFingerprint"] as? String)?.count, 64)
+        let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        _ = try await evaluate(view, "document.getElementById('fixture-bound-stop').remove(); return true;")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        XCTAssertEqual((complete["modelProofContext"] as? [String: Any])?["firstUserFingerprint"] as? String, fingerprint)
+        XCTAssertNotNil(complete["modelEvidence"])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testBoundFirstMessageRemountRecoveryRejectsConnectedOldChangedAndIgnoredBodies() async throws {
+        for behavior in ["connected_old", "remount_changed", "remount_ignored"] {
+            let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+            defer { fixture.shutdown() }
+            try await installBoundFirstUserCollapse(view, behavior: behavior)
+            for _ in 0..<2 {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Uncertain replacement cannot acquire ownership: \(behavior)")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), behavior) }
+            }
+            let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, behavior == "connected_old" ? 0 : 1, behavior)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+        }
+    }
+
+    func testBoundFirstMessageRemountRecoveryCannotRenewRefreshAcrossReplacementOrRouteChange() async throws {
+        for change in ["replacement", "route"] {
+            let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+            defer { fixture.shutdown() }
+            try await installBoundFirstUserCollapse(view, behavior: "remount")
+            var inspections = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect" else { return }
+                inspections += 1
+                guard inspections == 1 else { return }
+                _ = try? await self.evaluate(view, change == "replacement" ? """
+                    const root = document.querySelector('[data-message-author-role="user"]');
+                    root.replaceWith(root.cloneNode(true)); return true;
+                    """ : "history.pushState({}, '', '/g/foreign-route'); return true;")
+            }
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A changed replacement-discard continuation cannot release output: \(change)")
+            } catch {
+                if change == "route" {
+                    // The foreign product path is rejected by the native route
+                    // classifier before the replacement-refresh guard runs.
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .unexpectedPage(.chatgpt))
+                } else if let failure = error as? EmbeddedWebModelTransport.Failure, case .ownershipFailure = failure {
+                    // A second physical replacement invalidates the receipt.
+                } else {
+                    XCTFail("Expected an ownership failure: \(error)")
+                }
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertLessThanOrEqual(inspections, 2, "No replacement or route may renew the shared fresh-read budget")
+            if change == "replacement" { XCTAssertEqual(inspections, 2) }
+            let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+        }
+    }
+
+    func testBoundFirstMessageRemountRecoveryIsNotGrantedToCleanup() async throws {
+        for operation in ["webProviderFinish", "webProviderCancel"] {
+            let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+            defer { fixture.shutdown() }
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            try await installBoundFirstUserCollapse(view, behavior: "remount")
             let finished = try await call(fixture.transport, operation, ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "failed")
             let clicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
@@ -5322,8 +5444,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func installBoundFirstUserCollapse(_ view: WKWebView, behavior: String) async throws {
         _ = try await evaluate(view, """
             let root = document.querySelector('[data-message-author-role="user"]');
-            if (\(String(reflecting: behavior)) === 'remount') {
-              const replacement = root.cloneNode(true); root.replaceWith(replacement); root = replacement;
+            const behavior = \(String(reflecting: behavior));
+            if (behavior.startsWith('remount') || behavior === 'partial_remount' || behavior === 'connected_old') {
+              const replacement = root.cloneNode(true);
+              if (behavior === 'partial_remount') {
+                replacement.querySelector('[data-markdown-text-style="user-message"]').replaceWith(
+                  root.querySelector('[data-markdown-text-style="user-message"]'));
+              }
+              if (behavior === 'connected_old') {
+                root.removeAttribute('data-message-author-role'); root.removeAttribute('data-user-message-bubble');
+                root.removeAttribute('data-turn');
+                root.querySelectorAll('[data-markdown-text-style="user-message"]').forEach(node => node.removeAttribute('data-markdown-text-style'));
+                root.hidden = true; root.after(replacement);
+              } else root.replaceWith(replacement);
+              root = replacement;
             }
             const body = root.querySelector('[data-markdown-text-style="user-message"]');
             const full = window.fixturePrompts[0]; window.fixtureBoundExpansionClicks = 0;
@@ -5333,9 +5467,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               button.textContent = 'Show more'; button.setAttribute('aria-label', 'Show more');
               button.addEventListener('click', () => {
                 window.fixtureBoundExpansionClicks++;
-                if (\(String(reflecting: behavior)) === 'ignored') return;
+                if (behavior === 'ignored' || behavior === 'remount_ignored') return;
                 setTimeout(() => {
-                  body.textContent = \(String(reflecting: behavior)) === 'changed'
+                  body.textContent = behavior === 'changed' || behavior === 'remount_changed'
                     ? full.replace('Bound recovery', 'Wrong recovery') : full;
                   button.remove();
                 }, 25);
@@ -9144,7 +9278,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             "markerFinalLine": true, "submitted": true, "markerMatches": true,
             "reason": "binding_not_authorized", "scope": "action_final_guard", "action": "verifyProductMode",
             "allowFirstUserBinding": false, "allowFirstUserExpansion": false,
-            "allowBoundFirstUserExpansion": true, "boundRootSame": true, "boundBodySame": false, "boundNativePinMatches": true, "privatePinPresent": true, "expectedFingerprintPresent": false,
+            "allowBoundFirstUserExpansion": true, "boundRootSame": true, "boundBodySame": false, "boundNativePinMatches": true, "boundOldRootConnected": false, "boundOldBodyConnected": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
             "markerValid": true, "firstPromptPresent": true, "firstPromptMatches": true,
             "pinnedFingerprintMatch": true, "nativeFingerprintMatch": false,
             "snapshot": ["rootSame": true, "bodySame": true, "bodyConnected": true, "textSame": true,
@@ -9163,8 +9297,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(values[1]["boundRootSame"] as? Bool, true)
         XCTAssertEqual(values[1]["boundBodySame"] as? Bool, false)
         XCTAssertEqual(values[1]["boundNativePinMatches"] as? Bool, true)
+        XCTAssertEqual(values[1]["boundOldRootConnected"] as? Bool, false)
+        XCTAssertEqual(values[1]["boundOldBodyConnected"] as? Bool, false)
         for key in ["allowFirstUserBinding", "allowFirstUserExpansion", "allowBoundFirstUserExpansion",
-                    "boundRootSame", "boundBodySame", "boundNativePinMatches", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
+                    "boundRootSame", "boundBodySame", "boundNativePinMatches", "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
                     "firstPromptPresent", "firstPromptMatches", "pinnedFingerprintMatch", "markerFinalLine", "submitted"] {
             for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
                 var forged = source; forged[key] = invalid
