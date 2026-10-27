@@ -21,7 +21,7 @@ const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0))
 
 function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; sendLabelOnly?: boolean;
   resources?: any[]; observeResources?: boolean; moduleID?: string; configureRuntime?: (runtime: any) => void;
-  loadRuntime?: () => Promise<unknown>; methodSource?: string; validatorName?: string } = {}) {
+  loadRuntime?: () => Promise<unknown>; allowDiagnostics?: boolean; throwTimer?: boolean; methodSource?: string; validatorName?: string } = {}) {
   let clock = 100, imports = 0, timerID = 0, throwOriginal: unknown = null;
   // Retain all wire packets; the original authority regressions deliberately
   // inspect only the unchanged terminal/invalidated schemas.
@@ -73,10 +73,10 @@ function fixture(options: { unsupported?: boolean; delayedDigest?: boolean; send
   expect(source.split(runtimeImport)).toHaveLength(2);
   const execute = new Function('window', 'document', 'location', 'performance', 'crypto', 'MutationObserver',
     'getComputedStyle', 'setTimeout', 'clearTimeout', 'loadRuntime', 'PerformanceObserver', source
-      .replace('__COMPUTA_COMPLETION_CONFIG__', JSON.stringify({ key, handlerName: 'computaChatGPTCompletion' }))
+      .replace('__COMPUTA_COMPLETION_CONFIG__', JSON.stringify({ key, handlerName: 'computaChatGPTCompletion', ...(options.allowDiagnostics ? {allowsDiagnosticSubscribers:true} : {}) }))
       .replace(runtimeImport, 'loadRuntime(runtimeURL)'));
   execute(window, document, location, { now: () => clock, getEntriesByType: (type: string) => type === 'resource' ? resources : [] }, cryptoFixture, Observer, () => ({ visibility: 'visible' }),
-    (callback: () => void) => { timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime, options.observeResources ? ResourceObserver : undefined);
+    (callback: () => void) => { if(options.throwTimer)throw new Error('fixture timer');timers.set(++timerID, callback); return timerID; }, (id: number) => timers.delete(id), loadRuntime, options.observeResources ? ResourceObserver : undefined);
   const receiver = new O();
   return { window, document, button, location, allPosts, posts, diagnostics, timers, observers, resourceObservers, resources, importedURLs, runtime, imports: () => imports,
     api: window[key], O, receiver, original,
@@ -832,5 +832,53 @@ describe('ChatGPT current-response completion admission', () => {
     f.decode(final('LATE CONTENT'));
     expect(f.posts.map(p => p.kind)).toEqual(['terminal_failure', 'invalidated']);
     expect(f.O.prototype.recordCompletion).toBe(f.original.value);
+  });
+});
+
+
+describe('shared decoder diagnostic isolation', () => {
+  const options=(extra:any={})=>({durationMs:1000,admitted:()=>true,value:()=>{},thrown:()=>{},invalidated:()=>{},...extra});
+  test('ordinary model views expose no diagnostic subscription method',()=>{
+    expect(fixture().api.subscribeDiagnostic).toBeUndefined();
+  });
+  test('diagnostic admitted and value exceptions cannot suppress normal completion',async()=>{
+    for(const mode of ['admitted','value']) {
+      const f=fixture({allowDiagnostics:true});let fail=false;
+      const sub=await f.api.subscribeDiagnostic(options({
+        admitted:()=>{if(fail&&mode==='admitted')throw new Error('PRIVATE');return true;},
+        value:()=>{if(fail&&mode==='value')throw new Error('PRIVATE');}
+      }));expect(sub).not.toBeNull();await ready(f);fail=true;complete(f);
+      expect(f.posts.map(p=>p.kind)).toEqual(['terminal']);
+      f.api.stop(correlationID);expect(Object.getOwnPropertyDescriptor(f.O.prototype,'recordCompletion')).toEqual(f.original);
+    }
+  });
+  test('an admitted callback cannot cause a foreign descriptor to be overwritten',async()=>{
+    const f=fixture({allowDiagnostics:true});let calls=0;const foreign=function foreign(value:any){return value;};
+    expect(await f.api.subscribeDiagnostic(options({admitted:()=>{if(++calls===3)f.O.prototype.recordCompletion=foreign;return true;}}))).toBeNull();
+    expect(f.O.prototype.recordCompletion).toBe(foreign);
+  });
+  test('a later completion arm rechecks cache identity while diagnostic holds the wrapper',async()=>{
+    const f=fixture({allowDiagnostics:true});let invalidated='';
+    const sub=await f.api.subscribeDiagnostic(options({invalidated:(reason:string)=>invalidated=reason}));
+    expect(sub).not.toBeNull();f.runtime.__webpack_require__.c.jDdw={exports:{}};
+    expect(await f.api.arm(binding())).toEqual({armed:false});expect(invalidated).toBe('runtime_identity_changed');
+    expect(Object.getOwnPropertyDescriptor(f.O.prototype,'recordCompletion')).toEqual(f.original);
+  });
+  test('a post-install admission exception rolls back an empty tap',async()=>{
+    const f=fixture({allowDiagnostics:true});
+    expect(await f.api.subscribeDiagnostic(options({admitted:()=>{
+      if(f.O.prototype.recordCompletion!==f.original.value)throw new Error('PRIVATE');
+      return true;
+    }}))).toBeNull();
+    expect(Object.getOwnPropertyDescriptor(f.O.prototype,'recordCompletion')).toEqual(f.original);
+    expect(f.timers.size).toBe(0);
+  });
+  test('event registration and timer failures roll back only the owned wrapper',async()=>{
+    for(const mode of ['event','timer']) {
+      const f=fixture({allowDiagnostics:true,throwTimer:mode==='timer'});
+      if(mode==='event')f.window.addEventListener=()=>{throw new Error('PRIVATE');};
+      expect(await f.api.subscribeDiagnostic(options())).toBeNull();
+      expect(Object.getOwnPropertyDescriptor(f.O.prototype,'recordCompletion')).toEqual(f.original);
+    }
   });
 });

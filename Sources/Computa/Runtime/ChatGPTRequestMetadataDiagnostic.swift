@@ -266,12 +266,23 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
     /// ownership evidence. Unknown content is rejected rather than retained.
     private static func validDecoder(_ value: Any?) -> Bool {
         guard let object = value as? [String: Any],
-              Set(object.keys) == ["state", "completionCalls", "programObservations", "recoveredNullObservations", "lastProgram"],
+              Set(object.keys) == ["state", "completionCalls", "programObservations", "recoveredNullObservations", "lastProgram", "stream"],
               member(object["state"], ["pending", "unavailable", "installed", "restored", "superseded"]),
               let calls = integer(object["completionCalls"], in: 0...65_535),
               let programs = integer(object["programObservations"], in: 0...65_535),
               let recovered = integer(object["recoveredNullObservations"], in: 0...65_535),
-              recovered <= programs, calls != 0 || programs == 0 else { return false }
+              recovered <= programs, calls != 0 || programs == 0,
+              let stream = object["stream"] as? [String: Any],
+              Set(stream.keys) == ["inputMessages", "assistantMessages", "nonemptyTextMessages", "opaqueMessages",
+                                   "mainTerminals", "messageTerminals", "errorEvents", "originalThrows", "decoderInstances", "decoderOverflow"],
+              stream.filter({ $0.key != "decoderOverflow" }).values.allSatisfy({ integer($0, in: 0...65_535) != nil }),
+              let instances = integer(stream["decoderInstances"], in: 0...16),
+              let overflow = boolean(stream["decoderOverflow"]), !overflow || instances == 16,
+              let assistants = integer(stream["assistantMessages"], in: 0...calls),
+              integer(stream["nonemptyTextMessages"], in: 0...assistants) != nil,
+              integer(stream["opaqueMessages"], in: 0...assistants) != nil,
+              ["inputMessages", "mainTerminals", "messageTerminals", "errorEvents"].allSatisfy({ integer(stream[$0], in: 0...calls) != nil })
+        else { return false }
         if programs == 0 { return object["lastProgram"] is NSNull }
         guard let program = object["lastProgram"] as? [String: Any],
               Set(program.keys) == ["elapsedMs", "carrier", "messageStatus", "codeLength", "knownNullProgram",

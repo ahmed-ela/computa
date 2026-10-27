@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-request-metadata.js', import.meta.url), 'utf8');
 const key = '__computaRequestMetadata_' + 'a'.repeat(32);
-const runtimeImport = "import('https://chatgpt.com/cdn/assets/633146.1f9c264032.js')";
+const completionSource = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-completion.js', import.meta.url), 'utf8');
+const completionKey = '__computaCompletion_' + 'b'.repeat(32);
+const runtimeURL = 'https://chatgpt.com/cdn/assets/633146.8ccf94f4a9.js';
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
@@ -22,20 +25,36 @@ function fixture(options: { origin?: string; frame?: boolean; durationMs?: numbe
   const reflection = { apply: Reflect.apply, ownKeys: Reflect.ownKeys };
   const stringType = { prototype: { charCodeAt: String.prototype.charCodeAt } };
   const objectType = { prototype: Object.prototype, getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
-    getPrototypeOf: Object.getPrototypeOf, defineProperty: options.defineProperty ?? Object.defineProperty };
+    getPrototypeOf: Object.getPrototypeOf, keys: Object.keys, freeze: Object.freeze, defineProperty: options.defineProperty ?? Object.defineProperty };
   window.top = options.frame ? {} : window;
   const location = { origin: options.origin ?? 'https://chatgpt.com', href: (options.origin ?? 'https://chatgpt.com') + '/' };
   const config = { key: options.configKey ?? key, durationMs: options.durationMs ?? 1000,
-    ...(options.captureDecodedEvents ? { captureDecodedEvents: true } : {}) };
+    ...(options.captureDecodedEvents ? { captureDecodedEvents: true, completionKey } : {}) };
   let imports = 0;
   const loadRuntime = () => { imports++; return options.loadRuntime ? options.loadRuntime() : Promise.resolve({}); };
-  expect(source.split(runtimeImport)).toHaveLength(2);
+  const documentEvents = new Map<string, Function>();
+  const button: any = {isConnected:true,disabled:false,getClientRects:()=>[{}],getAttribute:()=>null,
+    closest:(selector:string)=>selector.startsWith('button[data-testid="send-button"]')?button:null};
+  const document = {addEventListener:(name:string,fn:Function)=>documentEvents.set(name,fn),
+    removeEventListener:(name:string,fn:Function)=>{if(documentEvents.get(name)===fn)documentEvents.delete(name);}, querySelectorAll:()=>[button]};
+  const posts:any[]=[]; window.webkit={messageHandlers:{computaChatGPTCompletion:{postMessage:(value:any)=>posts.push(value)}}};
+  const events = new Map<string, Set<Function>>();
+  window.addEventListener = (name: string, fn: Function) => { if (!events.has(name)) events.set(name, new Set()); events.get(name)!.add(fn); };
+  window.removeEventListener = (name: string, fn: Function) => events.get(name)?.delete(fn);
+  const timers = new Map<number, Function>(); let timerID = 0;
+  const performance = { now: () => clock + 100, getEntriesByType: () => [{name:runtimeURL,initiatorType:'script',startTime:0,responseEnd:1,responseStatus:200}] };
+  if (options.captureDecodedEvents) new Function('window','document','location','performance','loadRuntime','Object','setTimeout','clearTimeout','MutationObserver','getComputedStyle',
+    completionSource.replace('__COMPUTA_COMPLETION_CONFIG__', JSON.stringify({key:completionKey,handlerName:'computaChatGPTCompletion',allowsDiagnosticSubscribers:true}))
+      .replace('import(runtimeURL)', 'loadRuntime(runtimeURL)'))(window, document, location, performance, loadRuntime, objectType,
+        (fn:Function) => { timers.set(++timerID,fn); return timerID; }, (id:number) => timers.delete(id), class {observe(){} disconnect(){}}, ()=>({visibility:'visible'}));
   const install = () => new Function('window', 'location', 'performance', 'Reflect', 'String', 'Object', 'loadRuntime',
-    source.replace('__COMPUTA_REQUEST_METADATA_CONFIG__', JSON.stringify(config)).replace(runtimeImport, 'loadRuntime()'))(
-      window, location, { now: () => clock }, reflection, stringType, objectType, loadRuntime);
+    source.replace('__COMPUTA_REQUEST_METADATA_CONFIG__', JSON.stringify(config)))(
+      window, location, performance, reflection, stringType, objectType, loadRuntime);
   install();
   return { window, original, calls, pending, install, reflection, stringType, objectType, location, imports: () => imports,
     tick: (value: number) => { clock = value; },
+    completion: window[completionKey], posts, send:()=>documentEvents.get('click')?.({target:button}),
+    pagehide:()=>[...(events.get('pagehide')??[])].forEach(fn=>fn()),
     hook: (command: string) => window[config.key]?.(command) };
 }
 
@@ -337,7 +356,7 @@ describe('explicit pre-presentation decoded metadata diagnostic', () => {
     expect(Object.getOwnPropertyDescriptor(r.Decoder.prototype, 'recordCompletion')).toEqual(r.original);
   });
 
-  test('awaits one fixed-runtime activation and preserves exact result, receiver and original call count', async () => {
+  test('awaits one observed-runtime activation and preserves exact result, receiver and original call count', async () => {
     const r = decoderRuntime(), loading = deferred<unknown>();
     const f = fixture({ captureDecodedEvents: true, loadRuntime: () => loading.promise });
     f.location.href = 'https://chatgpt.com/c/' + currentConversation;
@@ -354,7 +373,7 @@ describe('explicit pre-presentation decoded metadata diagnostic', () => {
     expect(await Promise.resolve(second).then(value => decoder.recordCompletion(value))).toBe(second);
     expect(r.calls).toEqual([input, second]); expect(f.imports()).toBe(1); expect(r.requires()).toBe(0);
     const snapshot = f.hook('snapshot');
-    expect(snapshot.decoder).toEqual({ state: 'installed', completionCalls: 2, programObservations: 2,
+    expect(snapshot.decoder).toMatchObject({ state: 'installed', completionCalls: 2, programObservations: 2,
       recoveredNullObservations: 2, lastProgram: { elapsedMs: 12, carrier: 'message', messageStatus: 'finished_successfully',
         conversationMatchesDocument: true, codeLength: 194, knownNullProgram: true, emptyFallbackMarkdown: true,
         recovery: 'unterminated_braced_value_recovered_parse', recoveryLine: 1, recoveryColumn: 1 } });
@@ -500,5 +519,54 @@ describe('explicit pre-presentation decoded metadata diagnostic', () => {
     expect(methodWrites).toBe(0);
     expect(Object.getOwnPropertyDescriptor(r.Decoder.prototype, 'recordCompletion')).toEqual(r.original);
     f.hook('stop');
+  });
+});
+
+
+describe('actual diagnostic and completion script coexistence', () => {
+  const binding = () => ({correlationID:'11111111-1111-4111-8111-111111111111',sequence:1,
+    inputSHA256:'a'.repeat(64),inputUTF8Bytes:2,durationMs:1000});
+  test('diagnostic activation and completion arm share one wrapper and stop independently in either order', async () => {
+    for (const diagnosticFirst of [true,false]) {
+      const r=decoderRuntime(), f=fixture({captureDecodedEvents:true,loadRuntime:async()=>r.module});
+      if (diagnosticFirst) await f.hook('activate'); else expect(await f.completion.arm(binding())).toEqual({armed:true});
+      const wrapper=r.Decoder.prototype.recordCompletion;
+      if (diagnosticFirst) expect(await f.completion.arm(binding())).toEqual({armed:true}); else await f.hook('activate');
+      expect(r.Decoder.prototype.recordCompletion).toBe(wrapper); expect(f.imports()).toBe(1);
+      const decoder=new r.Decoder(); const value=message(); expect(decoder.recordCompletion(value)).toBe(value);
+      if (diagnosticFirst) {
+        f.completion.stop(binding().correlationID); expect(r.Decoder.prototype.recordCompletion).toBe(wrapper);
+        decoder.recordCompletion({type:'main_stream_complete'}); decoder.recordCompletion({type:'message_stream_complete'});
+        expect(f.hook('snapshot').decoder.stream).toMatchObject({assistantMessages:1,mainTerminals:1,messageTerminals:1,decoderInstances:1});
+        f.hook('stop');
+      } else {
+        f.hook('stop'); expect(r.Decoder.prototype.recordCompletion).toBe(wrapper);
+        f.completion.stop(binding().correlationID);
+      }
+      expect(Object.getOwnPropertyDescriptor(r.Decoder.prototype,'recordCompletion')).toEqual(r.original);
+      expect(r.calls).toHaveLength(diagnosticFirst?3:1);
+    }
+  });
+  test('completion rejection leaves finite diagnostics alive through later terminal events', async () => {
+    const r=decoderRuntime(), f=fixture({captureDecodedEvents:true,loadRuntime:async()=>r.module});
+    await f.hook('activate'); expect(await f.completion.arm({...binding(),inputSHA256:createHash('sha256').update('hi').digest('hex')})).toEqual({armed:true});
+    const decoder=new r.Decoder(); f.send();
+    decoder.recordCompletion({type:'input_message',conversation_id:currentConversation,input_message:{id:'33333333-3333-4333-8333-333333333333',author:{role:'user'},content:{content_type:'text',parts:['hi']}}});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const partial=message();partial.message.status='finished_partial';decoder.recordCompletion(partial);
+    decoder.recordCompletion(message()); decoder.recordCompletion({type:'main_stream_complete'});
+    decoder.recordCompletion({type:'message_stream_complete'});
+    expect(f.hook('snapshot').decoder.stream).toMatchObject({inputMessages:1,assistantMessages:2,mainTerminals:1,messageTerminals:1});
+    expect(f.posts.some(p=>p.kind==='terminal')).toBe(false);
+    f.hook('stop'); expect(Object.getOwnPropertyDescriptor(r.Decoder.prototype,'recordCompletion')).toEqual(r.original);
+  });
+  test('original throw stays exact for both subscribers and diagnostic pagehide restores the method', async () => {
+    const reason=new Error('PRIVATE'),r=decoderRuntime({reason}),f=fixture({captureDecodedEvents:true,loadRuntime:async()=>r.module});
+    await f.hook('activate'); expect(await f.completion.arm(binding())).toEqual({armed:true});
+    try {new r.Decoder().recordCompletion({});throw new Error('no throw');}catch(error){expect(error).toBe(reason);}
+    expect(f.hook('snapshot').decoder.stream).toMatchObject({originalThrows:1,decoderInstances:1});
+    expect(f.hook('snapshot').decoder.completionCalls).toBe(0);
+    f.pagehide();expect(f.hook('snapshot').active).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(r.Decoder.prototype,'recordCompletion')).toEqual(r.original);
   });
 });

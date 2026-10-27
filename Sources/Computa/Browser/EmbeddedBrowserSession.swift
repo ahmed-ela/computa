@@ -787,7 +787,12 @@ final class EmbeddedBrowserSession {
         let key = "__computaRequestMetadata_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
         let duration = authorization.remainingMilliseconds
         var configuration: [String: Any] = ["key": key, "durationMs": duration]
-        if authorization.capturesDecodedEvents { configuration["captureDecodedEvents"] = true }
+        if authorization.capturesDecodedEvents {
+            installResponseCompletionObserver(entry, allowsDiagnostics: true)
+            guard let completion = entry.responseCompletionObserver else { authorization.revoke(); return false }
+            configuration["captureDecodedEvents"] = true
+            configuration["completionKey"] = completion.key
+        }
         guard duration > 0, let source = Self.requestMetadataSource(),
               let config = try? JSONSerialization.data(withJSONObject: configuration),
               let configText = String(data: config, encoding: .utf8) else { authorization.revoke(); return false }
@@ -950,26 +955,43 @@ final class EmbeddedBrowserSession {
     private final class ResponseCompletionObserver {
         let key: String
         let script: WKUserScript
-        init(key: String, script: WKUserScript) { self.key = key; self.script = script }
+        let allowsDiagnostics: Bool
+        init(key: String, script: WKUserScript, allowsDiagnostics: Bool) {
+            self.key = key; self.script = script; self.allowsDiagnostics = allowsDiagnostics
+        }
     }
 
     /// The main-world API is inert until a native current submission arms it.
     /// Install before any model navigation, including prompt-free prewarming.
-    private func installResponseCompletionObserver(_ entry: Entry) {
-        guard entry.isModelOwned, !entry.isToolOwned, entry.responseCompletionObserver == nil,
+    private func installResponseCompletionObserver(_ entry: Entry, allowsDiagnostics: Bool = false) {
+        let previous = entry.responseCompletionObserver
+        guard entry.isModelOwned, !entry.isToolOwned,
+              previous == nil || allowsDiagnostics && previous?.allowsDiagnostics == false,
               entry.view.url == nil, !entry.view.isLoading,
               let source = responseCompletionSource(), source.utf8.count <= 65_536,
               source.components(separatedBy: "__COMPUTA_COMPLETION_CONFIG__").count == 2 else { return }
-        let key = "__computaCompletion_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-        guard let data = try? JSONSerialization.data(withJSONObject: ["key": key, "handlerName": Self.responseCompletionName]),
+        let key = previous?.key ?? "__computaCompletion_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        var configuration: [String: Any] = ["key": key, "handlerName": Self.responseCompletionName]
+        if allowsDiagnostics { configuration["allowsDiagnosticSubscribers"] = true }
+        guard let data = try? JSONSerialization.data(withJSONObject: configuration),
               let config = String(data: data, encoding: .utf8) else { return }
         let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_COMPLETION_CONFIG__", with: config),
             injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
-        entry.responseCompletionObserver = ResponseCompletionObserver(key: key, script: script)
         let controller = entry.view.configuration.userContentController
-        controller.add(EmbeddedResponseCompletionHandler(session: self, tabID: entry.tab.id),
-            contentWorld: .page, name: Self.responseCompletionName)
-        controller.addUserScript(script)
+        if let previous {
+            // Materialize the replacement before mutating WebKit's script
+            // collection; its bridged getter can otherwise become empty when
+            // removeAllUserScripts() changes the underlying collection.
+            guard controller.userScripts.filter({ $0 === previous.script }).count == 1 else { return }
+            let scripts = controller.userScripts.map { $0 === previous.script ? script : $0 }
+            controller.removeAllUserScripts()
+            scripts.forEach(controller.addUserScript)
+        } else {
+            controller.add(EmbeddedResponseCompletionHandler(session: self, tabID: entry.tab.id),
+                contentWorld: .page, name: Self.responseCompletionName)
+            controller.addUserScript(script)
+        }
+        entry.responseCompletionObserver = ResponseCompletionObserver(key: key, script: script, allowsDiagnostics: allowsDiagnostics)
     }
 
     /// Arming is a bounded preparation, never a Send or a response proof. A

@@ -141,6 +141,145 @@
       : returnedGetters === 0 ? 'runtime_getter_failed' : 'runtime_method_unsupported');
     return found;
   }
+  // Completion and an explicitly leased diagnostic share one verified method
+  // wrapper. Subscribers have independent lifetimes: losing completion proof
+  // must not erase the diagnostic events needed to explain that loss.
+  let decoderTap = null, pendingTap = null;
+  function tapContext() {
+    return document === initialDocument && window === window.top && location.origin === 'https://chatgpt.com'
+      && descriptor(window, config.key)?.value === api;
+  }
+  function restoreTap(tap) {
+    if (decoderTap !== tap || tap.subscribers.size !== 0) return;
+    decoderTap = null;
+    bestEffort(() => window.removeEventListener('pagehide', tap.pagehide));
+    bestEffort(() => {
+      const present = descriptor(tap.target, 'recordCompletion');
+      if (present?.value === tap.wrapper && present.writable === true
+        && present.configurable === true && present.enumerable === false)
+        define(tap.target, 'recordCompletion', tap.original);
+    });
+  }
+  function removeSubscriber(tap, subscriber, reason = null) {
+    if (!tap.subscribers.delete(subscriber)) return;
+    bestEffort(() => clearTimeout(subscriber.timer));
+    restoreTap(tap);
+    if (reason !== null) bestEffort(() => subscriber.invalidated(reason));
+  }
+  function invalidateTap(tap, reason) {
+    for (const subscriber of [...tap.subscribers]) removeSubscriber(tap, subscriber, reason);
+  }
+  function liveTap(tap) {
+    if (decoderTap !== tap) return false;
+    const present = descriptor(tap.target, 'recordCompletion');
+    const reason = !tapContext() ? 'route_changed'
+      : !present || present.value !== tap.wrapper || present.writable !== true
+        || present.configurable !== true || present.enumerable !== false ? 'wrapper_changed' : null;
+    if (reason) { invalidateTap(tap, reason); return false; }
+    return true;
+  }
+  async function subscribeDecoder(kind, durationMs, admitted, value, thrown, invalidated) {
+    const deadline = now() + durationMs;
+    const current = () => now() < deadline && tapContext() && admitted();
+    if (!current()) return { reason: 'expired' };
+    if (decoderTap && !liveTap(decoderTap)) return { reason: 'wrapper_changed' };
+    if (!decoderTap) {
+      if (!pendingTap) pendingTap = (async () => {
+        const state = { armFailureReason: 'runtime_resources_unavailable' };
+        try {
+          const runtimeURL = observedRuntimeURL();
+          if (!runtimeURL) throw unknown;
+          state.armFailureReason = 'runtime_import_failed';
+          const runtime = await import(runtimeURL);
+          state.armFailureReason = 'runtime_identity_changed';
+          if (!current() || observedRuntimeURL() !== runtimeURL) throw unknown;
+          state.armFailureReason = 'runtime_cache_unsupported';
+          const found = initializedDecoder(runtime, state), { target, original } = found;
+          const tap = { ...found, runtimeURL, subscribers: new Set(), wrapper: null, pagehide: null };
+          tap.wrapper = function (...args) {
+            let result;
+            try { result = apply(original.value, this, args); }
+            catch (error) {
+              bestEffort(() => {
+                if (liveTap(tap)) for (const subscriber of [...tap.subscribers]) {
+                  if (!tap.subscribers.has(subscriber)) continue;
+                  try {
+                    if (!subscriber.current()) { removeSubscriber(tap, subscriber, 'expired'); continue; }
+                    subscriber.thrown(this);
+                  } catch { removeSubscriber(tap, subscriber, 'observer_exception'); }
+                }
+              });
+              throw error;
+            }
+            bestEffort(() => {
+              if (liveTap(tap)) for (const subscriber of [...tap.subscribers]) {
+                if (!tap.subscribers.has(subscriber)) continue;
+                try {
+                  if (!subscriber.current()) { removeSubscriber(tap, subscriber, 'expired'); continue; }
+                  subscriber.value(this, result);
+                } catch { removeSubscriber(tap, subscriber, 'observer_exception'); }
+              }
+            });
+            return result;
+          };
+          state.armFailureReason = 'runtime_identity_changed';
+          if (!current()) throw unknown;
+          const currentExport = descriptor(found.exports, 'c');
+          if (observedRuntimeURL() !== runtimeURL
+            || data(found.cache, found.key) !== found.cached || data(found.cached, 'exports') !== found.exports
+            || !currentExport || currentExport.get !== found.exported.get || currentExport.set !== undefined
+            || currentExport.enumerable !== true || currentExport.configurable !== false
+            || data(apply(found.exported.get, found.exports, []), 'prototype') !== target) throw unknown;
+          // No subscriber callback runs after the final descriptor read. In
+          // particular admitted() cannot swap the method between proof/write.
+          const currentMethod = descriptor(target, 'recordCompletion');
+          if (!currentMethod || currentMethod.value !== original.value || currentMethod.writable !== true
+            || currentMethod.configurable !== true || currentMethod.enumerable !== false) throw unknown;
+          if (now() >= deadline || !tapContext()) throw unknown;
+          define(target, 'recordCompletion', { ...original, value: tap.wrapper });
+          decoderTap = tap;
+          tap.pagehide = () => invalidateTap(tap, 'route_changed');
+          try { window.addEventListener('pagehide', tap.pagehide); }
+          catch { restoreTap(tap); throw unknown; }
+          return { tap };
+        } catch { return { reason: state.armFailureReason }; }
+      })();
+      const pending = pendingTap, result = await pending;
+      if (pendingTap === pending) pendingTap = null;
+      if (!result.tap) return result;
+    }
+    const tap = decoderTap;
+    let admittedNow = false;
+    try { admittedNow = !!tap && liveTap(tap) && current(); }
+    catch {
+      if (tap) restoreTap(tap);
+      return { reason: 'observer_exception' };
+    }
+    if (!admittedNow) {
+      if (tap) restoreTap(tap);
+      return { reason: 'expired' };
+    }
+    // A retained diagnostic may outlive one completion. A new subscriber must
+    // still prove the current initialized cache/export identity before joining.
+    try {
+      const exported = descriptor(tap.exports, 'c');
+      if (observedRuntimeURL() !== tap.runtimeURL || data(tap.cache, tap.key) !== tap.cached
+        || data(tap.cached, 'exports') !== tap.exports || !exported || exported.get !== tap.exported.get
+        || exported.set !== undefined || exported.enumerable !== true || exported.configurable !== false
+        || data(apply(tap.exported.get, tap.exports, []), 'prototype') !== tap.target
+        || !current() || !liveTap(tap)) throw unknown;
+    } catch { invalidateTap(tap, 'runtime_identity_changed'); return { reason: 'runtime_identity_changed' }; }
+    if (tap.subscribers.size >= 2 || [...tap.subscribers].some(item => item.kind === kind))
+      return { reason: 'owner_conflict' };
+    const subscriber = { kind, current, value, thrown, invalidated, timer: null };
+    tap.subscribers.add(subscriber);
+    try { subscriber.timer = setTimeout(() => removeSubscriber(tap, subscriber, 'expired'), Math.max(0, deadline - now())); }
+    catch { removeSubscriber(tap, subscriber); return { reason: 'observer_exception' }; }
+    return { subscription: Object.freeze({
+      active() { return tap.subscribers.has(subscriber) && liveTap(tap) && current(); },
+      stop() { const valid = liveTap(tap); removeSubscriber(tap, subscriber); return valid; }
+    }) };
+  }
   const id = value => typeof value === 'string' && uuid.test(value) ? value : null;
   function keys(object, expected) {
     try { return object && typeof object === 'object' && !Array.isArray(object)
@@ -174,14 +313,7 @@
     bestEffort(() => window.removeEventListener('pagehide', current.pagehide));
     bestEffort(() => window.removeEventListener('popstate', current.pathchange));
     bestEffort(() => window.removeEventListener('hashchange', current.pathchange));
-    if (current.target) {
-      try {
-        const present = descriptor(current.target, 'recordCompletion');
-        if (present && present.value === current.wrapper && present.writable === true
-          && present.configurable === true && present.enumerable === false)
-          define(current.target, 'recordCompletion', current.original);
-      } catch { /* Never replace a newer owner's method. */ }
-    }
+    bestEffort(() => current.subscription?.stop());
     if (notify) post(identity(current, 'invalidated'));
   }
   function route(current) {
@@ -205,11 +337,7 @@
   function live(current) {
     if (lease !== current || current.stopped) return false;
     if (!route(current)) { restore(current, true, now() >= current.deadline ? 'expired' : 'route_changed'); return false; }
-    if (current.target) {
-      const present = descriptor(current.target, 'recordCompletion');
-      if (!present || present.value !== current.wrapper || present.writable !== true
-        || present.configurable !== true || present.enumerable !== false) { restore(current, true, 'wrapper_changed'); return false; }
-    }
+    if (current.subscription && !current.subscription.active()) { restore(current, true, 'wrapper_changed'); return false; }
     return true;
   }
   function reject(current, candidate, reason) {
@@ -403,34 +531,13 @@
         if (!route(current)) {
           bestEffort(() => diagnostic(current, now() >= current.deadline ? 'expired' : 'route_changed')); throw unknown;
         }
-        current.armFailureReason = 'runtime_resources_unavailable';
-        const runtimeURL = observedRuntimeURL();
-        if (!runtimeURL) throw unknown;
-        current.armFailureReason = 'runtime_import_failed';
-        const runtime = await import(runtimeURL);
-        if (!live(current)) return { armed: false };
-        current.armFailureReason = 'runtime_identity_changed';
-        if (observedRuntimeURL() !== runtimeURL) throw unknown;
-        current.armFailureReason = 'runtime_cache_unsupported';
-        const found = initializedDecoder(runtime, current), { target, original } = found;
-        const wrapper = function (...args) {
-          let result;
-          try { result = apply(original.value, this, args); }
-          catch (error) { restore(current, true, 'error'); throw error; }
-          try { observe(current, this, result); } catch { restore(current, true, 'observer_exception'); }
-          return result;
-        };
-        current.armFailureReason = 'runtime_identity_changed';
-        const currentExport = descriptor(found.exports, 'c'), currentMethod = descriptor(target, 'recordCompletion');
-        if (!live(current) || observedRuntimeURL() !== runtimeURL
-          || data(found.cache, found.key) !== found.cached || data(found.cached, 'exports') !== found.exports
-          || !currentExport || currentExport.get !== found.exported.get || currentExport.set !== undefined
-          || currentExport.enumerable !== true || currentExport.configurable !== false
-          || data(apply(found.exported.get, found.exports, []), 'prototype') !== target
-          || !currentMethod || currentMethod.value !== original.value || currentMethod.writable !== true
-          || currentMethod.configurable !== true || currentMethod.enumerable !== false) throw unknown;
-        define(target, 'recordCompletion', { ...original, value: wrapper });
-        current.target = target; current.original = original; current.wrapper = wrapper;
+        const shared = await subscribeDecoder('completion', binding.durationMs,
+          () => lease === current && !current.stopped && route(current),
+          (receiver, result) => observe(current, receiver, result),
+          () => restore(current, true, 'error'), reason => restore(current, true, reason));
+        if (!shared.subscription) { current.armFailureReason = shared.reason; throw unknown; }
+        current.subscription = shared.subscription;
+        if (!live(current)) { shared.subscription.stop(); return { armed: false }; }
         current.click = event => {
           if (!live(current)) return;
           try {
@@ -456,7 +563,18 @@
         return { armed: true };
       } catch { restore(current, false, current.armFailureReason || 'runtime_unsupported'); return { armed: false }; }
     },
-    stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); }
+    stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); },
+    // The separately native-configured diagnostic receives this scoped API
+    // key. Page-world keys are not secrets or authorization. Diagnostic results
+    // and callbacks never contribute to a completion receipt.
+    ...(config.allowsDiagnosticSubscribers === true ? { async subscribeDiagnostic(options) {
+      if (!keys(options, 'admitted,durationMs,invalidated,thrown,value')
+        || !Number.isInteger(data(options, 'durationMs')) || options.durationMs < 1 || options.durationMs > 600000
+        || !['admitted', 'value', 'thrown', 'invalidated'].every(key => typeof data(options, key) === 'function')) return null;
+      const result = await subscribeDecoder('diagnostic', options.durationMs,
+        options.admitted, options.value, options.thrown, options.invalidated);
+      return result.subscription ?? null;
+    } } : {})
   });
   define(window, config.key, { value: api, writable: false, configurable: true, enumerable: false });
 })();

@@ -486,6 +486,26 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
         XCTAssertNoThrow(try parse(decodedRoot(decoder: decoder(program: maximum).merging(maximumCounts, uniquingKeysWith: { _, v in v }))))
     }
 
+    func testDecodedStreamCountersRejectPrivateFieldsTypesAndImpossibleCounts() throws {
+        let baseline = decoder()
+        let stream = try XCTUnwrap(baseline["stream"] as? [String: Any])
+        for key in stream.keys {
+            var missing = stream; missing.removeValue(forKey: key)
+            var value = baseline; value["stream"] = missing
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: value)), key)
+        }
+        for (key, value) in [("errorEvents", true), ("inputMessages", -1), ("assistantMessages", 65_536),
+                             ("nonemptyTextMessages", 1), ("opaqueMessages", 1), ("decoderInstances", 17),
+                             ("decoderOverflow", 1), ("decoderOverflow", true), ("text", "PRIVATE")] as [(String, Any)] {
+            var changed = stream; changed[key] = value
+            var capture = baseline; capture["stream"] = changed
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: capture)), key)
+        }
+        var withThrow = stream; withThrow["originalThrows"] = 1; withThrow["decoderInstances"] = 1
+        var capture = baseline; capture["stream"] = withThrow
+        XCTAssertNoThrow(try parse(decodedRoot(decoder: capture)), "An original throw need not produce a decoded return")
+    }
+
     private func decodedRoot(decoder: [String: Any]? = nil) -> [String: Any] {
         ["schemaVersion": 2, "active": true, "expired": false, "rows": [], "decoder": decoder ?? self.decoder()]
     }
@@ -493,7 +513,7 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
     private func decoder(program: [String: Any]? = nil) -> [String: Any] {
         ["state": "installed", "completionCalls": program == nil ? 0 : 1,
          "programObservations": program == nil ? 0 : 1, "recoveredNullObservations": program == nil ? 0 : 1,
-         "lastProgram": program.map { $0 as Any } ?? NSNull()]
+         "lastProgram": program.map { $0 as Any } ?? NSNull(), "stream": ["inputMessages": 0, "assistantMessages": 0, "nonemptyTextMessages": 0, "opaqueMessages": 0, "mainTerminals": 0, "messageTerminals": 0, "errorEvents": 0, "originalThrows": 0, "decoderInstances": 0, "decoderOverflow": false]]
     }
 
     private func lastProgram() -> [String: Any] {

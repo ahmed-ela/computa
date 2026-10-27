@@ -16,6 +16,18 @@ decoded terminal, content, or error evidence was recovered. Closing the owned
 tab removed its observer and page state. Later passing requests cannot recover
 that evidence or establish the original upstream trigger.
 
+The October 27 follow-up found a separate diagnostic defect before the new
+controlled trial: the opt-in decoded-metadata hook still imported an old
+hard-coded runtime and required the old validator binding. The ordinary
+completion observer already used observed runtime discovery. Merely updating
+the diagnostic's runtime identifier would also make the two observers wrap the
+same decoder method independently, causing one to reject the other's wrapper.
+The capture path now shares the verified decoder tap, with independent
+completion and diagnostic lifetimes. This fixes a capture defect, not evidence
+of the original empty-response trigger. Finite diagnostic counts describe the
+leased view; when multiple decoder instances or input messages are observed,
+they cannot alone attribute content or an error to the submitted prompt.
+
 Separate controlled, unsent `example.invalid` email drafts reproduced another
 failure: ChatGPT rendered a native email card. Computa's ordinary-prose
 compatibility path accepted the card's controls and suggestions as the final
