@@ -3197,6 +3197,89 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testProductMutationHistogramIsFiniteAndSharedAcrossDiagnosticRoutes() throws {
+        let histogram: [String: Any] = ["version": 1, "phase": "send_claimed", "capped": true,
+            "types": ["attributes": 1_000, "childList": 1_000, "characterData": 1_000, "other": 1_000],
+            "scopes": ["trackedProduct": 1_000, "message": 1_000, "composer": 1_000, "other": 1_000],
+            "composerAttributes": ["class": 1_000, "style": 1_000, "other": 1_000]]
+        let product: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 0,
+            "groupVisible": false, "recognized": false, "contradictory": false,
+            "chat": NSNull(), "work": NSNull(), "proofPresent": true, "proofInvalidated": true,
+            "chatClickClaimed": false, "productProofFailure": "mutation_overflow",
+            "productMutationRelevantCount": 513, "productMutationIgnoredCount": 1_000]
+        let firstUser: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "marker_not_final",
+            "scope": "marker_validation", "action": "inspect", "root": ["tag": "div", "classes": []],
+            "body": ["tag": "div", "classes": []], "userCount": 1, "textLength": 10_240, "lineCount": 98,
+            "markerOccurrences": 0, "controlDescendants": 0, "markerFinalLine": false, "submitted": true, "markerMatches": true,
+            "expansionOutcome": "context_changed", "expansionContextFailure": "product",
+            "productProofFailure": "mutation_overflow", "productMutationRelevantCount": 513, "productMutationIgnoredCount": 1_000]
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        func withHistogram(_ source: [String: Any], _ value: Any) -> [String: Any] {
+            source.merging(["productMutationHistogram": value]) { _, new in new }
+        }
+        for phase in ["none", "prepared", "send_claimed", "verified", "unknown"] {
+            for count in [0, 1_000] {
+                var candidate = histogram; candidate["phase"] = phase; candidate["capped"] = count == 1_000
+                for key in ["types", "scopes", "composerAttributes"] {
+                    let bucket = try XCTUnwrap(candidate[key] as? [String: Int])
+                    candidate[key] = bucket.mapValues { _ in count }
+                }
+                let productText = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(withHistogram(product, candidate)))
+                let productValue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(productText.utf8)) as? [String: Any])
+                XCTAssertEqual(productValue["productMutationHistogram"] as? NSDictionary, candidate as NSDictionary)
+                XCTAssertLessThanOrEqual(productText.utf8.count, 2_048)
+                let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(
+                    try encode(withHistogram(firstUser, candidate)), provider: .chatgpt))
+                XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE_CANARY") })
+                let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+                let provenance = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_product_proof" })
+                XCTAssertEqual(provenance["productMutationHistogram"] as? NSDictionary, candidate as NSDictionary)
+                XCTAssertEqual(provenance["productMutationRelevantCount"] as? Int, 513)
+                XCTAssertEqual(values.filter { $0["productMutationHistogram"] != nil }.count, 1,
+                    "The histogram remains separate from body/summary records at the existing log bound")
+                let body = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_body" })
+                XCTAssertEqual(body["expansionContextFailure"] as? String, "product")
+            }
+        }
+        func reject(_ value: Any, file: StaticString = #filePath, line: UInt = #line) throws {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(withHistogram(product, value)), file: file, line: line)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(
+                try encode(withHistogram(firstUser, value)), provider: .chatgpt), file: file, line: line)
+        }
+        for invalid in [NSNull(), [], "PRIVATE_CANARY"] as [Any] { try reject(invalid) }
+        for key in histogram.keys {
+            var missing = histogram; missing.removeValue(forKey: key); try reject(missing)
+        }
+        var extra = histogram; extra["pageText"] = "PRIVATE_CANARY"; try reject(extra)
+        for (key, invalidValues) in ["version": [true, 0, 2, 1.5, "1", NSNull()],
+                                     "phase": [true, 1, "PRIVATE_CANARY", NSNull()],
+                                     "capped": [0, 1, "false", NSNull()]] as [String: [Any]] {
+            for invalid in invalidValues { var value = histogram; value[key] = invalid; try reject(value) }
+        }
+        for key in ["types", "scopes", "composerAttributes"] {
+            let original = try XCTUnwrap(histogram[key] as? [String: Int])
+            for name in original.keys {
+                for invalid in [-1, 1_001, 1.5, true, NSNull(), "PRIVATE_CANARY"] as [Any] {
+                    var bucket: [String: Any] = original; bucket[name] = invalid
+                    var value = histogram; value[key] = bucket; try reject(value)
+                }
+                var bucket = original; bucket.removeValue(forKey: name)
+                var value = histogram; value[key] = bucket; try reject(value)
+            }
+            for invalid in [NSNull(), [], "PRIVATE_CANARY", original.merging(["PRIVATE_CANARY": 1]) { _, new in new }] as [Any] {
+                var value = histogram; value[key] = invalid; try reject(value)
+            }
+        }
+        for key in ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"] {
+            var incompleteProduct = withHistogram(product, histogram); incompleteProduct.removeValue(forKey: key)
+            var incompleteFirstUser = withHistogram(firstUser, histogram); incompleteFirstUser.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(incompleteProduct))
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(incompleteFirstUser), provider: .chatgpt))
+        }
+    }
+
     func testChatGPTStartsOnNormalRootAndProvesChatBeforeOwnedTemporaryTransition() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }

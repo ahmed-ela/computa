@@ -3051,3 +3051,40 @@ The failed task was not resumed or replayed. Its task-created tab and all owned
 website sessions closed, the fixture process was stopped and its listener was
 absent. The one-shot arm was consumed. No real email was sent; no Inspector or
 developer setting change was used in these tests.
+
+### Build 281: form guardrails pass; setup exposes product-proof overflow
+
+Installed signed, non-notarized 0.7.0 (281), source `ce9c7c3`, scopes input
+receipts to that input and refreshes conditional form-submission guidance.
+It keeps verification, no replay, draft-only scope, approvals and Stop. The new
+receipt is smaller than the prior envelope; an initial longer version displaced
+one ordinary form row and was corrected without increasing either output cap.
+The complete-page regression remains enforced.
+
+The final contract/controller/codec run passed 297 tests. All 48 runtime browser
+tests passed in the preceding run on unchanged production sources; its only
+remaining failure was an obsolete navigation-cue assertion corrected before the
+final run. Earlier results retain the output-capacity failure, stale assertions,
+a test compile error and missing fixture-interpreter configuration. These are
+separate focused runs, not a whole-app test result.
+
+A fresh neutral marker setup then failed after 2.340 seconds with
+`product_mode_unverified`, before either planned local-send qualification task
+started. It must not be called a verified no-Send failure: insertion completed,
+native submission was pending, and cleanup observed one clipped user message.
+No local tool ran. The cleanup body was the first 10,240 characters of the
+57,824-character submitted prompt; its marker could not be verified and display
+expansion lacked valid product binding. Cleanup remained unconfirmed and the
+exact owned view was retained. No refresh, replay or second setup was attempted.
+
+The retained first product-proof invalidation reason was `mutation_overflow`:
+513 relevant records exceeded the 512-record bound, with zero ignored records.
+That reason was recorded during cleanup, not timestamped at the invalidating
+mutation. Its exact record types and targets are unavailable. Chat/temporary
+and model checks passed earlier; there is no recorded evidence of a Work switch.
+Source and the existing deterministic test show that ordinary composer class
+mutations also consume this budget. This establishes an overly broad accounting
+case, while the live batch composition remains unknown. The subsequent candidate
+narrows only provably irrelevant editor presentation changes and records finite
+mutation categories on first invalidation. Unknown or ambiguous batches must
+still fail closed; no submitted action is replayed.

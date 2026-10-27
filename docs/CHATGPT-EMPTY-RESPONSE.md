@@ -99,6 +99,17 @@ not the original empty response. Input-receipt scope is a plausible presentation
 ambiguity, but the model's internal reason is not established; details and
 failed-trial evidence bounds are retained in the qualification report.
 
+Build281 then captured a separate product-mode verification failure during a
+fresh marker setup. The retained proof reported `mutation_overflow` at 513
+relevant records; the guard's bound is 512. Its classifier counts ordinary
+composer class/style changes outside message boundaries, a deterministic
+accounting failure covered by the existing tests. The live batch's specific
+types/targets were not retained, and the reason appeared in cleanup diagnostics.
+A pending submission and one rendered user body rule out treating this as proof
+of no dispatch. The invalid proof also prevented expansion/ownership verification
+of the clipped first message, leaving cleanup unconfirmed. This is separate from
+the original build270 empty provider reply; it must not be replayed.
+
 A separate instrumented long-response diagnostic returned content outside the
 required response envelope. The runtime translated that local format error into
 a generic "high demand" error; that generic text is not evidence of a provider
@@ -111,6 +122,12 @@ provider errors were projected into the same `Waiting` state as interruptions.
 
 ## Changes
 
+- Keep the 512 relevant-mutation bound, but exclude only proven presentation
+  attribute changes on the unique current prompt editor. Mixed or unknown
+  provenance, structural changes, mode controls and real Work transitions retain
+  conservative verification. Freeze bounded mutation type/scope counts and the
+  submission phase at first invalidation, so later cleanup cannot overwrite the
+  cause and no page text or attribute values enter diagnostics.
 - Scope browser input receipts to that input, preserving unverified outcomes and
   no-replay behavior. Refresh conditional form-submission guidance after website
   history: verify current field values and submission state, perform a distinct

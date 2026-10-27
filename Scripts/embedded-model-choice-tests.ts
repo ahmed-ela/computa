@@ -976,6 +976,113 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         ? { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody } }
         : index % 3 === 1 ? { type: 'attributes', target: f.userBody, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }
           : { type: 'childList', target: f.userBody, addedNodes: [new Node('SPAN', {}, 'PRIVATE RENDER FRAGMENT')], removedNodes: [] });
+      const composerChurn = (f: any, count: number) => Array.from({ length: count }, (_, index) => ({
+        type: 'attributes', target: f.composer, attributeName: index % 2 ? 'style' : 'class', oldValue: 'PRIVATE PRESENTATION' }));
+
+      test('only exact disjoint editor class and style churn is excluded from the product budget', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; productRecords(f, composerChurn(f, 1_100)); };
+        const result = await f.run('inspect', expansionInput);
+        expect(result.firstUserVerified).toBe(true); expect(f.world.__computaChatProductMode.invalidated).toBe(false);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('editor presentation exclusion preserves transient Work selection and first-failure phase metadata', async () => {
+        for (const attribute of ['aria-pressed', 'aria-checked']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          if (attribute === 'aria-checked') {
+            delete f.chatMode.values['aria-pressed']; delete f.workMode.values['aria-pressed'];
+            f.chatMode.values.role = 'radio'; f.workMode.values.role = 'radio';
+            f.chatMode.values['aria-checked'] = 'true'; f.workMode.values['aria-checked'] = 'false';
+          }
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const saved = f.world.__computaChatSubmissionState;
+            f.world.__computaChatSubmissionState = { document: f.document, owner: f.world.__computaChatProductMode.owner,
+              pending: { phase: 'send_claimed' } };
+            productRecords(f, [...composerChurn(f, 1_100), { type: 'attributes', target: f.workMode,
+              attributeName: attribute, oldValue: 'true' }]);
+            f.world.__computaChatSubmissionState.pending.phase = 'verified';
+            productRecords(f, [{ type: 'attributes', target: f.composer, attributeName: 'class', oldValue: 'PRIVATE LATER' }]);
+            f.world.__computaChatSubmissionState = saved;
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'work_selected',
+            productMutationRelevantCount: 1, productMutationIgnoredCount: 1_000,
+            productMutationHistogram: { version: 1, phase: 'send_claimed', capped: true,
+              types: { attributes: 1_000, childList: 0, characterData: 0, other: 0 },
+              scopes: { trackedProduct: 1, message: 0, composer: 1_000, other: 0 },
+              composerAttributes: { class: 550, style: 550, other: 0 } } });
+          const proof = f.world.__computaChatProductMode, histogram = proof.productMutationHistogram;
+          expect(Object.isFrozen(histogram)).toBe(true);
+          expect(Object.isFrozen(histogram.composerAttributes)).toBe(true);
+          for (const malformed of [
+            { ...histogram, phase: 'PRIVATE PHASE' },
+            { ...histogram, PRIVATE_EXTRA: 'PRIVATE CONTENT' },
+            { ...histogram, types: { ...histogram.types, attributes: 'PRIVATE COUNT' } },
+            { ...histogram, scopes: { ...histogram.scopes, other: 1_001 } },
+          ]) {
+            proof.productMutationHistogram = malformed;
+            const again = await f.run('inspect', expansionInput), serialized = JSON.stringify(again);
+            expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('productMutationHistogram');
+          }
+          proof.productMutationHistogram = histogram;
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('ambiguous editor provenance and oversized or unknown batches retain the conservative budget', async () => {
+        for (const kind of ['ancestor', 'tracked', 'duplicate', 'control', 'relabel', 'referenced_label', 'message_referenced_label',
+          'message_referenced_label_childlist',
+          'editor_label', 'editor_descendant_label', 'editor_ancestor_label', 'reference_limit', 'reference_size',
+          'moved', 'unknown', 'unknown_children', 'oversized_children', 'prescan_limit']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const records = composerChurn(f, kind === 'prescan_limit' ? 4_097 : 513);
+            if (kind === 'ancestor') records.forEach(record => { record.target = f.body; });
+            if (kind === 'tracked') records.forEach(record => { record.target = f.modeGroup; });
+            if (kind === 'duplicate') f.body.append(new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' }));
+            if (kind === 'control') f.composer.append(new Node('BUTTON'));
+            if (['editor_label', 'editor_descendant_label', 'editor_ancestor_label'].includes(kind)) {
+              const id = 'editor-related-label';
+              if (kind === 'editor_label') f.composer.values.id = id;
+              if (kind === 'editor_descendant_label') f.composer.append(new Node('SPAN', { id }));
+              if (kind === 'editor_ancestor_label') f.composer.parentElement.values.id = id;
+              // Preserve editor recognition independently of its ID.
+              f.composer.values['aria-label'] = 'Ask ChatGPT';
+              f.body.append(new Node('DIV', { 'aria-labelledby': id }));
+            }
+            if (kind === 'reference_limit') for (let i = 0; i < 129; i++) f.body.append(new Node('DIV', { 'aria-labelledby': `label-${i}` }));
+            if (kind === 'reference_size') f.body.append(new Node('DIV', { 'aria-labelledby': 'x'.repeat(1_025) }));
+            if (kind === 'relabel') records.push({ type: 'attributes', target: f.composer,
+              attributeName: 'aria-label', oldValue: 'Composer mode' });
+            if (kind === 'referenced_label') records.push({ type: 'attributes', target: f.modeGroup,
+              attributeName: 'aria-labelledby', oldValue: 'PRIVATE LABEL ID' });
+            if (kind === 'message_referenced_label' || kind === 'message_referenced_label_childlist') {
+              f.userBody.values.id = 'transient-label';
+              const group = new Node('DIV', { 'aria-labelledby': 'transient-label' });
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); group.append(work); f.body.append(group);
+              records.push(kind === 'message_referenced_label'
+                ? { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody }, oldValue: 'Composer mode' } as any
+                : { type: 'childList', target: f.userBody, addedNodes: [new Node('SPAN', {}, 'Current label')],
+                  removedNodes: [new Node('SPAN', {}, 'Composer mode')] } as any);
+              records.push({ type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' });
+            }
+            if (kind === 'moved') records.push({ type: 'childList', target: f.modeGroup,
+              addedNodes: [f.composer], removedNodes: [f.composer] } as any);
+            if (kind === 'unknown') records.push({ type: 'PRIVATE_UNKNOWN', target: f.composer } as any);
+            if (kind === 'unknown_children') records.unshift({ type: 'childList', target: f.modeGroup,
+              addedNodes: { length: 1 }, removedNodes: [] } as any);
+            if (kind === 'oversized_children') records.push({ type: 'childList', target: f.userBody,
+              addedNodes: Array.from({ length: 129 }, () => new Node('SPAN')), removedNodes: [] } as any);
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).productProofFailure).toBe('mutation_overflow');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
 
       test('product provenance ignores more than 512 message-only rendering mutations during first expansion', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
@@ -1092,7 +1199,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expand.onClick = () => {
           f.userBody.text = prompt;
           productRecords(f, [...messageChurn(f, 1_100), ...Array.from({ length: 513 }, () => ({
-            type: 'attributes', target: f.composer, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }))]);
+            type: 'attributes', target: f.composer, attributeName: 'data-unknown', oldValue: 'PRIVATE OLD ATTRIBUTE' }))]);
           productRecords(f, [{ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' }]);
         };
         const result = await f.run('inspect', expansionInput); rejected(result);
@@ -2013,7 +2120,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
           'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure',
-          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount',
+          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount', 'productMutationHistogram',
           'expansionTextAnalyzed', 'expansionClicked', 'expansionExactPrefixMatches', 'expansionASCIIPrefixMatches',
           'expansionASCIIPromptMatches', 'expansionASCIIRenderedLength', 'expansionASCIIPrefixLength', 'expansionASCIIPromptLength',
           'expansionUnicodeSpaceCount', 'expansionExpectedUnicodeSpaceCount', 'expansionFormatCount', 'expansionExpectedFormatCount',

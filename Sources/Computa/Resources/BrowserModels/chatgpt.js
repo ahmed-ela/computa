@@ -3552,7 +3552,25 @@ function chatGPTProductProofFailureDiagnostic() {
   const diagnostic = { productProofFailure: proof.invalidationReason };
   for (const key of ['productMutationRelevantCount', 'productMutationIgnoredCount'])
     if (Number.isInteger(proof[key]) && proof[key] >= 0) diagnostic[key] = Math.min(proof[key], 1_000);
+  const histogram = chatGPTProductMutationHistogramDiagnostic(proof.productMutationHistogram);
+  if (histogram) diagnostic.productMutationHistogram = histogram;
   return diagnostic;
+}
+function chatGPTProductMutationHistogramDiagnostic(value) {
+  try {
+    const keysMatch = (object, keys) => object && typeof object === 'object' && !Array.isArray(object)
+      && Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
+    if (!keysMatch(value, ['version', 'phase', 'capped', 'types', 'scopes', 'composerAttributes']) || value.version !== 1
+      || !['none', 'prepared', 'send_claimed', 'verified', 'unknown'].includes(value.phase) || typeof value.capped !== 'boolean') return null;
+    const result = { version: 1, phase: value.phase, capped: value.capped };
+    for (const [name, keys] of [['types', ['attributes', 'childList', 'characterData', 'other']],
+      ['scopes', ['trackedProduct', 'message', 'composer', 'other']], ['composerAttributes', ['class', 'style', 'other']]]) {
+      const bucket = value[name];
+      if (!keysMatch(bucket, keys) || !keys.every(key => Number.isInteger(bucket[key]) && bucket[key] >= 0 && bucket[key] <= 1_000)) return null;
+      result[name] = Object.fromEntries(keys.map(key => [key, bucket[key]]));
+    }
+    return result;
+  } catch { return null; }
 }
 function chatGPTInvalidateProductProof(proof, reason, counts = null) {
   if (!proof.invalidated) {
@@ -3560,6 +3578,7 @@ function chatGPTInvalidateProductProof(proof, reason, counts = null) {
     if (counts) {
       proof.productMutationRelevantCount = Math.min(counts.relevant, 1_000);
       proof.productMutationIgnoredCount = Math.min(counts.ignored, 1_000);
+      if (counts.histogram) proof.productMutationHistogram = counts.histogram;
     }
   }
   proof.invalidated = true;
@@ -3603,16 +3622,97 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return [...(record.addedNodes || []), ...(record.removedNodes || [])]
       .every(node => !touchesTracked(node) && !containsGroup(node));
   };
+  // Only the exact current editor can qualify for this presentation exclusion.
+  // It does not extend to ancestors, arbitrary page nodes or product controls.
+  const composerCandidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+    + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))];
+  const composer = composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
+    && composerCandidates[0].isConnected ? composerCandidates[0] : null;
+  const productNodes = [...tracked, ...(state.groups || []), state.work].filter(Boolean);
+  const intersects = (left, right) => !!left && !!right && (left === right || left.contains?.(right) || right.contains?.(left));
+  const emptyNodes = value => value == null || Number.isInteger(value.length) && value.length === 0;
+  const knownRecord = record => !!record && !!record.target
+    && (record.type === 'attributes' && record.target.nodeType === 1 && typeof record.attributeName === 'string'
+        && emptyNodes(record.addedNodes) && emptyNodes(record.removedNodes)
+      || record.type === 'characterData' && record.target.nodeType === 3
+      || record.type === 'childList' && record.target.nodeType === 1
+        && record.addedNodes != null && record.removedNodes != null
+        && Number.isInteger(record.addedNodes.length) && record.addedNodes.length >= 0
+        && Number.isInteger(record.removedNodes.length) && record.removedNodes.length >= 0
+        && typeof record.addedNodes[Symbol.iterator] === 'function' && typeof record.removedNodes[Symbol.iterator] === 'function');
+  const presentationAttribute = record => knownRecord(record) && record.type === 'attributes'
+    && record.target === composer && ['class', 'style'].includes(record.attributeName);
+  const editorCanAffectReferencedLabel = () => {
+    // An outside mode group may obtain its label through an editor-related ID.
+    // Class/style can change that label's physical visibility without moving
+    // either node. Bounded ID intersections suffice; no label text is read.
+    const descendants = [...composer.querySelectorAll('[id]')];
+    const references = [...document.querySelectorAll('[aria-labelledby]')];
+    if (descendants.length > 128 || references.length > 128) return true;
+    const sources = [composer, ...descendants];
+    let ancestor = composer.parentElement, depth = 0;
+    for (; ancestor && depth < 64; ancestor = ancestor.parentElement, depth++) sources.push(ancestor);
+    if (ancestor) return true;
+    const ids = new Set(sources.map(node => node.getAttribute('id')).filter(id => typeof id === 'string' && id));
+    for (const node of references) {
+      const value = node.getAttribute('aria-labelledby');
+      if (typeof value !== 'string' || value.length > 1_024) return true;
+      const tokens = value.trim().split(/\s+/);
+      if (tokens.length > 32 || tokens.some(id => ids.has(id))) return true;
+    }
+    return false;
+  };
+  const presentationBatchSafe = () => {
+    if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
+      || productNodes.some(node => intersects(node, composer)) || containsGroup(composer)
+      || composer.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]').length
+      || editorCanAffectReferencedLabel()) return false;
+    for (const record of records) {
+      if (!knownRecord(record)) return false;
+      // Labels can be referenced from elsewhere. Their intermediate values and
+      // structural/text replacements retain the existing conservative budget,
+      // including replacements inside a message that labels an outside group.
+      if (record.type === 'childList' || record.type === 'characterData' || record.type === 'attributes'
+        && ['aria-label', 'aria-labelledby', 'id', 'role'].includes(record.attributeName)) return false;
+      if (presentationAttribute(record) || messageOnly(record)) continue;
+      if (record.type === 'attributes' && intersects(record.target, composer)) return false;
+    }
+    return true;
+  };
+  const ignorePresentation = presentationBatchSafe();
+  // Metadata only, frozen at first invalidation. The phase comes from the
+  // current private submission record, never the observer's older invocation.
+  const submission = globalThis.__computaChatSubmissionState;
+  const submissionRecord = submission?.pending || submission?.lastVerified;
+  const phase = !submission ? 'none' : submission.document !== document || submission.owner !== proof.owner || submission.revoked
+    ? 'unknown' : !submissionRecord ? 'none' : ['prepared', 'send_claimed', 'verified'].includes(submissionRecord.phase)
+      ? submissionRecord.phase : 'unknown';
+  const histogram = { version: 1, phase, capped: false,
+    types: { attributes: 0, childList: 0, characterData: 0, other: 0 },
+    scopes: { trackedProduct: 0, message: 0, composer: 0, other: 0 },
+    composerAttributes: { class: 0, style: 0, other: 0 } };
+  const increment = (bucket, key) => { if (bucket[key] < 1_000) bucket[key]++; else histogram.capped = true; };
+  const countRecord = record => {
+    const type = ['attributes', 'childList', 'characterData'].includes(record?.type) ? record.type : 'other';
+    const target = record?.target, element = target?.nodeType === 1 ? target : target?.parentElement;
+    const scope = productNodes.some(node => intersects(node, target)) ? 'trackedProduct'
+      : element?.closest?.(messageBoundary) ? 'message' : element === composer && composer ? 'composer' : 'other';
+    increment(histogram.types, type); increment(histogram.scopes, scope);
+    if (scope === 'composer' && type === 'attributes')
+      increment(histogram.composerAttributes, ['class', 'style'].includes(record.attributeName) ? record.attributeName : 'other');
+  };
   const relevant = [];
   let ignored = 0;
   // Counts describe the examined prefix, stopping at the first over-budget
   // relevant record. Unrelated message rendering does not consume that budget.
   for (const record of records) {
-    if (messageOnly(record)) ignored++;
+    countRecord(record);
+    if (knownRecord(record) && (messageOnly(record) || ignorePresentation && presentationAttribute(record))) ignored++;
     else relevant.push(record);
     if (relevant.length > 512) break;
   }
-  const counts = { relevant: relevant.length, ignored };
+  Object.freeze(histogram.types); Object.freeze(histogram.scopes); Object.freeze(histogram.composerAttributes); Object.freeze(histogram);
+  const counts = { relevant: relevant.length, ignored, histogram };
   const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
   const trackWork = (node, observedInTrackedGroup = false) => {
     const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => group.contains(node));
@@ -3632,7 +3732,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   if (state.work) trackWork(state.work);
   // Process structural provenance before attribute records. A control can be
   // mounted, switched to Work, switched back and detached within one batch.
-  for (const record of relevant.slice(0, 512)) if (record.type === 'childList') {
+  for (const record of relevant.slice(0, 512)) if (knownRecord(record) && record.type === 'childList') {
     // A detached group authored in a message cannot become trusted just
     // because its final ancestry no longer contains that message boundary.
     const allowNewGroups = state.outside(record.target);
@@ -3649,7 +3749,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   if (works.size > 128) { invalidate('work_overflow'); return; }
   if (relevant.length > 512) { invalidate('mutation_overflow'); return; }
   if (state.contradictory) invalidate('contradictory_controls');
-  if (relevant.some(record => record.type === 'attributes'
+  if (relevant.some(record => record?.type === 'attributes'
     && ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true'
     && works.has(record.target))) invalidate('work_selected');
 }

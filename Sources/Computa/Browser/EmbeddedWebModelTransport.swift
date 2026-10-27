@@ -2580,6 +2580,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "group_overflow", "work_overflow",
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
+    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]
     private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
@@ -2608,6 +2609,55 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
+    }
+
+    /// The first invalidating mutation batch's examined prefix, not a full DOM
+    /// history or ownership proof. No page-authored names or values are logged.
+    private static func sanitizedProductMutationHistogram(_ raw: Any) -> [String: Any]? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["version", "phase", "capped", "types", "scopes", "composerAttributes"],
+              ComputerToolArgumentContract.exactInt64(value["version"]) == 1,
+              let phase = value["phase"] as? String,
+              ["none", "prepared", "send_claimed", "verified", "unknown"].contains(phase),
+              let capped = firstUserDiagnosticBool(value["capped"]) else { return nil }
+        var safe: [String: Any] = ["version": 1, "phase": phase, "capped": capped]
+        let buckets = [
+            "types": ["attributes", "childList", "characterData", "other"],
+            "scopes": ["trackedProduct", "message", "composer", "other"],
+            "composerAttributes": ["class", "style", "other"],
+        ]
+        for (key, names) in buckets {
+            guard let counts = value[key] as? [String: Any], Set(counts.keys) == Set(names) else { return nil }
+            var projected: [String: Int64] = [:]
+            for name in names {
+                guard let count = ComputerToolArgumentContract.exactInt64(counts[name]), (0...1_000).contains(count) else { return nil }
+                projected[name] = count
+            }
+            safe[key] = projected
+        }
+        return safe
+    }
+
+    /// Shared projection for product-mode and first-user failure diagnostics.
+    /// Invalid diagnostics suppress logging; they never change admission.
+    private static func sanitizedProductProofDiagnostic(_ value: [String: Any]) -> [String: Any]? {
+        var safe: [String: Any] = [:]
+        if let rawFailure = value["productProofFailure"] {
+            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
+            safe["productProofFailure"] = failure
+        }
+        for key in productMutationCounts {
+            if let rawCount = value[key] {
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        if let rawHistogram = value["productMutationHistogram"] {
+            guard safe["productProofFailure"] != nil, productMutationCounts.allSatisfy({ safe[$0] != nil }),
+                  let histogram = sanitizedProductMutationHistogram(rawHistogram) else { return nil }
+            safe["productMutationHistogram"] = histogram
+        }
+        return safe
     }
 
     /// Finite rendering measurements only. These fields never grant ownership.
@@ -2743,16 +2793,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let error = rawError as? String, errors.contains(error) else { return nil }
             safe["expansionModelError"] = error
         }
-        if let rawFailure = value["productProofFailure"] {
-            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
-            safe["productProofFailure"] = failure
-        }
-        for key in productMutationCounts {
-            if let rawCount = value[key] {
-                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
-                safe[key] = count
-            }
-        }
+        guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
+        safe.merge(productDiagnostic) { _, projected in projected }
         for key in firstUserBodyLengths + firstUserBodyCounts {
             if let rawCount = value[key] {
                 let limit: Int64 = firstUserBodyLengths.contains(key) ? 220_001 : 1_000
@@ -3009,7 +3051,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Product-control provenance has its own bounded record so diagnosing
         // message rendering cannot push the body observation past the log cap.
         var productObservation: [String: Any] = [:]
-        for key in ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"] {
+        for key in productProofDiagnosticKeys {
             if let value = summary.removeValue(forKey: key) { productObservation[key] = value }
         }
         if !productObservation.isEmpty {
@@ -4581,7 +4623,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
         let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
                                      "proofPresent", "proofInvalidated", "chatClickClaimed"]
-        let optional: Set<String> = ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"]
+        let optional = Set(productProofDiagnosticKeys)
         guard let value = raw as? [String: Any],
               required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
@@ -4596,16 +4638,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
             guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
         }
-        if let rawFailure = value["productProofFailure"] {
-            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
-            safe["productProofFailure"] = failure
-        }
-        for key in productMutationCounts {
-            if let rawCount = value[key] {
-                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
-                safe[key] = count
-            }
-        }
+        guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
+        safe.merge(productDiagnostic) { _, projected in projected }
         for key in ["chat", "work"] {
             if value[key] is NSNull { safe[key] = NSNull(); continue }
             guard let control = value[key] as? [String: Any],
