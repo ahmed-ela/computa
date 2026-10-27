@@ -2996,3 +2996,58 @@ with no pending retirement and a healthy archive. No real email was sent, no
 release was published, and no PR was merged. The original uncaptured build270
 empty-response failure remains unattributed, as detailed in
 `CHATGPT-EMPTY-RESPONSE.md`.
+
+
+### Build 280: working capture and a new premature final — October 27, 2026
+
+Installed signed Computa 0.7.0 (280), source `46f669ae81172df52052225d8fcc840c278dbbb4`. The installed executable matched the validated build. This is a controlled local build, not a published release.
+
+The fresh capture setup exposed defects in the diagnostic infrastructure: decoded-event capture still pinned an obsolete ChatGPT asset and would wrap the same decoder independently of the normal completion observer. Both now use one verified decoder wrapper with separate lifetimes. Diagnostics remain active when completion proof is rejected, but cannot accept a response or authorize an action. Ordinary views expose no diagnostic subscription API. Native tests also caught a pre-navigation script-upgrade bug: clearing the bridged script collection before materializing its replacement removed the completion script. The replacement array is now materialized first, and native regression coverage verifies one observer, its stable key, and diagnostic opt-in.
+
+Final focused validation passed **85 JavaScript tests / 1,146 assertions** and **54 native tests**, including real WebKit capture, lifecycle, failure, and ownership cases. Earlier failed runs are retained separately; these counts describe the final focused runs, not the whole app suite.
+
+Three controlled ChatGPT Chat / Instant turns completed:
+
+| Turn | Result | Duration | Inferences | Tool calls |
+| --- | --- | ---: | ---: | ---: |
+| Instrumented unsent draft | Exact synthetic recipient/subject/body returned; no tools or message sent | 8.901 s | 1 | 0 |
+| Browser lookup | Library opening time of 8 AM matched the actual page observation and fixture GET `/message/other`; zero POSTs in this turn's window | 34.543 s | 5 | 4 |
+| Terminal | Actual marker and `437`; both commands exited 0 | 21.161 s | 3 | 2 |
+
+All nine response inferences had verified submission, selected normal Chat/Instant model, response, release, and saved closed-session evidence. Browser open/click primitives themselves reported an unverified action outcome; the read task was qualified independently from the returned source observation and fixture request. Root also verified the app's live cleanup notice that one task-created browser tab was closed and existing user tabs were preserved. Both terminal processes exited; no interactive command remained.
+
+The instrumented draft captured one decoder instance and one input, nonempty assistant content, a message-terminal event, HTTP 200 for the conversation request, and no observed error events or original decoder throws. The normal observer was armed but lacked final ancestry, so acceptance used the existing verified **quiet fallback**, not the event shortcut. The preceding null-final native turn was context compaction and is excluded from the user-task result.
+
+The original empty-response failure was **not reproduced**, and its historical cause remains unknown. HTTP status and diagnostic counters alone are not causal or completion proof. This opt-in lease captures only its first physical model view; it must not be described as capture of every inference in a multi-step task. A harmless seed initialized the new native chat before arming; the measured turns were follow-ups in that fresh controlled chat, each with fresh owned website inference sessions. No original real email was replayed.
+
+A fourth controlled turn requested a local message saying `hi`. It failed the task
+outcome check after 48.257 seconds: six verified responses and five tools opened
+the mailbox, clicked Compose and filled the three fields, then returned a final
+answer saying the message was unsent. There was no Send call and zero POSTs.
+The final fresh observation contained all correct field values and an enabled
+Send control with a current reference. Its exact native catalog was bound,
+`auto`, and offered/allowed all ten browser functions. All six owned sessions
+closed; all six normal observers armed and used verified quiet fallback.
+
+The initial inference's scoped diagnostic captured one input and one decoder,
+nonempty assistant content, a message terminal, HTTP 200 and no error events or
+original throws. It did not capture the later five views. This is a semantic
+premature final, not an empty provider response, missing Send capability or
+failed dispatch. The model's internal reason is not established. The prior
+unsent-draft instruction is historical task context, not proof of contamination.
+
+One concrete presentation ambiguity remains: input receipts expose
+`result_verified:false` and `no_replay:true` without stating their action scope.
+Their fill cue says to verify before separate submission but does not distinguish
+uncertainty about that input from a different remaining authorized step. The
+current send authorization and completion guidance were already present. Any
+clarification of those cues is an adherence improvement hypothesis, not proof
+of this model decision's cause. No automatic resend, forced tool call or relaxed
+verification is warranted.
+
+The failed turn remains in the denominator: three complete tasks and one
+incomplete task, fifteen verified response inferences and eleven native calls.
+The failed task was not resumed or replayed. Its task-created tab and all owned
+website sessions closed, the fixture process was stopped and its listener was
+absent. The one-shot arm was consumed. No real email was sent; no Inspector or
+developer setting change was used in these tests.

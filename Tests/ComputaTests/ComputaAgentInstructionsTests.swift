@@ -654,7 +654,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let fresh = ComputaAgentInstructions.freshExecutionGuidance
         XCTAssertLessThan(policy.utf8.count, 1_900)
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
         XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_900)
         XCTAssertLessThan(fresh.utf8.count, 800)
         let combinedPolicy = policy + "\n" + fresh
@@ -775,7 +775,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
     }
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
@@ -887,7 +887,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         XCTAssertFalse(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: false).contains(senderRule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -1002,6 +1002,33 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testFormSubmissionGuidanceSeparatesPendingWorkFromUncertainSubmission() {
+        // Delivery/contract coverage only; live model adherence is qualified separately.
+        let guidance = ComputaAgentInstructions.browserFormSubmission
+        let normalized = guidance.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(normalized.contains("Fill is not an explicit submit; handlers may submit"))
+        XCTAssertTrue(normalized.contains("Input receipt flags result_verified/no_replay concern only that input"))
+        XCTAssertTrue(normalized.contains("Inspect full values and current submission state"))
+        XCTAssertTrue(normalized.contains("If explicitly authorized, values match and submission is pending"))
+        XCTAssertTrue(normalized.contains("distinct observed submit once, then verify a new receipt"))
+        XCTAssertTrue(normalized.contains("Filling alone does not complete a requested submission"))
+        XCTAssertTrue(normalized.contains("Already submitted: never repeat"))
+        XCTAssertTrue(normalized.contains("Uncertain submission: read-only verification, then report if unresolved"))
+        XCTAssertTrue(normalized.contains("draft-only scope, restrictions, approvals, denials, governing rules and Stop"))
+        XCTAssertLessThan(guidance.utf8.count, 560, "The shared addition has its own bounded byte budget")
+        for delivered in [ComputaAgentInstructions.builtInBrowser,
+                          ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
+                          ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_fill", "relay.browser_click"])] {
+            XCTAssertEqual(delivered.components(separatedBy: guidance).count - 1, 1)
+        }
+        XCTAssertFalse(ComputaAgentInstructions.developerInstructions().contains(guidance))
+        for names in [[], ["exec_command"], ["relay.browser_click_notes"]] {
+            XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: names).contains(guidance))
+        }
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["browser_click"],
+            customToolNames: ["browser_click"]).contains(guidance))
+    }
+
     func testBuiltInBrowserGuidanceRequiresCurrentOfferedToolsAndSurvivesQualifiedNames() {
         let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:])
         XCTAssertFalse(absent.contains(ComputaAgentInstructions.builtInBrowser))
@@ -1018,7 +1045,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
@@ -1082,7 +1109,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600,
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                                 "Named-service and sign-in/loading guidance retain all reference, approval and cleanup rules.")
     }
 

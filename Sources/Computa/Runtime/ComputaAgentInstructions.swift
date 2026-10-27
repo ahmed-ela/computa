@@ -77,6 +77,19 @@ enum ComputaAgentInstructions {
     narrow-query misses leave absence unverified.
     """
 
+    /// Shared form guidance, refreshed after website history. A dispatch receipt
+    /// does not decide task completion or authorize a submission/retry.
+    static let browserFormSubmission = """
+    Fill is not an explicit submit; handlers may submit. Input receipt flags
+    result_verified/no_replay concern only that input. Inspect full values and
+    current submission state. If explicitly authorized, values match and submission
+    is pending, request its distinct observed submit once, then verify a new receipt.
+    Filling alone does not complete a requested submission.
+    Already submitted: never repeat. Uncertain submission: read-only verification,
+    then report if unresolved. Honor draft-only scope, restrictions, approvals, denials,
+    governing rules and Stop.
+    """
+
     /// Exact policy emitted in the API developer checkpoint and existing
     /// website user-input suffix. Shared with the synthetic diagnostic matcher
     /// so it cannot drift from the wire text.
@@ -339,6 +352,7 @@ enum ComputaAgentInstructions {
     Complete requested/required fields; compare observed values before submit.
     Preserve complete requested identifiers; transform only as requested.
     Verify a new outcome tied to the action, not existing links/headings.
+    \(browserFormSubmission)
     """
 
     static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {
@@ -632,7 +646,8 @@ enum ComputaAgentInstructions {
         } ? commandChecks : ""
         // Keep exact-address guidance fresh even when native history already
         // contains the full browser contract and suppresses its outer duplicate.
-        let browserAddressHandoff = hasBuiltInBrowser ? browserAddressChecks + "\n" + browserTurnLifecycle + "\n" + browserSearchEvidence : ""
+        let browserAddressHandoff = hasBuiltInBrowser
+            ? [browserAddressChecks, browserTurnLifecycle, browserSearchEvidence, browserFormSubmission].joined(separator: "\n") : ""
         let diagnosticHandoff = hasBuiltInBrowser || !commandHandoff.isEmpty ? diagnosticEvidence : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.

@@ -90,6 +90,15 @@ history and could terminate legitimate work after an irreversible action.
 The delivery was not replayed. This reproduction is distinct from the original
 build270 empty provider response and build276's unsupported capability claim.
 
+The build280 fresh diagnostic trial captured a new premature final in a local
+mailbox: all fields were filled, but the model returned an unsent final instead
+of invoking the available Send control. Six provider responses verified; there
+was no failed tool, denial, missing browser function, or POST. The initial
+instrumented view returned nonempty content without a decoded error. This is
+not the original empty response. Input-receipt scope is a plausible presentation
+ambiguity, but the model's internal reason is not established; details and
+failed-trial evidence bounds are retained in the qualification report.
+
 A separate instrumented long-response diagnostic returned content outside the
 required response envelope. The runtime translated that local format error into
 a generic "high demand" error; that generic text is not evidence of a provider
@@ -102,6 +111,13 @@ provider errors were projected into the same `Waiting` state as interruptions.
 
 ## Changes
 
+- Scope browser input receipts to that input, preserving unverified outcomes and
+  no-replay behavior. Refresh conditional form-submission guidance after website
+  history: verify current field values and submission state, perform a distinct
+  authorized pending submit once, then verify its receipt. Draft-only scope,
+  governing rules, approvals, Stop and uncertain-outcome verification remain.
+  This addresses a presentation ambiguity; live model adherence is qualified
+  separately, and no final message is coerced into another action.
 - Require the ChatGPT response envelope, including ordinary final messages.
   Explicit relay instructions keep drafts in `message.text` and actions in
   Computa's offered tools. Native card/prose output is rejected without an

@@ -121,11 +121,15 @@ enum BrowserCompleteObservation {
                 return String(decoding: data, as: UTF8.self)
             }
             guard case let .input(wasFill, _, feedback) = self else { return text }
+            // This receipt describes one dispatched input, not completion of
+            // the user's task. A different authorized next step still requires
+            // current page evidence; uncertainty never permits input replay.
             let effect = wasFill
-                ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
-                : "Click unverified. For pending navigation: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); then read. Never replay."
+                ? "Fill: no Enter/submit sent; handlers may react. Verify full values/state; no replay."
+                : "If navigating: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); read. No replay."
             var result: [String: Any] = [
                 "dispatched": true, "no_replay": true, "result_verified": false,
+                "receipt_scope": "input",
                 "input_kind": wasFill ? "fill" : "click",
                 "current_observation": ["status": "available", "view": "overview",
                     "snapshot_id": snapshotID.uuidString, "text": text],

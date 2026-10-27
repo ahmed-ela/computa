@@ -32,6 +32,51 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testFreshFormGuidancePreservesScopeActionEvidenceAndToolChoice() throws {
+        let guidance = ComputaAgentInstructions.browserFormSubmission
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let stale = native.replacingOccurrences(of: guidance, with: "Earlier browser guidance.")
+        let tools = EmbeddedBrowserTools.definitions().map { definition -> [String: Any] in
+            var tool = definition
+            tool["parameters"] = tool.removeValue(forKey: "inputSchema")
+            return tool
+        }
+        let scenarios: [(scope: String, evidence: String, final: String)] = [
+            ("Send the form once.", "Fields match; submit control available; submission pending.", "Submission remains pending."),
+            ("Prepare the draft only. Do not submit.", "Fields match; submit control available.", "The draft is prepared and unsent."),
+            ("Send the form once.", "Submit was dispatched; outcome is uncertain.", "The submission outcome remains unverified."),
+            ("Send the form once.", "New receipt confirms the requested submission.", "The requested submission is verified."),
+            ("Stop. Do not submit.", "Fields match; submit control available.", "Stopped without submitting."),
+        ]
+        for model in [syntheticChatGPTModelID, "browser/claude", "browser/gemini"] {
+            for retained in [native, stale] {
+                for choice in ["auto", "none"] {
+                    for scenario in scenarios {
+                        let original = try JSONSerialization.data(withJSONObject: [
+                            "model": model, "tool_choice": choice, "tools": tools,
+                            "input": [["role": "developer", "content": retained],
+                                      ["role": "user", "content": "Never submit outside the approved account."],
+                                      ["role": "user", "content": scenario.scope],
+                                      ["type": "function_call", "name": "browser_fill", "call_id": "current-input",
+                                       "arguments": #"{"fill_ref":"bfill_11111111-1111-4111-8111-111111111111","text":"Exact café value"}"#],
+                                      ["type": "function_call_output", "call_id": "current-input", "output": scenario.evidence]],
+                        ])
+                        let request = try WebModelResponseCodec.prepareRequest(original)
+                        let handoff = try assertContiguousRequestValues(original, in: request)
+                        XCTAssertEqual(handoff.components(separatedBy: guidance).count - 1, 1,
+                            "Current form guidance follows unchanged history, even with retained native instructions")
+                        XCTAssertEqual(request.continuationRequest, original)
+                        XCTAssertFalse(request.toolCatalogDiagnostic.requiresCall, "Guidance must not force a tool or invent a retry")
+                        let answer = String(decoding: try JSONSerialization.data(withJSONObject: [
+                            "type": "message", "text": scenario.final]), as: UTF8.self)
+                        XCTAssertEqual(try WebModelResponseCodec.parseReply(answer, request: request, requireEnvelope: true),
+                            .message(scenario.final), "Drafts, truthful uncertainty, refusals and Stop must remain valid final responses")
+                    }
+                }
+            }
+        }
+    }
+
     func testSelectedResponseFormatCountsTowardFinalExpandedPromptLimit() throws {
         let terminal: [String: Any] = ["type": "function", "name": "exec_command",
             "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]
