@@ -1960,6 +1960,161 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, fresh)); expect(expand.clicks).toBe(1);
     });
 
+    test('native-bound completed expansion survives only certified route handoff before replacement proof', async () => {
+      for (const timing of ['body_hash', 'certificate_hash', 'model_read']) {
+        const { x, first, record, oldRoot, oldBody, root, body, expand } = await remounted();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-bound-recovery?temporary-chat=true';
+        let crossed = false, hashes = 0;
+        const promote = () => { crossed = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-bound-recovery'; };
+        if (timing === 'model_read') {
+          const open = x.picker!.trigger.onClick!;
+          x.picker!.trigger.onClick = () => { open();
+            if (!crossed && (x.f.world.__computaModelBoundFirstExpansion as any)?.outcome === 'expanded') promote(); };
+        } else {
+          const digest = () => { if (++hashes === (timing === 'body_hash' ? 1 : 2)) promote(); else x.f.onDigest(digest, first.outbound); };
+          x.f.onDigest(digest, first.outbound);
+        }
+        const discarded = await x.observe(first, allowance); denied(discarded);
+        expect(crossed, timing).toBe(true); expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        const before = x.f.digestInputs.length;
+        const resumed = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+        expect(resumed.error, timing).toBe('first_user_observation_replaced'); denied(resumed);
+        expect(record.replacement).toMatchObject({ root, body, oldRoot, oldBody });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(candidate.deadline).toBe(deadline); expect(candidate).not.toHaveProperty('verified', true);
+        const result = await x.observe(first, fresh);
+        expect(result.error, timing).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1); expect(candidate.deadline).toBe(deadline);
+      }
+    });
+
+    test('bound route continuation consumes only the existing two native route edges without renewing display work', async () => {
+      const { x, first, record, root, body, expand } = await remounted();
+      const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;
+      const publicURL = 'https://chatgpt.com/c/public-two-edges?temporary-chat=true';
+      x.f.document.URL = home; x.f.location.pathname = '/';
+      const move = (url: string) => { x.f.document.URL = url; x.f.location.pathname = new URL(url).pathname; };
+      x.f.onDigest(() => move(local), first.outbound); denied(await x.observe(first, allowance));
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+      const firstEdge = { fromURL: home, toURL: local }, secondEdge = { fromURL: local, toURL: publicURL };
+      x.f.onDigest(() => move(publicURL), first.outbound);
+      denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [firstEdge] }));
+      expect(candidate.routeDiscard).toMatchObject({ fromURL: local, toURL: publicURL });
+      const replacement = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+      expect(replacement.error).toBe('first_user_observation_replaced'); denied(replacement);
+      expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]);
+      expect((await x.observe(first, fresh)).submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(candidate.deadline).toBe(deadline);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('a route crossing the already granted replacement refresh keeps the same receipt and rehashes again', async () => {
+      const { x, first, record, body, expand } = await remounted();
+      expect((await x.observe(first, allowance)).error).toBe('first_user_observation_replaced');
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion, receipt = record.replacement, deadline = candidate.deadline;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-refresh?temporary-chat=true';
+      x.f.onDigest(() => { x.f.document.URL = toURL; x.f.location.pathname = '/c/public-refresh'; }, first.outbound);
+      denied(await x.observe(first, fresh)); expect(record.replacement).toBe(receipt);
+      expect(candidate.refreshClaimed).toBe(true); expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: 'body_hash' });
+      const before = x.f.digestInputs.length;
+      const current = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.body).toBe(body); expect(record.replacement).toBeNull(); expect(candidate.deadline).toBe(deadline);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('certificate return and fresh hash can consume the two distinct native route edges in order', async () => {
+      const { x, first, record, body, expand } = await remounted();
+      const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;
+      const publicURL = 'https://chatgpt.com/c/public-receipt-then-hash?temporary-chat=true';
+      x.f.document.URL = home; x.f.location.pathname = '/';
+      expect((await x.observe(first, allowance)).error).toBe('first_user_observation_replaced');
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion, receipt = record.replacement, deadline = candidate.deadline;
+      x.f.document.URL = local; x.f.location.pathname = new URL(local).pathname;
+      const firstEdge = { fromURL: home, toURL: local }, secondEdge = { fromURL: local, toURL: publicURL };
+      x.f.onDigest(() => { x.f.document.URL = publicURL; x.f.location.pathname = '/c/public-receipt-then-hash'; }, first.outbound);
+      denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge] }));
+      expect(record.replacement).toBe(receipt); expect(candidate.routeDiscard).toMatchObject({ fromURL: local, toURL: publicURL });
+      const current = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+      expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]); expect(candidate.deadline).toBe(deadline);
+      expect(record.body).toBe(body); expect(record.replacement).toBeNull(); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('a crossed route cannot retain display work when any non-route boundary failed', async () => {
+      for (const mutation of ['body', 'root', 'old_root', 'owner', 'document', 'state', 'pending', 'private_pin',
+        'record_pin', 'record_owner', 'record_document', 'model', 'work', 'temporary', 'invocation']) {
+        const { x, first, record, body, oldRoot, expand } = await remounted();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-reject?temporary-chat=true';
+        const state: any = x.f.world.__computaChatSubmissionState, pin: any = x.f.world.__computaModelFirstProof;
+        const owner = x.f.world.__computaModelOwner, document = state.document;
+        const restore: Array<() => void> = [];
+        x.f.onDigest(() => {
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-reject';
+          if (mutation === 'body') { body.text += '!'; restore.push(() => { body.text = first.outbound; }); }
+          if (mutation === 'root') replaceRoot(x);
+          if (mutation === 'old_root') { oldRoot.connected = true; restore.push(() => { oldRoot.connected = false; }); }
+          if (mutation === 'owner') { x.f.world.__computaModelOwner = 'foreign'; restore.push(() => { x.f.world.__computaModelOwner = owner; }); }
+          if (mutation === 'document') { state.document = {}; restore.push(() => { state.document = document; }); }
+          if (mutation === 'state') { x.f.world.__computaChatSubmissionState = {}; restore.push(() => { x.f.world.__computaChatSubmissionState = state; }); }
+          if (mutation === 'pending') { state.pending = {}; restore.push(() => { state.pending = null; }); }
+          if (mutation === 'private_pin') { pin.fingerprint = '0'.repeat(64); restore.push(() => { pin.fingerprint = first.fingerprint; }); }
+          if (mutation === 'record_pin') { record.fingerprint = '0'.repeat(64); restore.push(() => { record.fingerprint = first.fingerprint; }); }
+          if (mutation === 'record_owner') { record.owner = 'foreign'; restore.push(() => { record.owner = owner; }); }
+          if (mutation === 'record_document') { record.document = {}; restore.push(() => { record.document = document; }); }
+          if (mutation === 'model') { x.picker!.selected('High'); restore.push(() => { x.picker!.selected('Medium'); }); }
+          if (mutation === 'work') { x.f.workMode.values['aria-pressed'] = 'true'; restore.push(() => { x.f.workMode.values['aria-pressed'] = 'false'; }); }
+          if (mutation === 'temporary') { x.f.temporary.connected = false; restore.push(() => { x.f.temporary.connected = true; }); }
+          if (mutation === 'invocation') x.f.world.__computaChatActiveInvocation = {};
+        }, first.outbound);
+        denied(await x.observe(first, allowance));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard, mutation).toBeUndefined(); restore.forEach(fn => fn());
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBeUndefined();
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('native-certified bound route continuation rejects altered receipts current bodies and pins permanently', async () => {
+      for (const mutation of ['no_chain', 'wrong_from', 'wrong_to', 'cycle', 'too_many', 'body', 'prefix', 'root', 'old_root',
+        'native_first', 'native_round', 'model', 'temporary', 'work', 'wrong_action', 'wrong_handoff']) {
+        const { x, first, record, body, oldRoot, expand } = await remounted();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-bound-negative?temporary-chat=true';
+        x.f.onDigest(() => { x.f.document.URL = toURL; x.f.location.pathname = '/c/public-bound-negative'; }, first.outbound);
+        denied(await x.observe(first, allowance));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL });
+        const valid = [{ fromURL, toURL }], overrides: any = { ...allowance, firstUserExpansionRouteContinuation: valid };
+        if (mutation === 'no_chain') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'wrong_from') overrides.firstUserExpansionRouteContinuation = [{ fromURL: 'https://chatgpt.com/', toURL }];
+        if (mutation === 'wrong_to') overrides.firstUserExpansionRouteContinuation = [{ fromURL, toURL: 'https://chatgpt.com/c/other' }, { fromURL: 'https://chatgpt.com/c/other', toURL }];
+        if (mutation === 'cycle') overrides.firstUserExpansionRouteContinuation = [{ fromURL, toURL }, { fromURL: toURL, toURL: fromURL }];
+        if (mutation === 'too_many') overrides.firstUserExpansionRouteContinuation = [valid[0], valid[0], valid[0]];
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'prefix') body.text = first.outbound.slice(0, 10_240);
+        if (mutation === 'root') replaceRoot(x);
+        if (mutation === 'old_root') oldRoot.connected = true;
+        if (mutation === 'native_first') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+        if (mutation === 'native_round') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'model') x.picker!.selected('High');
+        if (mutation === 'temporary') x.f.temporary.connected = false;
+        if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
+        if (mutation === 'wrong_action') overrides.action = 'cleanup';
+        if (mutation === 'wrong_handoff') overrides.allowBoundFirstUserRemountRefresh = true;
+        denied(await x.observe(first, overrides));
+        body.text = first.outbound; oldRoot.connected = false; x.picker!.selected('Medium'); x.f.temporary.connected = true;
+        x.f.workMode.values['aria-pressed'] = 'false';
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: valid }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     test('remount expansion rejects either still-connected former node, duplicates, and mismatched prefixes', async () => {
       for (const mutation of ['old_root', 'old_body', 'extra_root', 'prefix', 'missing_authority', 'refresh_without_claim']) {
         const { x, first, oldRoot, oldBody, body, expand } = await remounted();

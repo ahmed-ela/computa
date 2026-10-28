@@ -3760,3 +3760,46 @@ the normal ChatGPT tab. Old unconfirmed website cleanup remains unconfirmed.
 These controlled passes qualify the reproduced fixes and current tool workflow;
 they do not establish external email delivery, universal reliability, or the
 cause of the original uncaptured build270 response. No release or merge occurred.
+
+### Build 294: native-bound message replacement and route transitions
+
+A later build293 user task failed after 5.201 seconds, before any tool call.
+The first prompt had already passed native verification. ChatGPT then replaced
+the message elements and promoted its local conversation URL. Display expansion
+completed, but its replacement verification crossed that route change. Native
+discarded the obsolete read without carrying the route continuation into the
+already-bound recovery. The next read rejected the spent recovery claim even
+though the full 57,830-character prompt, final marker and parsed payload still
+matched. Cleanup hit the same guard and remained unconfirmed. The real email
+request was not replayed.
+
+This is separate from build293's provisional-before-native-adoption fix. The
+saved diagnostics establish the bound-stage race but cannot distinguish the
+original interrupted hash from model recertification. Deterministic JavaScript
+and real WebKit fixtures reproduce the failure at these boundaries, including
+the JavaScript-to-native certificate handoff.
+
+The repair keeps the two existing monotonic route edges independent of the
+single display-expansion claim and single replacement-read handoff. Only a
+complete native-bound prompt on the same physical replacement can retain a
+discarded-read witness. A fresh native-certified route read must rehash the
+complete body and recheck model, Chat mode, temporary mode, owner, document and
+submission before adopting the replacement. Both unfinished certification and
+an already-issued replacement receipt consume the same bounded route suffix.
+No crossed read releases an answer; no Send, expansion click, deadline or
+replacement allowance is renewed. Cleanup receives no new recovery capability.
+
+Finite diagnostics now retain the interrupted stage, consumed route-edge count
+and whether a route witness remains pending. These fields contain no prompt,
+URL or page text and cannot authorize an action. The original failed evidence
+is preserved under `work/failed-email-20261028-042737`; build294 qualification
+artifacts use `work/bound-route-20261028` and the adjacent JS/native test folders.
+
+The adapter suite passed 494 tests / 21,509 assertions on unchanged candidate
+sources. Twenty-one focused real WebKit/native tests passed, covering six
+valid timing sequences, four new rejection scenarios, the earlier bound and
+provisional recovery controls, cleanup restrictions, response deadlines and
+strict finite diagnostic sanitization. The native tests assert one Send, one
+display expansion, unchanged deadlines and fresh full-body/model proof. The
+independent source review found no remaining blocking issue. Installed live
+qualification follows below once completed.

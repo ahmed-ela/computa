@@ -5403,6 +5403,212 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testBoundRemountDigestPromotionRequiresFreshWholeBodyAndModelProof() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"])
+    }
+
+    func testBoundRemountModelProofPromotionRequiresFreshWholeBodyAndModelProof() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "model")
+    }
+
+    func testBoundRemountCertificatePromotionPreservesOneNativeFreshRead() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "receipt")
+    }
+
+    func testBoundRemountTwoMonotonicPromotionsPreserveOneExpansionAndFreshRead() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "two_routes")
+    }
+
+    func testBoundRemountGrantedRefreshPromotionRetainsIndependentRouteBudget() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "refresh")
+    }
+
+    func testBoundRemountReceiptAndFreshHashPromotionsComposeWithoutRenewingBudgets() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "receipt_then_refresh")
+    }
+
+    func testBoundRemountDigestPromotionRejectsChangedOwnershipAndSecondLocalRoute() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["changed_body", "second_local", "wrong_model", "normal_chat"])
+    }
+
+    private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest") async throws {
+        for condition in conditions {
+            let hasTwoRoutes = ["two_routes", "receipt_then_refresh"].contains(crossing)
+            let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
+            defer {
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+                fixture.shutdown()
+            }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            let localRoute = "/c/local-chatgpt%3Abound-digest-promotion?temporary-chat=true"
+            let finalRoute = condition == "second_local"
+                ? "/c/local-chatgpt%3Aforeign-bound-digest?temporary-chat=true"
+                : "/c/public-bound-digest-promotion?temporary-chat=true"
+            if !hasTwoRoutes {
+                _ = try await evaluate(view, "history.pushState({}, '', '\(localRoute)'); return true;")
+            }
+            let local = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            let localProof = (local["modelProofContext"] ?? local["pendingSubmissionContext"]) as? [String: Any]
+            XCTAssertEqual(localProof?["firstUserFingerprint"] as? String, fingerprint)
+            let nativeBound = try await evaluate(view, """
+                const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+                return record?.nativeFirstPinned === true && record.phase === 'verified' && state.pending == null;
+                """, world: world) as? Bool
+            XCTAssertEqual(nativeBound, true, "The race must begin after native adopted the first prompt")
+            try await installBoundFirstUserCollapse(view, behavior: "remount")
+            // Observe the private recovery but mutate only the real page URL.
+            // Cross either the first exact digest after expansion or the later
+            // model-picker proof, before the remount certificate is complete.
+            _ = try await evaluate(view, """
+                const original = crypto.subtle.digest.bind(crypto.subtle);
+                globalThis.__fixtureBoundDigestPromotion = null;
+                globalThis.__fixtureBoundFinalRouteHashes = 0;
+                globalThis.__fixtureBoundRoutePromotions = 0;
+                let modelPromotionQueued = false;
+                const promote = stage => {
+                  const recovery = globalThis.__computaModelBoundFirstExpansion;
+                  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+                  const count = globalThis.__fixtureBoundRoutePromotions;
+                  const initialRoute = \(hasTwoRoutes) && count === 0 && location.pathname === '/';
+                  const nextRoute = location.pathname.startsWith('/c/local-chatgpt')
+                    && (count === 0 || \(hasTwoRoutes) && count === 1);
+                  if ((initialRoute || nextRoute) && recovery?.remount === true
+                    && recovery.provisional !== true && recovery.initialRoute !== true
+                    && recovery.outcome === 'expanded'
+                    && (['receipt', 'refresh'].includes(stage) ? recovery.awaitingNativeRefresh === true
+                      && record?.replacement === recovery.replacementReceipt
+                      && (stage !== 'refresh' || recovery.refreshClaimed === true)
+                      : recovery.awaitingNativeRefresh !== true)
+                    && state.pending == null && record === recovery.record && record.phase === 'verified'
+                    && record.nativeFirstPinned === true) {
+                    globalThis.__fixtureBoundDigestPromotion ||= { stage, nativePinned: true, recordPhase: record.phase,
+                      provisional: false, pending: false, outcome: recovery.outcome,
+                      deadline: recovery.deadline, oldRootDetached: recovery.oldRoot.isConnected === false,
+                      oldBodyDetached: recovery.oldBody.isConnected === false,
+                      replacementAbsent: record.replacement == null, recoveryVerified: recovery.verified === true };
+                    globalThis.__fixtureBoundRoutePromotions++;
+                    history.pushState({}, '', initialRoute ? '\(localRoute)' : '\(finalRoute)');
+                  }
+                };
+                globalThis.__fixturePromoteBoundReceipt = () => promote('receipt');
+                crypto.subtle.digest = async (...arguments_) => {
+                  const result = await original(...arguments_);
+                  const recovery = globalThis.__computaModelBoundFirstExpansion;
+                  const exact = recovery && new TextDecoder().decode(arguments_[1]) === recovery.canonical;
+                  if (exact && location.pathname === '/c/public-bound-digest-promotion')
+                    globalThis.__fixtureBoundFinalRouteHashes++;
+                  if (exact && ['digest', 'two_routes'].includes('\(crossing)')) promote('digest');
+                  if (exact && ['refresh', 'receipt_then_refresh'].includes('\(crossing)')) promote('refresh');
+                  // Let the hash caller resume first. Its synchronous guards
+                  // then reach the awaited model recertification before this
+                  // second microtask changes the route; no wall-clock race.
+                  if (exact && '\(crossing)' === 'model' && recovery.outcome === 'expanded' && !modelPromotionQueued) {
+                    modelPromotionQueued = true;
+                    queueMicrotask(() => queueMicrotask(() => promote('model')));
+                  }
+                  return result;
+                }; return true;
+                """, world: world)
+            var promotions = 0
+            if ["receipt", "receipt_then_refresh"].contains(crossing) {
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    guard action == "inspect" else { return }
+                    _ = try? await self.evaluate(view, "globalThis.__fixturePromoteBoundReceipt(); return true;", world: world)
+                }
+            }
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                guard checkpoint == .routeAccepted,
+                      view.url?.path == "/c/public-bound-digest-promotion"
+                        || hasTwoRoutes && view.url?.path == "/c/local-chatgpt:bound-digest-promotion" else { return }
+                promotions += 1
+                if condition == "changed_body" {
+                    _ = try? await self.evaluate(view, """
+                        const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                        body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery'); return true;
+                        """)
+                } else if condition == "wrong_model" {
+                    _ = try? await self.evaluate(view, "document.getElementById('fixture-model-header').textContent = 'High'; return true;")
+                } else if condition == "normal_chat" {
+                    _ = try? await self.evaluate(view, """
+                        const temporary = document.querySelector('[aria-label="Turn off temporary chat"]');
+                        temporary.setAttribute('aria-label', 'Start temporary chat');
+                        temporary.textContent = 'Start temporary chat'; return true;
+                        """)
+                }
+            }
+            var recovered: [String: Any]?, failure: EmbeddedWebModelTransport.Failure?
+            do { recovered = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            catch { failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure) }
+            let witness = try await evaluate(view, """
+                const recovery = globalThis.__computaModelBoundFirstExpansion;
+                return { ...globalThis.__fixtureBoundDigestPromotion,
+                  finalDeadline: recovery?.deadline, finalVerified: recovery?.verified === true,
+                  routeDiscardStage: recovery?.routeDiscard?.stage ?? null,
+                  routePromotions: globalThis.__fixtureBoundRoutePromotions,
+                  finalRouteHashes: globalThis.__fixtureBoundFinalRouteHashes,
+                  finalRootPinned: globalThis.__computaChatSubmissionState?.lastVerified?.root
+                    === document.querySelector('[data-message-author-role="user"]') };
+                """, world: world) as? [String: Any]
+            let encoded = try JSONSerialization.data(withJSONObject: try XCTUnwrap(witness), options: [.sortedKeys])
+            print("BoundDigestPromotionWitness crossing=\(crossing) condition=\(condition) \(String(decoding: encoded, as: UTF8.self))")
+            for key in ["nativePinned", "oldRootDetached", "oldBodyDetached"] {
+                XCTAssertEqual(witness?[key] as? Bool, true, key)
+            }
+            XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh"].contains(crossing))
+            XCTAssertEqual(witness?["recordPhase"] as? String, "verified")
+            XCTAssertEqual(witness?["stage"] as? String,
+                           crossing == "two_routes" ? "digest" : crossing == "receipt_then_refresh" ? "receipt" : crossing)
+            XCTAssertEqual(witness?["outcome"] as? String, "expanded")
+            XCTAssertEqual(witness?["recoveryVerified"] as? Bool, false)
+            XCTAssertEqual(witness?["provisional"] as? Bool, false)
+            XCTAssertEqual(witness?["pending"] as? Bool, false)
+            XCTAssertEqual(witness?["finalDeadline"] as? Double, witness?["deadline"] as? Double)
+            XCTAssertEqual(promotions, condition == "second_local" ? 0 : hasTwoRoutes ? 2 : 1)
+            XCTAssertEqual(witness?["routePromotions"] as? Int, hasTwoRoutes ? 2 : 1)
+            let clicks = try await evaluate(view, "return {initial:window.fixtureExpansionClicks,recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
+            XCTAssertEqual(clicks, ["initial": 1, "recovery": 1])
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            if condition == "unchanged" {
+                XCTAssertNil(failure, "A native-certified promotion must not poison completed exact display recovery")
+                if let recovered {
+                    let proof = try XCTUnwrap((recovered["modelProofContext"] ?? recovered["pendingSubmissionContext"]) as? [String: Any])
+                    XCTAssertEqual(proof["firstUserFingerprint"] as? String, fingerprint)
+                    XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
+                    XCTAssertEqual(witness?["finalVerified"] as? Bool, true)
+                    if !["receipt", "refresh", "receipt_then_refresh"].contains(crossing) {
+                        XCTAssertEqual(witness?["routeDiscardStage"] as? String, crossing == "model" ? "model_read" : "body_hash")
+                    }
+                    XCTAssertEqual(witness?["finalRootPinned"] as? Bool, true)
+                    XCTAssertGreaterThanOrEqual(witness?["finalRouteHashes"] as? Int ?? 0, 2,
+                        "The promoted route requires fresh whole-body digest and independent submission proof")
+                    _ = try await evaluate(view, "document.getElementById('fixture-bound-stop').remove(); return true;")
+                    let complete = try await waitForState("complete", fixture.transport, token: token)
+                    XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                    try assertChoiceEvidence(complete, choice: choice)
+                    let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                    XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+                    try await assertHumanTabIntact(fixture)
+                }
+            } else {
+                XCTAssertNotNil(failure)
+                XCTAssertNil(recovered, "Rejected ownership cannot expose any answer")
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("A failed claim cannot revive") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, failure) }
+                let after = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+                XCTAssertEqual(after, 1, "Reinspection cannot grant another expansion")
+                try await assertHumanTabIntact(fixture, retaining: ownedID)
+            }
+        }
+    }
+
     func testProvisionalFirstMessageRemountRecoversOnlyExactDispatchedBodyBeforeNativeBinding() async throws {
         for behavior in ["remount", "remount_changed", "remount_ignored", "partial_remount", "repeat"] {
             let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
@@ -10342,6 +10548,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         var extra = lifecycle; extra["url"] = "https://private_canary"
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(extra))
+        var boundRoute = lifecycle
+        boundRoute["boundRouteStage"] = "body_hash"
+        boundRoute["boundRouteEdges"] = 2
+        boundRoute["boundRoutePending"] = false
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(boundRoute))
+        for key in ["boundRouteStage", "boundRouteEdges", "boundRoutePending"] {
+            var partial = boundRoute; partial.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(partial), key)
+        }
+        for invalid in [true, -1, 3, 1.5, "2", NSNull(), "https://private_canary"] as [Any] {
+            var forged = boundRoute; forged["boundRouteEdges"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(forged))
+        }
+        for invalid in [0, 1, "false", NSNull(), "private_canary"] as [Any] {
+            var forged = boundRoute; forged["boundRoutePending"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(forged))
+        }
+        var privateStage = boundRoute; privateStage["boundRouteStage"] = "https://private_canary"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(privateStage))
+        let boundedRouteRecords = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(
+            try JSONSerialization.data(withJSONObject: ["error": "document_changed", "detail": "model_read_context",
+                "recoveryLifecycleDiagnostic": boundRoute, "text": "private_canary"]), provider: .chatgpt)
+        XCTAssertEqual(boundedRouteRecords.count, 2)
+        XCTAssertTrue(boundedRouteRecords.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        XCTAssertTrue(boundedRouteRecords[1].contains("boundRouteEdges"))
         var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
             "reason": "snapshot_before_action", "scope": "digest", "action": "inspect",
             "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],

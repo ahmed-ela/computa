@@ -2595,9 +2595,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "recordPhase": ["none", "prepared", "send_claimed", "verified", "other"]]
 
     static func sanitizedRecoveryLifecycle(_ raw: Any?) -> [String: Any]? {
-        guard let value = raw as? [String: Any],
-              Set(value.keys) == Set(recoveryLifecycleFlags + Array(recoveryLifecycleLabels.keys)) else { return nil }
+        guard let value = raw as? [String: Any] else { return nil }
+        let ordinaryKeys = Set(recoveryLifecycleFlags + Array(recoveryLifecycleLabels.keys))
+        let routeKeys: Set<String> = ["boundRouteStage", "boundRouteEdges", "boundRoutePending"]
+        guard Set(value.keys) == ordinaryKeys || Set(value.keys) == ordinaryKeys.union(routeKeys) else { return nil }
         var safe: [String: Any] = [:]
+        if value["boundRouteStage"] != nil {
+            guard let stage = value["boundRouteStage"] as? String,
+                  ["body_hash", "model_read", "replacement_hash", "other"].contains(stage),
+                  let count = value["boundRouteEdges"] as? NSNumber, CFGetTypeID(count) != CFBooleanGetTypeID(),
+                  [0.0, 1.0, 2.0].contains(count.doubleValue),
+                  let pending = firstUserDiagnosticBool(value["boundRoutePending"]) else { return nil }
+            safe["boundRouteStage"] = stage; safe["boundRouteEdges"] = count.intValue; safe["boundRoutePending"] = pending
+        }
         for key in recoveryLifecycleFlags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
             safe[key] = flag
@@ -3832,7 +3842,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var routeContinuation = firstUserExpansionRouteContinuation
         var routeRefreshAvailable = refreshChangedRoute
         if let preceding = routeContinuation.last {
-            guard allowFirstUserExpansion else { throw Failure.ownershipFailure(.routeBefore) }
+            guard allowFirstUserExpansion || allowBoundFirstUserExpansion else { throw Failure.ownershipFailure(.routeBefore) }
             if preceding.toURL != url {
                 // The allowed public promotion can arrive after native accepts
                 // the local edge but before this recursive inspect starts.
@@ -3953,7 +3963,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 input["submissionSequence"] = binding.sequence
             }
         }
-        if allowFirstUserExpansion, !routeContinuation.isEmpty {
+        if allowFirstUserExpansion || allowBoundFirstUserExpansion, !routeContinuation.isEmpty {
             // A bounded contiguous chain survives an unconsumed intermediate
             // read. Cleanup and unrelated read refreshes receive no receipts.
             input["firstUserExpansionRouteContinuation"] = routeContinuation.map {
@@ -4117,7 +4127,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // predicates above reject another local or public conversation.
                 let awaitingLocalPromotion = firstConversation && current == nil
                     && provider.isLocalConversation(nextConversation)
-                let nextContinuation = allowFirstUserExpansion
+                let nextContinuation = allowFirstUserExpansion || allowBoundFirstUserExpansion
                     ? try Self.appendingFirstUserExpansionRoute(routeContinuation, from: url, to: currentURL) : []
                 if provider == .chatgpt, !nextContinuation.isEmpty {
                     for edge in nextContinuation {
@@ -4128,12 +4138,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 #if DEBUG
                 if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
                 #endif
+                // A completed replacement certificate may arrive just before
+                // this same native-certified route edge. Preserve its existing
+                // one-read handoff while discarding every result field. The
+                // fresh read must still prove the exact replacement in full.
+                let crossedRead = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+                let crossedBoundReplacement = provider == .chatgpt && allowBoundFirstUserExpansion
+                    && refreshReadOnlyObservation
+                    && crossedRead?["error"] as? String == "first_user_observation_replaced"
+                    && crossedRead?["detail"] as? String == "readonly_model_observation"
                 for diagnostic in Self.routeDiscardDiagnosticRecords(bytes, provider: provider) {
                     Self.inspectionLog.info("routeDiscardDiagnostic provider=\(provider.rawValue, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
                 }
                 return try await page(session, action: pendingSubmissionProductRecheck ? "verifyProductMode" : "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                                      refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                      refreshReadOnlyObservation: refreshReadOnlyObservation && !crossedBoundReplacement,
+                                      allowBoundFirstUserRemountRefresh: allowBoundFirstUserRemountRefresh || crossedBoundReplacement,
                                       allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
@@ -4255,6 +4275,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // discard after checking both pinned hashes and the exact
                 // marker on the disconnected node's replacement. Admit nothing
                 // from that read; use the same one-inspect budget as an append.
+                // Keep the separately bounded, unconsumed first-route budget;
+                // a replacement handoff does not consume a navigation edge.
                 guard refreshReadOnlyObservation, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
                       observed["detail"] as? String == "readonly_model_observation",
                       session.submitted, session.firstUserFingerprint != nil else {
@@ -4262,12 +4284,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
-                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
+                                      refreshChangedRoute: provider == .chatgpt && allowBoundFirstUserExpansion && routeRefreshAvailable, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false,
                                       allowBoundFirstUserRemountRefresh: provider == .chatgpt && allowBoundFirstUserExpansion,
                                       allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
+                                      firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
