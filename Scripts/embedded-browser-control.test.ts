@@ -73,7 +73,7 @@ function fixture(target: string | null) {
     expected: row, expectedURL: location.href });
   const fill = (row: any, text: string) => run({ operation: 'fill', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href, text });
-  return { Node, link, run, press, fill, document, location, timers, observers, listeners,
+  return { Node, link, run, press, fill, document, location, timers, observers, listeners, state,
     appendText: (text: string) => document.body.append(new Node('P', {}, text)),
     appendControl: () => document.body.append(new Node('BUTTON', {}, 'Continue')),
     appendMetadata: () => document.body.append(new Node('MAIN', { 'aria-label': 'Outlook' })),
@@ -332,6 +332,117 @@ describe('bounded capture of late forms and dialogs', () => {
     return { ...f, inbox, scope, to, subject, body, send };
   }
 
+  function minimized(deep = false, dialog = false) {
+    const f = crowded('focus-only');
+    if (dialog) f.scope.values.role = 'dialog';
+    const heading = new f.Node('H2', {}, 'New message');
+    const maximize = new f.Node('BUTTON', {}, 'Maximize');
+    const fullscreen = new f.Node('BUTTON', {}, 'Full screen');
+    const close = new f.Node('BUTTON', {}, 'Close');
+    f.scope.replaceChildren(heading, maximize, fullscreen, close);
+    fullscreen.onClick = () => {
+      for (const node of [f.to, f.subject, f.body, f.send]) node.connected = true;
+      f.scope.append(f.to, f.subject, f.body, f.send);
+    };
+    if (deep) {
+      for (let index = 0; index < 5_000; index++) f.inbox.append(new f.Node('DIV'));
+      const application = new f.Node('DIV', { role: 'application' });
+      f.document.body.replaceChildren(application); application.append(f.inbox);
+      let wrapper = application;
+      for (let depth = 0; depth < 12; depth++) {
+        const child = new f.Node('DIV'); wrapper.append(child); wrapper = child;
+      }
+      wrapper.append(f.scope);
+      f.inbox.connected = true; f.scope.connected = true;
+    }
+    f.document.activeElement = null;
+    f.document.elementFromPoint = () => fullscreen;
+    return { ...f, heading, maximize, fullscreen, close };
+  }
+
+  for (const [deep, dialog] of [[false, false], [true, true], [true, false]]) {
+    test(`unfocused minimized ${dialog ? 'dialog' : 'named panel'} ${deep ? 'behind wide fanout' : 'after inbox'} exposes controls without inventing fields`, async () => {
+      const f = minimized(deep, dialog);
+      const result = await f.run({ operation: 'observe' });
+      const panel = result.nodes.find((node: any) => node.name === 'New message' && node.role === (dialog ? 'dialog' : 'group'));
+      expect(panel).toBeDefined(); expect(panel.isDOMClickable).toBe(false);
+      const controls = result.nodes.filter((node: any) => node.parentNodeID === panel.nodeID && node.role === 'button');
+      expect(controls.map((node: any) => node.name)).toEqual(['Maximize', 'Full screen', 'Close']);
+      expect(panel.childNodeIDs.map((id: string) => result.nodes.find((node: any) => node.nodeID === id).name))
+        .toEqual(['New message', 'Maximize', 'Full screen', 'Close']);
+      expect(result.nodes.some((node: any) => node.isEditable || node.name === 'Send')).toBe(false);
+      expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+      expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+      expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20_001); expect(result.nodes.length).toBeLessThanOrEqual(3_000);
+      expect(new Set(result.nodes.map((node: any) => node.nodeID)).size).toBe(result.nodes.length);
+      const row = controls.find((node: any) => node.name === 'Full screen');
+      expect(row.isDOMClickable).toBe(true); expect(row.isDisabled).toBe(false);
+      expect(await f.press(row)).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
+      expect(f.fullscreen.clicks).toBe(1); expect(f.maximize.clicks).toBe(0); expect(f.close.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      const expanded = await f.run({ operation: 'observe' });
+      expect(expanded.nodes.filter((node: any) => node.isEditable).map((node: any) => node.name))
+        .toEqual(['Recipients', 'Subject', 'Message body']);
+    });
+  }
+
+  test('minimized panel priority never makes its passive container actionable or revives changed controls', async () => {
+    for (const drift of ['passive', 'replaced', 'role', 'parent', 'hidden', 'route', 'obstructed']) {
+      const f = minimized(), capturedURL = f.location.href;
+      const result = await f.run({ operation: 'observe' });
+      const row = result.nodes.find((node: any) => node.name === (drift === 'passive' ? 'New message' : 'Full screen')
+        && node.role === (drift === 'passive' ? 'group' : 'button'));
+      expect(row).toBeDefined();
+      if (drift === 'passive') {
+        expect(row.isPressUnsupported).toBe(true); expect(row.isReadOnly).toBe(true);
+        f.document.elementFromPoint = () => f.scope;
+      }
+      if (drift === 'replaced') f.scope.replaceChildren(new f.Node('BUTTON', {}, 'Full screen'));
+      if (drift === 'role') f.fullscreen.values.role = 'heading';
+      if (drift === 'parent') { f.scope.children = f.scope.children.filter(node => node !== f.fullscreen); f.document.body.append(f.fullscreen); }
+      if (drift === 'hidden') f.scope.values.hidden = '';
+      if (drift === 'route') f.location.href = 'https://example.test/changed';
+      if (drift === 'obstructed') f.document.elementFromPoint = () => f.link;
+      await expect(f.run({ operation: 'press', nodeID: row.backendNodeID, expected: row, expectedURL: capturedURL }))
+        .rejects.toThrow(['passive', 'route'].includes(drift) ? 'stale_document'
+          : drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(f.fullscreen.clicks).toBe(0); expect(f.send.clicks).toBe(0); expect(f.to.valueWrites).toEqual([]);
+    }
+  });
+
+  test('expansion beyond the compact-panel bound preserves real text fields without autofocus or form semantics', async () => {
+    const f = minimized(true);
+    f.fullscreen.onClick = () => {
+      for (let index = 0; index < 100; index++) f.scope.append(new f.Node('SPAN', {}, `Visible panel detail ${index}`));
+      for (const node of [f.to, f.subject, f.body, f.send]) node.connected = true;
+      f.scope.append(f.to, f.subject, f.body, f.send);
+    };
+    const before = await f.run({ operation: 'observe' });
+    const full = before.nodes.find((node: any) => node.name === 'Full screen' && node.role === 'button');
+    expect(await f.press(full)).toMatchObject({ dispatched: true, noReplay: true });
+    expect(f.document.activeElement).toBeNull(); expect(f.scope.values.role).toBeUndefined();
+    const result = await f.run({ operation: 'observe' });
+    expect(result.nodes.filter((node: any) => node.isEditable).map((node: any) => node.name))
+      .toEqual(['Recipients', 'Subject', 'Message body']);
+    const panel = result.nodes.find((node: any) => node.name === 'New message' && node.role === 'group');
+    expect(panel.isDOMClickable).toBe(false); expect(panel.isReadOnly).toBe(true);
+    expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+    f.document.elementFromPoint = () => f.to;
+    const to = result.nodes.find((node: any) => node.name === 'Recipients');
+    expect(await f.fill(to, 'fixture@example.invalid')).toMatchObject({ dispatched: true, noReplay: true });
+    expect(f.to.value).toBe('fixture@example.invalid'); expect(f.send.clicks).toBe(0);
+  });
+
+  test('hidden minimized panels expose no controls or secure values', async () => {
+    for (const hidden of ['hidden', 'inert', 'aria-hidden']) {
+      const f = minimized(true); f.scope.values[hidden] = hidden === 'aria-hidden' ? 'true' : '';
+      f.scope.append(new f.Node('INPUT', { type: 'password', value: 'PRIVATE_FIELD_VALUE' }));
+      const result = await f.run({ operation: 'observe' });
+      expect(result.nodes.some((node: any) => ['New message', 'Full screen', 'Close'].includes(node.name))).toBe(false);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_FIELD_VALUE');
+      expect(result.sourceTruncated).toBe(true); expect(f.fullscreen.clicks).toBe(0);
+    }
+  });
+
   test('late compose controls survive source truncation with or without focus', async () => {
     for (const kind of ['dialog', 'native-dialog', 'form', 'focus-only'] as const) {
       const f = crowded(kind, kind === 'focus-only');
@@ -455,11 +566,49 @@ describe('bounded capture of late forms and dialogs', () => {
         return Reflect.get(target, property, receiver);
       } }) : children;
     } });
+    const dialogChildren = dialog.childNodes;
+    let dialogLists = 0, dialogSlots = 0;
+    Object.defineProperty(dialog, 'childNodes', { get() {
+      dialogLists++;
+      return dialogLists === 1 ? new Proxy(dialogChildren, { get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) dialogSlots++;
+        return Reflect.get(target, property, receiver);
+      } }) : dialogChildren;
+    } });
     const result = await f.run({ operation: 'observe' });
-    expect(discoverySlots).toBe(4096);
+    expect(discoverySlots + dialogSlots).toBe(4096);
     expect(result.nodes.some((node: any) => node.name === 'Recipients' && node.isEditable)).toBe(true);
     expect(result.sourceTruncated).toBe(false, 'Exhausted priority discovery is not omitted source when ordinary capture completed');
     expect(result.captureDiagnostics.stopReason).toBe('none');
+  });
+
+  test('compact-panel probes share the discovery cap and never read page or field text', async () => {
+    const f = minimized(true);
+    await f.run({ operation: 'observe' });
+    let captureStarted = false, childSlots = 0, contentReads = 0;
+    const map = (f.state as any).__computaBrowserControlV1.nodes;
+    map.clear = () => { captureStarted = true; Map.prototype.clear.call(map); };
+    const prototype = f.Node.prototype;
+    const children = Object.getOwnPropertyDescriptor(prototype, 'childNodes')!.get!;
+    Object.defineProperty(prototype, 'childNodes', { get() {
+      return new Proxy(children.call(this), { get(target, property, receiver) {
+        if (!captureStarted && typeof property === 'string' && /^\d+$/.test(property)) childSlots++;
+        return Reflect.get(target, property, receiver);
+      } });
+    } });
+    for (const key of ['textContent', 'innerText', 'value']) {
+      let owner: any = prototype;
+      while (!Object.getOwnPropertyDescriptor(owner, key)) owner = Object.getPrototypeOf(owner);
+      const descriptor = Object.getOwnPropertyDescriptor(owner, key)!;
+      Object.defineProperty(prototype, key, { ...descriptor, get() {
+        if (!captureStarted) contentReads++;
+        return descriptor.get!.call(this);
+      } });
+    }
+    const result = await f.run({ operation: 'observe' });
+    expect(childSlots).toBe(4096); expect(contentReads).toBe(0);
+    expect(result.nodes.some((node: any) => node.name === 'Full screen')).toBe(true);
+    expect(result.sourceTruncated).toBe(true); expect(f.fullscreen.clicks).toBe(0);
   });
 });
 

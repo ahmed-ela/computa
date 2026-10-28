@@ -1271,8 +1271,12 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             && !$0.isDOMClickable && !$0.isEditable && !$0.isFocusablePointer && $0.isPressUnsupported })
         XCTAssertFalse(messages.contains { $0.name.contains("Sender") || $0.name.contains("pdf") },
                        "The passive wrapper's label is not an aggregate of its messages or attachments")
-        let unnamed = try XCTUnwrap(raw.nodes.first { $0.role == "group" && $0.name == "Unlabeled existing group" })
-        XCTAssertFalse(unnamed.isExplicitlyNamedContainer, "Existing descendant-name fallback does not establish a named record")
+        let unnamedBody = try XCTUnwrap(raw.nodes.first { $0.role == "statictext" && $0.name == "Unlabeled existing group" })
+        let unnamed = try XCTUnwrap(raw.nodes.first { $0.nodeID == unnamedBody.parentNodeID })
+        XCTAssertEqual(unnamed.role, "group")
+        XCTAssertEqual(unnamed.name, "", "A structural container must not duplicate its descendant's text as a label")
+        XCTAssertEqual(unnamed.childNodeIDs, [unnamedBody.nodeID], "The readable child retains the actual structural ancestor")
+        XCTAssertFalse(unnamed.isExplicitlyNamedContainer, "Descendant text does not establish an explicitly named record")
         let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
         let binding = try await broker.bindBorrowed(taskKey: "named-records", processIdentifier: 42, target: target)
         let content = try await broker.snapshot(taskKey: "named-records", binding: binding,

@@ -138,13 +138,13 @@ const constraintsFor = (element, boxlessContents) => {
   return {required:element.required, candidate:element.willValidate, valid:validity.valid,
     issues:flags.filter(([property]) => validity[property] === true).map(([,name]) => name)};
 };
+const nativeEditable = element => element.isContentEditable || ['TEXTAREA','SELECT'].includes(element.tagName)
+  || (element.tagName === 'INPUT' && ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type));
 const metaFor = (element, role, boxlessContents = false) => {
   const name = nameFor(element, role, boxlessContents);
   const passiveContainer = role === 'group' && isPassiveContainer(element);
   const editableRole = ['textbox','searchbox','combobox'].includes(role);
-  const nativeEditable = element.isContentEditable || ['TEXTAREA','SELECT'].includes(element.tagName)
-    || (element.tagName === 'INPUT' && ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type));
-  const editable = editableRole && nativeEditable;
+  const editable = editableRole && nativeEditable(element);
   const password = element.tagName === 'INPUT' && element.type === 'password';
   const value = editable && !password && !boxlessContents ? String(element.isContentEditable ? element.innerText : element.value ?? '') : null;
   const link = role === 'link' ? String(element.href || '') : null;
@@ -159,7 +159,7 @@ const metaFor = (element, role, boxlessContents = false) => {
     && trim(element.getAttribute('role')).toLowerCase() === role;
   const tooLarge = name.length > 4096 || (value?.length || 0) > 4096 || (link?.length || 0) > 2048;
   const disabled = !!element.disabled || !!element.closest('[disabled], [aria-disabled="true"]') || password || tooLarge || passiveContainer;
-  const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || passiveContainer || (editableRole && !nativeEditable);
+  const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || passiveContainer || (editableRole && !editable);
   return {role, name:name.slice(0,4096), value:password ? null : value?.slice(0,4096) ?? null,
     linkURL:link?.slice(0,2048) ?? null, isDisabled:disabled, isReadOnly:readOnly, isEditable:editable && !readOnly,
     isIgnored:false, isDOMClickable:!popupOnlyLink && (interactiveItem || ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role)),
@@ -171,8 +171,8 @@ const capture = () => {
   const root = document.body || document.documentElement;
   // The source budget is independent of native result pagination. Traversing
   // a long inbox first can permanently omit its appended compose dialog from
-  // every cursor page. Prefer the live focus branch and visible form/dialog
-  // branches, but keep their real ancestors and the usual capture limits.
+  // every cursor page. Prefer the live focus branch, visible form/dialog
+  // branches and compact named control panels, keeping their real ancestors.
   // Discovery reads only bounded structure/attributes, never field values or
   // innerText. It grants no action capability and does not claim completeness.
   const priorities = new Map();
@@ -184,22 +184,59 @@ const capture = () => {
     for (const node of path) priorities.set(node, Math.min(priorities.get(node) ?? 3, priority));
   };
   prioritize(document.activeElement, 0);
-  const discovery = root ? [root] : [];
   let examinedChildren = 0;
-  for (let index = 0; index < discovery.length && index < 4096; index++) {
-    const node = discovery[index];
-    if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)) continue;
-    const rawRole = node.getAttribute('role') || '';
-    const role = oversizedRole(rawRole) ? '' : trim(rawRole).split(' ')[0].toLowerCase();
-    if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') prioritize(node, 1);
-    else if (role === 'form' || node.tagName === 'FORM') prioritize(node, 2);
-    const children = node.childNodes;
-    // Count every child slot, including text/comments, so non-element fanout
-    // cannot turn this bounded prepass into an unbounded scan.
-    for (let child = 0; child < children.length && discovery.length < 4096 && examinedChildren < 4096; child++) {
-      examinedChildren++;
-      if (children[child].nodeType === Node.ELEMENT_NODE) discovery.push(children[child]);
+  const compactControlPanel = element => {
+    const pending = [element];
+    let slots = 0, control = false;
+    while (pending.length) {
+      const node = pending.pop();
+      if (['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || !allowedByAncestors(node)) continue;
+      if (['button','link','textbox','searchbox','combobox','checkbox','radio','switch','tab','menuitem','slider']
+        .includes(semanticRoleFor(node)) && visible(node)) control = true;
+      const children = node.childNodes;
+      // A large/incomplete named application is not a compact panel. These
+      // checks share the discovery budget; per-candidate walks cannot multiply
+      // its cap or read descendant text, field values or accessible labels.
+      if (children.length > 64 - slots || children.length > 4096 - examinedChildren) return false;
+      for (let index = 0; index < children.length; index++) {
+        slots++; examinedChildren++;
+        const child = children[index];
+        if (child.nodeType === Node.ELEMENT_NODE) pending.push(child);
+      }
     }
+    return control;
+  };
+  const discovery = root ? [{node:root}] : [];
+  for (let index = 0; index < discovery.length && examinedChildren < 4096; index++) {
+    const cursor = discovery[index], node = cursor.node;
+    if (!cursor.children) {
+      if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)
+          || !allowedByAncestors(node)) continue;
+      const rawRole = node.getAttribute('role') || '';
+      const role = oversizedRole(rawRole) ? '' : trim(rawRole).split(' ')[0].toLowerCase();
+      const semantic = semanticRoleFor(node);
+      if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') prioritize(node, 1);
+      else if (role === 'form' || node.tagName === 'FORM') prioritize(node, 2);
+      // Expanded panels may no longer be compact and need not use FORM or
+      // dialog semantics. Preserve real text-entry branches without reading
+      // their values or treating ARIA alone as editability.
+      else if (['textbox','searchbox','combobox'].includes(semantic) && nativeEditable(node)) prioritize(node, 2);
+      else if (['DIV','SECTION'].includes(node.tagName) && (!semantic || ['group','region','toolbar'].includes(semantic))
+        && ['aria-label','aria-labelledby'].some(name => {
+          const value = node.getAttribute(name) || '';
+          return value.length <= 4096 && !!trim(value);
+        }) && compactControlPanel(node)) prioritize(node, 2);
+      cursor.children = node.childNodes;
+      cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
+    }
+    if (cursor.first > cursor.last || examinedChildren >= 4096) continue;
+    // Interleave child cursors across branches instead of exhausting a wide
+    // inbox before descending into a later panel. Sample both ends; normal
+    // capture and its evidence graph still retain the actual DOM child order.
+    const child = cursor.children[cursor.tail ? cursor.last-- : cursor.first++];
+    cursor.tail = !cursor.tail; examinedChildren++;
+    if (child.nodeType === Node.ELEMENT_NODE) discovery.push({node:child});
+    if (cursor.first <= cursor.last) discovery.push(cursor);
   }
   const nodes = [], next = [{node:root, parent:null, suppressText:false}];
   const capturedDOMNodes = new Map();
