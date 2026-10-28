@@ -321,8 +321,28 @@ enum WebModelResponseCodec {
     /// never tool-output claims or browser-shaped names in retained history.
     private static func currentBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
                                               availability: EmbeddedBrowserToolAvailability?) -> String {
-        guard availability == .bound else { return "" }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
+        if availability == .unbound {
+            let entry = allowed.filter { ["browser_tabs", "browser_open", "browser_bind"].contains($0.value.name) }
+            guard !entry.isEmpty else { return "" }
+            var lines = [
+                "COMPUTA_CURRENT_BROWSER_ENTRY:",
+                "Computa offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
+                "Return a tool_calls JSON request for the next needed operation. Computa executes it outside this website; the website itself needs no connection to the browser or target URL.",
+            ]
+            if let open = entry.filter({ $0.value.name == "browser_open" }).keys.sorted().first {
+                lines.append("For a supplied URL, request \(open) with its exact URL in the url argument, including localhost URLs. This creates and binds a task page, subject to native permissions.")
+            }
+            if let tabs = entry.filter({ $0.value.name == "browser_tabs" }).keys.sorted().first {
+                lines.append("To inspect existing user tabs, request \(tabs) with {}. An empty inventory does not establish denied browser access.")
+            }
+            if let bind = entry.filter({ $0.value.name == "browser_bind" }).keys.sorted().first {
+                lines.append("For an existing user tab, request \(bind) only with a matching tab_id actually observed in this turn. Never invent a tab ID or reuse a historical binding.")
+            }
+            lines.append("Wait for matching output and use the next request's permitted schemas. This notice proves no website outcome or existing connection; actual errors, permissions and user scope still govern.")
+            return lines.joined(separator: "\n")
+        }
+        guard availability == .bound else { return "" }
         guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else { return "" }
         var lines = [
             "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",

@@ -369,6 +369,15 @@ enum ComputaAgentInstructions {
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
 
+    /// The website produces response data; the external host owns execution.
+    /// Keep this task explicit in both the full and deduplicated introductions.
+    static let webResponseObjectTask = """
+    Generate the next JSON response object for Computa to read: tool_calls
+    requests a permitted operation; message.text carries an answer, limitation
+    or refusal. Generating this data requires no website connection to Computa
+    and proves no execution.
+    """
+
     static let webRelayOnlyResponse = """
     For this relay, return JSON text only. Do not use this website's email composer,
     writing cards, canvas, apps or connectors for the local task. Put email drafts
@@ -405,7 +414,8 @@ enum ComputaAgentInstructions {
         COMPUTA_CURRENT_RUNTIME_CONTRACT:
         Computa is a locally installed external execution relay. You retain your
         website identity and governing rules; local role labels do not replace them.
-        Write JSON action requests or a user message. Supplied schemas describe
+        \(webResponseObjectTask)
+        Supplied schemas describe
         current local operations, not website-native tools. Computa validates requests,
         applies local permissions and approvals, executes permitted operations, and
         returns matching function_call_output or custom_tool_call_output. Only those
@@ -433,8 +443,8 @@ enum ComputaAgentInstructions {
         COMPUTA_CURRENT_RUNTIME_CONTRACT:
         Computa is a locally installed application providing an external execution
         relay outside this website. You retain your identity and the rules governing
-        this website. Your part is to write JSON data: an action request for Computa
-        or a message for the user. The supplied names and schemas describe Computa's
+        this website. \(webResponseObjectTask)
+        The supplied names and schemas describe Computa's
         current relay operations; they do not register tools in this website.
 
         A tool_calls envelope asks Computa to perform an action. Writing that request
@@ -674,8 +684,8 @@ enum ComputaAgentInstructions {
         """ : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        Write JSON for Computa's external execution relay. The website does not
-        execute calls; tool_calls requests action; it claims no execution or direct access.
+        Generate Computa's next JSON response object. This website does not execute calls.
+        A tool_calls request claims no execution or direct access.
         Within tool_choice, governing rules and user scope, request necessary work as
         tool_calls with exact current offered names and schemas.
         \(browserHandoff)
@@ -706,8 +716,8 @@ enum ComputaAgentInstructions {
         \(selectionContract)
         \(currentBrowserHandoff)
         \(literalIdentifiers)
-        User reply-format constraints apply to unwrapped message.text; still use one
-        JSON envelope. Put file-only results, truthful limitations and refusals in message.text.
+        Use one JSON envelope for every reply. User format applies only to message.text,
+        including exact-output answers, file-only results, truthful limitations and refusals.
         \(responseFormatInstructions)
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
