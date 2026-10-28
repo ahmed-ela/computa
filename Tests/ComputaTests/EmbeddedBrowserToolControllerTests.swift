@@ -1976,7 +1976,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertFalse(clickNext.contains("no Enter key or submit-control click was sent"))
         let final = try availableObservation(click)
         XCTAssertTrue(final.contains("UA 4629"))
-        XCTAssertFalse(final.contains("UA 4629 departs at 18:45"), "Overview does not invent unexposed body evidence")
+        let resultLine = try XCTUnwrap(final.split(separator: "\n").first { $0.contains("UA 4629 departs at 18:45") })
+        XCTAssertTrue(resultLine.contains("content_scope=unknown"), "Captured body text keeps its unknown provenance")
+        XCTAssertTrue(resultLine.contains("content_kind=readable"), "Overview exposes actual readable text without verifying the action outcome")
         XCTAssertNotEqual(try snapshotID(final), try snapshotID(fresh))
         do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1]); XCTFail("Click capability is consumed too") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
