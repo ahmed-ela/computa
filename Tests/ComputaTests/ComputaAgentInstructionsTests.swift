@@ -21,11 +21,26 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let original: [String: Any] = ["model": "browser/chatgpt", "input": input, "tools": functions]
         let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: original))
         let end = try XCTUnwrap(prepared.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
-        let handoff = String(prepared.prompt[end.upperBound...]).replacingOccurrences(of: "\n", with: " ")
-        for rule in ["Partial reads do not mean the relay is unavailable", "cursors cover captured nodes only",
-                     "fresh overview without query/cursor", "never replay input", "Respect actual access denials and approvals"] {
-            XCTAssertTrue(handoff.contains(rule), rule)
-        }
+        let handoff = String(prepared.prompt[end.upperBound...])
+        let progressGuidance = """
+        Partial reads do not mean the relay is unavailable. Use relevant observed controls;
+        continue only for missing evidence. Missing controls/query miss: one fresh
+        overview without query/cursor. source_truncated=1: cursors cover captured nodes only.
+        To reveal UI, use observed expand/full-screen controls with current refs.
+        If one bounded wait/read shows no change, use another observed presentation
+        control in task scope or report unresolved. Uncertain submission: read-only
+        verification; never replay input.
+        """
+        XCTAssertTrue(handoff.contains(progressGuidance),
+                      "The complete progress rule must follow quoted history on each fresh website handoff")
+        XCTAssertTrue(handoff.contains(ComputaAgentInstructions.browserAddressChecks),
+                      "Progress guidance must retain the full address, access and sign-in evidence contract")
+        XCTAssertTrue(handoff.contains(ComputaAgentInstructions.browserFormSubmission),
+                      "Presentation recovery cannot replace read-only verification of uncertain submissions")
+        XCTAssertEqual(handoff.components(separatedBy: progressGuidance).count - 1, 1)
+        XCTAssertFalse(handoff.contains("output_truncated=1: continue"),
+                       "Pagination is conditional on missing evidence, not a prerequisite for observed controls")
+        XCTAssertFalse(handoff.contains("Recover by reading"))
         let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.continuationRequest) as? NSDictionary)
         XCTAssertEqual(continued, original as NSDictionary, "Partial-read recovery must preserve draft-only scope and all original tool evidence")
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains("Partial reads do not mean"),
@@ -1155,7 +1170,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck the observed label/action against the intended operation"))
-        XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
+        XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Never repeat uncertain input or loop over unchanged reads"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
@@ -1191,7 +1206,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
             XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
             XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
-            XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
+            XCTAssertTrue(text.contains("Never repeat uncertain input or loop over unchanged reads"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
             XCTAssertTrue(text.contains("compare with the task; never guess a variant/homepage"))
@@ -1218,7 +1233,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
         XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
-        XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
+        XCTAssertTrue(text.contains("Never repeat uncertain input or loop over unchanged reads"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                                 "Named-service and sign-in/loading guidance retain all reference, approval and cleanup rules.")
