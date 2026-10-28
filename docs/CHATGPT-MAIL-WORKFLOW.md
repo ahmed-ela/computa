@@ -470,6 +470,17 @@ by complete recheck evidence, while ordinary pending reads avoid picker work.
 These deterministic results remain separate from installed ChatGPT Instant and
 real-mail qualification.
 
+Installed build 314 stopped the original email task at its initial Chat-mode
+check after 2.064 seconds. Its bounded inspection found no recognized Chat/Work
+group and admitted no product-mode proof. The guard stopped before any provider
+prompt, tool call or mail input; cleanup closed with `not_created`. No email was
+sent. This attempt therefore did not exercise the picker-remount correction or
+post-Compose capture. The current normal page also exposes no Chat/Work controls
+in native accessibility observations. Missing UI does not establish Chat mode or
+identify a WebKit defect; the selector and current product semantics must be
+inspected before adding another supported proof. No retry or verification
+relaxation was performed.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
