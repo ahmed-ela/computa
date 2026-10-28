@@ -3796,10 +3796,53 @@ is preserved under `work/failed-email-20261028-042737`; build294 qualification
 artifacts use `work/bound-route-20261028` and the adjacent JS/native test folders.
 
 The adapter suite passed 494 tests / 21,509 assertions on unchanged candidate
-sources. Twenty-one focused real WebKit/native tests passed, covering six
+sources. Twenty-one focused real WebKit/native tests (33 scenarios) passed, covering six
 valid timing sequences, four new rejection scenarios, the earlier bound and
 provisional recovery controls, cleanup restrictions, response deadlines and
 strict finite diagnostic sanitization. The native tests assert one Send, one
 display expansion, unchanged deadlines and fresh full-body/model proof. The
-independent source review found no remaining blocking issue. Installed live
-qualification follows below once completed.
+independent source review found no remaining blocking issue. The immutable
+build293 adapter fails both native hash/model-await reproductions; the candidate
+passes with the same native test binary. The test resource was restored afterward.
+
+### Build 294: installed live qualification
+
+Signed, non-notarized Computa 0.7.0 (294), source `ee30c03`, passed build,
+signature and installation checks. An independent audit matched all 171 source
+files and 44 installed resources to the tested artifact. The running executable
+matched its build receipt. Normal ChatGPT Chat mode, Instant and the signed-in
+composer were checked on this installed build; Work remained off.
+
+| Fresh native chat | Duration | Verified responses | Successful tools | Verified outcome |
+| --- | ---: | ---: | ---: | --- |
+| Exact marker 1 | 8.934 s | 1 | 0 | Exact final text |
+| Local send 1 | 54.589 s | 7 | 6 | One POST, exact fields and visible receipt |
+| Local send 2 | 53.315 s | 7 | 6 | One POST, exact fields and visible receipt |
+| Staff attachment lookup | 28.278 s | 4 | 3 | Correct sender and exact filename; no additional POST |
+| Two terminal commands | 23.131 s | 3 | 2 | Exact marker and independently calculated digest; both exits zero |
+| Exact marker 2 | 6.255 s | 1 | 0 | Exact final text |
+
+Both sends were the first user message in separate fresh native chats, without
+a seed turn. Both bodies were exactly lowercase `hi`. Independent fixture POST
+records matched receipts `LOCAL-408f053f37f7ed76` and `LOCAL-937fe35475b6dbbd`;
+the Send tool results exposed complete live receipt-page observations, and the
+final answers accurately reported them. All browser references came from
+current observations. The attachment was read within the requested Course staff
+message. The terminal executed two separate commands and returned their actual
+outputs, with the digest checked against the frozen expected UTF-8 input.
+
+All six tasks completed with 23 verified model responses, 17 successful tool
+calls and 23 matching saved closed website-session receipts. No request was
+retried, no tool failed, and no cleanup remained unconfirmed for these tests.
+Both loopback fixture processes/listeners were stopped and the app closed all
+three task-created browser tabs. Only the normal ChatGPT tab remained. No Safari
+Inspector setting was changed. The optional draft/send cases were not run.
+
+Evidence is retained in `work/bound-route-20261028/live294`, with per-case
+independent reports, raw tool/website/cleanup journals, bounded native logs,
+fixture events and final cleanup attestations. The deterministic tests establish
+the repaired timing behavior; these live runs establish successful task flows,
+not that the exact interrupted recovery fired naturally during every run.
+Synthetic delivery is not external email delivery. The earlier real email was
+not replayed, and its historical unconfirmed cleanup remains unconfirmed.
+No release or merge was performed.
