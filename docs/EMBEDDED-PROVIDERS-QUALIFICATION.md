@@ -3846,3 +3846,100 @@ not that the exact interrupted recovery fired naturally during every run.
 Synthetic delivery is not external email delivery. The earlier real email was
 not replayed, and its historical unconfirmed cleanup remains unconfirmed.
 No release or merge was performed.
+
+### Builds 295–298: browser identity, crowded forms, and receipt visibility
+
+The October 28 build294 Gmail attempt stopped after seven successful browser calls. Its final filtered read had 218 captured nodes, `source_truncated=1`, zero local matches for Recipients, and 97 captured input nodes excluded by the query. No input filled or sent that real message. The model's claim that its browser relay was unavailable was unsupported by those successful calls.
+
+Two independent defects were reproduced. The WebKit browser sent its default user agent without Safari product/version tokens, although the installed Safari and loaded system WebKit had the same engine build. The DOM capture also traversed the long inbox before the appended compose form, exhausting its source budget; continuation could only page the already incomplete capture. Aggregate names on structural rows duplicated descendant text and consumed the budget faster.
+
+Browser identification now preserves WebKit's native prefix and appends Safari-compatible tokens only when installed Safari and loaded WebKit have exactly matching, validated bundle builds. The product version is read from that matching Safari, and Computa identifies itself separately. Missing or mismatched metadata falls back to Computa-only identification; this does not promise universal site support. The compatibility token is documented in WebKit's own macOS source.
+
+Capture now prioritizes the focused branch and visible form/dialog branches using a discovery pass bounded to 4,096 examined children. The original 20,000-visited, 3,000-node and approximately 220 KB capture limits remain. Explicit labels, real semantic ancestry and readable child text are retained. Prioritized output does not change DOM child order in the verification graph, so focus changes cannot manufacture changed-region evidence. Hidden, inert, stale, moved, changed-role and obstructed targets remain rejected. Source completeness is still reported honestly.
+
+A first installed build295 run found another real gap. It filled the exact three fields and dispatched one Send, creating exactly one correct synthetic delivery, but its final overview exposed only the new Message sent heading. The native capture contained all six receipt nodes; readable plain body text without a main/article landmark was excluded from the overview. The model stopped without reading the actual receipt. The collector and independent review both rejected that run. Its eight website inferences had valid Chat/Instant/submission/completion/closed-cleanup evidence; the failure was outcome verification, not model transport or duplicate delivery.
+
+The overview now includes a bounded separate lane of readable text with unknown scope, preserving that unknown provenance and unverified relevance. Known navigation, sidebar and footer text, control echoes and metadata labels are not promoted into it. Plain receipt pages expose their details while long pages keep exact cursor/UTF-8 fragmentation and output limits. Fresh browser guidance distinguishes source omissions from local filters and a disconnected relay; heading-only results require reading available receipt details instead of resubmitting.
+
+The build295 compatibility check also showed that a correct current user agent alone did not refresh Gmail's first load. The warning disappeared on reload at the final inbox URL but returned on a new root-URL load. A separate isolated persistent-WebKit experiment reproduced old-UA HTML cache reuse with a same-UA cache-hit control; new navigation using cache revalidation or bypass obtained the current-UA response. That establishes the engine cache mechanism; Gmail's precise server-side detection remains inferred rather than directly traced.
+
+The app now migrates only the shared profile's HTTP disk and memory caches once per validated browser/engine identity change, before its first navigation. Cookies, local/session storage, IndexedDB, FetchCache and service workers are retained. Only WebKit's real removal callback marks the identity ready; cancelled or expired callers cannot authorize navigation. Waiters share one migration, with existing ownership, generation, URL and navigation-ticket checks preserved. Private and isolated model stores do not receive this migration. Real WebKit tests cover cache reuse/revalidation, retained cookies/storage, no duplicate request and cancelled zero-dispatch navigation.
+
+Signed build296 from `e8e0dcf` passed an independent 27-check artifact audit: 172 source files, 44 resources, compiled/link inputs, executable, installed bundle, version and signatures matched. Its 410 focused native tests passed, along with 35 JavaScript tests / 498 assertions and the fixture tests. Gmail opened from its root URL twice in fresh tabs without the unsupported-browser warning or a reload; Inbox and Compose were available, and existing sign-in survived. This is observed compatibility on this profile, not a guarantee about every site or the precise Gmail server decision.
+
+Two marker controls remain separately recorded failures. The first requested a marker followed by a sentence-ending period while its expected value omitted the period; ChatGPT returned the period. The lifecycle passed, but the frozen exact comparison failed. The second used an unambiguous standalone marker and hit `unsupported_website_response`. Its finite DOM diagnostics show one 29-character paragraph, no PRE/code nodes and rendered fallback extraction. The marker also has 29 characters, but the actual rejected reply was not retained, so equality is an inference. Current handoff instructions already require an envelope even for exact-text requests. Strict rejection and closed cleanup were preserved; neither failure is relabeled a passing control or blamed on missing instructions. The generic runtime high-demand message is not evidence of provider capacity trouble.
+
+A separately frozen ordinary-email diagnostic on296 confirmed that format refusal also affected the core workflow. The exact-task rejected-reply capture was armed 9.235 seconds before failure. Its 200-byte reply said it could not access Computa's relay and returned prose, not an envelope; no tool call or fixture request occurred. Full payload comparison and ownership fingerprints verified that the 59,313-byte prompt reached ChatGPT, and its offered browser entry schemas matched the previously successful295 request. Thus neither capture truncation nor missing native tool definitions explains this refusal. The strict parser was correct. The fixture stopped with zero requests and zero POSTs; rejected evidence was privately archived and the one-shot arm was consumed.
+
+Build297 clarifies the website's immediate task as generating the next JSON response object, including final text or refusals, and adds a schema-derived unbound-browser entry handoff. The entry guidance is present only for current native unbound availability and recognized entry schemas allowed by the current tool choice. It tells the website model to request the operation in JSON for Computa to execute; it does not invent a website connection or a browser binding. Bound-page guidance and strict response validation, permissions and replay guards remain unchanged. This is a controlled mitigation for observed model behavior, not a demonstrated deterministic cause of model cooperation.
+
+A separately frozen ordinary-email diagnostic on297 passed the collector and independent raw tool/journal/ledger review in 68.814 seconds. Eight successful tool calls opened the crowded local mailbox, composed the message, filled the three exact values and clicked Send once. Nine website inferences verified normal Chat/Instant selection, submission, completion and closed cleanup. The model recovered from honest `source_truncated=1` captures with fresh reads and read all six plain receipt nodes after Send. The observed recipient, subject, body and receipt matched exactly one accepted fixture POST and one synthetic delivery; no other POST occurred. Each complete field value was observed across successive post-fill observations, not together in one atomic final form snapshot. The task-created browser tab and fixture process were subsequently cleaned up. This is one bounded local workflow pass, not external email delivery or a general reliability qualification. Evidence: `live297-email-diagnostic/send/capture/independent-qualification.json` and `live297-email-diagnostic/fixture-cleanup.json`.
+
+The exact-output marker limitation remains unresolved. Build297 returned the requested marker as plain paragraph text, with no required JSON envelope. This time the task-scoped rejected reply was retained, so exact content equality is verified rather than inferred. Submission and normal Chat/Instant selection were verified; the strict parser rejected the malformed response with `unsupported_website_response`, no tools ran and cleanup closed. The six-case297 campaign stopped at that failed control. The later ordinary-email pass does not relabel the marker failure or prove that the instruction change fixed exact-output adherence. Evidence: `live297/marker/capture/independent-format-failure-review.json`.
+
+A fresh297 no-focus email fixture then exposed a separate ownership race before any tool or fixture request. It failed after 5.516 seconds with `website_ownership_unverified / first_user_message`; website cleanup remained unconfirmed and the evidence was preserved. The initial exact first-user proof had already been adopted. Reads then crossed root-to-local and local-to-public conversation routes; the second returned an expanded but unverified recovery with no route witness, and the next read rejected the spent recovery. Full prompt comparison and native pins still matched. The native layer correctly withheld authority because the adapter had not returned the required witness. Finite live diagnostics establish that chain but cannot prove every microscopic DOM interleaving. Evidence: `live297-browser-followups/send-no-focus/capture/independent-ownership-failure-review.json`.
+
+Deterministic adapter and real-WebKit regressions reproduced the missing transition: the bound user message collapses and expands on its original physical nodes, then the conversation route changes during the complete-body digest and those nodes are replaced. Earlier coverage started with already-replaced nodes. The old adapter failed this ordering with the same spent-recovery signature; its pre-remounted control passed. Build298 now preserves only the existing discarded-read route witness for this original-node expansion and, when both old nodes detach, one exact current successor. It does not publish a recovered answer, replace the verified record, renew the deadline or replay a prompt. The existing native-certified route continuation and a fresh complete body/model/product/temporary-mode check must still authorize replacement. The original one-Send, one recovery expansion, two monotonic route edges and one authorized replacement-read bounds remain.
+
+The new-order native positive changed from red to green with six fresh complete-body digests on the final route, unchanged deadline and verified final replacement. Changed body, model, temporary mode and second-local-route negatives still reject without replay. Adapter negatives additionally cover changed owner, old nodes remaining connected, invalid or duplicate continuation edges and expired recovery. Final298 validation passed 532 native tests, including the 20 bound-ownership tests, plus 497 ChatGPT adapter tests / 21,947 assertions and 35 browser-control tests / 498 assertions. These are controlled regression results, not live ChatGPT reliability. Evidence: `ownership297-experiment/validation.json`, `ownership298-native-qualification.json` and `native298-final-tests.log`.
+
+Computa 0.7.0 (298), commit `fe902ee28cafe817f287795833114bbc91377c34`, was signed, installed and independently audited. All 34 checks passed: 172 frozen source files, 44 bundle resources, compiler/link inputs, final adapter, executable, installed-bundle equality, version and Developer ID signature matched. The installed executable SHA-256 is `68b4ccb17dc515c0d3b69ff10706ef6dfda913869c1f44d477e761c7bff1c5d4`; the adapter SHA-256 is `36281951f2a00d42ea10015f50ae104aa5691800783b155ed43768d46ca05954`. This audit verifies the artifact used for testing, not a published or notarized release. Evidence: `artifact298-independent-audit.json`.
+
+### Build 298: installed browser-email qualification
+
+The initial `live298` preparation was rejected before dispatch because root
+invoked the frozen fixture launcher through a relative path rather than its
+required absolute path. It made no model request, fixture request or POST; the
+watcher expired unarmed. That preparation error is preserved and is not an
+app/provider result. The unchanged harness was frozen in `live298b` with fresh
+identities and absolute commands, then independently reviewed.
+
+Five fresh native chats on the installed build298 used normal ChatGPT Chat /
+Instant. Each received only its ordinary email task; no user-supplied relay or
+tool-format padding was added. All five passed independent raw tool, reference,
+field-value, final-answer, website-journal and fixture-ledger review.
+
+| Scenario | Duration | Browser calls | Verified responses | Observed outcome |
+| --- | ---: | ---: | ---: | --- |
+| Default form | 72.497 s | 8 | 9 | One exact send; `LOCAL-f34c828a032dba0f` |
+| No autofocus | 68.099 s | 8 | 9 | One exact send; `LOCAL-adc2f88caa6dc912` |
+| Stale prefilled values | 64.835 s | 8 | 9 | One exact send; `LOCAL-61761dd4f3fdfd99` |
+| Draft only | 71.717 s | 8 | 9 | One unsent draft; `DRAFT-1a5fbe485550de8c` |
+| Send unavailable | 69.876 s | 8 | 9 | Observed restriction; zero POSTs, no draft |
+
+All 40 browser calls succeeded. All 45 website inferences verified current
+Chat/Instant selection, submission, ownership, completion and release, with
+matching saved closed-session receipts. All five crowded source captures
+honestly reported `source_truncated=1`; fresh queries/reads recovered the
+needed controls and actual outcome details. Every mutation used a currently
+observed reference. Complete requested values were observed after their last
+fill and before Send/Save, across successive reads; this is not a claim that
+all three values shared one atomic form snapshot.
+
+The three send cases each created exactly one accepted POST and exact synthetic
+delivery, with matching receipt, recipient, subject and body visible to the
+model. The prefilled case replaced all three stale values. Draft-only used one
+Save draft operation, observed the explicit unsent status and produced zero
+sends. The unavailable-Send case read the positive restriction and a fresh form
+scope, reported it accurately, and produced zero POSTs or draft actions. It did
+not mislabel the browser relay as unavailable.
+
+Three fresh Gmail root navigations after installing298 opened signed-in
+Inbox/Compose without the unsupported-browser warning or a reload. This is
+profile-specific observed compatibility, consistent with the identity/cache
+repair; it does not prove Gmail's internal detection algorithm. Root UI checks
+after every task retained the three restored Gmail tabs and normal ChatGPT tab,
+with each task-created fixture tab absent. Each task-scoped diagnostic arm was
+independently archived and removed. Fixture cleanup compares final immutable
+ledgers with the terminal captures and stops only the exact recorded servers.
+
+Evidence is under `work/browser-reliability-20261028`, including the frozen
+`live298b` plan, per-case captures/independent reviews, diagnostics and fixture
+cleanup records; native/adapter/capture regression logs; installation/source
+attestations; and the independent build audit. Local synthetic receipts are not
+external email delivery. The original real email was not replayed, historical
+unconfirmed cleanup remains unconfirmed, and the separate exact-text envelope
+failure remains unresolved. The deterministic regressions establish the repaired
+race and capture behavior; the five live passes establish these controlled
+browser-email workflows, not universal provider reliability or proof that the
+race naturally fired in every live response. No release or merge was performed.
