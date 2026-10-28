@@ -238,7 +238,7 @@ const capture = () => {
     if (child.nodeType === Node.ELEMENT_NODE) discovery.push({node:child});
     if (cursor.first <= cursor.last) discovery.push(cursor);
   }
-  const nodes = [], next = [{node:root, parent:null, suppressText:false}];
+  const nodes = [], next = [[{node:root, parent:null, suppressText:false}], [], [], []];
   const capturedDOMNodes = new Map();
   let visited = 0, budget = 0, truncated = false;
   const diagnostics = {stopReason:'none',visited:0,emitted:0,estimatedBytes:0,
@@ -247,8 +247,12 @@ const capture = () => {
     viewportHeight:Number.isInteger(innerHeight) && innerHeight >= 0 && innerHeight <= 1000000 ? innerHeight : 0,
     frames:0,shadowRoots:0,oversizedRoles:0,clippedFields:0,boxlessContents:0};
   state.nodes.clear();
-  while (next.length) {
-    const item = next.pop(), node = item.node;
+  while (next.some(frontier => frontier.length)) {
+    // A priority applies across the capture, not just between siblings. A
+    // focused ancestor must not drain its ordinary inbox descendants before
+    // another discovered dialog/form branch. Propagated ancestor priorities
+    // retain parent-before-child capture; each frontier keeps DFS ordering.
+    const item = next.find(frontier => frontier.length).pop(), node = item.node;
     if (++visited > 20000 || nodes.length >= 3000 || budget > 220000) {
       diagnostics.stopReason = visited > 20000 ? 'visited_limit' : nodes.length >= 3000 ? 'node_limit' : 'byte_budget';
       truncated = true; break;
@@ -299,7 +303,7 @@ const capture = () => {
     for (const child of Array.from(node.childNodes)) children[priorities.get(child) ?? 3].push(child);
     for (let priority = children.length - 1; priority >= 0; priority--)
       for (let index = children[priority].length - 1; index >= 0; index--)
-        next.push({node:children[priority][index],parent,suppressText});
+        next[priority].push({node:children[priority][index],parent,suppressText});
   }
   const byID = new Map(nodes.map(node => [node.nodeID,node]));
   for (const node of nodes) if (node.parentNodeID && byID.has(node.parentNodeID)) byID.get(node.parentNodeID).childNodeIDs.push(node.nodeID);

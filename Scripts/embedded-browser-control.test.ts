@@ -360,6 +360,68 @@ describe('bounded capture of late forms and dialogs', () => {
     return { ...f, heading, maximize, fullscreen, close };
   }
 
+  function competingPriorityBranches(kind: 'focus' | 'form') {
+    const f = fixture(null), background = new f.Node(kind === 'form' ? 'FORM' : 'DIV');
+    const compose = new f.Node('BUTTON', {}, 'Compose');
+    background.append(compose);
+    for (let index = 0; index < 300; index++)
+      background.append(new f.Node('P', {}, `Synthetic record ${index}: ${'x'.repeat(1000)}`));
+    const panel = new f.Node('DIV', { ...(kind === 'focus' ? { role: 'dialog' } : {}), 'aria-label': 'New message' });
+    const heading = new f.Node('H2', {}, 'New message'), fullscreen = new f.Node('BUTTON', {}, 'Full screen');
+    const close = new f.Node('BUTTON', {}, 'Save & close');
+    panel.append(heading, fullscreen, close); f.document.body.append(background, panel);
+    f.document.activeElement = kind === 'focus' ? compose : null;
+    f.document.elementFromPoint = () => fullscreen;
+    return { ...f, background, compose, panel, heading, fullscreen, close };
+  }
+
+  for (const kind of ['focus', 'form'] as const) {
+    test(`a discovered panel survives the ordinary descendants of an earlier ${kind} priority branch`, async () => {
+      const f = competingPriorityBranches(kind), result = await f.run({ operation: 'observe' });
+      const panel = result.nodes.find((node: any) => node.name === 'New message' && node.role === (kind === 'focus' ? 'dialog' : 'group'));
+      expect(panel).toBeDefined(); expect(panel.isDOMClickable).toBe(false); expect(panel.isEditable).toBe(false);
+      expect(panel.childNodeIDs.map((id: string) => result.nodes.find((node: any) => node.nodeID === id).name))
+        .toEqual(['New message', 'Full screen', 'Save & close']);
+      for (const label of ['Full screen', 'Save & close']) {
+        const control = result.nodes.find((node: any) => node.name === label);
+        expect(control.role).toBe('button'); expect(control.isDOMClickable).toBe(true);
+        expect(control.parentNodeID).toBe(panel.nodeID);
+      }
+      for (const [index, node] of result.nodes.entries()) {
+        if (node.parentNodeID) expect(result.nodes.findIndex((parent: any) => parent.nodeID === node.parentNodeID)).toBeLessThan(index);
+      }
+      expect(result.nodes.some((node: any) => node.name.startsWith('Synthetic record '))).toBe(true);
+      expect(result.nodes.some((node: any) => node.isEditable || node.name === 'Send')).toBe(false);
+      expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+      expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+      expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20_001); expect(result.nodes.length).toBeLessThanOrEqual(3_000);
+      expect(new Set(result.nodes.map((node: any) => node.nodeID)).size).toBe(result.nodes.length);
+      expect(f.compose.clicks + f.fullscreen.clicks + f.close.clicks).toBe(0);
+    });
+  }
+
+  test('cross-branch capture priority preserves hidden and changed-reference rejection without input', async () => {
+    for (const change of ['hidden', 'replaced', 'parent', 'obstructed']) {
+      const f = competingPriorityBranches('focus');
+      if (change === 'hidden') f.panel.values['aria-hidden'] = 'true';
+      const result = await f.run({ operation: 'observe' });
+      if (change === 'hidden') {
+        expect(result.nodes.some((node: any) => ['New message', 'Full screen', 'Save & close'].includes(node.name))).toBe(false);
+      } else {
+        const control = result.nodes.find((node: any) => node.name === 'Full screen');
+        expect(control).toBeDefined();
+        if (change === 'replaced') f.panel.replaceChildren(new f.Node('BUTTON', {}, 'Full screen'));
+        if (change === 'parent') {
+          f.panel.children = f.panel.children.filter(child => child !== f.fullscreen);
+          f.document.body.append(f.fullscreen);
+        }
+        if (change === 'obstructed') f.document.elementFromPoint = () => f.compose;
+        await expect(f.press(control)).rejects.toThrow(change === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      }
+      expect(f.compose.clicks + f.fullscreen.clicks + f.close.clicks).toBe(0);
+    }
+  });
+
   for (const [deep, dialog] of [[false, false], [true, true], [true, false]]) {
     test(`unfocused minimized ${dialog ? 'dialog' : 'named panel'} ${deep ? 'behind wide fanout' : 'after inbox'} exposes controls without inventing fields`, async () => {
       const f = minimized(deep, dialog);

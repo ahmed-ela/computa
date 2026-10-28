@@ -169,6 +169,35 @@ new lifecycle tests then passed. Thus all 252 unique checks have passing results
 without claiming a single 252-test zero-failure run. Older native controller
 fixtures also now attach a real render host, matching the production requirement.
 
+## Priority across capture branches
+
+The installed build-307 retest confirmed attached, visible 1,024-by-768 Gmail
+captures throughout. It still reached the turn limit after one Compose click and
+no fills or Send. All sixteen completed Chat / Instant sessions verified and
+closed. This preserves the rendering repair as a measured result while identifying
+a remaining capture-selection failure.
+
+A deterministic counterexample exposed another capture defect: discovery found a
+later visible dialog within 606 structural slots, but capture exhausted its byte
+budget inside an earlier focused ancestor's ordinary inbox descendants. Priority
+sorted siblings only; depth-first traversal still drained that earlier branch.
+An earlier form and later named panel produced the same failure at equal priority.
+
+Capture now selects from four global priority frontiers. Propagated ancestor
+priorities keep parents ahead of children, each frontier retains depth-first
+ordering, and the published graph retains actual DOM child order. The same discovery,
+visited-node, output-node and byte limits apply. Visibility, field protection,
+current references and input authorization are unchanged. The reproduction proves
+the scheduling defect; the exact live Gmail ancestry was not captured. A separate
+adversarial discovery-exhaustion case remains outside this scheduling correction.
+
+All 45 browser-control JavaScript tests pass (730 assertions). The two real WebKit
+counterexamples fail with the immutable build-307 resource and pass with the
+candidate in the same native test binary. All 45 native browser transport tests
+pass, including unchanged byte limits, preserved ancestry and sibling order,
+zero capture inputs, replaced-reference rejection and one separately observed
+current-reference click. Live Gmail qualification remains separate.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

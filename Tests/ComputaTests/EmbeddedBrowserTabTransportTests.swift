@@ -10,6 +10,86 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testGlobalCaptureFrontierRetainsLaterDialogAfterFocusedInboxBranch() async throws {
+        try await verifyGlobalCaptureFrontier(focused: true)
+    }
+
+    func testGlobalCaptureFrontierRetainsLaterNamedPanelAfterEarlierForm() async throws {
+        try await verifyGlobalCaptureFrontier(focused: false)
+    }
+
+    private func verifyGlobalCaptureFrontier(focused: Bool) async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = attachRenderHost(to: session)
+        defer { session.shutdown(); window.close() }
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let paragraphs = (0..<300).map { "<p>Synthetic record \($0): \(String(repeating: "x", count: 1_000))</p>" }.joined()
+        let branch = focused ? "div" : "form", panelRole = focused ? " role='dialog'" : ""
+        view.loadHTMLString("""
+            <!doctype html><main aria-label="Fixture root"><\(branch) aria-label="Primary region">
+            <button type="button" id="search" onclick="window.searches++">Search</button>\(paragraphs)</\(branch)>
+            <div\(panelRole) aria-label="Synthetic panel"><p>Panel context</p>
+            <button type="button" id="action" onclick="window.actions++">Full screen</button></div></main>
+            <script>window.searches=0;window.actions=0;window.inputEvents=0;document.addEventListener('input',()=>window.inputEvents++);</script>
+            """, baseURL: URL(string: "http://localhost:8123/frontier-\(focused ? "focus" : "form")"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let lifetime = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        if focused {
+            let focusedID = try await script(view, "document.getElementById('search').focus();return document.activeElement.id;")
+            XCTAssertEqual(focusedID, Data(#""search""#.utf8))
+        }
+        let generation = session.documentGeneration(for: id)
+        let raw = try await transport.observe(target: target)
+        let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated)
+        XCTAssertEqual(diagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(diagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 224_096, "Prioritization must not increase the existing220KB capture budget")
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Full screen" },
+                                  "A discovered later panel must not be starved by a higher/equal-priority ancestor's bulk text")
+        let panel = try XCTUnwrap(raw.nodes.first { $0.name == "Synthetic panel" })
+        let primary = try XCTUnwrap(raw.nodes.first { $0.name == "Primary region" })
+        let root = try XCTUnwrap(raw.nodes.first { $0.name == "Fixture root" })
+        let text = try XCTUnwrap(raw.nodes.first { $0.name == "Panel context" })
+        XCTAssertEqual(root.childNodeIDs, [try XCTUnwrap(primary.nodeID), try XCTUnwrap(panel.nodeID)],
+                       "Priority visitation must preserve actual sibling order in the published ancestry")
+        XCTAssertEqual(panel.parentNodeID, root.nodeID)
+        XCTAssertEqual(action.parentNodeID, panel.nodeID)
+        XCTAssertEqual(text.parentNodeID, panel.nodeID)
+        XCTAssertEqual(panel.childNodeIDs, [try XCTUnwrap(text.nodeID), try XCTUnwrap(action.nodeID)])
+        XCTAssertTrue(action.isDOMClickable)
+        XCTAssertFalse(panel.isDOMClickable)
+        XCTAssertFalse(panel.isEditable)
+        let untouched = try await script(view, "return {searches:window.searches,actions:window.actions,inputs:window.inputEvents};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+                       ["searches": 0, "actions": 0, "inputs": 0], "Discovery/capture must never execute page input")
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "frontier", processIdentifier: 42, target: target)
+        let before = try await broker.snapshot(taskKey: "frontier", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let beforeAction = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Full screen" })
+        _ = try await script(view, "let old=document.getElementById('action');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await broker.perform(taskKey: "frontier", binding: before.binding, snapshot: before.snapshot,
+                                     elementIndex: beforeAction.index, action: "AXPress")
+            XCTFail("An identical replacement must not inherit the prior captured action reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .elementNotFound) }
+        let after = try await broker.snapshot(taskKey: "frontier", binding: before.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let currentAction = try XCTUnwrap(after.snapshot.elements.first { $0.label == "Full screen" })
+        try await broker.perform(taskKey: "frontier", binding: after.binding, snapshot: after.snapshot,
+                                 elementIndex: currentAction.index, action: "AXPress")
+        let actions = try await script(view, "return window.actions;")
+        XCTAssertEqual(actions, Data("1".utf8), "Only the separately authorized current reference may act once")
+        try await broker.revoke(taskKey: "frontier", binding: after.binding)
+        lifetime.revoke(); await transport.releaseRendering(target: target, lifetime: lifetime)
+    }
+
     private func attachRenderHost(to session: EmbeddedBrowserSession) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_024, height: 768),
                               styleMask: [], backing: .buffered, defer: false)
