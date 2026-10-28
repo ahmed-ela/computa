@@ -4933,6 +4933,89 @@ describe('normal ChatGPT product provenance', () => {
       productModeEvidence: { temporaryTransition: 'acknowledged' } });
   });
 
+  const productCommentBatch = (f: ReturnType<typeof fixture>, parent?: Element) => {
+    const holder = parent || new Element('DIV'); if (!parent) f.body.append(holder);
+    const spans = Array.from({ length: 4 }, () => new Element('SPAN', {}, 'Rendered helper'));
+    holder.append(...spans);
+    const comment = { nodeType: 8, parentElement: holder, textContent: 'hydrated', nodeValue: 'hydrated', isConnected: true };
+    // Comments are childNodes but not selector-matching element children.
+    Object.defineProperty(holder, 'childNodes', { configurable: true, get: () => [...holder.children, ...(comment.parentElement === holder ? [comment] : [])] });
+    const records: any[] = [...spans.map(node => ({ type: 'childList', target: holder, addedNodes: [node], removedNodes: [] })),
+      { type: 'characterData', target: comment, oldValue: 'pending' }];
+    return { holder, comment, records };
+  };
+
+  test('valid Comment characterData records retain the same Chat proof before and after temporary transition', async () => {
+    for (const mode of ['normal', 'temporary', 'hidden_temporary', 'detached']) {
+      const f = fixture({ response: false, normalRoot: mode === 'normal' });
+      expect((await f.inspect({ action: 'verifyProductMode' })).productModeEvidence.mode).toBe('chat');
+      const proof = f.world.__computaChatProductMode, { holder, records } = productCommentBatch(f);
+      if (mode === 'hidden_temporary') f.modeGroup.connected = false;
+      if (mode === 'detached') { holder.connected = false; f.body.children = f.body.children.filter(node => node !== holder); holder.parentElement = null; }
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      expect(result.error, mode).toBeUndefined(); expect(f.world.__computaChatProductMode).toBe(proof);
+      expect(proof).not.toHaveProperty('invalidated', true);
+      expect(result.productModeEvidence).toMatchObject({ mode: 'chat', temporaryTransition: mode === 'normal' ? 'not_requested' : 'acknowledged' });
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
+  });
+
+  test('valid Comment records cannot mask tracked product history referenced labels or transient Work selection', async () => {
+    for (const kind of ['tracked_history', 'referenced_label', 'work_selected']) {
+      const f = fixture({ response: false, normalRoot: kind === 'referenced_label' });
+      const label = new Element('SPAN', { id: 'comment-mode-label' }, 'Composer mode');
+      if (kind === 'referenced_label') {
+        f.body.append(label); delete f.modeGroup.values['aria-label'];
+        f.modeGroup.values['aria-labelledby'] = 'comment-mode-label';
+      }
+      await f.inspect();
+      const { comment, records } = productCommentBatch(f);
+      if (kind !== 'work_selected') {
+        const parent = kind === 'tracked_history' ? f.workMode : label;
+        comment.parentElement = parent;
+        Object.defineProperty(parent, 'childNodes', { get: () => [{ nodeType: 3, parentElement: parent, textContent: parent.text }, comment] });
+      } else records.push({ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      expect(result.error).toBe('product_mode_unverified');
+      expect(result.productModeDiagnostic.productProofFailure).toBe(kind === 'work_selected' ? 'work_selected' : 'product_history_ambiguous');
+      expect(result.productModeDiagnostic).not.toHaveProperty('productMutationFailureRule');
+      expect(result.productModeDiagnostic).not.toHaveProperty('productMutationFailureNodeKind');
+      f.chatMode.values['aria-pressed'] = 'true'; f.workMode.values['aria-pressed'] = 'false';
+      expect((await f.inspect({ action: 'verifyProductMode' })).error).toBe('product_mode_unverified');
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
+  });
+
+  test('Comment support preserves unknown nodes records mutation budgets and finite first-cause diagnostics', async () => {
+    for (const kind of ['unknown_node', 'unknown_record', 'overflow']) {
+      const f = fixture({ response: false }); await f.inspect();
+      const { comment, records } = productCommentBatch(f);
+      if (kind === 'unknown_node') comment.nodeType = 7; // Unsupported processing instruction, not an accepted Comment.
+      else if (kind === 'unknown_record') records.at(-1).type = 'PRIVATE_UNKNOWN_RECORD';
+      else records.push(...Array.from({ length: 4_093 }, () => ({ type: 'characterData', target: comment, oldValue: 'earlier' })));
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' }), diagnostic = result.productModeDiagnostic;
+      expect(result.error).toBe('product_mode_unverified');
+      expect(diagnostic.productProofFailure).toBe(kind === 'overflow' ? 'mutation_overflow' : 'mutation_uninspectable');
+      expect(diagnostic.productMutationRelevantCount).toBe(kind === 'unknown_node' ? 1 : kind === 'unknown_record' ? 5 : 1_000);
+      expect(diagnostic.productMutationIgnoredCount).toBe(0);
+      if (kind === 'overflow') expect(diagnostic).not.toHaveProperty('productMutationFailureRule');
+      else expect(diagnostic).toMatchObject({ productMutationFailureRule: kind === 'unknown_node' ? 'node_shape' : 'record_shape',
+        productMutationFailureNodeKind: kind === 'unknown_node' ? 'other' : 'comment' });
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE');
+      f.observers[0].callback([{ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' }]);
+      expect((await f.inspect({ action: 'verifyProductMode' })).productModeDiagnostic).toEqual(diagnostic);
+      const proof: any = f.world.__computaChatProductMode;
+      proof.productMutationFailureRule = 'PRIVATE_INVALID_RULE'; proof.productMutationFailureNodeKind = 'PRIVATE_INVALID_NODE';
+      const malformed = (await f.inspect({ action: 'verifyProductMode' })).productModeDiagnostic;
+      expect(malformed).not.toHaveProperty('productMutationFailureRule'); expect(malformed).not.toHaveProperty('productMutationFailureNodeKind');
+      expect(JSON.stringify(malformed)).not.toContain('PRIVATE');
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
+  });
+
   test('Work or a disallowed product route revokes proof permanently, including a transient mode flip', async () => {
     for (const mutate of [
       (f: ReturnType<typeof fixture>) => { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; },

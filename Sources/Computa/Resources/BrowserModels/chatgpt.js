@@ -3554,6 +3554,12 @@ function chatGPTProductProofFailureDiagnostic() {
     if (Number.isInteger(proof[key]) && proof[key] >= 0) diagnostic[key] = Math.min(proof[key], 1_000);
   const histogram = chatGPTProductMutationHistogramDiagnostic(proof.productMutationHistogram);
   if (histogram) diagnostic.productMutationHistogram = histogram;
+  if (proof.invalidationReason === 'mutation_uninspectable'
+    && ['record_shape', 'node_shape', 'children_shape', 'ancestry_cycle', 'label_bounds', 'read_exception'].includes(proof.productMutationFailureRule)
+    && ['element', 'text', 'comment', 'document', 'fragment', 'other', 'missing'].includes(proof.productMutationFailureNodeKind)) {
+    diagnostic.productMutationFailureRule = proof.productMutationFailureRule;
+    diagnostic.productMutationFailureNodeKind = proof.productMutationFailureNodeKind;
+  }
   return diagnostic;
 }
 function chatGPTProductMutationHistogramDiagnostic(value) {
@@ -3579,6 +3585,10 @@ function chatGPTInvalidateProductProof(proof, reason, counts = null) {
       proof.productMutationRelevantCount = Math.min(counts.relevant, 1_000);
       proof.productMutationIgnoredCount = Math.min(counts.ignored, 1_000);
       if (counts.histogram) proof.productMutationHistogram = counts.histogram;
+      if (reason === 'mutation_uninspectable' && counts.failure) {
+        proof.productMutationFailureRule = counts.failure.rule;
+        proof.productMutationFailureNodeKind = counts.failure.nodeKind;
+      }
     }
   }
   proof.invalidated = true;
@@ -3598,8 +3608,24 @@ function chatGPTObserveProductMutations(proof, state, records) {
   if (proof.invalidated) return;
   const groups = proof.groups, works = proof.works;
   const limits = { relevant: 4_096, records: 8_192, visits: 16_384, children: 4_096, depth: 128 };
-  let analysisFailure = null, visits = 0;
-  const unavailable = reason => { if (!analysisFailure) analysisFailure = reason; return []; };
+  let analysisFailure = null, analysisFailureDiagnostic = null, visits = 0;
+  const nodeKind = node => {
+    try {
+      if (node == null) return 'missing';
+      switch (node.nodeType) {
+        case 1: return 'element'; case 3: return 'text'; case 8: return 'comment';
+        case 9: return 'document'; case 11: return 'fragment'; default: return 'other';
+      }
+    } catch { return 'other'; }
+  };
+  const unavailable = (reason, rule = null, node = null) => {
+    if (!analysisFailure) {
+      analysisFailure = reason;
+      // Finite first-cause metadata only: never retain the node or its content.
+      if (reason === 'mutation_uninspectable') analysisFailureDiagnostic = { rule, nodeKind: nodeKind(node) };
+    }
+    return [];
+  };
   const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
   const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
   const ancestry = new Map(), containments = new Map();
@@ -3611,7 +3637,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     if (!ancestry.has(node)) {
       const chain = new Set(); let current = node;
       for (; current && chain.size <= limits.depth; current = current.parentElement) {
-        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable'); return false; }
+        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable', 'ancestry_cycle', current); return false; }
         chain.add(current);
       }
       if (current) { unavailable('mutation_scan_overflow'); return false; }
@@ -3629,19 +3655,19 @@ function chatGPTObserveProductMutations(proof, state, records) {
       while (stack.length) {
         const { node, depth } = stack.pop();
         if (!charge()) return [];
-        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable');
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable', 'node_shape', node);
         if (depth > limits.depth) return unavailable('mutation_scan_overflow');
         seen.add(node);
         if (node.nodeType === 1) result.push(node);
         if (![1, 9, 11].includes(node.nodeType)) continue;
         const children = node.childNodes;
-        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable');
+        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable', 'children_shape', node);
         if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
           return unavailable('mutation_scan_overflow');
         for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
       }
       subtrees.set(root, result); return result;
-    } catch { return unavailable('mutation_uninspectable'); }
+    } catch { return unavailable('mutation_uninspectable', 'read_exception', root); }
   };
   const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
     || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
@@ -3666,7 +3692,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
       if (id) { const matches = ids.get(id) || []; matches.push(node); ids.set(id, matches); }
       const value = node.getAttribute('aria-labelledby');
       if (value != null) {
-        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable'); break; }
+        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable', 'label_bounds', node); break; }
         for (const token of value.trim().split(/\s+/)) if (token) {
           references.add(token); const referring = referrers.get(token) || new Set(); referring.add(node); referrers.set(token, referring);
         }
@@ -3731,7 +3757,9 @@ function chatGPTObserveProductMutations(proof, state, records) {
     && (record.type === 'attributes' && record.target.nodeType === 1 && typeof record.attributeName === 'string'
         && observedAttributes.has(record.attributeName)
         && emptyNodes(record.addedNodes) && emptyNodes(record.removedNodes)
-      || record.type === 'characterData' && record.target.nodeType === 3
+      // Comment.data is also CharacterData. Keep these records in the same
+      // bounded history analysis; accepting their shape does not ignore them.
+      || record.type === 'characterData' && [3, 8].includes(record.target.nodeType)
       || record.type === 'childList' && record.target.nodeType === 1
         && record.addedNodes != null && record.removedNodes != null
         && Number.isInteger(record.addedNodes.length) && record.addedNodes.length >= 0
@@ -3804,7 +3832,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   // relevant record. Unrelated message rendering does not consume that budget.
   for (const record of records) {
     countRecord(record);
-    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable'); break; }
+    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable', 'record_shape', record?.target); break; }
     if (record.type === 'childList' && record.addedNodes.length + record.removedNodes.length > limits.children) {
       relevant.push(record); unavailable('mutation_scan_overflow'); break;
     }
@@ -3814,7 +3842,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   }
   Object.freeze(histogram.types); Object.freeze(histogram.scopes); Object.freeze(histogram.composerAttributes); Object.freeze(histogram);
   const counts = { relevant: relevant.length, ignored, histogram };
-  const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
+  const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, { ...counts, failure: analysisFailureDiagnostic });
   if (analysisFailure) { invalidate(analysisFailure); return; }
   if (records.length > limits.records || relevant.length > limits.relevant) { invalidate('mutation_overflow'); return; }
   const ownedControls = new Set(works);

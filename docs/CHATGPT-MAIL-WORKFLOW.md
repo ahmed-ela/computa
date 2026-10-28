@@ -87,6 +87,42 @@ candidate adapter. It verifies the exact finalization ordering, fresh complete
 proofs, the same certificate/deadline, and unchanged input counts. Wrong-model
 and ownership negatives remain rejected on both the first and subsequent reads.
 
+Build 305 then completed the installed minimized-compose draft in 98.721 seconds:
+nine tools, one exact unsent draft, zero sends, and ten freshly verified and closed
+Chat / Instant inference sessions. Independent receipt and current-reference
+checks passed. The task-created fixture tab and fixture server were cleaned up.
+These separate live runs do not constitute a controlled latency benchmark.
+
+## Product-mode preparation
+
+The next real-mail attempt stopped in 3.310 seconds during preparation, before
+prompt submission or any tool call. After model selection, the product-mode proof
+was invalidated with `mutation_uninspectable`. The recorded batch contained four
+child-list mutations and one character-data mutation outside the tracked product,
+composer and message scopes. No Work selection was recorded. Website cleanup
+remained unconfirmed and the failed attempt was preserved without replay.
+The mode switch may disappear after the owned temporary-chat transition; its
+absence alone did not revoke the previously established proof.
+
+The mutation validator accepted text-node character-data changes but rejected
+comment-node changes, which also produce character-data records under the
+[DOM Standard](https://dom.spec.whatwg.org/#interface-mutationrecord). A controlled reproduction
+on the unchanged build-305 adapter produces the same finite failure signature.
+The live diagnostics did not retain the target node type, so the reproduction
+identifies a concrete matching defect without proving that the live node was a
+comment. The correction admits valid comment records into the existing bounded
+product-history analysis; it does not ignore the batch or reset product proof.
+Two allowlisted diagnostic fields identify the first failed inspection rule and
+node kind. They contain no page text or node references and cannot authorize a
+request. Unknown values and incomplete diagnostic pairs are rejected.
+
+The updated adapter suite passes 515 tests (24,266 assertions). Twelve focused
+native product-mode and diagnostic tests pass. A real WebKit observer delivers
+the five-record comment batch: the same compiled regression fails with the
+immutable build-305 adapter and passes with the correction, then completes one
+request and cleanup. Mixed transient Work and referenced-label changes remain
+rejected before Send. These tests do not establish external email delivery.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

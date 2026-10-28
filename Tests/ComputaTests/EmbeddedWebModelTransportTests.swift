@@ -3327,6 +3327,146 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testProductMutationFailureCauseIsPairedFiniteAndSharedAcrossDiagnosticRoutes() throws {
+        let details: [String: Any] = ["productProofFailure": "mutation_uninspectable",
+            "productMutationRelevantCount": 1_000, "productMutationIgnoredCount": 1_000,
+            "productMutationHistogram": ["version": 1, "phase": "verified", "capped": true,
+                "types": ["attributes": 1_000, "childList": 1_000, "characterData": 1_000, "other": 1_000],
+                "scopes": ["trackedProduct": 1_000, "message": 1_000, "composer": 1_000, "other": 1_000],
+                "composerAttributes": ["class": 1_000, "style": 1_000, "other": 1_000]]]
+        let product: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 0,
+            "groupVisible": false, "recognized": false, "contradictory": false,
+            "chat": NSNull(), "work": NSNull(), "proofPresent": true, "proofInvalidated": true, "chatClickClaimed": false]
+        let firstUser: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "marker_not_final",
+            "scope": "marker_validation", "action": "inspect", "root": ["tag": "div", "classes": []],
+            "body": ["tag": "div", "classes": []], "userCount": 1, "textLength": 10_240, "lineCount": 98,
+            "markerOccurrences": 0, "controlDescendants": 0, "markerFinalLine": false, "submitted": true, "markerMatches": true]
+        func encode(_ fields: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: firstUser.merging(fields) { _, new in new }), as: UTF8.self)
+        }
+        for rule in ["record_shape", "node_shape", "children_shape", "ancestry_cycle", "label_bounds", "read_exception"] {
+            for node in ["element", "text", "comment", "document", "fragment", "other", "missing"] {
+                var fields = details
+                fields["productMutationFailureRule"] = rule; fields["productMutationFailureNodeKind"] = node
+                let text = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(product.merging(fields) { _, new in new }))
+                XCTAssertLessThanOrEqual(text.utf8.count, 2_048)
+                let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                XCTAssertEqual(value["productMutationFailureRule"] as? String, rule)
+                XCTAssertEqual(value["productMutationFailureNodeKind"] as? String, node)
+                let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(fields), provider: .chatgpt))
+                XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 })
+                let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+                let proof = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_product_proof" })
+                XCTAssertEqual(proof["productMutationFailureRule"] as? String, rule)
+                XCTAssertEqual(proof["productMutationFailureNodeKind"] as? String, node)
+                XCTAssertEqual(values.filter { $0["productMutationFailureRule"] != nil }.count, 1)
+            }
+        }
+        var valid = details
+        valid["productMutationFailureRule"] = "record_shape"; valid["productMutationFailureNodeKind"] = "comment"
+        func reject(_ fields: [String: Any]) throws {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(product.merging(fields) { _, new in new }))
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(fields), provider: .chatgpt))
+        }
+        for key in ["productMutationFailureRule", "productMutationFailureNodeKind", "productProofFailure",
+                    "productMutationRelevantCount", "productMutationIgnoredCount"] {
+            var missing = valid; missing.removeValue(forKey: key); try reject(missing)
+        }
+        for key in ["productMutationFailureRule", "productMutationFailureNodeKind"] {
+            for bad in ["https://PRIVATE_CANARY", "unknown", 1, true, NSNull(), ["comment"]] as [Any] {
+                var forged = valid; forged[key] = bad; try reject(forged)
+            }
+        }
+        var wrongReason = valid; wrongReason["productProofFailure"] = "work_selected"; try reject(wrongReason)
+    }
+
+    func testProductCommentCharacterDataInRealWebKitPreservesVerifiedPreparation() async throws {
+        try await verifyProductCommentMutation(scenarios: ["comment"])
+    }
+
+    func testProductCommentCharacterDataCannotHideWorkOrReferencedLabelHistory() async throws {
+        try await verifyProductCommentMutation(scenarios: ["late_work", "label_id"])
+    }
+
+    private func verifyProductCommentMutation(scenarios: [String]) async throws {
+        for scenario in scenarios {
+            let page = Self.page.replacingOccurrences(
+                of: #"<div id="fixture-composer-mode" role="group" aria-label="Composer mode">"#,
+                with: #"<span id="fixture-mode-label">Composer mode</span><div id="fixture-composer-mode" role="group" aria-labelledby="fixture-mode-label">"#)
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            // Use native MutationObserver delivery, including a comment in a
+            // just-detached subtree. No synthetic records or private-proof writes.
+            let raw = try await evaluate(view, """
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const host = document.createElement('div'), comment = document.createComment('$?');
+                const batches = [], sample = [];
+                const observer = new MutationObserver(records => {
+                  batches.push(records.length);
+                  for (const record of records) if (record.target === document.body || record.target === host || record.target === comment)
+                    sample.push({type: record.type, nodeType: record.target.nodeType});
+                });
+                observer.observe(document, {subtree:true, childList:true, characterData:true, characterDataOldValue:true,
+                  attributes:true, attributeOldValue:true, attributeFilter:['id','aria-pressed']});
+                document.body.appendChild(host);
+                host.appendChild(comment);
+                host.appendChild(document.createElement('span'));
+                host.remove();
+                comment.data = '$';
+                if (\(String(reflecting: scenario)) === 'late_work') {
+                  const work = document.getElementById('fixture-work-mode');
+                  work.setAttribute('aria-pressed', 'true'); work.setAttribute('aria-pressed', 'false');
+                }
+                if (\(String(reflecting: scenario)) === 'label_id') {
+                  const label = document.getElementById('fixture-mode-label');
+                  label.id = 'fixture-mode-label-moved'; label.id = 'fixture-mode-label';
+                }
+                await new Promise(resolve => setTimeout(resolve, 0)); observer.disconnect();
+                return {sample, batches};
+                """)
+            let observed = try XCTUnwrap(raw as? [String: Any])
+            let sample = try XCTUnwrap(observed["sample"] as? [[String: Any]])
+            XCTAssertEqual(sample.compactMap { $0["type"] as? String }, ["childList", "childList", "childList", "childList", "characterData"])
+            XCTAssertEqual(sample.compactMap { $0["nodeType"] as? Int }, [1, 1, 1, 1, 8])
+            XCTAssertEqual(observed["batches"] as? [Int], [scenario == "comment" ? 5 : 7])
+            let rawProof = try await evaluate(view, """
+                const proof = globalThis.__computaChatProductMode;
+                return {present: !!proof, invalidated: proof?.invalidated === true,
+                  reason: proof?.invalidationReason ?? null};
+                """, world: .world(name: "computa-chatgpt-model-v1"))
+            let proof = try XCTUnwrap(rawProof as? [String: Any])
+            XCTAssertEqual(proof["present"] as? Bool, true)
+            let sendsBefore = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+            XCTAssertEqual(sendsBefore, 0)
+            if scenario == "comment" {
+                XCTAssertEqual(proof["invalidated"] as? Bool, false)
+                guard proof["invalidated"] as? Bool == false else { return }
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "After a bounded inert comment update"])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+                XCTAssertEqual(sends, 1)
+                let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+                try await assertHumanTabIntact(fixture)
+            } else {
+                XCTAssertEqual(proof["invalidated"] as? Bool, true)
+                XCTAssertEqual(proof["reason"] as? String, scenario == "late_work" ? "work_selected" : "product_history_ambiguous")
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": "Must not bypass historical product uncertainty"])
+                    XCTFail("Comment handling must not hide a genuine mode or label transition")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+                let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+                XCTAssertEqual(sends, 0)
+            }
+        }
+    }
+
     func testProductMutationRealWebKitProcessesLargeBatchesAndPreservesLateNegatives() async throws {
         for scenario in ["render", "late_work", "label_id"] {
             let page = Self.page.replacingOccurrences(

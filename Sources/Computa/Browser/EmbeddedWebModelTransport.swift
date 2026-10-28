@@ -2655,7 +2655,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "mutation_uninspectable", "product_history_ambiguous", "group_overflow", "work_overflow",
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
-    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]
+    private static let productMutationFailureKeys = ["productMutationFailureRule", "productMutationFailureNodeKind"]
+    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts
+        + ["productMutationHistogram"] + productMutationFailureKeys
     private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
         "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
         "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
@@ -2805,6 +2807,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard safe["productProofFailure"] != nil, productMutationCounts.allSatisfy({ safe[$0] != nil }),
                   let histogram = sanitizedProductMutationHistogram(rawHistogram) else { return nil }
             safe["productMutationHistogram"] = histogram
+        }
+        if productMutationFailureKeys.contains(where: { value[$0] != nil }) {
+            guard safe["productProofFailure"] as? String == "mutation_uninspectable",
+                  productMutationCounts.allSatisfy({ safe[$0] != nil }),
+                  let rule = value["productMutationFailureRule"] as? String,
+                  ["record_shape", "node_shape", "children_shape", "ancestry_cycle", "label_bounds", "read_exception"].contains(rule),
+                  let nodeKind = value["productMutationFailureNodeKind"] as? String,
+                  ["element", "text", "comment", "document", "fragment", "other", "missing"].contains(nodeKind) else { return nil }
+            safe["productMutationFailureRule"] = rule
+            safe["productMutationFailureNodeKind"] = nodeKind
         }
         return safe
     }
