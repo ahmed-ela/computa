@@ -5358,8 +5358,19 @@ function chatGPTPendingInitialRouteDiscard(candidate, fingerprint, stage) {
 // display attempt. Retain only an exact, native-bound physical candidate. This
 // witness grants no response, replacement receipt, or retry; the next call must
 // present the native-certified route edge and repeat the complete proof.
-function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
+function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedDiscard = null) {
   const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
+  // The replacement helper may install its one certificate just before this
+  // caller resumes on a promoted URL. Preserve that exact unclaimed receipt
+  // for native's existing fresh-read handoff, never manufacture another one.
+  const returningReceipt = certifiedDiscard?.error === 'first_user_observation_replaced'
+    && candidate?.remount === true && candidate.awaitingNativeRefresh === true && candidate.refreshClaimed !== true
+    && input.allowBoundFirstUserRemountRefresh !== true
+    && candidate.replacementReceipt != null && record?.replacement === candidate.replacementReceipt
+    && candidate.replacementReceipt.document === document && candidate.replacementReceipt.owner === candidate.owner
+    && candidate.replacementReceipt.root === candidate.root && candidate.replacementReceipt.body === candidate.body
+    && candidate.replacementReceipt.oldRoot === candidate.oldRoot && candidate.replacementReceipt.oldBody === candidate.oldBody;
+  if (certifiedDiscard != null && !returningReceipt) return null;
   const roots = chatGPTMessageRoots('user');
   const root = roots[0], body = root && chatGPTUserBody(root);
   // Display recovery can start on the originally verified nodes, then cross
@@ -5383,7 +5394,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
     || candidate.outcome !== 'expanded' || candidate.clicked !== true
     || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
     || input.action !== 'inspect' || input.allowBoundFirstUserExpansion !== true
-    || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
+    || (!returningReceipt && (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true))
     || input.suppressFirstUserExpansionClaim === true
     || input.allowFirstUserBinding !== false || input.allowFirstUserExpansion === true
     || input.allowProvisionalFirstUserExpansion === true
@@ -5397,7 +5408,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
     || state.pending != null || state.lastVerified !== record || record?.phase !== 'verified'
     || record.sequence !== 1 || record.document !== document || record.owner !== candidate.owner
     || (candidate.awaitingNativeRefresh === true
-      ? !candidate.refreshClaimed || record.replacement !== candidate.replacementReceipt || !candidate.replacementReceipt
+      ? (!candidate.refreshClaimed && !returningReceipt) || record.replacement !== candidate.replacementReceipt || !candidate.replacementReceipt
       : record.replacement != null)
     || record.root !== candidate.oldRoot || record.body !== candidate.oldBody
     || candidate.remount && (candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
@@ -5431,6 +5442,9 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
     candidate.remount = true;
     candidate.root = root; candidate.body = body;
   }
+  // No new witness or claim: native already knows how to carry this discarded
+  // certificate across its bounded route chain and require a fresh full proof.
+  if (returningReceipt) return certifiedDiscard;
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
@@ -5483,6 +5497,8 @@ async function chatGPTCertifyBoundFirstRemount(candidate, fingerprint) {
   candidate.replacementReceipt = receipt;
   candidate.awaitingNativeRefresh = true;
   if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+    const routeDiscard = chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'replacement_hash', discarded);
+    if (routeDiscard) return routeDiscard;
     candidate.refreshClaimed = true;
     return null;
   }

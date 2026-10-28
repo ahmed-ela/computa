@@ -198,6 +198,39 @@ pass, including unchanged byte limits, preserved ancestry and sibling order,
 zero capture inputs, replaced-reference rejection and one separately observed
 current-reference click. Live Gmail qualification remains separate.
 
+Build 308's real-mail attempt stopped after 6.201 seconds before any browser
+tool ran. Its first complete prompt matched, but a later conversation-URL
+promotion failed in replacement-message certification before finalization.
+The next read found the recovery claim spent and rejected `first_user_message`.
+No mail fields or Send were
+dispatched, and temporary-session cleanup remained unconfirmed. This attempt
+does not qualify the browser capture change.
+
+A real WebKit regression reproduces a missing certificate-return handoff:
+the caller discards an already-installed certificate if the URL changes before
+the awaited helper returns. It reproduces the same ownership-error boundary
+with the immutable build-308 adapter, including root-to-local and local-to-public
+route changes. It retains one installed replacement certificate, the original
+deadline, one display expansion and one provider submission. The regression
+establishes this boundary defect; its diagnostic context booleans do not prove
+an identical live microtask ordering.
+
+The correction retains that exact, unclaimed replacement certificate through
+the existing route-discard validation and returns it to native's existing fresh
+read. It requires the same old and new physical message nodes, complete prompt
+fingerprint, owner, document, model, product mode, temporary mode and deadline.
+It creates no certificate, route witness, prompt replay or additional recovery
+allowance. The subsequent native read still proves the complete current message.
+
+All 518 adapter tests pass (24,805 assertions), including three focused handoff
+tests with concurrent-change, deadline and invalid/reused-continuation negatives.
+All 19 native ownership tests pass with the candidate resource in the same binary
+that failed against build 308. The two-route positive retains one certificate,
+the original deadline, one expansion and one provider Send, and performs fresh
+full-body hashes before pinning the current physical message. Changed body, model,
+temporary mode and an invalid second local route remain rejected. Installed
+real-mail validation is still separate from these deterministic results.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

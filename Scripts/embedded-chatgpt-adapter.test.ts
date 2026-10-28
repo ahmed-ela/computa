@@ -2530,6 +2530,92 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       }
     });
 
+    const certificateReturnRoute = async (mutation = 'none') => {
+      const staged = await remounted(), { x, first, record, body } = staged;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-certificate-return?temporary-chat=true';
+      const owner = x.f.world.__computaModelOwner, originalDocument = record.document;
+      let crossed = false, receipt: any, deadline = 0;
+      const watchCertificate = () => {
+        x.f.onDigest(watchCertificate, first.outbound);
+        let remaining = 32;
+        const check = () => {
+          const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+          // Observe the real helper's receipt, then mutate only in the await
+          // return gap. This does not fabricate any recovery authority.
+          if (!crossed && record.replacement && !candidate?.awaitingNativeRefresh) {
+            crossed = true; receipt = record.replacement; deadline = candidate.deadline;
+            x.f.document.URL = toURL; x.f.location.pathname = new URL(toURL).pathname;
+            if (mutation === 'body') body.text += '!';
+            if (mutation === 'model') x.picker!.selected('High');
+            if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+            if (mutation === 'document') candidate.document = {};
+            if (mutation === 'deadline') x.f.advanceTime(2_000);
+            if (mutation === 'temporary') x.f.temporary.connected = false;
+            if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
+            if (mutation === 'lease') x.f.world.__computaChatActiveInvocation = {};
+          } else if (!crossed && --remaining > 0) queueMicrotask(check);
+        };
+        queueMicrotask(check);
+      };
+      x.f.onDigest(watchCertificate, first.outbound);
+      const discarded = await x.observe(first, allowance);
+      expect(crossed).toBe(true); denied(discarded);
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      expect(candidate).not.toHaveProperty('verified', true); expect(candidate.routeDiscard).toBeUndefined();
+      expect(record.root).toBe(staged.oldRoot); expect(record.body).toBe(staged.oldBody);
+      return { ...staged, candidate, receipt, deadline, owner, originalDocument, fromURL, toURL, discarded };
+    };
+
+    test('certificate-return route crossing preserves the original unclaimed receipt for one fresh native proof', async () => {
+      const { x, first, record, root, body, expand, candidate, receipt, deadline, fromURL, toURL, discarded }
+        = await certificateReturnRoute();
+      expect(discarded).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+      expect(record.replacement).toBe(receipt); expect(candidate.replacementReceipt).toBe(receipt);
+      expect(candidate.awaitingNativeRefresh).toBe(true); expect(candidate.refreshClaimed).not.toBe(true);
+      const before = x.f.digestInputs.length;
+      const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+      expect(candidate).toMatchObject({ verified: true, refreshClaimed: true, deadline });
+      expect(candidate.routeContinuationEdges).toEqual([{ fromURL, toURL }]);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('certificate-return route crossing cannot carry changed bytes model authority mode or expired recovery', async () => {
+      for (const mutation of ['body', 'model', 'owner', 'document', 'deadline', 'temporary', 'work', 'lease']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, owner, originalDocument, fromURL, toURL, discarded }
+          = await certificateReturnRoute(mutation);
+        expect(discarded.error, mutation).not.toBe('first_user_observation_replaced');
+        expect(candidate.refreshClaimed).toBe(true);
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner;
+        candidate.document = originalDocument; x.f.temporary.connected = true; x.f.workMode.values['aria-pressed'] = 'false';
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('certificate-return continuation still rejects absent or extra edges changed receipt and a spent handoff', async () => {
+      for (const mutation of ['no_edge', 'extra_edge', 'receipt', 'body', 'native_pin', 'no_handoff']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, fromURL, toURL, discarded }
+          = await certificateReturnRoute();
+        expect(discarded.error).toBe('first_user_observation_replaced');
+        const edge = { fromURL, toURL }, overrides: any = { ...fresh, firstUserExpansionRouteContinuation: [edge] };
+        if (mutation === 'no_edge') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'extra_edge') overrides.firstUserExpansionRouteContinuation = [edge, edge, edge];
+        if (mutation === 'receipt') record.replacement = { ...receipt };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'native_pin') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+        if (mutation === 'no_handoff') delete overrides.allowBoundFirstUserRemountRefresh;
+        denied(await x.observe(first, overrides)); body.text = first.outbound; record.replacement = receipt;
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [edge] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBe(receipt);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     test('certificate return and fresh hash can consume the two distinct native route edges in order', async () => {
       const { x, first, record, body, expand } = await remounted();
       const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;

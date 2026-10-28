@@ -5639,9 +5639,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                              crossing: "receipt_then_finalization")
     }
 
+    func testBoundReplacementCertificateReturnPromotionRequiresFreshProofWithoutRenewingBudgets() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "certificate_return")
+    }
+
+    func testBoundReplacementCertificateReturnRejectsConcurrentChangesAndSecondLocalRoute() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["changed_body", "second_local", "wrong_model", "normal_chat"],
+                                             crossing: "certificate_return")
+    }
+
     private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest") async throws {
         for condition in conditions {
-            let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization"].contains(crossing)
+            let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization", "certificate_return"].contains(crossing)
             let sameNodeStart = ["same_node_then_remount", "ordinary_model"].contains(crossing)
             let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
             defer {
@@ -5669,7 +5678,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 return record?.nativeFirstPinned === true && record.phase === 'verified' && state.pending == null;
                 """, world: world) as? Bool
             XCTAssertEqual(nativeBound, true, "The race must begin after native adopted the first prompt")
-            try await installBoundFirstUserCollapse(view, behavior: sameNodeStart ? "success" : "remount")
+            if crossing != "certificate_return" {
+                try await installBoundFirstUserCollapse(view, behavior: sameNodeStart ? "success" : "remount")
+            }
             // Observe private recovery, but mutate only the real page URL and
             // (for the same-node race) the provider's physical message nodes.
             // Cross either the first exact digest after expansion or the later
@@ -5687,6 +5698,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   const recovery = globalThis.__computaModelBoundFirstExpansion;
                   const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
                   if (recovery?.replacementReceipt) globalThis.__fixtureBoundReplacementReceipts.add(recovery.replacementReceipt);
+                  if (stage === 'certificate_return' && record?.replacement) globalThis.__fixtureBoundReplacementReceipts.add(record.replacement);
                   const count = globalThis.__fixtureBoundRoutePromotions;
                   const initialRoute = \(hasTwoRoutes) && count === 0 && location.pathname === '/';
                   const nextRoute = location.pathname.startsWith('/c/local-chatgpt')
@@ -5694,7 +5706,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   if ((initialRoute || nextRoute) && recovery?.remount === \(!sameNodeStart)
                     && recovery.provisional !== true && recovery.initialRoute !== true
                     && recovery.outcome === 'expanded'
-                    && (['receipt', 'refresh', 'finalization'].includes(stage) ? recovery.awaitingNativeRefresh === true
+                    && (stage === 'certificate_return' ? recovery.awaitingNativeRefresh !== true && record?.replacement != null
+                      && record.replacement.root === recovery.root && record.replacement.body === recovery.body
+                      : ['receipt', 'refresh', 'finalization'].includes(stage) ? recovery.awaitingNativeRefresh === true
                       && record?.replacement === recovery.replacementReceipt
                       && (!['refresh', 'finalization'].includes(stage) || recovery.refreshClaimed === true)
                       : recovery.awaitingNativeRefresh !== true)
@@ -5714,6 +5728,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                       recoveryVerified: recovery.verified === true, priorPromotions: count };
                     globalThis.__fixtureBoundRoutePromotions++;
                     history.pushState({}, '', initialRoute ? '\(localRoute)' : '\(finalRoute)');
+                    if (stage === 'certificate_return') {
+                      // Mutate only provider DOM/URL after the real helper
+                      // installs its receipt, before the awaiting caller can
+                      // consume it. No private proof or grant is supplied.
+                      if ('\(condition)' === 'changed_body') {
+                        const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                        body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery');
+                      } else if ('\(condition)' === 'wrong_model') document.getElementById('fixture-model-header').textContent = 'High';
+                      else if ('\(condition)' === 'normal_chat') {
+                        const temporary = document.querySelector('[aria-label="Turn off temporary chat"]');
+                        temporary.setAttribute('aria-label', 'Start temporary chat'); temporary.textContent = 'Start temporary chat';
+                      }
+                    }
                     if (\(sameNodeStart)) {
                       // Begin expansion on the natively pinned physical node,
                       // then cross the route and replace it after the actual
@@ -5741,6 +5768,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   if (exact && ['digest', 'two_routes', 'same_node_then_remount'].includes('\(crossing)')) promote('digest');
                   if (exact && ['refresh', 'receipt_then_refresh'].includes('\(crossing)')) promote('refresh');
                   if (exact && '\(crossing)' === 'receipt_then_finalization') promote('finalization');
+                  if (exact && '\(crossing)' === 'certificate_return') {
+                    // Bounded scheduling across the actual digest/receipt
+                    // awaits, without wall-clock delays or private setters.
+                    let remaining = 32;
+                    const afterReceipt = () => {
+                      const record = globalThis.__computaChatSubmissionState?.lastVerified;
+                      if (record?.replacement && recovery.awaitingNativeRefresh !== true) promote('certificate_return');
+                      else if (--remaining > 0) queueMicrotask(afterReceipt);
+                    };
+                    queueMicrotask(afterReceipt);
+                  }
                   // Let the hash caller resume first. Its synchronous guards
                   // then reach the awaited model recertification before this
                   // second microtask changes the route; no wall-clock race.
@@ -5752,6 +5790,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 }; return true;
                 """, world: world)
             var promotions = 0
+            if crossing == "certificate_return" {
+                var firstRouteCrossed = false
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    guard action == "inspect", !firstRouteCrossed, view.url?.path == "/" else { return }
+                    firstRouteCrossed = true
+                    // The initial fully verified read crosses root→local
+                    // before the replacement claim exists. Native must retain
+                    // that edge when the certificate-return read crosses again.
+                    _ = try? await self.evaluate(view, "globalThis.__fixtureBoundRoutePromotions++; history.pushState({}, '', '\(localRoute)'); return true;", world: world)
+                    try? await self.installBoundFirstUserCollapse(view, behavior: "remount")
+                }
+            }
             if ["receipt", "receipt_then_refresh", "receipt_then_finalization"].contains(crossing) {
                 fixture.transport.setBeforePageResultValidationForTesting { action in
                     guard action == "inspect" else { return }
@@ -5764,6 +5814,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                         || hasTwoRoutes && view.url?.path == "/c/local-chatgpt:bound-digest-promotion" else { return }
                 promotions += 1
                 if crossing == "receipt_then_finalization", promotions == 1 { return }
+                if crossing == "certificate_return" { return }
                 if condition == "changed_body" {
                     _ = try? await self.evaluate(view, """
                         const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
@@ -5812,7 +5863,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(witness?[key] as? Bool, !sameNodeStart, key)
             }
             XCTAssertEqual(witness?["startedOnOriginalNodes"] as? Bool, sameNodeStart)
-            XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh", "receipt_then_finalization"].contains(crossing))
+            XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh", "receipt_then_finalization", "certificate_return"].contains(crossing))
             XCTAssertEqual(witness?["recordPhase"] as? String, "verified")
             XCTAssertEqual(witness?["stage"] as? String,
                            crossing == "two_routes" || crossing == "same_node_then_remount" ? "digest" : ["receipt_then_refresh", "receipt_then_finalization"].contains(crossing) ? "receipt" : crossing)
@@ -5821,8 +5872,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(witness?["provisional"] as? Bool, false)
             XCTAssertEqual(witness?["pending"] as? Bool, false)
             XCTAssertEqual(witness?["finalDeadline"] as? Double, witness?["deadline"] as? Double)
-            XCTAssertEqual(promotions, condition == "second_local" ? (crossing == "receipt_then_finalization" ? 1 : 0) : hasTwoRoutes ? 2 : 1)
+            XCTAssertEqual(promotions, condition == "second_local" ? (["receipt_then_finalization", "certificate_return"].contains(crossing) ? 1 : 0) : hasTwoRoutes ? 2 : 1)
             XCTAssertEqual(witness?["routePromotions"] as? Int, hasTwoRoutes ? 2 : 1)
+            if crossing == "certificate_return" {
+                XCTAssertEqual(witness?["replacementReceiptCount"] as? Int, 1, "The installed certificate must be retained, never recreated")
+            }
             if crossing == "receipt_then_finalization" {
                 let finalization = try XCTUnwrap(witness?["finalizationCrossing"] as? [String: Any])
                 for key in ["entered", "replacementRetained", "refreshClaimed", "nativePinned"] {
@@ -5848,7 +5902,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     XCTAssertEqual(witness?["finalVerified"] as? Bool, true)
                     if crossing == "receipt_then_finalization" {
                         XCTAssertEqual(witness?["routeDiscardStage"] as? String, "finalization_hash")
-                    } else if !["receipt", "refresh", "receipt_then_refresh"].contains(crossing) {
+                    } else if !["receipt", "refresh", "receipt_then_refresh", "certificate_return"].contains(crossing) {
                         XCTAssertEqual(witness?["routeDiscardStage"] as? String, ["model", "ordinary_model"].contains(crossing) ? "model_read" : "body_hash")
                     }
                     XCTAssertEqual(witness?["finalRootPinned"] as? Bool, true)
