@@ -6900,12 +6900,36 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testInitialDisplayRecoveryRehashesAfterSecondPromotionBeforeNativeAdoptionWithoutReclick() async throws {
-        for condition in ["unchanged", "remounted", "late_read", "changed", "recollapsed", "work"] {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["unchanged", "remounted", "late_read", "changed", "recollapsed", "work"])
+    }
+
+    func testInitialDisplayRecoveryPromotingAtBodyHashBeforePrivatePinRequiresFreshASCIIProof() async throws {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["unchanged"], beforePrivatePin: true)
+    }
+
+    func testInitialDisplayRecoveryPromotingAtBodyHashBeforePrivatePinRequiresFreshUnicodeProof() async throws {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["unchanged"], beforePrivatePin: true, unicode: true)
+    }
+
+    func testInitialDisplayRecoveryPromotingBeforePrivatePinRejectsChangedProof() async throws {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["changed", "recollapsed", "work"], beforePrivatePin: true, unicode: true)
+    }
+
+    private func verifyInitialDisplayRecoverySecondPromotion(conditions: [String], beforePrivatePin: Bool = false,
+                                                            unicode: Bool = false) async throws {
+        for condition in conditions {
             let succeeds = ["unchanged", "remounted", "late_read"].contains(condition)
             let localRoute = "/c/local-chatgpt%3Arecovery-adoption?temporary-chat=true"
             let publicRoute = "/c/public-recovery-adoption?temporary-chat=true"
             let fixture = try Fixture(page: Self.collapsedFirstUserPage())
-            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil); fixture.shutdown() }
+            defer {
+                fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+                fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
+                fixture.shutdown()
+            }
+            fixture.transport.setRouteDiscardDiagnosticsObserverForTesting { records in
+                for record in records { print("InitialRecoveryRouteDiagnostic beforePin=\(beforePrivatePin) unicode=\(unicode) condition=\(condition) \(record)") }
+            }
             let choice = Self.fixtureChoice(.chatgpt)
             let started = try await fixturePhaseProbe("recovery_adoption_start") { try await startChoice(choice, in: fixture) }
             let token = try XCTUnwrap(started["sessionToken"] as? String)
@@ -6931,7 +6955,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     globalThis.__fixtureInitialAdoptionRoute = true;
                     history.pushState({}, '', '\(localRoute)');
                   } else if (!globalThis.__fixtureSecondAdoptionRoute && recovery?.initialRoute
-                    && recovery.outcome === 'expanded' && pinned
+                    && recovery.outcome === 'expanded'
+                    && (\(beforePrivatePin) ? !pinned && new TextDecoder().decode(arguments_[1]) === recovery.canonical : !!pinned)
                     && pending?.phase === 'send_claimed' && location.pathname.startsWith('/c/local-chatgpt')) {
                     globalThis.__fixtureSecondAdoptionRoute = true;
                     history.pushState({}, '', '\(publicRoute)');
@@ -6956,7 +6981,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                         """, world: privateWorld) as? [String: Any]
                     XCTAssertEqual(state?["initialRoute"] as? Bool, true, condition)
                     XCTAssertEqual(state?["outcome"] as? String, "expanded", condition)
-                    XCTAssertEqual(state?["privatePinned"] as? Bool, true, condition)
+                    XCTAssertEqual(state?["privatePinned"] as? Bool, !beforePrivatePin, condition)
+                    let encoded = try? JSONSerialization.data(withJSONObject: state ?? [:], options: .sortedKeys)
+                    if let encoded { print("InitialRecoverySecondEdge beforePin=\(beforePrivatePin) unicode=\(unicode) condition=\(condition) \(String(decoding: encoded, as: UTF8.self))") }
                     XCTAssertEqual(state?["pendingPhase"] as? String, "send_claimed", condition)
                     XCTAssertEqual(state?["revoked"] as? Bool, false, condition)
                     deadline = state?["deadline"] as? Double
@@ -6989,7 +7016,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             do {
                 _ = try await fixturePhaseProbe("recovery_adoption_send") {
                     try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
-                        "prompt": String(repeating: "Bound recovery canonical payload line.\n", count: 600)])
+                        "prompt": String(repeating: unicode ? "Bound recovery Café — 東京 🌙 e\u{301} payload line.\n"
+                            : "Bound recovery canonical payload line.\n", count: 600)])
                 }
                 complete = try await fixturePhaseProbe("recovery_adoption_complete") {
                     try await waitForState("complete", fixture.transport, token: token)
@@ -6997,8 +7025,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertTrue(succeeds, "Changed, collapsed or product-invalid pending proof cannot be adopted: \(condition)")
             } catch {
                 if succeeds { throw error }
+                // Before the private first pin exists, the continuation must
+                // reject product drift as missing ownership proof. The older
+                // post-pin path retains its specific product-mode failure.
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
-                    condition == "work" ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
+                    condition == "work" && !beforePrivatePin ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
             }
             XCTAssertEqual(transitions, 2, condition)
             let clicks = try await evaluate(view,
@@ -7035,7 +7066,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     XCTFail("A rejected pending adoption cannot be revived: \(condition)")
                 } catch {
                     XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
-                        condition == "work" ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
+                        condition == "work" && !beforePrivatePin ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
                 }
                 let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
                 XCTAssertEqual(finished["cleanup"] as? String, "failed", condition)

@@ -1459,8 +1459,8 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     const provisionalAllowance = { allowProvisionalFirstUserExpansion: true, allowBoundFirstUserExpansion: false,
       allowFirstUserBinding: true, allowFirstUserExpansion: true, expectedFirstUserFingerprint: null,
       firstUserExpansionModelChoice: choice };
-    const initialRouteStage = async (remount = false) => {
-      const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE INITIAL ROUTE\n' + 'x'.repeat(40_000));
+    const initialRouteStage = async (remount = false, text = 'PRIVATE INITIAL ROUTE\n' + 'x'.repeat(40_000)) => {
+      const x = await chatTurnFixture(choice), first = await x.dispatch(text);
       const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
       oldBody.text = first.outbound.slice(0, 10_240);
       const initialControl = new Element('BUTTON', { 'aria-label': 'Show more' }); oldRoot.append(initialControl);
@@ -1499,6 +1499,110 @@ describe('ChatGPT per-round canonical submission ownership', () => {
           initialExpansionOldRootConnected: !remount, initialExpansionOldBodyConnected: !remount, initialExpansionDeadlineLive: true });
         body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, allowance));
         expect(initialControl.clicks + (remount ? expand.clicks : 0)).toBe(2);
+      }
+    });
+
+    test('initial display recapture carries the second native route before either first pin exists', async () => {
+      for (const [text, remount, timing] of [['ASCII', true, 'body_hash'], ['café — 東京 😀', true, 'body_hash'],
+        ['ASCII', false, 'body_hash'], ['ASCII', true, 'model_read']] as const) {
+        const { x, first, body, expand, initialControl, initial, record, continuation } = await initialRouteStage(remount,
+          text + '\n' + 'x'.repeat(40_000));
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-before-pin?temporary-chat=true';
+        let crossed = false;
+        const promote = () => {
+          const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+          expect(candidate).toMatchObject({ initialRoute: true, outcome: 'expanded', remount });
+          expect(x.f.world.__computaModelFirstProof).toBeUndefined(); expect(record.nativeFirstPinned).not.toBe(true);
+          expect(record.phase).toBe('send_claimed'); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+          crossed = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-before-pin';
+        };
+        if (timing === 'body_hash') x.f.onDigest(promote, first.outbound);
+        else {
+          let hashed = false; x.f.onDigest(() => { hashed = true; }, first.outbound);
+          const open = x.picker!.trigger.onClick!;
+          x.picker!.trigger.onClick = () => { open(); if (hashed && !crossed) promote(); };
+        }
+        const discarded = await x.observe(first, continuation); denied(discarded); expect(crossed).toBe(true);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: timing });
+        expect(candidate.routeContinuationEdges).toEqual(continuation.firstUserExpansionRouteContinuation);
+        expect(candidate).not.toHaveProperty('verified', true); expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+        expect(record.phase).toBe('send_claimed'); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        const before = x.f.digestInputs.length;
+        const result = await x.observe(first, { ...continuation,
+          firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] });
+        expect(result.error).toBeUndefined(); expect(result.firstUserFingerprint).toBe(first.fingerprint);
+        expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+        expect(x.f.digestInputs.slice(before).filter(value => value === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.body).toBe(body); expect(record.phase).toBe('verified'); expect(candidate.verified).toBe(true);
+        expect(candidate.routeContinuationEdges).toHaveLength(2); expect(candidate.deadline).toBe(initial.deadline);
+        expect(initialControl.clicks).toBe(remount ? 1 : 2); expect(expand.clicks).toBe(remount ? 1 : 2); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('pending initial route witness rejects changed full proof and never revives a rejected display', async () => {
+      for (const mutation of ['body', 'model', 'temporary', 'owner', 'deadline', 'stale_lease', 'second_remount',
+        'private_pin', 'native_pin', 'record_hash', 'missing_edge', 'malformed_edge', 'extra_edge']) {
+        const { x, first, body, expand, initialControl, initial, record, continuation } = await initialRouteStage(true);
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-negative?temporary-chat=true';
+        const edges = continuation.firstUserExpansionRouteContinuation.map(edge => ({ ...edge }));
+        const owner = x.f.world.__computaModelOwner;
+        x.f.onDigest(() => {
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-negative';
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'deadline') x.f.advanceTime(2_000);
+          if (mutation === 'stale_lease') x.f.world.__computaChatActiveInvocation = {};
+          if (mutation === 'second_remount') replaceRoot(x);
+          if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+          if (mutation === 'native_pin') record.nativeFirstPinned = true;
+          if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+          if (mutation === 'missing_edge') continuation.firstUserExpansionRouteContinuation.splice(0);
+          if (mutation === 'malformed_edge') Object.assign(continuation.firstUserExpansionRouteContinuation[0], { extra: true });
+          if (mutation === 'extra_edge') continuation.firstUserExpansionRouteContinuation.push({ fromURL, toURL });
+        }, first.outbound);
+        denied(await x.observe(first, continuation));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(record.phase).toBe('send_claimed');
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.temporary.connected = true;
+        x.f.world.__computaModelOwner = owner; delete x.f.world.__computaModelFirstProof;
+        record.nativeFirstPinned = false; record.fingerprint = first.fingerprint;
+        denied(await x.observe(first, { ...continuation, firstUserExpansionRouteContinuation: [...edges, { fromURL, toURL }] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(candidate.deadline).toBe(initial.deadline);
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('pending initial continuation requires the exact second edge and fresh unchanged pending authority', async () => {
+      for (const mutation of ['no_edge', 'wrong_edge', 'extra_edge', 'record', 'body', 'second_remount', 'private_pin', 'native_pin', 'deadline']) {
+        const { x, first, body, expand, initialControl, initial, record, continuation } = await initialRouteStage(true);
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-continuation?temporary-chat=true';
+        x.f.onDigest(() => { x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-continuation'; }, first.outbound);
+        denied(await x.observe(first, continuation));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL });
+        const edges = [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }], overrides: any = { ...continuation, firstUserExpansionRouteContinuation: edges };
+        if (mutation === 'no_edge') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'wrong_edge') overrides.firstUserExpansionRouteContinuation = [{ fromURL: 'https://chatgpt.com/c/foreign', toURL }];
+        if (mutation === 'extra_edge') overrides.firstUserExpansionRouteContinuation = [...edges, { fromURL: toURL, toURL: 'https://chatgpt.com/c/third' }];
+        if (mutation === 'record') (x.f.world.__computaChatSubmissionState as any).pending = { ...record };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'second_remount') replaceRoot(x);
+        if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+        if (mutation === 'native_pin') record.nativeFirstPinned = true;
+        if (mutation === 'deadline') x.f.advanceTime(2_000);
+        denied(await x.observe(first, overrides));
+        body.text = first.outbound; delete x.f.world.__computaModelFirstProof; record.nativeFirstPinned = false;
+        (x.f.world.__computaChatSubmissionState as any).pending = record;
+        denied(await x.observe(first, { ...continuation, firstUserExpansionRouteContinuation: edges }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(candidate.deadline).toBe(initial.deadline); expect(initialControl.clicks).toBe(1);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
       }
     });
 
