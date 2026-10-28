@@ -2727,9 +2727,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "state_model", "expected_model", "expansion_model", "product", "temporary",
         "model_pins", "conversation_identity", "conversation_route", "conversation_url"]
     private static let boundCertificateLabels: [String: Set<String>] = [
-        "stage": ["model_read", "model_context", "replacement_observation", "receipt_context"],
+        "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
         "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
-                 "receipt_body", "receipt_old_root", "receipt_old_body"],
+                 "receipt_body", "receipt_old_root", "receipt_old_body", "rendered", "fingerprint", "route_guard"],
         "contextFailure": ["not_checked", "none", "frame", "provider", "origin", "owner", "user_count", "submission",
             "submission_count", "marker", "prompt", "private_pin", "product", "temporary", "root", "body",
             "conversation_route", "conversation_identity", "url"],

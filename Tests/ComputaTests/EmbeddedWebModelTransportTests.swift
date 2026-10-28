@@ -5652,13 +5652,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await verifyBoundRemountPromotion(conditions: ["changed_body"], crossing: "certificate_return", verifyCertificateDiagnostic: true)
     }
 
-    private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest", verifyCertificateDiagnostic: Bool = false) async throws {
+    func testBoundFullHashFirstFailureSurvivesDiscardSpentReadAndCleanupWithoutAnotherAction() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["normal_chat"], crossing: "product_then_hash",
+                                             verifyCertificateDiagnostic: true, mutateAtFullHash: true)
+    }
+
+    private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest", verifyCertificateDiagnostic: Bool = false,
+                                            mutateAtFullHash: Bool = false) async throws {
         for condition in conditions {
-            let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization", "certificate_return"].contains(crossing)
+            let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization", "certificate_return", "product_then_hash"].contains(crossing)
             let sameNodeStart = ["same_node_then_remount", "ordinary_model"].contains(crossing)
             let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
             defer {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
+                fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
                 fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
                 fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
                 fixture.transport.setBoundCertificateDiagnosticsObserverForTesting(nil)
@@ -5683,7 +5690,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 return record?.nativeFirstPinned === true && record.phase === 'verified' && state.pending == null;
                 """, world: world) as? Bool
             XCTAssertEqual(nativeBound, true, "The race must begin after native adopted the first prompt")
-            if crossing != "certificate_return" {
+            if !["certificate_return", "product_then_hash"].contains(crossing) {
                 try await installBoundFirstUserCollapse(view, behavior: sameNodeStart ? "success" : "remount")
             }
             // Observe private recovery, but mutate only the real page URL and
@@ -5733,10 +5740,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                       recoveryVerified: recovery.verified === true, priorPromotions: count };
                     globalThis.__fixtureBoundRoutePromotions++;
                     history.pushState({}, '', initialRoute ? '\(localRoute)' : '\(finalRoute)');
-                    if (stage === 'certificate_return') {
-                      // Mutate only provider DOM/URL after the real helper
-                      // installs its receipt, before the awaiting caller can
-                      // consume it. No private proof or grant is supplied.
+                    if (stage === 'certificate_return' || \(mutateAtFullHash) && stage === 'digest') {
+                      // Mutate only provider DOM/URL at the selected actual
+                      // full-body hash or receipt-return boundary. No private
+                      // proof or grant is supplied.
                       if ('\(condition)' === 'changed_body') {
                         const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
                         body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery');
@@ -5770,7 +5777,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   if (exact && recovery.outcome === 'expanded') firstExpandedHashCompleted = true;
                   if (exact && location.pathname === '/c/public-bound-digest-promotion')
                     globalThis.__fixtureBoundFinalRouteHashes++;
-                  if (exact && ['digest', 'two_routes', 'same_node_then_remount'].includes('\(crossing)')) promote('digest');
+                  if (exact && ['digest', 'two_routes', 'same_node_then_remount', 'product_then_hash'].includes('\(crossing)')) promote('digest');
                   if (exact && ['refresh', 'receipt_then_refresh'].includes('\(crossing)')) promote('refresh');
                   if (exact && '\(crossing)' === 'receipt_then_finalization') promote('finalization');
                   if (exact && '\(crossing)' === 'certificate_return') {
@@ -5795,10 +5802,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 }; return true;
                 """, world: world)
             var promotions = 0
-            if crossing == "certificate_return" {
+            var nativeReadContexts: [(String, Bool)] = []
+            if crossing == "product_then_hash" {
+                fixture.transport.setBeforePageResultValidationDetailedForTesting { action, enforceModel in
+                    nativeReadContexts.append((action, enforceModel))
+                }
+            }
+            if ["certificate_return", "product_then_hash"].contains(crossing) {
                 var firstRouteCrossed = false
                 fixture.transport.setBeforePageResultValidationForTesting { action in
-                    guard action == "inspect", !firstRouteCrossed, view.url?.path == "/" else { return }
+                    guard action == (crossing == "product_then_hash" ? "verifyProductMode" : "inspect"),
+                          !firstRouteCrossed, view.url?.path == "/" else { return }
                     firstRouteCrossed = true
                     // The initial fully verified read crosses root→local
                     // before the replacement claim exists. Native must retain
@@ -5820,6 +5834,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 promotions += 1
                 if crossing == "receipt_then_finalization", promotions == 1 { return }
                 if crossing == "certificate_return" { return }
+                if mutateAtFullHash { return }
                 if condition == "changed_body" {
                     _ = try? await self.evaluate(view, """
                         const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
@@ -5873,13 +5888,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh", "receipt_then_finalization", "certificate_return"].contains(crossing))
             XCTAssertEqual(witness?["recordPhase"] as? String, "verified")
             XCTAssertEqual(witness?["stage"] as? String,
-                           crossing == "two_routes" || crossing == "same_node_then_remount" ? "digest" : ["receipt_then_refresh", "receipt_then_finalization"].contains(crossing) ? "receipt" : crossing)
+                           ["two_routes", "same_node_then_remount", "product_then_hash"].contains(crossing) ? "digest" : ["receipt_then_refresh", "receipt_then_finalization"].contains(crossing) ? "receipt" : crossing)
             XCTAssertEqual(witness?["outcome"] as? String, "expanded")
             XCTAssertEqual(witness?["recoveryVerified"] as? Bool, false)
             XCTAssertEqual(witness?["provisional"] as? Bool, false)
             XCTAssertEqual(witness?["pending"] as? Bool, false)
             XCTAssertEqual(witness?["finalDeadline"] as? Double, witness?["deadline"] as? Double)
-            XCTAssertEqual(promotions, condition == "second_local" ? (["receipt_then_finalization", "certificate_return"].contains(crossing) ? 1 : 0) : hasTwoRoutes ? 2 : 1)
+            // A product-only read has no expansion grant to extend. Its root
+            // promotion therefore precedes, rather than consumes, the one
+            // bounded inspect continuation in this specific fixture.
+            XCTAssertEqual(promotions, crossing == "product_then_hash" ? 1
+                : condition == "second_local" ? (["receipt_then_finalization", "certificate_return"].contains(crossing) ? 1 : 0) : hasTwoRoutes ? 2 : 1)
             XCTAssertEqual(witness?["routePromotions"] as? Int, hasTwoRoutes ? 2 : 1)
             if crossing == "certificate_return" {
                 XCTAssertEqual(witness?["replacementReceiptCount"] as? Int, 1, "The installed certificate must be retained, never recreated")
@@ -5956,12 +5975,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 if verifyCertificateDiagnostic {
                     let discarded = try XCTUnwrap(routeDiagnostics.first { $0.contains("chatgpt_bound_certificate_v1") })
                     let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(discarded.utf8)) as? [String: Any])
-                    XCTAssertEqual(first["stage"] as? String, "receipt_context")
+                    XCTAssertEqual(first["stage"] as? String, mutateAtFullHash ? "body_hash" : "receipt_context")
                     XCTAssertEqual(first["rule"] as? String, "context")
-                    XCTAssertEqual(first["routeRule"] as? String, "body_canonical")
-                    XCTAssertEqual(first["receiptPresent"] as? Bool, true)
-                    XCTAssertEqual(first["receiptNodesMatch"] as? Bool, true)
-                    XCTAssertEqual(first["receiptRetained"] as? Bool, true)
+                    XCTAssertEqual(first["routeRule"] as? String, mutateAtFullHash ? "temporary" : "body_canonical")
+                    XCTAssertEqual(first["receiptPresent"] as? Bool, !mutateAtFullHash)
+                    XCTAssertEqual(first["receiptNodesMatch"] as? Bool, !mutateAtFullHash)
+                    XCTAssertEqual(first["receiptRetained"] as? Bool, !mutateAtFullHash)
+                    if mutateAtFullHash {
+                        XCTAssertEqual(first["expectedModelPresent"] as? Bool, true)
+                        XCTAssertEqual(first["deferModelVerification"] as? Bool, true)
+                        let productIndex = try XCTUnwrap(nativeReadContexts.firstIndex { $0.0 == "verifyProductMode" })
+                        XCTAssertFalse(nativeReadContexts[productIndex].1)
+                        XCTAssertTrue(nativeReadContexts.dropFirst(productIndex + 1).contains { $0.0 == "inspect" && !$0.1 },
+                            "The real product-only recheck must promote into inspect with its original native enforcement flag")
+                    }
                     XCTAssertFalse(certificateDiagnostics.isEmpty, "The next spent read must retain the original rejected guard")
                     let priorCount = certificateDiagnostics.count
                     let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -10981,6 +11008,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                      "expected_model", "expansion_model", "model_pins", "conversation_identity"] {
             var value = valid; value["routeRule"] = rule
             XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt)?["routeRule"] as? String, rule)
+        }
+        for stage in ["body_hash", "replacement_hash", "finalization_hash"] {
+            for rule in ["context", "rendered", "fingerprint", "route_guard"] {
+                var value = valid; value["stage"] = stage; value["rule"] = rule
+                XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt) as NSDictionary?, value as NSDictionary)
+            }
         }
     }
 

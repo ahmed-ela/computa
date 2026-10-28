@@ -256,6 +256,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
   let adapterClockOffset = 0;
   let digestHook: (() => void | Promise<void>) | undefined;
   let digestExpectedText: string | undefined;
+  let digestReplacement: { bytes: ArrayBuffer, expectedText: string } | null = null;
   let productBootstrapped = false;
   const invoke = (request: Record<string, unknown>, useHook = true) => execute({ provider: 'chatgpt', ownerToken, bindOwner: true,
     expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
@@ -273,6 +274,9 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       if (useHook && (digestExpectedText === undefined || new TextDecoder().decode(data) === digestExpectedText)) {
         const hook = digestHook; digestHook = undefined; digestExpectedText = undefined; await hook?.();
       }
+      if (digestReplacement?.expectedText === new TextDecoder().decode(data)) {
+        const replacement = digestReplacement.bytes; digestReplacement = null; return replacement;
+      }
       return digest;
     } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
   return { rawRun: invoke, messages, posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, digestInputs, userBody, answer: outer,
@@ -283,6 +287,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root); return root;
     },
     onDigest: (hook: () => void | Promise<void>, expectedText?: string) => { digestHook = hook; digestExpectedText = expectedText; },
+    replaceNextDigest: (bytes: ArrayBuffer, expectedText: string) => { digestReplacement = { bytes, expectedText }; },
     diagnose: (overrides: Record<string, unknown> = {}) => invoke({ action: 'failedPageDiagnostic', bindOwner: false, ...overrides }),
     submit: (prompt: string) => invoke({ action: 'submit', prompt }),
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
@@ -2650,6 +2655,60 @@ describe('ChatGPT per-round canonical submission ownership', () => {
           receiptPresent: true, receiptNodesMatch: true, receiptRetained: true,
           expectedModelPresent: false, deferModelVerification: false } });
       expect(candidate).not.toHaveProperty('verified', true);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('bound body-hash diagnostics retain exact route refusals before any replacement certificate exists', async () => {
+      for (const [mutation, routeRule] of [['body', 'body_canonical'], ['model', 'model_pins'], ['owner', 'global_owner'],
+        ['temporary', 'temporary'], ['expected_model', 'expected_model']] as const) {
+        const { x, first, record, body, oldRoot, oldBody, expand } = await remounted();
+        const owner = x.f.world.__computaModelOwner;
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-body-hash-diagnostic?temporary-chat=true';
+        let crossed = false;
+        x.f.onDigest(() => {
+          crossed = true; x.f.document.URL = toURL; x.f.location.pathname = new URL(toURL).pathname;
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+        }, first.outbound);
+        const result = await x.observe(first, { ...allowance, ...(mutation === 'expected_model' ? { expectedModelChoice: null } : {}) });
+        expect(crossed).toBe(true); denied(result);
+        expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'body_hash', rule: 'context', routeRule,
+          observedError: 'none', receiptPresent: false, receiptNodesMatch: false, receiptRetained: false,
+          awaitingNativeRefresh: false, refreshClaimed: false, expectedModelPresent: mutation !== 'expected_model' });
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ reason: 'pinned_fingerprint', scope: 'digest' });
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, initial = result.boundCertificateDiagnostic;
+        expect(candidate).not.toHaveProperty('verified', true); expect(candidate.routeDiscard).toBeUndefined();
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner; x.f.temporary.connected = true;
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...allowance, action, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+          denied(refused); expect(refused.boundCertificateDiagnostic).toEqual(initial);
+        }
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('bound body-hash diagnostics distinguish an incorrect digest from context failure without adopting it', async () => {
+      const { x, first, record, oldRoot, oldBody, expand } = await remounted();
+      x.f.replaceNextDigest(new Uint8Array(32).buffer, first.outbound);
+      const result = await x.observe(first, allowance); denied(result);
+      expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'body_hash', rule: 'fingerprint',
+        contextFailure: 'none', routeRule: 'url_unchanged', receiptPresent: false });
+      expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+      const later = await x.observe(first, allowance); denied(later);
+      expect(later.boundCertificateDiagnostic).toEqual(result.boundCertificateDiagnostic);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('shared route refusal diagnostics cover ordinary model-read terminal guards without another proof or action', async () => {
+      const { x, first, expand, result, fromURL, toURL } = await lateOrdinaryModelRoute(true, 'deadline');
+      denied(result);
+      expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'model_read', rule: 'route_guard',
+        routeRule: 'deadline_expired', contextFailure: 'not_checked', receiptPresent: false });
+      const later = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      denied(later); expect(later.boundCertificateDiagnostic).toEqual(result.boundCertificateDiagnostic);
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
     });
 

@@ -263,6 +263,47 @@ private diagnostic fields and verify that stripping them preserves the original
 response/error fields. The existing certificate-return positive and concurrent
 change negatives continue to pass.
 
+The independently verified installed build 310 completed its first Chat / Instant
+inference and one read-only `browser_tabs` call, then failed the next inference
+after 13.646 seconds overall. No email fields were filled and no email was sent.
+The failed inference crossed root-to-local during product verification and
+local-to-public during the full-body hash. It rejected `pinned_fingerprint` before
+entering the remount certifier, so the new certificate diagnostic was correctly
+absent. That error combines context, canonical-text and fingerprint checks; it
+does not by itself prove a changed fingerprint. Later reads matched the complete
+61,990-character prompt, but cannot establish the state at the earlier rejection.
+The exact earlier rejection remains unresolved. Failed evidence is retained,
+diagnostic arms and the watcher were cleaned up, and website cleanup remains
+unconfirmed. This result does not qualify the live email workflow.
+
+Build 311 extends the same bounded first-failure diagnostic to the earlier
+body-hash check. It distinguishes the already-evaluated context, rendered-text
+and fingerprint predicates and records the exact route-helper rejection. The
+shared result boundary also retains otherwise unreported terminal route-helper
+refusals. The existing first record remains immutable, and its fourteen-field
+shape, private-value exclusions and native stripping stay unchanged. Predicate
+order and short-circuit evaluation are preserved; no proof is repeated solely
+for diagnostics. This is further instrumentation, not a behavioral repair.
+
+All 523 adapter tests pass (25,428 assertions). Three new diagnostic cases fail
+against the immutable build-310 resource because the first-failure record is
+missing; the candidate passes all five focused diagnostic tests. Context drift,
+an incorrect digest, missing expected-model input and a terminal route refusal
+remain rejected. The tests distinguish those causes and retain the first record
+through later spent reads and cleanup without admitting a response or replaying
+an action.
+
+Eleven focused native tests pass. The new real-WebKit case reaches the ordinary
+poll's product-only verification, then the inherited inspect call, across two
+actual URL changes. Both nested reads retain their original model-enforcement
+flag; the expected-model input and deferred verification are present. A deliberate
+temporary-control change at the full hash is rejected with the exact first cause,
+retained through the spent read and failed cleanup, with one Send and one
+initial display expansion plus one bound recovery expansion. The immutable
+build-310 adapter fails only the new diagnostic assertion
+in the same final native test binary. This proves diagnostic coverage and the
+normal path's arguments, not the unknown cause of real run 310.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

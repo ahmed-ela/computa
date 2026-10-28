@@ -5360,8 +5360,10 @@ function chatGPTPendingInitialRouteDiscard(candidate, fingerprint, stage) {
 // present the native-certified route edge and repeat the complete proof.
 // First rejected operand only; diagnostics never supply ownership authority.
 let chatGPTBoundRouteFailureRule = 'not_attempted';
+let chatGPTBoundRouteFailureStage = null, chatGPTBoundRouteFailureCandidate = null;
 function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedDiscard = null) {
   chatGPTBoundRouteFailureRule = 'none';
+  chatGPTBoundRouteFailureStage = stage; chatGPTBoundRouteFailureCandidate = candidate;
   const reject = (rule, value) => {
     if (value && chatGPTBoundRouteFailureRule === 'none') chatGPTBoundRouteFailureRule = rule;
     return value;
@@ -6187,6 +6189,12 @@ function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, 
 function chatGPTWithRecoveryLifecycle(observed, path = 'other') {
   const candidate = globalThis.__computaModelBoundFirstExpansion;
   if (!candidate) return observed;
+  // Keep otherwise-unreported terminal route refusals at the shared result
+  // boundary. The certifier/body-hash callers retain their more precise first
+  // checkpoint before reaching here. No proof is evaluated for diagnostics.
+  if (candidate === chatGPTBoundRouteFailureCandidate && chatGPTBoundRouteFailureRule !== 'none'
+    && ['body_hash', 'model_read', 'replacement_hash', 'finalization_hash'].includes(chatGPTBoundRouteFailureStage))
+    chatGPTLatchCertificateFailure(candidate, chatGPTBoundRouteFailureStage, 'route_guard', 'not_checked', observed);
   const recoveryLifecycle = chatGPTRecoveryLifecycle(path);
   const boundCertificateDiagnostic = candidate.certificateDiagnosticDocument === document
     && candidate.certificateDiagnosticOwner === input.ownerToken ? candidate.certificateDiagnostic : null;
@@ -6422,11 +6430,17 @@ if (ownedUserCount > 0) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const boundRecovery = expansion?.bound ? expansion : boundRefresh;
-  if (boundRecovery && (!chatGPTFirstUserExpansionContext(boundRecovery)
-    || rendered !== boundRecovery.canonical || fingerprint !== boundRecovery.fingerprint))
-    return chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
-      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash')
-      || chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
+  let boundHashFailure = 'none', boundHashContextFailure = null;
+  const rejectBoundHash = (rule, value) => { if (value && boundHashFailure === 'none') boundHashFailure = rule; return value; };
+  if (boundRecovery && (rejectBoundHash('context', (boundHashContextFailure = chatGPTFirstUserExpansionContextFailure(boundRecovery)) !== null)
+    || rejectBoundHash('rendered', rendered !== boundRecovery.canonical)
+    || rejectBoundHash('fingerprint', fingerprint !== boundRecovery.fingerprint))) {
+    const continued = chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
+      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash');
+    if (continued) return continued;
+    chatGPTLatchCertificateFailure(boundRecovery, 'body_hash', boundHashFailure, boundHashContextFailure);
+    return chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
+  }
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
     { snapshotIntact: snapshotUnchanged(true), fingerprint }, chatGPTTemporaryVerified())
     || await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
