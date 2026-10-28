@@ -6381,6 +6381,91 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testPendingPrivateFirstProofRecoversCollapsedRemountAfterRouteBeforeSubmissionAdoption() async throws {
+        for condition in ["remount", "remount_changed", "partial_remount", "expired"] {
+            let succeeds = condition == "remount"
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage())
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil); fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await fixturePhaseProbe("pending_private_start") { try await startChoice(choice, in: fixture) }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await fixturePhaseProbe("pending_private_ready") { try await waitForState("ready", fixture.transport, token: token) }
+            let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            _ = try await evaluate(view, """
+                const original = crypto.subtle.digest.bind(crypto.subtle);
+                crypto.subtle.digest = async (...args) => {
+                  const result = await original(...args);
+                  const state = globalThis.__computaChatSubmissionState;
+                  if (!globalThis.__fixturePendingPrivateRoute && location.pathname === '/'
+                    && globalThis.__computaModelFirstProof && state?.pending?.phase === 'send_claimed'
+                    && !state.lastVerified && !globalThis.__computaModelBoundFirstExpansion) {
+                    globalThis.__fixturePendingPrivateRoute = true;
+                    history.pushState({}, '', '/c/local-chatgpt%3Apending-private?temporary-chat=true');
+                  }
+                  return result;
+                }; return true;
+                """, world: world)
+            var transitions = 0
+            var initialDeadline: Double?
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                guard checkpoint == .routeAccepted else { return }
+                transitions += 1
+                let state = try? await self.evaluate(view, """
+                    const s = globalThis.__computaChatSubmissionState;
+                    return { pinned: !!globalThis.__computaModelFirstProof, pending: s?.pending?.phase,
+                      lastVerified: !!s?.lastVerified, recovery: !!globalThis.__computaModelBoundFirstExpansion,
+                      deadline: globalThis.__computaModelFirstExpansion?.deadline };
+                    """, world: world) as? [String: Any]
+                XCTAssertEqual(state?["pinned"] as? Bool, true, condition)
+                XCTAssertEqual(state?["pending"] as? String, "send_claimed", condition)
+                XCTAssertEqual(state?["lastVerified"] as? Bool, false, condition)
+                XCTAssertEqual(state?["recovery"] as? Bool, false, condition)
+                initialDeadline = state?["deadline"] as? Double
+                try? await self.installBoundFirstUserCollapse(view, behavior: condition == "expired" ? "remount" : condition)
+                if condition == "expired" { try? await Task.sleep(for: .milliseconds(1_900)) }
+            }
+            do {
+                _ = try await fixturePhaseProbe("pending_private_send") {
+                    try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": String(repeating: "Bound recovery pending-private payload line.\n", count: 600)])
+                }
+                let complete = try await fixturePhaseProbe("pending_private_complete") {
+                    try await waitForState("complete", fixture.transport, token: token)
+                }
+                XCTAssertTrue(succeeds, condition)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(complete, choice: choice)
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
+                let deadline = try await evaluate(view, "return globalThis.__computaModelBoundFirstExpansion?.deadline;", world: world) as? Double
+                XCTAssertNotNil(initialDeadline)
+                XCTAssertEqual(deadline, initialDeadline, "Recovery must not renew the original display deadline")
+            } catch {
+                if succeeds { throw error }
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition)
+            }
+            XCTAssertEqual(transitions, 1, condition)
+            let clicks = try await evaluate(view, "return {initial: window.fixtureExpansionClicks, recovery: window.fixtureBoundExpansionClicks};") as? [String: Int]
+            XCTAssertEqual(clicks?["initial"], 1, condition)
+            XCTAssertEqual(clicks?["recovery"], condition == "remount" || condition == "remount_changed" ? 1 : 0, condition)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            if !succeeds {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Rejected pending adoption cannot be revived")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+            }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, succeeds ? "not_created" : "failed")
+            if succeeds { try await assertHumanTabIntact(fixture) }
+            else { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+        }
+    }
+
     func testInitialDisplayRecoveryRehashesAfterSecondPromotionBeforeNativeAdoptionWithoutReclick() async throws {
         for condition in ["unchanged", "remounted", "late_read", "changed", "recollapsed", "work"] {
             let succeeds = ["unchanged", "remounted", "late_read"].contains(condition)

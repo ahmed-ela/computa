@@ -3561,3 +3561,66 @@ allowed-key test is retained; its schema expectation was corrected and the full
 suite rerun passed. Source-hashed receipts are
 `recovery290-diagnostics-tests/full-final-result.json` and
 `swift290-recovery-diagnostic-tests-result.json`. Live capture remains pending.
+
+### Build 290 controlled action: delivery succeeded, final inference failed
+
+The signed installed build290 (`10ed16566760db700b4f201f538e7c3939d7a6be`)
+passed its exact no-tool seed in 8.603 seconds with verified Instant ownership
+and a saved closed-session receipt. This pass used a different adoption path
+and does not establish that the previous intermittent failure was fixed.
+
+Its independent local mailbox task then completed seven model inferences and
+seven browser tools (open, navigate, three fills, click, wait). Each completed
+inference retained current Instant/temporary/submission proof and closed cleanup.
+Exactly one local POST delivered the requested recipient, subject and body with
+receipt `LOCAL-d80916ab6cbf2504`. The eighth inference failed before it could
+produce the final answer; the native task ended Failed after 57.441 seconds.
+This is local fixture delivery evidence, not an external-email delivery claim.
+The action was not replayed. The app closed its one task-created fixture tab;
+root stopped the exact fixture process after preserving the evidence. The final
+website-session cleanup remains unconfirmed.
+
+The new diagnostics capture `document_changed / model_read_context` on the first
+route discard, followed about 29 milliseconds later by `marker_not_final`. The
+current body is a 10,239-character prefix of the 114,960-character prompt, with
+one scoped expansion control. The private first-message pin exists, native has
+zero confirmed users and a pending submission, and no recovery claim exists.
+The prior initial expansion succeeded with complete canonical bytes and a live
+deadline; its old nodes are both detached. The recovery admission failure is
+`private_pin`. Exact evidence is retained in
+`candidate290-plan/fresh-send/terminal-capture/failed-inference-diagnostics/`.
+
+### Build 291: pending private proof before native submission adoption
+
+The missing stage is a private first-message proof created before the separate
+submitted-body hash completes. A certified route transition can discard that
+submission read; ChatGPT then replaces and collapses the message. Existing
+provisional recovery expects a completed submission record, while initial-route
+recovery expects no private pin. Neither admits this intermediate state.
+
+Both JavaScript and actual-WebKit regressions reproduce rejection on unchanged
+build290 production source. The native route checkpoint verifies private pin
+present, pending `send_claimed`, no last-verified record and no recovery claim.
+Its preserved pre-teardown error is `javaScriptFirstUser`; WebKit teardown also
+reports an `InvalidTransition`, which is retained separately and is not the
+causal assertion.
+
+Build291 adds a pending-private case to the existing provisional recovery claim.
+It requires the pending first outbound hash to equal the private full-message
+hash, no native pin or completed submission, a successful exact predecessor,
+both predecessor nodes detached, and the already certified first-route chain.
+The one shared recovery claim retains the predecessor's original deadline.
+After expansion, current complete canonical bytes and their hashes still pass
+ordinary submission adoption and model/product/temporary checks. The existing
+URL-only discard handling applies to this same pending stage; it grants no answer
+or submission authority from a discarded observation. Final validation and live
+qualification are pending.
+
+Frozen build291 validation passed 485 adapter tests / 19,988 assertions and
+24 focused native tests. The new WebKit regression now passes recovery after
+the exact pending-private boundary; changed full text, mixed old/new nodes
+and expired deadlines remain rejected, with no repeat Send or deadline renewal.
+JavaScript coverage additionally checks 16 admission negatives, five post-click
+failures and a second route discard requiring fresh complete proof. Evidence is
+`pending291-tests/full-result.json` and
+`swift291-pending-private-final-tests-result.json`. Live qualification is pending.

@@ -5120,6 +5120,19 @@ function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
 // lost merely because the expansion was correctly refused.
 let chatGPTFirstUserExpansionAdmissionFailure = null;
 let chatGPTInitialRouteRecovery = null;
+function chatGPTFirstUserExpansionRouteStart(candidate) {
+  const edges = input.firstUserExpansionRouteContinuation;
+  const valid = !!candidate && Array.isArray(edges) && edges.length >= 1 && edges.length <= 2
+    && Object.keys(edges).join(',') === (edges.length === 1 ? '0' : '0,1')
+    && edges.every((edge, index) => edge && !Array.isArray(edge) && typeof edge === 'object'
+      && Object.keys(edge).sort().join(',') === 'fromURL,toURL'
+      && typeof edge.fromURL === 'string' && typeof edge.toURL === 'string' && edge.fromURL !== edge.toURL
+      && (index === 0 || edges[index - 1].toURL === edge.fromURL))
+    && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1
+    && edges.at(-1).toURL === input.expectedURL && document.URL === input.expectedURL;
+  const starts = valid ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
+  return starts.length === 1 ? starts[0] : -1;
+}
 function chatGPTBoundFirstUserExpansionPins(candidate) {
   const state = candidate.state, record = candidate.record, pinned = globalThis.__computaModelFirstProof;
   return input.action === 'inspect' && input.suppressFirstUserExpansionClaim !== true && (candidate.provisional || candidate.initialRoute
@@ -5130,22 +5143,24 @@ function chatGPTBoundFirstUserExpansionPins(candidate) {
     : input.allowBoundFirstUserExpansion === true && input.allowProvisionalFirstUserExpansion !== true
       && input.allowFirstUserBinding !== true && input.allowFirstUserExpansion !== true)
     && state === globalThis.__computaChatSubmissionState && chatGPTSubmissionContext(state)
-    && record?.sequence === 1 && (candidate.initialRoute
+    && record?.sequence === 1 && (candidate.initialRoute || candidate.pendingPrivate
       ? state.pending === record && state.lastVerified == null && record.phase === 'send_claimed'
-        && record.root == null && record.body == null && pinned == null
-        && candidate.predecessor === globalThis.__computaModelFirstExpansion
+        && record.root == null && record.body == null
+        && (candidate.pendingPrivate ? pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint : pinned == null)
+        && candidate.predecessor != null && candidate.predecessor === globalThis.__computaModelFirstExpansion
         && candidate.predecessor.outcome === 'expanded' && candidate.predecessor.contextFailure == null
         && candidate.predecessor.clicked === true && candidate.predecessor.expandedText === record.canonical
         && candidate.predecessor.document === document && candidate.predecessor.owner === input.ownerToken
         && candidate.predecessor.prompt === candidate.prompt && candidate.predecessor.marker === candidate.marker
         && candidate.predecessor.root === candidate.oldRoot && candidate.predecessor.body === candidate.oldBody
         && candidate.deadline === candidate.predecessor.deadline && Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline
+        && (!candidate.pendingPrivate || chatGPTFirstUserExpansionRouteStart(candidate.predecessor) >= 0)
       : state.pending == null && state.lastVerified === record && record.phase === 'verified')
     && record.document === document && record.owner === input.ownerToken
     && (candidate.awaitingNativeRefresh === true ? candidate.remount === true
       && record.replacement === candidate.replacementReceipt && candidate.replacementReceipt != null : record.replacement == null)
     && input.submissionSequence === 1 && input.submissionMarker === record.marker
-    && (candidate.remount ? (candidate.initialRoute || record.root === candidate.oldRoot && record.body === candidate.oldBody)
+    && (candidate.remount ? (candidate.initialRoute || candidate.pendingPrivate || record.root === candidate.oldRoot && record.body === candidate.oldBody)
       && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false
       && candidate.root !== candidate.oldRoot && candidate.body !== candidate.oldBody
       : candidate.initialRoute ? candidate.oldRoot === candidate.root && candidate.oldBody === candidate.body
@@ -5189,7 +5204,12 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   if (input.allowBoundFirstUserExpansion !== true && input.allowProvisionalFirstUserExpansion !== true) return reject('binding');
   if (input.allowBoundFirstUserRemountRefresh === true) return reject('binding');
   if (globalThis.__computaModelBoundFirstExpansion != null) return reject('claim_spent');
-  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  const state = globalThis.__computaChatSubmissionState;
+  const pendingPrivate = input.allowProvisionalFirstUserExpansion === true
+    && state?.pending?.sequence === 1 && state.pending.phase === 'send_claimed' && state.lastVerified == null;
+  const record = pendingPrivate ? state.pending : state?.lastVerified;
+  const predecessor = pendingPrivate ? globalThis.__computaModelFirstExpansion : null;
+  const oldRoot = pendingPrivate ? predecessor?.root : record?.root, oldBody = pendingPrivate ? predecessor?.body : record?.body;
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
   if (typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker)) return reject('marker');
   if (typeof prompt !== 'string' || prompt.length > 180_000
@@ -5201,9 +5221,12 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   // A private first proof may finish before native adopts it, then its display
   // can remount. Native's pending outbound hash and the private verified hash
   // must agree; this shares the same recovery budget with the bound phase.
+  // If submission finalization crossed the first route, its pending record has
+  // no physical pin yet. Only the successful initial display's detached nodes,
+  // native-certified route and original live deadline can supply that witness.
   const candidate = { bound: true, provisional: input.allowProvisionalFirstUserExpansion === true,
-    state, record, fingerprint: record?.fingerprint,
-    remount: !!record && (record.root !== root || record.body !== body), oldRoot: record?.root, oldBody: record?.body,
+    state, record, pendingPrivate, predecessor, deadline: pendingPrivate ? predecessor?.deadline : undefined, fingerprint: record?.fingerprint,
+    remount: pendingPrivate || !!record && (record.root !== root || record.body !== body), oldRoot, oldBody,
     root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
     document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
   const failure = chatGPTFirstUserExpansionContextFailure(candidate);
@@ -5566,14 +5589,7 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
 async function chatGPTContinueFirstUserExpansion(candidate) {
   const latch = () => { candidate.initialTransitionDiagnostic ||= chatGPTInitialExpansionFacts(candidate); };
   const edges = input.firstUserExpansionRouteContinuation;
-  const validChain = Array.isArray(edges) && edges.length >= 1 && edges.length <= 2
-    && Object.keys(edges).join(',') === (edges.length === 1 ? '0' : '0,1')
-    && edges.every((edge, index) => edge && !Array.isArray(edge) && typeof edge === 'object'
-      && Object.keys(edge).sort().join(',') === 'fromURL,toURL'
-      && typeof edge.fromURL === 'string' && typeof edge.toURL === 'string' && edge.fromURL !== edge.toURL
-      && (index === 0 || edges[index - 1].toURL === edge.fromURL))
-    && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1;
-  const starts = validChain ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
+  const routeStart = chatGPTFirstUserExpansionRouteStart(candidate);
   // The local display can finish before a later digest/model read crosses the
   // route. Native still discards that read and certifies the same first-route
   // edge. Preserve only its already-completed, exact physical body; a failed or
@@ -5586,7 +5602,7 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   const interrupted = candidate.outcome === 'context_changed' && candidate.contextFailure === 'url';
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
-    || !validChain || starts.length !== 1 || edges.at(-1).toURL !== input.expectedURL || edges.at(-1).toURL !== document.URL
+    || routeStart < 0
     || candidate.clicked !== true
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice)) {
     latch();
@@ -5601,7 +5617,7 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   // Consume only the unconsumed suffix of the exact native-certified chain.
   // A route may have promoted before this read or before the previous script
   // consumed its receipt. Neither the deadline nor click claim is reset.
-  for (const edge of edges.slice(starts[0])) candidate.routeURL = edge.toURL;
+  for (const edge of edges.slice(routeStart)) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
   // Display completion does not grant lineage. The caller must still hash the
   // unchanged body and complete the ordinary current model/product/temporary
@@ -5655,7 +5671,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
-    if (!candidate.initialRoute) candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate) candidate.deadline = Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
@@ -6109,7 +6125,7 @@ if (ownedUserCount > 0) {
   }
   const context = chatGPTSubmissionContextFailure;
   const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
-    && input.action === 'inspect' && boundRecovery?.initialRoute === true
+    && input.action === 'inspect' && (boundRecovery?.initialRoute === true || boundRecovery?.pendingPrivate === true)
     && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true
     && input.expectedFirstUserFingerprint == null && input.allowBoundFirstUserRemountRefresh !== true
     && finalizationState && !finalizationState.revoked && finalizationState.document === document
