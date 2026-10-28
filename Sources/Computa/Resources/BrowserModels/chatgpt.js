@@ -6124,17 +6124,28 @@ if (ownedUserCount > 0) {
     throw error;
   }
   const context = chatGPTSubmissionContextFailure;
+  const recoveryRecord = boundRecovery?.record;
+  const pendingRecoveryRecord = (boundRecovery?.initialRoute === true || boundRecovery?.pendingPrivate === true)
+    && finalizationState?.pending === recoveryRecord && finalizationState?.lastVerified == null
+    && recoveryRecord?.phase === 'send_claimed' && recoveryRecord.root == null && recoveryRecord.body == null;
+  // A provisional remount can start after JS verified the first submission
+  // but before native adopted it. Its URL-discarded rehash still retains the
+  // detached original physical pins; it has no bound replacement certificate.
+  const provisionalRecoveryRecord = boundRecovery?.provisional === true && boundRecovery.pendingPrivate !== true
+    && boundRecovery.remount === true && boundRecovery.awaitingNativeRefresh !== true
+    && finalizationState?.pending == null && finalizationState?.lastVerified === recoveryRecord
+    && recoveryRecord?.phase === 'verified' && recoveryRecord.replacement == null
+    && recoveryRecord.root === boundRecovery.oldRoot && recoveryRecord.body === boundRecovery.oldBody
+    && boundRecovery.oldRoot?.isConnected === false && boundRecovery.oldBody?.isConnected === false;
   const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
-    && input.action === 'inspect' && (boundRecovery?.initialRoute === true || boundRecovery?.pendingPrivate === true)
+    && input.action === 'inspect' && (pendingRecoveryRecord || provisionalRecoveryRecord)
     && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true
     && input.expectedFirstUserFingerprint == null && input.allowBoundFirstUserRemountRefresh !== true
     && finalizationState && !finalizationState.revoked && finalizationState.document === document
     && finalizationState.owner === input.ownerToken && globalThis.__computaChatSubmissionState === finalizationState
     && globalThis.__computaModelOwner === finalizationState.owner
-    && finalizationState.pending === boundRecovery.record && finalizationState.lastVerified == null
-    && boundRecovery.record.sequence === 1 && boundRecovery.record.phase === 'send_claimed'
-    && boundRecovery.record.nativeFirstPinned !== true && boundRecovery.record.root == null && boundRecovery.record.body == null
-    && boundRecovery.record.fingerprint === boundRecovery.fingerprint && chatGPTSubmissionPins(boundRecovery.record)
+    && recoveryRecord.sequence === 1 && recoveryRecord.nativeFirstPinned !== true
+    && recoveryRecord.fingerprint === boundRecovery.fingerprint && chatGPTSubmissionPins(recoveryRecord)
     && globalThis.__computaModelFirstProof?.marker === boundRecovery.marker
     && globalThis.__computaModelFirstProof?.fingerprint === boundRecovery.fingerprint
     && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease

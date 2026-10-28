@@ -3663,3 +3663,55 @@ schemas and excluded tool choices, preserved canonical history and the full
 prompt-size bound. Independent review found no material blocker. Evidence is
 `browser-handoff292-tests/result.json` and
 `candidate292-handoff-independent-review.json`. New live qualification is pending.
+
+Installed build292 (`bebc9be`) passed its exact seed (8.185 seconds, zero tools)
+and the fresh local send (76.556 seconds, nine successful browser calls, ten
+verified/closed inferences). It proceeded through wait, fresh read, three field
+fills and the separate Send control, then read the new receipt. Exactly one POST
+matched recipient, subject and body, receipt `LOCAL-ca043fc00ee240a9`, and the
+accurate final answer. This establishes the controlled case, not universal model
+adherence or external delivery. The fixture process was stopped after capture.
+
+The independent draft-only setup then failed after 7.071 seconds with no tools
+and no final answer. The task displayed Failed and preserved
+`website_ownership_unverified/first_user_message`; website cleanup is unconfirmed.
+No draft fixture was started and no send or retry was made. Captured lifecycle
+facts identify a separate missing transition: an expanded provisional recovery
+already has `lastVerified`/`phase=verified`, but the URL-only discard classifier
+only recognizes pending first records. The second certified route crosses the
+independent submission check, which returns `document_changed/model_read_context`.
+The following read contains the full 57,987-character body and unique final
+marker, but rejects the spent recovery because its verified flag stayed false.
+Evidence is `candidate292-plan/draft-then-send/setup-failure-capture/` and the
+separate passing fresh-send qualification. Browser and terminal regressions were
+not dispatched on this failed candidate.
+
+### Build 293: verified provisional recovery across finalization
+
+The build292 draft capture identifies a provisional remount whose first
+submission is privately verified but not yet adopted natively. Its final
+submission rehash crossed the second native-certified URL transition. An
+unchanged-source JavaScript regression reproduces the exact finite lifecycle:
+`recordPhase=verified`, `lastVerifiedMatches=true`, no pending record, a URL-only
+context witness, and an incorrectly unverified spent display recovery.
+
+Build293 extends only that URL-discard classification to the exact provisional
+state. It requires the same verified record, no pending submission or native
+first pin, no replacement certificate, both detached original physical nodes,
+and all existing private/native hash, owner, invocation and URL-context checks.
+The discarded result remains an error; it carries no response or action
+authority. Native must certify the route and obtain fresh complete evidence.
+No recovery claim, deadline, expansion click or Send is added or renewed.
+
+The frozen candidate passed all 488 adapter tests / 20,389 assertions. The real
+WebKit differential also reproduces the same failure with immutable build292
+JavaScript and passes the fixed candidate with fresh full-body proof. Five
+focused WebKit tests passed, including changed-body and second-local-route
+rejections and the existing pending-private/initial-route controls. Only the
+owned test bundle resource was swapped for the differential and restored; source
+and installed app resources were not changed. Initial test-only cleanup
+expectations were corrected: a rejected task response does not prevent ordinary
+cleanup from independently proving and closing its exact owned temporary page.
+The original test logs remain preserved. Evidence is
+`provisional293-tests/full-result.json` and
+`provisional293-native-final-validation.json`. Fresh live qualification is pending.

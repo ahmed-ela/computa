@@ -1814,6 +1814,90 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       }
     });
 
+    test('completed provisional display survives a URL-discarded verified-record rehash before native adoption', async () => {
+      const { x, first, record, oldRoot, oldBody, root, body, expand, initialControl } = await provisionalStage(true);
+      const state: any = x.f.world.__computaChatSubmissionState;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-provisional-recovery?temporary-chat=true';
+      let promoted = false;
+      const promote = () => {
+        const recovery: any = x.f.world.__computaModelBoundFirstExpansion;
+        if (recovery?.finalizationDiagnostic?.finalizationStage !== 'entered') { x.f.onDigest(promote, first.outbound); return; }
+        expect(state.pending).toBeNull(); expect(state.lastVerified).toBe(record);
+        expect(record.phase).toBe('verified'); expect(record.nativeFirstPinned).not.toBe(true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+        promoted = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-provisional-recovery';
+      };
+      x.f.onDigest(promote, first.outbound);
+      const crossed = await x.observe(first, provisionalAllowance); denied(crossed);
+      expect(promoted).toBe(true); expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+      expect(crossed.recoveryLifecycleDiagnostic).toMatchObject({ present: true, initialRoute: false, outcome: 'expanded',
+        finalizationStage: 'returned', finalizationError: 'document_changed', urlWitness: true, urlChanged: true,
+        pendingMatches: false, lastVerifiedMatches: true, recordPhase: 'verified', verified: true, urlDiscard: true });
+      expect(state.revoked).toBe(false); expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+      const before = x.f.digestInputs.length;
+      const fresh = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      expect(fresh.error).toBeUndefined(); expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.root).toBe(root); expect(record.body).toBe(body);
+      expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('provisional URL discard never replaces fresh full body and native proof', async () => {
+      for (const mutation of ['body', 'prefix', 'native_pin', 'private_pin', 'work']) {
+        const { x, first, body, expand } = await provisionalStage(true);
+        const promote = () => {
+          const recovery: any = x.f.world.__computaModelBoundFirstExpansion;
+          if (recovery?.finalizationDiagnostic?.finalizationStage !== 'entered') { x.f.onDigest(promote, first.outbound); return; }
+          x.f.document.URL = 'https://chatgpt.com/c/public-provisional-fresh?temporary-chat=true';
+          x.f.location.pathname = '/c/public-provisional-fresh';
+        };
+        x.f.onDigest(promote, first.outbound);
+        const crossed = await x.observe(first, provisionalAllowance); denied(crossed);
+        expect(crossed.recoveryLifecycleDiagnostic).toMatchObject({ verified: true, urlDiscard: true });
+        const overrides: any = { ...provisionalAllowance };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'prefix') body.text = first.outbound.slice(0, 10_240);
+        if (mutation === 'native_pin') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        if (mutation === 'work') { x.f.workMode.values['aria-pressed'] = 'true'; x.f.chatMode.values['aria-pressed'] = 'false'; }
+        denied(await x.observe(first, overrides)); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('provisional finalizer failures cannot become completed display proof after restoration', async () => {
+      for (const mutation of ['private_pin', 'record_hash', 'native_pinned', 'pending', 'old_root', 'receipt', 'owner', 'lease', 'throw']) {
+        const { x, first, record, oldRoot, expand } = await provisionalStage(true);
+        const state: any = x.f.world.__computaChatSubmissionState, owner = x.f.world.__computaModelOwner;
+        let reached = false;
+        const fail = () => {
+          const recovery: any = x.f.world.__computaModelBoundFirstExpansion;
+          if (recovery?.finalizationDiagnostic?.finalizationStage !== 'entered') { x.f.onDigest(fail, first.outbound); return; }
+          reached = true;
+          x.f.document.URL = 'https://chatgpt.com/c/public-provisional-rejected?temporary-chat=true';
+          x.f.location.pathname = '/c/public-provisional-rejected';
+          if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+          if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+          if (mutation === 'native_pinned') record.nativeFirstPinned = true;
+          if (mutation === 'pending') state.pending = { sequence: 1, phase: 'prepared' };
+          if (mutation === 'old_root') oldRoot.connected = true;
+          if (mutation === 'receipt') record.replacement = {};
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'lease') x.f.world.__computaChatActiveInvocation = {};
+          if (mutation === 'throw') throw new Error('Synthetic provisional finalization exception');
+        };
+        x.f.onDigest(fail, first.outbound);
+        if (mutation === 'throw') await expect(x.observe(first, provisionalAllowance)).rejects.toThrow('Synthetic provisional finalization exception');
+        else denied(await x.observe(first, provisionalAllowance));
+        expect(reached).toBe(true); expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+        (x.f.world.__computaModelFirstProof as any).fingerprint = first.fingerprint;
+        record.fingerprint = first.fingerprint; record.nativeFirstPinned = false; record.replacement = null;
+        state.pending = null; oldRoot.connected = false; x.f.world.__computaModelOwner = owner;
+        const later = await x.observe(first, provisionalAllowance); denied(later);
+        expect(later.recoveryLifecycleDiagnostic).toMatchObject({ path: 'spent_recovery', present: true, verified: false, urlDiscard: false });
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     test('provisional display permission requires exact private and native pending proof with both old nodes detached', async () => {
       for (const mutation of ['permission', 'binding', 'initial_expansion', 'native_first', 'already_native_pinned',
         'native_round', 'private_first', 'record_hash', 'pending', 'old_root', 'old_body', 'same_body', 'refresh', 'choice']) {
