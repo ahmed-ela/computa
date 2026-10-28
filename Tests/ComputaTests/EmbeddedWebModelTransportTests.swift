@@ -5431,9 +5431,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await verifyBoundRemountPromotion(conditions: ["changed_body", "second_local", "wrong_model", "normal_chat"])
     }
 
+    func testBoundSameNodeExpansionThenRouteAndPhysicalRemountRequiresFreshCompleteProof() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "same_node_then_remount")
+    }
+
+    func testBoundSameNodeExpansionThenRouteAndPhysicalRemountRejectsChangedOwnership() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["changed_body", "second_local", "wrong_model", "normal_chat"],
+                                             crossing: "same_node_then_remount")
+    }
+
     private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest") async throws {
         for condition in conditions {
             let hasTwoRoutes = ["two_routes", "receipt_then_refresh"].contains(crossing)
+            let sameNodeStart = crossing == "same_node_then_remount"
             let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
             defer {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
@@ -5459,8 +5469,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 return record?.nativeFirstPinned === true && record.phase === 'verified' && state.pending == null;
                 """, world: world) as? Bool
             XCTAssertEqual(nativeBound, true, "The race must begin after native adopted the first prompt")
-            try await installBoundFirstUserCollapse(view, behavior: "remount")
-            // Observe the private recovery but mutate only the real page URL.
+            try await installBoundFirstUserCollapse(view, behavior: sameNodeStart ? "success" : "remount")
+            // Observe private recovery, but mutate only the real page URL and
+            // (for the same-node race) the provider's physical message nodes.
             // Cross either the first exact digest after expansion or the later
             // model-picker proof, before the remount certificate is complete.
             _ = try await evaluate(view, """
@@ -5476,7 +5487,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   const initialRoute = \(hasTwoRoutes) && count === 0 && location.pathname === '/';
                   const nextRoute = location.pathname.startsWith('/c/local-chatgpt')
                     && (count === 0 || \(hasTwoRoutes) && count === 1);
-                  if ((initialRoute || nextRoute) && recovery?.remount === true
+                  if ((initialRoute || nextRoute) && recovery?.remount === \(!sameNodeStart)
                     && recovery.provisional !== true && recovery.initialRoute !== true
                     && recovery.outcome === 'expanded'
                     && (['receipt', 'refresh'].includes(stage) ? recovery.awaitingNativeRefresh === true
@@ -5487,11 +5498,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     && record.nativeFirstPinned === true) {
                     globalThis.__fixtureBoundDigestPromotion ||= { stage, nativePinned: true, recordPhase: record.phase,
                       provisional: false, pending: false, outcome: recovery.outcome,
+                      startedOnOriginalNodes: recovery.root === record.root && recovery.body === record.body,
                       deadline: recovery.deadline, oldRootDetached: recovery.oldRoot.isConnected === false,
                       oldBodyDetached: recovery.oldBody.isConnected === false,
                       replacementAbsent: record.replacement == null, recoveryVerified: recovery.verified === true };
                     globalThis.__fixtureBoundRoutePromotions++;
                     history.pushState({}, '', initialRoute ? '\(localRoute)' : '\(finalRoute)');
+                    if (\(sameNodeStart)) {
+                      // Begin expansion on the natively pinned physical node,
+                      // then cross the route and replace it after the actual
+                      // whole-body hash completes. This is a different ordering
+                      // from the pre-remounted fixtures above. No private state
+                      // or certificate is supplied by the fixture.
+                      const root = document.querySelector('[data-message-author-role="user"]');
+                      root.replaceWith(root.cloneNode(true));
+                    }
                   }
                 };
                 globalThis.__fixturePromoteBoundReceipt = () => promote('receipt');
@@ -5501,7 +5522,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   const exact = recovery && new TextDecoder().decode(arguments_[1]) === recovery.canonical;
                   if (exact && location.pathname === '/c/public-bound-digest-promotion')
                     globalThis.__fixtureBoundFinalRouteHashes++;
-                  if (exact && ['digest', 'two_routes'].includes('\(crossing)')) promote('digest');
+                  if (exact && ['digest', 'two_routes', 'same_node_then_remount'].includes('\(crossing)')) promote('digest');
                   if (exact && ['refresh', 'receipt_then_refresh'].includes('\(crossing)')) promote('refresh');
                   // Let the hash caller resume first. Its synchronous guards
                   // then reach the awaited model recertification before this
@@ -5550,18 +5571,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   routeDiscardStage: recovery?.routeDiscard?.stage ?? null,
                   routePromotions: globalThis.__fixtureBoundRoutePromotions,
                   finalRouteHashes: globalThis.__fixtureBoundFinalRouteHashes,
+                  originalRootDetached: recovery?.oldRoot?.isConnected === false,
+                  originalBodyDetached: recovery?.oldBody?.isConnected === false,
                   finalRootPinned: globalThis.__computaChatSubmissionState?.lastVerified?.root
                     === document.querySelector('[data-message-author-role="user"]') };
                 """, world: world) as? [String: Any]
             let encoded = try JSONSerialization.data(withJSONObject: try XCTUnwrap(witness), options: [.sortedKeys])
             print("BoundDigestPromotionWitness crossing=\(crossing) condition=\(condition) \(String(decoding: encoded, as: UTF8.self))")
-            for key in ["nativePinned", "oldRootDetached", "oldBodyDetached"] {
+            for key in ["nativePinned", "originalRootDetached", "originalBodyDetached"] {
                 XCTAssertEqual(witness?[key] as? Bool, true, key)
             }
+            for key in ["oldRootDetached", "oldBodyDetached"] {
+                XCTAssertEqual(witness?[key] as? Bool, !sameNodeStart, key)
+            }
+            XCTAssertEqual(witness?["startedOnOriginalNodes"] as? Bool, sameNodeStart)
             XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh"].contains(crossing))
             XCTAssertEqual(witness?["recordPhase"] as? String, "verified")
             XCTAssertEqual(witness?["stage"] as? String,
-                           crossing == "two_routes" ? "digest" : crossing == "receipt_then_refresh" ? "receipt" : crossing)
+                           crossing == "two_routes" || sameNodeStart ? "digest" : crossing == "receipt_then_refresh" ? "receipt" : crossing)
             XCTAssertEqual(witness?["outcome"] as? String, "expanded")
             XCTAssertEqual(witness?["recoveryVerified"] as? Bool, false)
             XCTAssertEqual(witness?["provisional"] as? Bool, false)

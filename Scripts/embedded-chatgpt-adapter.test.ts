@@ -1960,6 +1960,93 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       body.text = first.outbound.slice(0, 10_240); denied(await x.observe(first, fresh)); expect(expand.clicks).toBe(1);
     });
 
+    test('same-node completed expansion preserves only certified route handoff and fresh replacement proof', async () => {
+      for (const remountAtHash of [false, true]) {
+        const { x, first, record, root: oldRoot, body: oldBody, expand } = await stage();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-same-node-recovery?temporary-chat=true';
+        let replacement: ReturnType<typeof replaceRoot> | null = null;
+        x.f.onDigest(() => {
+          if (remountAtHash) { replacement = replaceRoot(x); replacement.body.text = first.outbound; }
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-same-node-recovery';
+        }, first.outbound);
+        const discarded = await x.observe(first, allowance); denied(discarded);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: 'body_hash' });
+        expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+        const before = x.f.digestInputs.length;
+        const resumed = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+        let result = resumed;
+        if (remountAtHash) {
+          expect(resumed.error).toBe('first_user_observation_replaced'); denied(resumed);
+          expect(record.replacement).toMatchObject({ root: replacement!.root, body: replacement!.body, oldRoot, oldBody });
+          expect(record.root).toBe(oldRoot); expect(candidate).not.toHaveProperty('verified', true);
+          result = await x.observe(first, fresh);
+        }
+        expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.root).toBe(replacement?.root || oldRoot); expect(record.body).toBe(replacement?.body || oldBody);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('same-node route discard cannot retain changed text permissions model or ambiguous physical lineage', async () => {
+      for (const mutation of ['body', 'model', 'temporary', 'old_root_connected', 'old_body_connected', 'owner', 'deadline']) {
+        const { x, first, record, root: oldRoot, body: oldBody, expand } = await stage();
+        const owner = x.f.world.__computaModelOwner;
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-same-node-negative?temporary-chat=true';
+        let replacement: ReturnType<typeof replaceRoot>;
+        x.f.onDigest(() => {
+          replacement = replaceRoot(x); replacement.body.text = first.outbound;
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-same-node-negative';
+          if (mutation === 'body') replacement.body.text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'old_root_connected') oldRoot.connected = true;
+          if (mutation === 'old_body_connected') x.f.body.append(oldBody);
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'deadline') x.f.advanceTime(2_000);
+        }, first.outbound);
+        denied(await x.observe(first, allowance));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBe(oldRoot); expect(record.replacement).toBeUndefined();
+        replacement!.body.text = first.outbound; x.picker!.selected('Medium'); x.f.temporary.connected = true;
+        x.f.world.__computaModelOwner = owner; oldRoot.connected = false; oldBody.connected = false;
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('same-node route witness needs one current exact native edge and never renews display recovery', async () => {
+      for (const mutation of ['no_edge', 'wrong_edge', 'duplicate_edge', 'changed_replacement', 'expired']) {
+        const { x, first, record, expand } = await stage();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-same-node-edge?temporary-chat=true';
+        let replacement: ReturnType<typeof replaceRoot>;
+        x.f.onDigest(() => {
+          replacement = replaceRoot(x); replacement.body.text = first.outbound;
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-same-node-edge';
+        }, first.outbound);
+        denied(await x.observe(first, allowance));
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL });
+        const edge = { fromURL, toURL }, overrides: any = { ...allowance, firstUserExpansionRouteContinuation: [edge] };
+        if (mutation === 'no_edge') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'wrong_edge') overrides.firstUserExpansionRouteContinuation = [{ fromURL: 'https://chatgpt.com/c/other', toURL }];
+        if (mutation === 'duplicate_edge') overrides.firstUserExpansionRouteContinuation = [edge, edge];
+        if (mutation === 'changed_replacement') replacement!.body.text += '!';
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+        denied(await x.observe(first, overrides));
+        replacement!.body.text = first.outbound;
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [edge] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBeUndefined();
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     test('native-bound completed expansion survives only certified route handoff before replacement proof', async () => {
       for (const timing of ['body_hash', 'certificate_hash', 'model_read']) {
         const { x, first, record, oldRoot, oldBody, root, body, expand } = await remounted();

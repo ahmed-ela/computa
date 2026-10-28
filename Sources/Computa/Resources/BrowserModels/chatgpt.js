@@ -5239,12 +5239,27 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
 function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
   const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
   const roots = chatGPTMessageRoots('user');
+  const root = roots[0], body = root && chatGPTUserBody(root);
+  // Display recovery can start on the originally verified nodes, then cross
+  // the route either before or during their one physical replacement. This
+  // witness retains no response or replacement authority. The native route
+  // edge and the next full read must still hash the exact current body; a
+  // replacement additionally needs the ordinary certificate and fresh read.
+  const sameNodeRecovery = candidate?.remount === false
+    && candidate.root === record?.root && candidate.body === record?.body
+    && candidate.oldRoot === record?.root && candidate.oldBody === record?.body;
+  const lateRemount = sameNodeRecovery && candidate.root?.isConnected === false
+    && candidate.body?.isConnected === false && root !== candidate.root && body !== candidate.body;
+  const currentBodyIntact = roots.length === 1 && root?.isConnected === true && body?.isConnected === true
+    && (lateRemount || root === candidate?.root && body === candidate?.body)
+    && normalizedFirstBody(body) === candidate?.canonical;
   if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
     || !candidate.bound || candidate.provisional || candidate.initialRoute || candidate.pendingPrivate
-    || !candidate.remount
+    || !candidate.remount && !sameNodeRecovery
     || candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard
     || (candidate.routeContinuationEdges?.length || 0) >= 2 || candidate.modelFailure || candidate.contextFailure
     || candidate.outcome !== 'expanded' || candidate.clicked !== true
+    || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
     || input.action !== 'inspect' || input.allowBoundFirstUserExpansion !== true
     || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
     || input.suppressFirstUserExpansionClaim === true
@@ -5263,13 +5278,12 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
       ? !candidate.refreshClaimed || record.replacement !== candidate.replacementReceipt || !candidate.replacementReceipt
       : record.replacement != null)
     || record.root !== candidate.oldRoot || record.body !== candidate.oldBody
-    || candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
-    || roots.length !== 1 || roots[0] !== candidate.root || !candidate.root.isConnected
-    || !candidate.body.isConnected || chatGPTUserBody(candidate.root) !== candidate.body
-    || candidate.root === candidate.oldRoot || candidate.body === candidate.oldBody
+    || candidate.remount && (candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
+      || candidate.root === candidate.oldRoot || candidate.body === candidate.oldBody)
+    || !currentBodyIntact
     || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
     || globalThis.__computaModelFirstPrompt !== candidate.prompt || globalThis.__computaModelFirstMarker !== candidate.marker
-    || candidate.expandedText !== candidate.canonical || normalizedFirstBody(candidate.body) !== candidate.canonical
+    || candidate.expandedText !== candidate.canonical
     || record.canonical !== candidate.canonical || record.fingerprint !== fingerprint || candidate.fingerprint !== fingerprint
     || input.expectedFirstUserFingerprint !== fingerprint || pinned?.fingerprint !== fingerprint || pinned.marker !== candidate.marker
     || input.expectedFirstUserMarker !== candidate.marker || input.submissionSequence !== 1 || input.submissionMarker !== record.marker
@@ -5301,6 +5315,13 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
       if (input.expectedConversation !== old.origin + decodeURIComponent(old.pathname).replace(/\/$/, '')) return null;
     } catch { return null; }
   }
+  if (lateRemount) {
+    // Retain only this observed successor to both detached original nodes.
+    // Do not change the verified record, create a certificate, mark recovery
+    // verified, repeat expansion, or renew its existing deadline.
+    candidate.remount = true;
+    candidate.root = root; candidate.body = body;
+  }
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
@@ -5320,6 +5341,7 @@ function chatGPTContinueBoundFirstRoute(candidate) {
   candidate.routeDiscardConsumed = witness;
   if (!unused || !witness || candidate.verified === true || candidate.outcome !== 'expanded'
     || candidate.modelFailure || candidate.contextFailure
+    || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
     || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
     || !chatGPTFirstUserExpansionContext(candidate)
     || candidate.expandedText !== candidate.canonical || normalizedFirstBody(candidate.body) !== candidate.canonical) return false;
