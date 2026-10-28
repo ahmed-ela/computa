@@ -3715,3 +3715,48 @@ cleanup from independently proving and closing its exact owned temporary page.
 The original test logs remain preserved. Evidence is
 `provisional293-tests/full-result.json` and
 `provisional293-native-final-validation.json`. Fresh live qualification is pending.
+
+### Build 293: installed controlled qualification
+
+Signed, non-notarized Computa 0.7.0 (293), source `5d51d0f`, passed artifact
+identity, signature and exact-resource checks before installation. The running
+executable matched the validated artifact. Normal ChatGPT Chat mode was signed
+in, with Work off. The prior build292 failure restored as Failed with its exact
+ownership error and unconfirmed-cleanup status; it did not return to Waiting.
+
+| Controlled task | Duration | Verified responses | Successful native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Fresh local mailbox send | 68.298 s | 9 | 8 | Exact receipt and fields verified |
+| Explicit send after a draft-only task | 78.166 s | 9 | 8 | Delivery verified; greeting capitalization differs |
+| Staff attachment lookup | 29.746 s | 4 | 3 | Exact filename from the requested message |
+| Two separate terminal commands | 25.187 s | 3 | 2 | Exact marker/digest, both exits zero |
+
+The separate seed (8.957 seconds) and draft-only setup (6.322 seconds) each
+completed with one verified response and zero tools. Across these six turns,
+all 27 inferences passed current model, temporary-session, submission, ownership
+and release checks, with saved closed cleanup. All 21 dispatched tools succeeded.
+The browser lookup expanded the requested Course staff message, read its sender
+and attached `course-staff-evidence-packet.pdf` in that message, and made no extra
+POST. The terminal ran two separate actual commands and matched an independently
+computed SHA-256 value.
+
+Each send produced exactly one POST and a new matching receipt, subsequently
+read through the browser and accurately reported: `LOCAL-634144cfb2f05113` and
+`LOCAL-80195f05bea67db0`. The second body was `Hi`, matching its earlier draft,
+while the frozen literal expectation was `hi`. Its strict literal comparison
+remains failed. The natural-language task requested an email "saying hi", so
+this is accepted as operational success with a recorded capitalization
+deviation, not an exact-payload pass. An additive, explicit preflight recorded
+that distinction before the independent lookup/terminal checks; the original
+prompts, expectations, gate and evidence were preserved. No action was replayed.
+
+Evidence lives under `candidate293-plan/`: per-case independent qualification,
+the explicit operational preflights, exact native tool/website journals,
+bounded diagnostics, fixture events, installation attestation and cleanup
+receipts. Both owned fixture processes and listeners were stopped. The app
+closed its three task-created browser tabs; final UI inspection retained only
+the normal ChatGPT tab. Old unconfirmed website cleanup remains unconfirmed.
+
+These controlled passes qualify the reproduced fixes and current tool workflow;
+they do not establish external email delivery, universal reliability, or the
+cause of the original uncaptured build270 response. No release or merge occurred.
