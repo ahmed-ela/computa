@@ -406,6 +406,70 @@ Capture itself performs no input. Maximum-schema encoding remains within the
 existing native log budget. These results qualify the bounded capture correction,
 not actual Gmail topology, external delivery or the intermittent model-pin issue.
 
+Installed build 313 failed the next real-mail task after 26.930 seconds. Two
+Chat / Instant inferences verified and closed; browser inventory and binding
+succeeded, with no Compose click, field input or Send. The third inference failed
+ownership verification, and its website cleanup remains unconfirmed. Binding
+returned an initial observation, but the task never reached a post-Compose capture,
+so this run does not qualify the live capture correction.
+
+The first immutable diagnostic identifies `finalization_hash / route_guard /
+model_trigger_identity`. There was one current picker trigger and one candidate,
+and the saved header pin existed. Expected-model input, deferred verification and
+the matching retained replacement receipt were present. The route guard rejected
+the different physical picker element; missing/duplicate controls and earlier pin
+invalidation were not its first failing checks. These facts do not establish the
+replacement's selected model or whether the old header was detached. The existing
+read-only model verifier can certify a strict same-choice header replacement, but
+this route guard rejects before that full proof can run. The failure is retained
+without prompt replay while that ordering is reproduced independently.
+
+## Re-verifying a picker replacement across the owned route
+
+The adapter and real WebKit reproductions detach the old picker and insert a
+unique, enabled successor with the same selection during the second route's
+finalization hash. The immutable build-313 adapter rejects the same diagnostic leaf despite
+retaining the original prompt receipt, deadline and action counts. This proves
+a compatible remount was blocked; it does not retrospectively establish the live
+replacement's model or old-node attachment state.
+
+The bounded route-discard path now reuses the existing provisional-header
+observer. It retains the old pin and negative history, records exactly one
+successor, and returns only the existing discarded-read handoff. It neither adopts
+the new picker nor grants ownership or response evidence. The continued read must
+use the original complete, read-only verification of model family and power, even
+when ordinary in-flight checks are deferred. Only that verifier can transfer the model pin.
+The old connected picker, disabled or mismatched successor, negative selection
+history and another replacement remain rejected.
+
+The mandatory proof keeps the original recovery deadline, receipt and route
+budget. Checks around the awaited model proof and after the final submission hash
+reject expiry before ownership acceptance or receipt consumption. Expiry remains
+latched if the clock moves backward; a valid model-only pin transfer cannot revive
+the failed recovery. No timer, display expansion, provider Send or recovery
+allowance is added. New failure details are finite explicit native enum values,
+with the original diagnostic shape and privacy checks.
+
+The first native test then exposed a separate recheck mismatch. Its outer read
+returned full model evidence, but native permitted a deferred `verifyModel`
+recheck and then unconditionally required full evidence from that recheck. A
+finite test observer confirmed that exact full-to-pending sequence. Native now
+requests complete proof for the existing positive-evidence recheck. It still
+compares the two resolved selections; ordinary pending reads and their session
+state remain unchanged. No parser or acceptance rule is relaxed.
+
+All 529 adapter tests pass (26,723 assertions), including both deferred and full
+reads, incomplete or swapped replacements, restored negative history, missing
+proof and expiry during the model proof and final hash. The native cohort passes
+20 tests. Stronger final-completion assertions also pass separately. In the final
+compiled native test binary, the immutable build-313 adapter fails at the exact
+live identity rejection and the candidate completes with the original receipt,
+deadline, two route edges, one provider Send, and one initial plus one bound
+display expansion. The native trace confirms complete outer evidence followed
+by complete recheck evidence, while ordinary pending reads avoid picker work.
+These deterministic results remain separate from installed ChatGPT Instant and
+real-mail qualification.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

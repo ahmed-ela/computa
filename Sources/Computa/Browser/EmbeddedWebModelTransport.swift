@@ -490,6 +490,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
     #if DEBUG
     enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
+    struct ModelValidationObservationForTesting: Codable, Sendable {
+        enum Action: String, Codable, Sendable { case inspect, submit, verifyModel, verifyProductMode, other }
+        let action: Action
+        let enforceModel: Bool
+        let allowPending: Bool
+        let recheck: Bool
+        let pending: Bool
+        let evidencePresent: Bool
+    }
+    private var modelValidationObserverForTesting: (@MainActor (ModelValidationObservationForTesting) -> Void)?
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
@@ -624,6 +634,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserStructureEmissionObserverForTesting(_ observer: (@MainActor (Bool, String) -> Void)?) {
         firstUserStructureEmissionObserverForTesting = observer
+    }
+
+    func setModelValidationObserverForTesting(_ observer: (@MainActor (ModelValidationObservationForTesting) -> Void)?) {
+        modelValidationObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -2731,7 +2745,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "model_pin_missing", "model_pin_owner", "model_pin_document", "model_pin_invalidated",
         "model_selection_missing", "model_selection_key", "model_trigger_identity", "model_trigger_missing", "model_trigger_disabled",
         "model_duplicate", "model_conflicting", "model_indicator", "model_selection_ambiguous", "model_navigation_ambiguous",
-        "model_header_power", "model_slider_power", "model_checked_family"]
+        "model_header_power", "model_slider_power", "model_checked_family",
+        "model_remount_previous_missing", "model_remount_previous_connected", "model_remount_trigger_count",
+        "model_remount_trigger_missing", "model_remount_trigger_disabled", "model_remount_closed_presentation",
+        "model_remount_header_power", "model_remount_product", "model_remount_temporary", "model_remount_pending_completed",
+        "model_remount_pending_header", "model_remount_pin_changed", "model_remount_pending_replaced"]
     private static let boundCertificateLabels: [String: Set<String>] = [
         "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
         "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
@@ -4984,6 +5002,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                               preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
                                               preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                                               maximumWait: Duration) async throws {
+        #if DEBUG
+        modelValidationObserverForTesting?(.init(action: .init(rawValue: action) ?? .other,
+            enforceModel: enforceModel, allowPending: allowPendingChatGPTModelVerification, recheck: recheck,
+            pending: observed["modelVerificationPending"] as? Bool == true, evidencePresent: observed["modelEvidence"] != nil))
+        #endif
         if observed["modelVerificationPending"] != nil {
             guard observed["modelVerificationPending"] as? Bool == true,
                   allowPendingChatGPTModelVerification, session.provider == .chatgpt,
@@ -5006,11 +5029,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // acknowledges it. Only inspect may bind that exact lineage;
                 // a fresh model-only read cannot acquire an unbound message.
                 let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyModel"
+                // This branch requires fresh positive evidence below; a deferred
+                // continuity read cannot satisfy that contract. The ordinary
+                // pending branch above remains available for running responses.
                 let fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
                                            refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
                                            recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                           allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                           allowPendingChatGPTModelVerification: false,
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)

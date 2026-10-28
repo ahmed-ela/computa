@@ -5658,22 +5658,49 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testBoundModelPinLeafFailuresSurviveDiscardSpentReadAndCleanupWithoutAnotherAction() async throws {
-        try await verifyBoundRemountPromotion(conditions: ["disabled_model", "replaced_model", "wrong_model"], crossing: "product_then_hash",
+        try await verifyBoundRemountPromotion(conditions: ["disabled_model", "connected_replaced_model", "wrong_model"], crossing: "product_then_hash",
                                              verifyCertificateDiagnostic: true, mutateAtFullHash: true)
     }
 
+    func testBoundFinalizationModelHeaderRemountRequiresFreshSameChoiceProofWithoutNewBudgets() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "receipt_then_finalization",
+                                             remountModelAtFinalization: true)
+    }
+
+    func testBoundFinalizationModelHeaderRemountRejectsConnectedDisabledOrWrongPowerReplacement() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["model_old_connected", "model_replacement_disabled", "model_replacement_power"],
+                                             crossing: "receipt_then_finalization", remountModelAtFinalization: true)
+    }
+
+    func testOrdinaryBoundRunningModelReadRetainsDeferredContinuityWithoutFreshPicker() async throws {
+        let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        let before = try await evaluate(view, "return window.fixtureModelFamilyOpenCount;") as? Int
+        var observations: [EmbeddedWebModelTransport.ModelValidationObservationForTesting] = []
+        fixture.transport.setModelValidationObserverForTesting { observations.append($0) }
+        let observed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(observed["state"] as? String, "running")
+        XCTAssertEqual(observed["modelVerificationPending"] as? Bool, true)
+        XCTAssertNil(observed["modelEvidence"])
+        XCTAssertTrue(observations.contains { $0.allowPending && $0.pending && !$0.evidencePresent })
+        let after = try await evaluate(view, "return window.fixtureModelFamilyOpenCount;") as? Int
+        XCTAssertEqual(after, before)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+    }
+
     private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest", verifyCertificateDiagnostic: Bool = false,
-                                            mutateAtFullHash: Bool = false) async throws {
+                                            mutateAtFullHash: Bool = false, remountModelAtFinalization: Bool = false) async throws {
         for condition in conditions {
             let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization", "certificate_return", "product_then_hash"].contains(crossing)
             let sameNodeStart = ["same_node_then_remount", "ordinary_model"].contains(crossing)
-            let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
+            let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture(remountableModel: remountModelAtFinalization)
             defer {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
                 fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
                 fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
                 fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
                 fixture.transport.setBoundCertificateDiagnosticsObserverForTesting(nil)
+                fixture.transport.setModelValidationObserverForTesting(nil)
                 fixture.shutdown()
             }
             let choice = Self.fixtureChoice(.chatgpt)
@@ -5698,6 +5725,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if !["certificate_return", "product_then_hash"].contains(crossing) {
                 try await installBoundFirstUserCollapse(view, behavior: sameNodeStart ? "success" : "remount")
             }
+            if remountModelAtFinalization {
+                // Recreate the provider's real picker handler on its new DOM
+                // node. This changes fixture page behavior, never private proof.
+                _ = try await evaluate(view, """
+                    document.addEventListener('fixture-bound-model-remount', () => {
+                      const old = document.getElementById('fixture-model-trigger');
+                      const replacement = old.cloneNode(true);
+                      if ('\(condition)' === 'model_old_connected') {
+                        old.id = 'fixture-retained-old-model-trigger'; old.hidden = true; old.after(replacement);
+                      } else old.replaceWith(replacement);
+                      modelTrigger = replacement;
+                      replacement.addEventListener('click', () => old.click());
+                      if ('\(condition)' === 'model_replacement_disabled') replacement.disabled = true;
+                      if ('\(condition)' === 'model_replacement_power') replacement.querySelector('#fixture-model-header').textContent = 'High';
+                      window.fixtureBoundModelRemountFamilyReads = window.fixtureModelFamilyOpenCount;
+                    }, {once:true}); return true;
+                    """)
+            }
             // Observe private recovery, but mutate only the real page URL and
             // (for the same-node race) the provider's physical message nodes.
             // Cross either the first exact digest after expansion or the later
@@ -5708,6 +5753,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 globalThis.__fixtureBoundFinalRouteHashes = 0;
                 globalThis.__fixtureBoundRoutePromotions = 0;
                 globalThis.__fixtureBoundFinalizationCrossing = null;
+                globalThis.__fixtureBoundModelRemountWitness = null;
                 globalThis.__fixtureBoundReplacementReceipts = new Set();
                 let modelPromotionQueued = false;
                 let firstExpandedHashCompleted = false;
@@ -5745,6 +5791,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                       recoveryVerified: recovery.verified === true, priorPromotions: count };
                     globalThis.__fixtureBoundRoutePromotions++;
                     history.pushState({}, '', initialRoute ? '\(localRoute)' : '\(finalRoute)');
+                    if (\(remountModelAtFinalization) && stage === 'finalization') {
+                      const pin = globalThis.__computaChatPresetPin, old = document.getElementById('fixture-model-trigger');
+                      const label = old.textContent;
+                      document.dispatchEvent(new Event('fixture-bound-model-remount'));
+                      const current = document.getElementById('fixture-model-trigger');
+                      globalThis.__fixtureBoundModelRemountWitness = {
+                        oldDetached: old.isConnected === false, currentConnected: current?.isConnected === true,
+                        differentPhysicalTrigger: old !== current, sameDisplayedChoice: current?.textContent === label,
+                        uniqueCurrentTrigger: document.querySelectorAll('#fixture-model-trigger').length === 1,
+                        originalPinRetained: globalThis.__computaChatPresetPin === pin && pin.headerTrigger === old,
+                        receiptRetained: record.replacement === recovery.replacementReceipt,
+                        deadlineUnchanged: recovery.deadline === globalThis.__fixtureBoundDigestPromotion.deadline };
+                    }
                     if (stage === 'certificate_return' || \(mutateAtFullHash) && stage === 'digest') {
                       // Mutate only provider DOM/URL at the selected actual
                       // full-body hash or receipt-return boundary. No private
@@ -5754,8 +5813,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                         body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery');
                       } else if ('\(condition)' === 'wrong_model') document.getElementById('fixture-model-header').textContent = 'High';
                       else if ('\(condition)' === 'disabled_model') document.getElementById('fixture-model-trigger').disabled = true;
-                      else if ('\(condition)' === 'replaced_model') {
-                        const old = document.getElementById('fixture-model-trigger'); old.replaceWith(old.cloneNode(true));
+                      else if ('\(condition)' === 'connected_replaced_model') {
+                        const old = document.getElementById('fixture-model-trigger'), replacement = old.cloneNode(true);
+                        old.id = 'fixture-retained-old-model-trigger'; old.hidden = true; old.after(replacement);
                       }
                       else if ('\(condition)' === 'normal_chat') {
                         const temporary = document.querySelector('[aria-label="Turn off temporary chat"]');
@@ -5863,6 +5923,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             fixture.transport.setRouteDiscardDiagnosticsObserverForTesting { routeDiagnostics += $0 }
             var certificateDiagnostics: [String] = []
             fixture.transport.setBoundCertificateDiagnosticsObserverForTesting { certificateDiagnostics.append($0) }
+            var validationObservations: [EmbeddedWebModelTransport.ModelValidationObservationForTesting] = []
+            if remountModelAtFinalization { fixture.transport.setModelValidationObserverForTesting { validationObservations.append($0) } }
             var recovered: [String: Any]?, failure: EmbeddedWebModelTransport.Failure?
             do {
                 recovered = crossing == "ordinary_model"
@@ -5870,13 +5932,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     : try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
             }
             catch { failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure) }
+            if let failure { print("BoundPromotionNativeFailure crossing=\(crossing) condition=\(condition) remountModel=\(remountModelAtFinalization) failure=\(failure)") }
+            for observation in validationObservations {
+                print("BoundPromotionNativeModelValidation \(String(decoding: try JSONEncoder().encode(observation), as: UTF8.self))")
+            }
             let witness = try await evaluate(view, """
                 const recovery = globalThis.__computaModelBoundFirstExpansion;
                 return { ...globalThis.__fixtureBoundDigestPromotion,
                   finalDeadline: recovery?.deadline, finalVerified: recovery?.verified === true,
+                  finalDeadlineLive: Number.isFinite(recovery?.deadline) && Date.now() <= recovery.deadline,
                   routeDiscardStage: recovery?.routeDiscard?.stage ?? null,
                   routePromotions: globalThis.__fixtureBoundRoutePromotions,
                   finalizationCrossing: globalThis.__fixtureBoundFinalizationCrossing,
+                  modelRemount: globalThis.__fixtureBoundModelRemountWitness,
                   replacementReceiptCount: globalThis.__fixtureBoundReplacementReceipts.size,
                   finalRouteHashes: globalThis.__fixtureBoundFinalRouteHashes,
                   originalRootDetached: recovery?.oldRoot?.isConnected === false,
@@ -5921,6 +5989,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(finalization["priorPromotions"] as? Int, 1)
                 XCTAssertEqual(witness?["replacementReceiptCount"] as? Int, 1, "A route discard cannot mint another replacement certificate")
             }
+            if remountModelAtFinalization {
+                let modelRemount = try XCTUnwrap(witness?["modelRemount"] as? [String: Any])
+                for key in ["currentConnected", "differentPhysicalTrigger", "uniqueCurrentTrigger", "originalPinRetained", "receiptRetained", "deadlineUnchanged"] {
+                    XCTAssertEqual(modelRemount[key] as? Bool, true, key)
+                }
+                XCTAssertEqual(modelRemount["oldDetached"] as? Bool, condition != "model_old_connected")
+                XCTAssertEqual(modelRemount["sameDisplayedChoice"] as? Bool, condition != "model_replacement_power")
+                if condition == "unchanged", failure != nil,
+                   let first = routeDiagnostics.first(where: { $0.contains("chatgpt_bound_certificate_v1") }) {
+                    let diagnostic = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(first.utf8)) as? [String: Any])
+                    XCTAssertEqual(diagnostic["stage"] as? String, "finalization_hash")
+                    XCTAssertEqual(diagnostic["rule"] as? String, "route_guard")
+                    XCTAssertEqual(diagnostic["routeRule"] as? String, "model_trigger_identity")
+                    XCTAssertEqual(diagnostic["modelPinState"] as? NSDictionary,
+                        ["triggerPresent": true, "pinHeaderPresent": true, "triggerCount": 1, "triggerCandidateCount": 1] as NSDictionary)
+                    XCTAssertNil(diagnostic["modelPinInvalidation"])
+                    for key in ["receiptPresent", "receiptNodesMatch", "receiptRetained", "awaitingNativeRefresh", "refreshClaimed"] {
+                        XCTAssertEqual(diagnostic[key] as? Bool, true, key)
+                    }
+                }
+            }
             let clicks = try await evaluate(view, "return {initial:window.fixtureExpansionClicks,recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
             XCTAssertEqual(clicks, ["initial": 1, "recovery": 1])
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
@@ -5931,6 +6020,29 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if condition == "unchanged" {
                 XCTAssertNil(failure, "A native-certified promotion must not poison completed exact display recovery")
                 if let recovered {
+                    if remountModelAtFinalization {
+                        let outer = try XCTUnwrap(validationObservations.firstIndex {
+                            $0.action == .inspect && $0.enforceModel && $0.recheck && $0.allowPending
+                                && !$0.pending && $0.evidencePresent
+                        })
+                        XCTAssertTrue(validationObservations.dropFirst(outer + 1).contains {
+                            $0.action == .verifyModel && $0.enforceModel && !$0.recheck && !$0.allowPending
+                                && !$0.pending && $0.evidencePresent
+                        }, "The positive-proof native recheck must request and receive full evidence")
+                        XCTAssertFalse(validationObservations.dropFirst(outer + 1).contains {
+                            $0.action == .verifyModel && $0.pending
+                        }, "A deferred continuity result cannot satisfy the full-proof recheck")
+                        XCTAssertEqual(witness?["finalDeadlineLive"] as? Bool, true, "Compulsory fresh model proof must finish within the original recovery deadline")
+                        let freshFamilyReads = try await evaluate(view, "return window.fixtureModelFamilyOpenCount - window.fixtureBoundModelRemountFamilyReads;") as? Int
+                        XCTAssertGreaterThanOrEqual(freshFamilyReads ?? 0, 1, "The first accepted recovered Poll needs fresh family evidence, before Stop is removed or another Poll runs")
+                        // A successful intermediate full recheck does not end
+                        // the running response's native pending lifecycle.
+                        XCTAssertEqual(recovered["state"] as? String, "running")
+                        XCTAssertEqual(recovered["modelVerificationPending"] as? Bool, true)
+                        XCTAssertNotNil(recovered["pendingSubmissionContext"])
+                        XCTAssertNil(recovered["modelEvidence"])
+                        XCTAssertEqual(recovered["text"] as? String, "")
+                    }
                     let proof = try XCTUnwrap((recovered["modelProofContext"] ?? recovered["pendingSubmissionContext"]) as? [String: Any])
                     XCTAssertEqual(proof["firstUserFingerprint"] as? String, fingerprint)
                     XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
@@ -5947,12 +6059,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     let complete = try await waitForState("complete", fixture.transport, token: token)
                     XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
                     try assertChoiceEvidence(complete, choice: choice)
+                    if remountModelAtFinalization {
+                        XCTAssertNil(complete["modelVerificationPending"])
+                        XCTAssertNil(complete["pendingSubmissionContext"])
+                    }
                     let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
                     XCTAssertEqual(finished["cleanup"] as? String, "not_created")
                     try await assertHumanTabIntact(fixture)
                 }
             } else {
                 XCTAssertNotNil(failure)
+                if remountModelAtFinalization { XCTAssertEqual(failure, .ownershipFailure(.javaScriptFirstUser)) }
                 XCTAssertNil(recovered, "Rejected ownership cannot expose any answer")
                 if crossing == "receipt_then_finalization", condition == "wrong_model" {
                     XCTAssertEqual(failure, .modelMismatch)
@@ -5986,7 +6103,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(discarded.utf8)) as? [String: Any])
                     XCTAssertEqual(first["stage"] as? String, mutateAtFullHash ? "body_hash" : "receipt_context")
                     XCTAssertEqual(first["rule"] as? String, "context")
-                    let modelRule = ["disabled_model": "model_trigger_disabled", "replaced_model": "model_trigger_identity",
+                    let modelRule = ["disabled_model": "model_trigger_disabled", "connected_replaced_model": "model_remount_previous_connected",
                                      "wrong_model": "model_pin_invalidated"][condition]
                     XCTAssertEqual(first["routeRule"] as? String, modelRule ?? (mutateAtFullHash ? "temporary" : "body_canonical"))
                     if modelRule != nil {
@@ -6287,12 +6404,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     /// Bind through native Poll while an actual Stop control keeps the reply
     /// running. Fixture mutations never write private adapter state.
-    private func readyBoundFirstUserFixture() async throws -> (Fixture, WKWebView, String, String) {
-        let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
+    private func readyBoundFirstUserFixture(remountableModel: Bool = false) async throws -> (Fixture, WKWebView, String, String) {
+        var page = Self.collapsedFirstUserPage(expansionScript: """
             const stop = document.createElement('button'); stop.id = 'fixture-bound-stop';
             stop.setAttribute('data-testid', 'stop-button'); stop.setAttribute('aria-label', 'Stop generating');
             stop.textContent = 'Stop generating'; document.body.appendChild(stop);
-            """))
+            """)
+        if remountableModel {
+            page = page.replacingOccurrences(of: "const modelTrigger = document.getElementById('fixture-model-trigger');",
+                                             with: "let modelTrigger = document.getElementById('fixture-model-trigger');")
+        }
+        let fixture = try Fixture(page: page)
         do {
             let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
             let token = try XCTUnwrap(started["sessionToken"] as? String)
@@ -11149,6 +11271,29 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                      "model_header_power", "model_slider_power", "model_checked_family"] {
             var diagnostic = boundCertificateDiagnosticFixture(); diagnostic["routeRule"] = rule
             XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt)?["routeRule"] as? String, rule)
+        }
+    }
+
+    func testModelRemountRouteFailureDiagnosticsHaveClosedStateAndNoInventedInvalidationHistory() throws {
+        let rules = ["model_remount_previous_missing", "model_remount_previous_connected", "model_remount_trigger_count",
+            "model_remount_trigger_missing", "model_remount_trigger_disabled", "model_remount_closed_presentation",
+            "model_remount_header_power", "model_remount_product", "model_remount_temporary", "model_remount_pending_completed",
+            "model_remount_pending_header", "model_remount_pin_changed", "model_remount_pending_replaced"]
+        for rule in rules {
+            var value = boundCertificateDiagnosticFixture(); value["routeRule"] = rule
+            value["modelPinState"] = ["triggerPresent": true, "pinHeaderPresent": true, "triggerCount": 1, "triggerCandidateCount": 1]
+            XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt) as NSDictionary?, value as NSDictionary)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .claude))
+            var observed: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message", "firstUserVerified": false,
+                                          "boundCertificateDiagnostic": value]
+            XCTAssertNotNil(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observed, provider: .chatgpt))
+            XCTAssertEqual(observed as NSDictionary, ["error": "conversation_changed", "detail": "first_user_message", "firstUserVerified": false] as NSDictionary)
+            value["modelPinInvalidation"] = ["reason": "header_replaced", "source": "header_tracking"]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt), "Static remount rejection is not recorded negative history")
+        }
+        for invalid in ["model_remount_pending_invalidated", "model_remount_unknown", "model_remount_PRIVATE_CANARY"] {
+            var value = boundCertificateDiagnosticFixture(); value["routeRule"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt))
         }
     }
 

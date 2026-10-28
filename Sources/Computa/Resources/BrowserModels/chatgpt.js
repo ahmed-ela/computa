@@ -2194,15 +2194,27 @@ function websiteChatDrainProvisionalHeader(pin) {
     || reject('checked_family', current.checkedFamily && current.checkedFamily.key !== pending.family))
     websiteChatInvalidatePin(pin, 'header_replaced', Object.freeze(diagnostic), 'provisional_context');
 }
-function websiteChatClaimProvisionalHeader(pin, current) {
+function websiteChatClaimProvisionalHeader(pin, current, diagnostic = null) {
+  const reject = (rule, value) => {
+    if (value && diagnostic && diagnostic.rule == null) diagnostic.rule = rule;
+    return value;
+  };
   const pending = pin.provisionalHeader;
   if (pending) {
     websiteChatDrainProvisionalHeader(pin);
-    return !pending.completed && pending.header === current.trigger && pin.invalidated !== true;
+    return !reject('pending_completed', pending.completed)
+      && !reject('pending_header', pending.header !== current.trigger)
+      && !reject('pending_invalidated', pin.invalidated === true);
   }
-  if (!pin.headerTrigger || pin.headerTrigger.isConnected !== false || current.triggerCount !== 1
-    || !current.trigger || !current.enabled(current.trigger) || !current.closedPresentation
-    || current.headerPower?.key !== pin.selection.power.key || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return false;
+  if (reject('previous_missing', !pin.headerTrigger)
+    || reject('previous_connected', pin.headerTrigger.isConnected !== false)
+    || reject('trigger_count', current.triggerCount !== 1)
+    || reject('trigger_missing', !current.trigger)
+    || reject('trigger_disabled', !current.enabled(current.trigger))
+    || reject('closed_presentation', !current.closedPresentation)
+    || reject('header_power', current.headerPower?.key !== pin.selection.power.key)
+    || reject('product', !chatGPTProductModeProof())
+    || reject('temporary', !chatGPTTemporaryVerified())) return false;
   const candidate = { owner: pin.owner, document, invocation: websiteChatInvocationLease,
     previous: pin.headerTrigger, header: current.trigger, selection: pin.selection,
     family: pin.selection.family.key, power: { ...pin.selection.power }, completed: false, proofLease: null, observer: null };
@@ -2210,7 +2222,17 @@ function websiteChatClaimProvisionalHeader(pin, current) {
   candidate.observer.observe(candidate.header, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
   pin.provisionalHeader = candidate;
   websiteChatDrainProvisionalHeader(pin);
-  return pin.invalidated !== true;
+  return !reject('pending_invalidated', pin.invalidated === true);
+}
+function chatGPTBoundRouteModelDeadlineFailed(candidate) {
+  if (!candidate?.routeModelRemount || candidate.verified === true) return false;
+  if (candidate.contextFailure === 'deadline') return true;
+  if (Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline) return false;
+  // Negative history is sticky even if the wall clock moves backward. These
+  // existing failure slots grant no model, body, receipt or retry authority.
+  candidate.modelFailure ||= { error: 'model_unverified' };
+  candidate.contextFailure ||= 'deadline';
+  return true;
 }
 function websiteChatDeferredModelRead(expected, context) {
   const started = chatGPTSyncWorkStart();
@@ -2627,7 +2649,16 @@ function chatGPTAwaitFirstInsertEditor(request, observed) {
 }
 const websiteModelFullReadEvidence = websiteModelReadEvidence;
 websiteModelReadEvidence = async function(provider, expected, openingRecovery = null, context = null) {
-  if (provider === 'chatgpt') {
+  const routeRecovery = provider === 'chatgpt' ? globalThis.__computaModelBoundFirstExpansion : null;
+  const routeHeader = routeRecovery?.routeModelRemount;
+  if (routeHeader && !chatGPTBoundRouteModelRemountIntact(routeRecovery)) return { error: 'model_mismatch' };
+  // A route witness retained only negative history of this exact successor.
+  // It cannot use the in-flight shortcut: the existing full readonly family /
+  // power proof must transfer the original pin before any accepted result.
+  const requireRouteModelProof = !!routeHeader && (!routeHeader.completed || routeRecovery.verified !== true);
+  const routeProofExpired = () => requireRouteModelProof && chatGPTBoundRouteModelDeadlineFailed(routeRecovery);
+  if (routeProofExpired()) return { error: 'model_unverified' };
+  if (provider === 'chatgpt' && !requireRouteModelProof) {
     const deferred = websiteChatDeferredModelRead(expected, context);
     if (deferred) return deferred;
   }
@@ -2644,6 +2675,7 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
     ? { ...context, firstInsertDeadline: chatGPTFirstInsertFinalDeadline } : context;
   try {
     const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, cappedContext);
+    if (routeProofExpired()) return { error: 'model_unverified' };
     if (pending && !pending.completed) {
       websiteChatDrainPinnedMutations(pin);
       if (pin.invalidated === true) return { error: 'model_mismatch' };
@@ -2653,6 +2685,9 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
         pending.observer.disconnect?.();
       }
     }
+    if (requireRouteModelProof && !result.error && (!result.modelEvidence || !pending?.completed
+      || pin !== routeRecovery.routeModelPin || pin.headerTrigger !== routeHeader.header
+      || !websiteModelChoiceEqual(result.modelEvidence.selected, expected))) return { error: 'model_unverified' };
     return result;
   } finally {
     if (pending) pending.proofLease = null;
@@ -3380,6 +3415,11 @@ async function chatGPTSubmissionResult(request, observed) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const currentRoots = chatGPTMessageRoots('user');
+  const routeRecovery = globalThis.__computaModelBoundFirstExpansion;
+  // This new route-only picker handoff retains its original deadline through
+  // the final digest too, before the existing body receipt can be consumed.
+  if (routeRecovery?.state === state && routeRecovery.record === record
+    && chatGPTBoundRouteModelDeadlineFailed(routeRecovery)) return { error: 'model_unverified' };
   if (!chatGPTSubmissionContext(state) || (state.pending !== pending) || !chatGPTSubmissionPins(record)
     || state.lastVerified !== capturedParent || capturedParent && !chatGPTSubmissionBodyIntact(capturedParent, currentRoots, capturedParent === record ? replacement : null)
     || currentRoots.length !== roots.length || currentRoots.some((node, index) => node !== roots[index])
@@ -5340,6 +5380,7 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
 let chatGPTFirstRouteModelFailureRule = 'none';
 let chatGPTFirstRouteModelFailurePin = null;
 let chatGPTFirstRouteModelFailureState = null;
+let chatGPTFirstRouteModelFailurePicker = null;
 function chatGPTFirstRouteModelPins(candidate) {
   // Preserve negative model history and physical picker continuity when URL
   // drift discarded a read. This is not fresh model evidence; the continued
@@ -5353,6 +5394,7 @@ function chatGPTFirstRouteModelPins(candidate) {
   chatGPTFirstRouteModelFailurePin = pin;
   websiteChatDrainPinnedMutations(pin);
   const picker = websiteChatPickerState(), selected = pin && websiteChatPresetChoice(pin.selection?.family, pin.selection?.power);
+  chatGPTFirstRouteModelFailurePicker = picker;
   chatGPTFirstRouteModelFailureState = Object.freeze({ triggerPresent: !!picker.trigger,
     triggerCount: picker.triggerCount, triggerCandidateCount: picker.triggerCandidates.length, pinHeaderPresent: !!pin?.headerTrigger });
   if (reject('model_pin_missing', !pin)
@@ -5561,7 +5603,21 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
     || reject('product', !chatGPTProductModeProof())
     || reject('temporary', !chatGPTTemporaryVerified())) return null;
-  if (!chatGPTFirstRouteModelPins(candidate)) { reject(chatGPTFirstRouteModelFailureRule, true); return null; }
+  let modelRemount = null;
+  if (!chatGPTFirstRouteModelPins(candidate)) {
+    const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
+    const diagnostic = {};
+    const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
+    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
+    if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
+    if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
+      return failModel('model_remount_pending_replaced');
+    // Do not adopt the replacement picker here. Reuse the existing single
+    // provisional-header observer, retaining the old pin and all negatives.
+    if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
+      return failModel(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
+    modelRemount = { pin, pending: pin.provisionalHeader };
+  }
   // Any non-route conversation identity remains a hard boundary. Route-only
   // lineage is independently checked against the original URL by native.
   if (reject('conversation_identity', input.expectedConversationIdentity)) return null;
@@ -5578,6 +5634,10 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     candidate.remount = true;
     candidate.root = root; candidate.body = body;
   }
+  if (modelRemount) {
+    candidate.routeModelPin = modelRemount.pin;
+    candidate.routeModelRemount = modelRemount.pending;
+  }
   // No new witness or claim: native already knows how to carry this discarded
   // certificate across its bounded route chain and require a fresh full proof.
   if (returningReceipt) return certifiedDiscard;
@@ -5587,7 +5647,15 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
 // Both a discarded certification and a completed replacement receipt consume
 // the same native-certified route suffix. The two-edge navigation budget is
 // independent of the one display click and one replacement-read handoff.
+function chatGPTBoundRouteModelRemountIntact(candidate) {
+  const pending = candidate?.routeModelRemount;
+  if (!pending) return true;
+  const pin = globalThis.__computaChatPresetPin;
+  return pin === candidate.routeModelPin && pin?.provisionalHeader === pending
+    && (!pending.completed || pin.headerTrigger === pending.header);
+}
 function chatGPTConsumeBoundFirstRoute(candidate, witness = null) {
+  if (!chatGPTBoundRouteModelRemountIntact(candidate)) return false;
   const start = chatGPTFirstUserExpansionRouteStart(candidate), edges = input.firstUserExpansionRouteContinuation;
   if (start < 0 || (candidate.routeContinuationEdges?.length || 0) + edges.length - start > 2
     || witness && (edges[start].fromURL !== witness.fromURL || edges[start].toURL !== witness.toURL)) return false;

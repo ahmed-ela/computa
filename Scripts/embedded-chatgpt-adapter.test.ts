@@ -2457,7 +2457,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
     });
 
-    const remountFinalizationRoute = async (mutation = 'none', afterPromotion?: (staged: any) => void) => {
+    const remountFinalizationRoute = async (mutation = 'none', afterPromotion?: (staged: any) => void, observeOverrides: Record<string, unknown> = {}) => {
       const staged = await remounted(), { x, first, record, oldRoot, oldBody } = staged;
       const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;
       const publicURL = 'https://chatgpt.com/c/public-finalization-recovery?temporary-chat=true';
@@ -2486,12 +2486,133 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         afterPromotion?.(staged);
       };
       x.f.onDigest(promote, first.outbound);
-      const discarded = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge] });
+      const discarded = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge], ...observeOverrides });
       expect(crossed).toBe(true); denied(discarded);
       expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
       expect(candidate).not.toHaveProperty('verified', true);
       return { ...staged, candidate, receipt, deadline, owner, originalDocument, firstEdge, secondEdge, discarded };
     };
+
+    const modelRemountFinalization = async (defer = true, beforeWitness = 'none') => {
+      let oldHeader: any;
+      const staged = await remountFinalizationRoute('none', ({ x }: any) => {
+        oldHeader = x.picker.replaceTrigger(beforeWitness !== 'connected_old');
+        if (beforeWitness === 'disabled') x.picker.trigger.disabled = true;
+        if (beforeWitness === 'wrong_power') x.picker.selected('High');
+      }, { deferModelVerification: defer });
+      return { ...staged, oldHeader, pin: staged.x.f.world.__computaChatPresetPin };
+    };
+
+    test('same-choice picker remount retains only a route witness until original full proof commits its pin', async () => {
+      for (const defer of [false, true]) {
+        const { x, first, oldRoot, oldBody, root, body, record, candidate, pin, oldHeader,
+          receipt, deadline, firstEdge, secondEdge, discarded, expand } = await modelRemountFinalization(defer);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' }); denied(discarded);
+        expect(oldHeader.isConnected).toBe(false); expect(pin.invalidated).not.toBe(true);
+        const pending = pin.provisionalHeader;
+        expect(pending.previous).toBe(oldHeader); expect(pending.header).toBe(x.picker!.trigger);
+        expect(pin.headerTrigger).toBe(oldHeader); expect(pending.completed).toBe(false);
+        expect(candidate.routeModelRemount).toBe(pending); expect(candidate.routeModelPin).toBe(pin);
+        expect(candidate.routeDiscard).toMatchObject(secondEdge); expect(record.replacement).toBe(receipt);
+        let fullReads = 0;
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          if (++fullReads === 1) expect(pin.headerTrigger).toBe(oldHeader);
+          expect(candidate).not.toHaveProperty('verified', true);
+          expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBe(receipt);
+          click();
+        };
+        const before = x.f.digestInputs.length;
+        const current = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: defer });
+        expect(current.error).toBeUndefined(); expect(current.modelEvidence?.selected).toEqual(choice);
+        expect(current).not.toHaveProperty('modelVerificationPending'); expect(fullReads).toBeGreaterThan(0);
+        expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pin.provisionalHeader).toBe(pending); expect(pending.completed).toBe(true);
+        expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]); expect(candidate.deadline).toBe(deadline);
+        expect(candidate.verified).toBe(true); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('route-only picker admission rejects connected predecessors disabled replacements and changed power', async () => {
+      for (const [mutation, rule] of [['connected_old', 'previous_connected'], ['disabled', 'trigger_disabled'], ['wrong_power', 'header_power']]) {
+        const { x, first, record, candidate, pin, oldHeader, receipt, deadline, firstEdge, secondEdge, discarded, expand }
+          = await modelRemountFinalization(true, mutation);
+        denied(discarded); expect(candidate.routeDiscard).toBeUndefined();
+        expect(discarded.boundCertificateDiagnostic).toMatchObject({ stage: 'finalization_hash', rule: 'route_guard',
+          routeRule: 'model_remount_' + rule, expectedModelPresent: true, deferModelVerification: true });
+        expect(pin.headerTrigger).toBe(oldHeader); expect(pin.provisionalHeader).toBeUndefined();
+        expect(record.replacement).toBe(receipt); expect(candidate.deadline).toBe(deadline);
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true }));
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('route model full proof cannot publish ownership after its original recovery deadline expires during the read', async () => {
+      const { x, first, candidate, pin, receipt, record, deadline, firstEdge, secondEdge, expand } = await modelRemountFinalization();
+      x.f.advanceTime(1_300);
+      const click = x.picker!.trigger.onClick!;
+      let advanced = false;
+      x.picker!.trigger.onClick = () => { if (!advanced) { advanced = true; x.f.advanceTime(700); } click(); };
+      const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true });
+      expect(advanced).toBe(true); denied(result); expect(result).not.toHaveProperty('modelEvidence');
+      expect(candidate.deadline).toBe(deadline); expect(candidate).not.toHaveProperty('verified', true);
+      expect(record.replacement).toBe(receipt); expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      x.f.advanceTime(-2_000);
+      denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true }));
+      expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+    });
+
+    test('route model final submission hash cannot consume its receipt after the original recovery deadline', async () => {
+      const { x, first, candidate, receipt, record, oldRoot, deadline, firstEdge, secondEdge, expand } = await modelRemountFinalization();
+      x.f.advanceTime(1_300);
+      let advanced = false;
+      const expire = () => {
+        if (!candidate.routeModelRemount.completed) { x.f.onDigest(expire, first.outbound); return; }
+        advanced = true; x.f.advanceTime(700);
+      };
+      x.f.onDigest(expire, first.outbound);
+      const options = { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true };
+      const result = await x.observe(first, options);
+      expect(advanced).toBe(true); denied(result); expect(result).not.toHaveProperty('modelEvidence');
+      expect(record.root).toBe(oldRoot); expect(record.replacement).toBe(receipt);
+      expect(candidate.deadline).toBe(deadline); expect(candidate).not.toHaveProperty('verified', true);
+      x.f.advanceTime(-2_000); denied(await x.observe(first, options));
+      expect(record.replacement).toBe(receipt); expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+    });
+
+    test('route model remount cannot survive second replacement restored negatives missing full proof or stale authority', async () => {
+      for (const mutation of ['second_replacement', 'old_reconnected', 'switch_restore', 'wrong_family', 'disabled',
+        'body', 'deadline', 'extra_edge', 'owner', 'pending_identity']) {
+        const { x, first, oldRoot, record, candidate, pin, oldHeader, receipt, deadline, firstEdge, secondEdge, body, expand }
+          = await modelRemountFinalization();
+        const pending = pin.provisionalHeader, fullTrigger = x.picker!.trigger;
+        if (mutation === 'second_replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_reconnected') oldHeader.connected = true;
+        if (mutation === 'switch_restore') {
+          let once = true;
+          pending.observer.takeRecords = () => { if (!once) return []; once = false;
+            return [{ type: 'characterData', target: { nodeType: 3, parentElement: fullTrigger, textContent: 'Medium' }, oldValue: 'High' }]; };
+        }
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'disabled') fullTrigger.disabled = true;
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'deadline') x.f.advanceTime(2_000);
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        const edges = [firstEdge, secondEdge];
+        if (mutation === 'extra_edge') edges.push({ fromURL: secondEdge.toURL, toURL: 'https://chatgpt.com/c/extra?temporary-chat=true' });
+        const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: edges, deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence');
+        expect(pin.headerTrigger).toBe(oldHeader); expect(record.root).toBe(oldRoot); expect(record.replacement).toBe(receipt);
+        expect(candidate).not.toHaveProperty('verified', true); expect(candidate.deadline).toBe(deadline);
+        if (mutation === 'wrong_family') expect(fullTrigger.clicks).toBeGreaterThan(0);
+        if (mutation === 'switch_restore') expect(pin.invalidated).toBe(true);
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
 
     test('fresh remount finalization retains only its existing certificate and certified two-edge route handoff', async () => {
       const { x, first, record, root, body, expand, candidate, receipt, deadline, firstEdge, secondEdge, discarded }
@@ -2726,14 +2847,13 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     });
 
     test('model-pin route diagnostics distinguish disabled and replaced headers from retained negative history', async () => {
-      for (const mutation of ['disabled', 'replacement', 'missing', 'duplicate', 'header_old', 'header_old_limit',
+      for (const mutation of ['disabled', 'missing', 'duplicate', 'header_old', 'header_old_limit',
         'header_new_limit', 'header_record_limit', 'header_aggregate', 'semantic_current', 'semantic_old']) {
         let oldTrigger: any;
         const { x, first, record, candidate, receipt, deadline, firstEdge, secondEdge, discarded, expand }
           = await remountFinalizationRoute('none', ({ x }: any) => {
             const pin = x.f.world.__computaChatPresetPin;
             if (mutation === 'disabled') x.picker.trigger.disabled = true;
-            if (mutation === 'replacement') oldTrigger = x.picker.replaceTrigger();
             if (mutation === 'missing') x.picker.trigger.connected = false;
             if (mutation === 'duplicate') x.f.body.append(new Element('BUTTON', {
               'aria-label': 'Select ChatGPT model', 'aria-haspopup': 'menu' }, 'Medium'));
@@ -2762,7 +2882,8 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         const diagnostic = discarded.boundCertificateDiagnostic;
         expect(diagnostic, mutation).toMatchObject({ stage: 'finalization_hash', rule: 'route_guard',
           routeRule: mutation === 'disabled' ? 'model_trigger_disabled'
-            : ['replacement', 'missing', 'duplicate'].includes(mutation) ? 'model_trigger_identity' : 'model_pin_invalidated',
+            : mutation === 'missing' ? 'model_remount_trigger_count'
+              : mutation === 'duplicate' ? 'model_remount_previous_connected' : 'model_pin_invalidated',
           receiptPresent: true, receiptNodesMatch: true, receiptRetained: true });
         expect(diagnostic.modelPinState).toEqual({ triggerPresent: !['missing', 'duplicate'].includes(mutation),
           triggerCount: mutation === 'missing' ? 0 : mutation === 'duplicate' ? 2 : 1,
