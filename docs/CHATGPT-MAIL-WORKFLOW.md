@@ -231,6 +231,19 @@ full-body hashes before pinning the current physical message. Changed body, mode
 temporary mode and an invalid second local route remain rejected. Installed
 real-mail validation is still separate from these deterministic results.
 
+The signed, independently verified build 309 failed the original real-mail task
+after 3.130 seconds, before any browser tool, field input or Send. Its first full
+prompt bound successfully, followed by root-to-local and local-to-public route
+changes. The remount certifier returned `snapshot_before_action` / `digest`, and
+the next read rejected the spent recovery. This matches build 308's finite error
+boundary; the retained diagnostics cannot identify which internal guard rejected
+or whether the certificate had already been installed. The passing local fix
+therefore does not establish reliable live behavior or the remaining root cause.
+Temporary-session cleanup remains unconfirmed. No prompt was replayed, diagnostic
+watchers and their exact unused arms were cleaned up, and the failed page and
+historical evidence were retained. The real-email workflow remains **failed**,
+with zero emails sent, and this PR remains draft pending a verified live result.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
