@@ -605,7 +605,8 @@ enum ComputaAgentInstructions {
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],
                                     includedInstructionText: [String] = [],
                                     responseFormat: WebResponseFormat = .fencedJSON,
-                                    singleActionRelay: Bool = false) -> String {
+                                    singleActionRelay: Bool = false,
+                                    currentBrowserHandoff: String = "") -> String {
         let responseFormatInstructions: String
         switch responseFormat {
         case .fencedJSON:
@@ -695,6 +696,7 @@ enum ComputaAgentInstructions {
         \(browserAddressHandoff)
         \(diagnosticHandoff)
         \(selectionContract)
+        \(currentBrowserHandoff)
         \(literalIdentifiers)
         User reply-format constraints apply to unwrapped message.text; still use one
         JSON envelope. Put file-only results, truthful limitations and refusals in message.text.

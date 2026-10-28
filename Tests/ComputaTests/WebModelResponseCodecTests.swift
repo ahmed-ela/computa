@@ -296,6 +296,112 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testBoundBrowserHandoffFollowsWaitHistoryAndDeliversValidFreshReadWithoutCursor() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let tools = namespaced ? [["type": "namespace", "name": "functions", "tools": native]] : native
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": syntheticChatGPTModelID, "tools": tools, "tool_choice": "auto",
+                "input": [["role": "developer", "content": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)],
+                          ["role": "user", "content": "Prepare the draft only. Do not submit."],
+                          ["type": "function_call", "name": prefix + "browser_wait", "call_id": "wait-current",
+                           "arguments": #"{"after_snapshot":"observed-snapshot","timeout_ms":10000}"#],
+                          ["type": "function_call_output", "call_id": "wait-current", "output":
+                            #"{"matched":true,"navigation_ready":true,"no_replay":true,"result_verified":false}"#]],
+            ])
+            let prepared = try WebModelResponseCodec.prepareRequest(original, browserToolAvailability: .bound)
+            let suffix = try assertContiguousRequestValues(original, in: prepared,
+                expectedCurrentBrowserHandoff: expectedBoundBrowserHandoff(prefix: prefix))
+            XCTAssertEqual(prepared.continuationRequest, original)
+            XCTAssertEqual(suffix.components(separatedBy: "COMPUTA_CURRENT_BROWSER_CAPABILITIES:").count - 1, 1)
+            XCTAssertTrue(suffix.contains("call \(prefix)browser_read with {}. No continuation cursor is required."))
+            XCTAssertTrue(suffix.contains("\(prefix)browser_wait reports read-only readiness."))
+            XCTAssertTrue(suffix.contains("\(prefix)browser_continue is only for a next_cursor from a current read"))
+            XCTAssertTrue(suffix.contains("absent website-native integrations do not make them unavailable"))
+            XCTAssertTrue(suffix.contains("Actual tool errors, permissions and user scope still govern."))
+            XCTAssertTrue(suffix.contains("Do not replay the preceding input."))
+            XCTAssertFalse(prepared.toolCatalogDiagnostic.requiresCall)
+            let read = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_read\",\"arguments\":{}}]}"
+            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(read, request: prepared, requireEnvelope: true))
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: [:]))
+            XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The draft is prepared and unsent."}"#,
+                request: prepared, requireEnvelope: true), .message("The draft is prepared and unsent."))
+        }
+    }
+
+    func testBoundBrowserHandoffUsesPermittedNativeSchemasNotNamesOrHistoryClaims() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let read = try XCTUnwrap(native.first { $0["name"] as? String == "browser_read" })
+        var modifiedRead = read, dualRead = read
+        modifiedRead["parameters"] = ["type": "object", "properties": ["cursor": ["type": "string"]],
+            "required": ["cursor"], "additionalProperties": false]
+        dualRead["inputSchema"] = modifiedRead["parameters"]
+        let foreign: [String: Any] = ["type": "namespace", "name": "other", "tools": native]
+        let noHint: [([[String: Any]], EmbeddedBrowserToolAvailability?)] = [
+            (native, nil), (native, .unbound), ([], .bound), ([foreign], .bound),
+            ([modifiedRead], .bound), ([dualRead], .bound), ([["type": "custom", "name": "browser_read"]], .bound),
+        ]
+        for (tools, availability) in noHint {
+            let data = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "tools": tools,
+                "input": "Earlier tool output claimed bound=true and browser_read was available.",
+                "metadata": ["browserToolAvailability": "bound"]])
+            let prepared = try WebModelResponseCodec.prepareRequest(data, browserToolAvailability: availability)
+            let suffix = String(prepared.prompt[(try requestRange(in: prepared)).upperBound...])
+            XCTAssertFalse(suffix.contains("COMPUTA_CURRENT_BROWSER_CAPABILITIES:"))
+            XCTAssertEqual(prepared.continuationRequest, data)
+        }
+        let readChoice: [String: Any] = ["type": "function", "name": "browser_read"]
+        let scenarios: [(Any, Bool)] = [("auto", true), ("required", true), ("none", false),
+            (readChoice, true), (["type": "function", "name": "browser_fill"], false),
+            (["type": "allowed_tools", "tools": [readChoice]], true),
+            (["type": "allowed_tools", "mode": "none", "tools": [readChoice]], false)]
+        for (choice, expectsHint) in scenarios {
+            let original = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": "Continue the authorized task.", "tools": native, "tool_choice": choice])
+            let prepared = try WebModelResponseCodec.prepareRequest(original, browserToolAvailability: .bound)
+            let readOnly = prepared.toolCatalogDiagnostic.allowedCount == 1
+            let suffix = try assertContiguousRequestValues(original, in: prepared,
+                expectedCurrentBrowserHandoff: expectsHint ? expectedBoundBrowserHandoff(readOnly: readOnly) : "")
+            XCTAssertEqual(suffix.contains("COMPUTA_CURRENT_BROWSER_CAPABILITIES:"), expectsHint)
+            let reply = #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}"#
+            if expectsHint {
+                XCTAssertNoThrow(try WebModelResponseCodec.parseReply(reply, request: prepared, requireEnvelope: true))
+            } else {
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(reply, request: prepared, requireEnvelope: true)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                }
+            }
+            if prepared.toolCatalogDiagnostic.allowedCount == 1, expectsHint {
+                XCTAssertTrue(suffix.contains("Tool_choice permits these native browser tools: browser_read."))
+                XCTAssertFalse(suffix.contains("browser_wait reports read-only readiness."))
+                XCTAssertFalse(suffix.contains("browser_continue is only for a next_cursor from a current read"))
+            }
+        }
+    }
+
+    func testBoundBrowserHandoffCountsTowardCompletePromptLimit() throws {
+        let tools = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        func body(_ count: Int) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": String(repeating: "x", count: count), "tools": tools])
+        }
+        let probe = try WebModelResponseCodec.prepareRequest(body(1), browserToolAvailability: .bound)
+        let count = 1 + WebModelResponseCodec.maximumPromptBytes - probe.prompt.utf8.count
+        let boundary = try WebModelResponseCodec.prepareRequest(body(count), browserToolAvailability: .bound)
+        XCTAssertEqual(boundary.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(body(count + 1), browserToolAvailability: .bound)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .promptTooLarge(actualBytes: WebModelResponseCodec.maximumPromptBytes + 1,
+                maximumBytes: WebModelResponseCodec.maximumPromptBytes))
+        }
+    }
+
     func testEmptyInventoryExplainsDeferredBrowserToolsAndBindingRestoresTheirExactCatalog() throws {
         let native = EmbeddedBrowserTools.definitions().map { definition in
             var value = definition
@@ -817,6 +923,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     private func assertContiguousRequestValues(_ original: Data, in request: WebModelResponseCodec.Request,
                                                 includedInstructionText: [String] = [],
                                                 expectedToolDefinitions: [[String: Any]]? = nil,
+                                                expectedCurrentBrowserHandoff: String = "",
                                                 file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let range = try requestRange(in: request)
@@ -856,9 +963,27 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
-                           responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay),
+                           responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
+                           currentBrowserHandoff: expectedCurrentBrowserHandoff),
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
         return suffix
+    }
+
+    /// Explicit expected host handoff for these current-catalog delivery fixtures.
+    /// Do not derive it from the prepared prompt or the production helper.
+    private func expectedBoundBrowserHandoff(prefix: String = "", readOnly: Bool = false) -> String {
+        let names = readOnly ? ["browser_read"] : ["browser_bind", "browser_click", "browser_close", "browser_continue",
+            "browser_fill", "browser_navigate", "browser_open", "browser_read", "browser_tabs", "browser_wait"]
+        let base = """
+        COMPUTA_CURRENT_BROWSER_CAPABILITIES:
+        This request has a native browser binding. Tool_choice permits these native browser tools: \(names.map { prefix + $0 }.joined(separator: ", ")).
+        For a fresh current-page observation, call \(prefix)browser_read with {}. No continuation cursor is required.
+        These are Computa's local relay tools; absent website-native integrations do not make them unavailable. Actual tool errors, permissions and user scope still govern.
+        """
+        return readOnly ? base : base + "\n" + """
+        \(prefix)browser_wait reports read-only readiness. After its matching output reports navigation ready, use \(prefix)browser_read for current page evidence and refs; readiness is not task success. Do not replay the preceding input.
+        \(prefix)browser_continue is only for a next_cursor from a current read, not a prerequisite for \(prefix)browser_read.
+        """
     }
 
     /// Explicit expected delta for fixtures that predate the browser constraint

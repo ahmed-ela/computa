@@ -3624,3 +3624,42 @@ JavaScript coverage additionally checks 16 admission negatives, five post-click
 failures and a second route discard requiring fresh complete proof. Evidence is
 `pending291-tests/full-result.json` and
 `swift291-pending-private-final-tests-result.json`. Live qualification is pending.
+
+Build291 live capture verified the exact seed reply and four inferences for a
+fresh local mailbox task, with all ownership/model/temporary checks and website
+session closure passing. The mailbox task nevertheless failed: after successful
+open, Compose click and navigation wait, the model ended with an unsupported
+claim that continuation tools were unavailable. No `browser_read` followed the
+wait, and the fixture recorded zero POSTs. The completed transport does not
+establish completed task execution.
+
+Final inference `937021dc-f850-49fb-97bc-b310134bbccc` logged native binding
+`bound`, automatic tool choice, 22 offered/allowed tools and browser masks 1023.
+These diagnostics derive from the same validated schemas and tool policy used
+to construct the prepared prompt: all ten built-in browser operations were
+available. This rules out omission from the local prepared catalog, but does not
+reveal why the model misinterpreted it. The final physical provider payload was
+not retained by the first-inference-only metadata capture. Evidence is
+`candidate291-plan/fresh-send/terminal-capture/independent-qualification.json`
+and `prepared-request-tool-catalog-proof.json`; the failed task was not replayed.
+The owned fixture process was stopped after capture.
+
+### Build 292: current browser handoff after history
+
+The prepared catalog in build291 was correct, but the final handoff did not
+distinguish current fresh reads from cursor-based continuation. Build292 adds a
+short post-history reminder only when native admission reports a bound page
+and the validated, tool-choice-allowed catalog contains the native fresh-read
+schema. It names the exact callable read operation and its valid empty arguments.
+When available, wait and continuation guidance explains that readiness requires
+a fresh observation, while continuation only advances a current captured page.
+The text grants no references, permissions or action authority and does not
+retry actions or change parser admission. This is a model-guidance mitigation;
+the captured false capability claim does not prove the model's internal cause.
+All 174 focused native instruction, codec and format-correction tests passed
+with unchanged source hashes. New cases cover exact post-history delivery,
+qualified fresh-read arguments, withheld hints for absent/foreign/modified
+schemas and excluded tool choices, preserved canonical history and the full
+prompt-size bound. Independent review found no material blocker. Evidence is
+`browser-handoff292-tests/result.json` and
+`candidate292-handoff-independent-review.json`. New live qualification is pending.

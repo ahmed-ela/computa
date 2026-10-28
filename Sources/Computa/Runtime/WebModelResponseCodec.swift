@@ -284,7 +284,8 @@ enum WebModelResponseCodec {
         // toward admission and the outbound ownership fingerprint.
         let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT)
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
+            currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability))
         let prompt = """
         \(runtimeInstructions)
 
@@ -314,6 +315,28 @@ enum WebModelResponseCodec {
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
                        responseConfiguration: configuration, continuationRequest: data)
+    }
+
+    /// Native state and the final validated catalog establish this handoff,
+    /// never tool-output claims or browser-shaped names in retained history.
+    private static func currentBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
+                                              availability: EmbeddedBrowserToolAvailability?) -> String {
+        guard availability == .bound else { return "" }
+        let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
+        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else { return "" }
+        var lines = [
+            "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",
+            "This request has a native browser binding. Tool_choice permits these native browser tools: \(allowed.keys.sorted().joined(separator: ", ")).",
+            "For a fresh current-page observation, call \(read) with {}. No continuation cursor is required.",
+            "These are Computa's local relay tools; absent website-native integrations do not make them unavailable. Actual tool errors, permissions and user scope still govern.",
+        ]
+        if let wait = allowed.filter({ $0.value.name == "browser_wait" }).keys.sorted().first {
+            lines.append("\(wait) reports read-only readiness. After its matching output reports navigation ready, use \(read) for current page evidence and refs; readiness is not task success. Do not replay the preceding input.")
+        }
+        if let continuation = allowed.filter({ $0.value.name == "browser_continue" }).keys.sorted().first {
+            lines.append("\(continuation) is only for a next_cursor from a current read, not a prerequisite for \(read).")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Only actual local instruction fields can establish an already-supplied
