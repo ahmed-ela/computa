@@ -35,6 +35,40 @@ func compactMailboxFixtureNodes(message: String = "Please confirm Tuesday at 10:
 }
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testCaptureRecoveryDistinguishesMissingSourceFromEmptyLocalSelectionWithoutDispatching() async throws {
+        for compact in [false, true] {
+            for truncated in [false, true] {
+                let fixture = try await BrowserBrokerTestFixture.make()
+                try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                    nodes: [semanticNode(0, role: "heading", name: "Inbox"),
+                            semanticNode(1, role: "button", name: "Compose")], sourceTruncated: truncated)
+                let before = await fixture.transport.readinessRequests().count
+                let miss = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                    bundleIdentifier: "com.ahmedelamin.LocalCodex", read: .init(query: "Recipients", view: .all), compact: compact)
+                let text = miss.snapshot.formattedText
+                XCTAssertEqual(miss.snapshot.totalMatches, 0)
+                XCTAssertNil(miss.snapshot.nextCursor)
+                XCTAssertTrue(miss.snapshot.elements.isEmpty)
+                XCTAssertTrue(miss.snapshot.actionWitnesses.isEmpty)
+                XCTAssertEqual(text.contains("CAPTURE_LIMIT"), truncated)
+                if truncated {
+                    XCTAssertTrue(text.contains("cursors cover captured rows only"))
+                    XCTAssertTrue(text.contains("fresh overview without query/cursor"))
+                    XCTAssertTrue(text.contains("Unresolved capture is not relay/access failure"))
+                    XCTAssertTrue(text.contains("Never replay input"))
+                } else if compact {
+                    XCTAssertTrue(text.contains("FILTER_EMPTY no captured match in this view/query"))
+                }
+                let after = await fixture.transport.readinessRequests().count
+                XCTAssertEqual(after, before + 1, "Recovery guidance must not dispatch a hidden reread")
+                if compact {
+                    XCTAssertEqual(try BrowserCompleteObservation.excessBytes(text + BrowserCompleteObservation.footer(cursor: nil)), 0)
+                }
+                await fixture.assertNoInput()
+            }
+        }
+    }
+
     func testCompactFooterDoesNotDuplicateCursorOrNameAnUnavailableTool() throws {
         let cursor = "opaque-\"\\🙂-cursor"
         let footer = try BrowserCompleteObservation.footer(cursor: cursor)

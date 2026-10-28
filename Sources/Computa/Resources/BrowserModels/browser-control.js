@@ -65,7 +65,7 @@ const semanticRoleFor = element => {
   }
   if (element.isContentEditable) return 'textbox';
   return ({a: element.hasAttribute('href') ? 'link' : null, button:'button', textarea:'textbox', select:'combobox',
-    main:'main', article:'article', nav:'navigation', aside:'complementary', header:'banner', footer:'contentinfo',
+    main:'main', article:'article', nav:'navigation', aside:'complementary', header:'banner', footer:'contentinfo', dialog:'dialog', form:'form',
     ul:'list', ol:'list', li:'listitem', p:'statictext', pre:'statictext', blockquote:'statictext', img:'image',
     section: element.getAttribute('aria-label') ? 'region' : null, output:'status'})[tag] || null;
 };
@@ -106,7 +106,13 @@ const nameFor = (element, role, boxlessContents = false) => {
     const label = trim(Array.from(element.labels || []).map(node => node.innerText || node.textContent || '').join(' '));
     return label || trim(element.getAttribute('placeholder')) || trim(element.getAttribute('title'));
   }
-  if (['application','main','article','navigation','complementary','banner','contentinfo','list','listitem','region'].includes(role)) return '';
+  // Structural containers do not need a second copy of every descendant's
+  // text as their fallback name. On a large inbox/table that duplication can
+  // consume the entire capture budget before a later form is reached. Keep
+  // explicit accessible labels above, and capture visible child text below.
+  if (['application','main','article','navigation','complementary','banner','contentinfo','list','listitem','region',
+    'group','generic','dialog','alertdialog','form','table','grid','treegrid','rowgroup','row','cell','gridcell',
+    'toolbar','menu','menubar','listbox','radiogroup','tablist','tree'].includes(role)) return '';
   if (role === 'image') return trim(element.getAttribute('alt'));
   // WebKit's innerText on a boxless wrapper can include hidden descendants.
   // Keep explicit accessible labels above; visible child text is captured with
@@ -162,7 +168,41 @@ const metaFor = (element, role, boxlessContents = false) => {
     ...(['group','region'].includes(role) ? {isExplicitlyNamedContainer:!!explicitContainerName(element)} : {})};
 };
 const capture = () => {
-  const nodes = [], next = [{node:document.body || document.documentElement, parent:null, suppressText:false}];
+  const root = document.body || document.documentElement;
+  // The source budget is independent of native result pagination. Traversing
+  // a long inbox first can permanently omit its appended compose dialog from
+  // every cursor page. Prefer the live focus branch and visible form/dialog
+  // branches, but keep their real ancestors and the usual capture limits.
+  // Discovery reads only bounded structure/attributes, never field values or
+  // innerText. It grants no action capability and does not claim completeness.
+  const priorities = new Map();
+  const prioritize = (element, priority) => {
+    if (!element || element === root || !visible(element)) return;
+    const path = [];
+    for (let node = element; node && node !== root && path.length < 128; node = node.parentElement) path.push(node);
+    if (!path.length || path[path.length - 1].parentElement !== root) return;
+    for (const node of path) priorities.set(node, Math.min(priorities.get(node) ?? 3, priority));
+  };
+  prioritize(document.activeElement, 0);
+  const discovery = root ? [root] : [];
+  let examinedChildren = 0;
+  for (let index = 0; index < discovery.length && index < 4096; index++) {
+    const node = discovery[index];
+    if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)) continue;
+    const rawRole = node.getAttribute('role') || '';
+    const role = oversizedRole(rawRole) ? '' : trim(rawRole).split(' ')[0].toLowerCase();
+    if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') prioritize(node, 1);
+    else if (role === 'form' || node.tagName === 'FORM') prioritize(node, 2);
+    const children = node.childNodes;
+    // Count every child slot, including text/comments, so non-element fanout
+    // cannot turn this bounded prepass into an unbounded scan.
+    for (let child = 0; child < children.length && discovery.length < 4096 && examinedChildren < 4096; child++) {
+      examinedChildren++;
+      if (children[child].nodeType === Node.ELEMENT_NODE) discovery.push(children[child]);
+    }
+  }
+  const nodes = [], next = [{node:root, parent:null, suppressText:false}];
+  const capturedDOMNodes = new Map();
   let visited = 0, budget = 0, truncated = false;
   const diagnostics = {stopReason:'none',visited:0,emitted:0,estimatedBytes:0,
     visibilityState:['visible','hidden','prerender'].includes(document.visibilityState) ? document.visibilityState : 'unknown',
@@ -184,6 +224,7 @@ const capture = () => {
       if (text.length > 4096) diagnostics.clippedFields++;
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
         value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null});
+      capturedDOMNodes.set(String(id), node);
       budget += name.length * 3 + 200;
       continue;
     }
@@ -211,16 +252,27 @@ const capture = () => {
         meta.isDOMClickable = false; meta.isFocusablePointer = false; meta.isPressUnsupported = true;
       }
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:parent,childNodeIDs:[],...meta});
+      capturedDOMNodes.set(String(id), node);
       state.nodes.set(id,node);
       budget += JSON.stringify(meta).length * 3 + 200;
       parent = String(id);
       suppressText = !boxlessContents && ['button','link','heading','statictext','textbox','searchbox','combobox','image'].includes(role);
     }
-    const children = Array.from(node.childNodes);
-    for (let index = children.length - 1; index >= 0; index--) next.push({node:children[index],parent,suppressText});
+    const children = [[], [], [], []];
+    for (const child of Array.from(node.childNodes)) children[priorities.get(child) ?? 3].push(child);
+    for (let priority = children.length - 1; priority >= 0; priority--)
+      for (let index = children[priority].length - 1; index >= 0; index--)
+        next.push({node:children[priority][index],parent,suppressText});
   }
   const byID = new Map(nodes.map(node => [node.nodeID,node]));
   for (const node of nodes) if (node.parentNodeID && byID.has(node.parentNodeID)) byID.get(node.parentNodeID).childNodeIDs.push(node.nodeID);
+  // Selection order is only a read-priority choice. Preserve actual DOM sibling
+  // order in the evidence graph so moving focus cannot manufacture a changed
+  // region or child-position witness. This sorts only the bounded captured IDs.
+  for (const node of nodes) node.childNodeIDs.sort((left, right) => {
+    const position = capturedDOMNodes.get(left).compareDocumentPosition(capturedDOMNodes.get(right));
+    return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : position & Node.DOCUMENT_POSITION_PRECEDING ? 1 : 0;
+  });
   diagnostics.visited = visited; diagnostics.emitted = nodes.length; diagnostics.estimatedBytes = budget;
   return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes,
     sourceTruncated:truncated,captureDiagnostics:diagnostics};

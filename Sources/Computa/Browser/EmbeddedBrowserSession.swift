@@ -558,6 +558,9 @@ final class EmbeddedBrowserSession {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        // Apply before construction/initial navigation for human, tool, model
+        // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
+        configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
         let view: WKWebView
         #if DEBUG
@@ -607,8 +610,8 @@ final class EmbeddedBrowserSession {
             guard configuration.websiteDataStore === source.configuration.websiteDataStore else {
                 throw Failure.popupProfileMismatch
             }
-            // WebKit owns this configuration, opener and initial navigation.
-            // Return synchronously without replacing settings or loading again.
+            // Preserve WebKit's configuration, opener and initial navigation.
+            // Registration adds the same browser identity; never load again.
             return try registerTab(configuration: configuration, select: true, modelOwned: false,
                                    popupOpenerTabID: tabID).view
         } catch {

@@ -2,10 +2,24 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Element } from './embedded-provider-adapter-fixture';
 
-const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/browser-control.js', import.meta.url), 'utf8');
+const source = readFileSync(process.env.COMPUTA_BROWSER_CONTROL_SOURCE
+  || new URL('../Sources/Computa/Resources/BrowserModels/browser-control.js', import.meta.url), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function fixture(target: string | null) {
+  const documentPosition = (left: any, right: any) => {
+    const path = (node: any) => {
+      const result: number[] = [];
+      for (let current = node; current?.parentElement; current = current.parentElement)
+        result.unshift(current.nodeType === 3 ? -1 : current.parentElement.children.indexOf(current));
+      return result;
+    };
+    if (left === right) return 0;
+    const a = path(left), b = path(right);
+    for (let index = 0; index < Math.min(a.length, b.length); index++)
+      if (a[index] !== b[index]) return a[index] < b[index] ? 4 : 2;
+    return a.length < b.length ? 20 : 10;
+  };
   class Node extends Element {
     focusOptions: unknown[] = [];
     valueWrites: string[] = [];
@@ -19,6 +33,12 @@ function fixture(target: string | null) {
     get textContent() { return super.textContent; }
     set textContent(value: string) { this.replaceChildren(); this.text = value; }
     hasAttribute(name: string) { return this.values[name] !== undefined; }
+    matches(selector: string) { return this.closest(selector) === this; }
+    compareDocumentPosition(other: any) { return documentPosition(this, other); }
+    get childNodes(): any[] {
+      return super.childNodes.map(node => node.nodeType === 3
+        ? { ...node, compareDocumentPosition(other: any) { return documentPosition(this, other); } } : node);
+    }
     scrollIntoView() {}
     getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 20 }; }
     focus(options?: unknown) { this.focusOptions.push(options); document.activeElement = this; this.onFocus?.(); }
@@ -37,18 +57,18 @@ function fixture(target: string | null) {
     observe(target: unknown) { this.target = target; this.active = true; }
     disconnect() { this.active = false; }
   }
-  const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', activeElement: null as Element | null, elementFromPoint: () => link,
+  const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', visibilityState: 'visible', activeElement: null as Element | null, elementFromPoint: () => link,
     getElementById: (id: string) => document.body.descendants().find(node => node.values.id === id) || null,
     addEventListener(name: string, callback: Function) {
       if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
     }, removeEventListener(name: string, callback: Function) { listeners.get(name)?.delete(callback); } };
   const state = {}, location = { href: 'https://example.test/' };
   const execute = new AsyncFunction('input', 'globalThis', 'document', 'location', 'Node', 'getComputedStyle', 'TextEncoder',
-    'MutationObserver', 'setTimeout', 'clearTimeout', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'Event', source);
+    'MutationObserver', 'setTimeout', 'clearTimeout', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'Event', 'Element', 'innerWidth', 'innerHeight', source);
   const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
-    { TEXT_NODE: 3, ELEMENT_NODE: 1 }, () => ({ display: 'block', visibility: 'visible' }), TextEncoder, Observer,
+    { TEXT_NODE: 3, ELEMENT_NODE: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 }, () => ({ display: 'block', visibility: 'visible' }), TextEncoder, Observer,
     (callback: Function, delay: number) => { timers.set(++timerID, { callback, delay }); return timerID; },
-    (id: number) => timers.delete(id), Node, Node, Node, Event);
+    (id: number) => timers.delete(id), Node, Node, Node, Event, Node, 1024, 768);
   const press = (row: any) => run({ operation: 'press', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href });
   const fill = (row: any, text: string) => run({ operation: 'fill', nodeID: row.backendNodeID,
@@ -77,7 +97,7 @@ describe('explicit ARIA selection item press capabilities', () => {
       f.document.body.append(item, other, result); f.document.elementFromPoint = () => item;
       const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === role && node.name === 'Synthetic item');
       expect(row.isDOMClickable).toBe(true); expect(row.isPressUnsupported).toBe(false); expect(row.isDisabled).toBe(false);
-      expect(await f.press(row)).toEqual({ dispatched: true, noReplay: true });
+      expect(await f.press(row)).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
       expect(item.clicks).toBe(1); expect(other.clicks).toBe(0);
       expect(item.values[role.startsWith('menuitem') ? 'aria-checked' : 'aria-selected']).toBe('true');
       expect((await f.run({ operation: 'observe' })).nodes.some((node: any) => node.name === 'Synthetic item selected')).toBe(true);
@@ -156,7 +176,7 @@ describe('exact-field page-local fill focus', () => {
     expect(before.nodes.some((node: any) => node.role === 'button')).toBe(false);
     const row = before.nodes.find((node: any) => node.role === 'searchbox');
     const text = 'Exact search & punctuation.';
-    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true });
+    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
     expect(field.focusOptions).toEqual([{ preventScroll: true }]);
     expect(field.valueWrites).toEqual([text]); expect(field.value).toBe(text);
     expect(deliveries).toEqual(['input', 'change']); expect(field.clicks).toBe(0);
@@ -216,7 +236,7 @@ describe('exact-field page-local fill focus', () => {
     f.document.body.append(field); f.document.elementFromPoint = () => field;
     const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
     const text = 'Exact line one\nLine two & punctuation.';
-    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true });
+    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
     expect(f.document.activeElement).toBe(field); expect(field.textContent).toBe(text);
     expect(field.valueWrites).toEqual([]); expect(field.events.map((event: any) => event.type)).toEqual(['input', 'change']);
   });
@@ -229,7 +249,7 @@ describe('built-in browser popup-only link capabilities', () => {
       const link = read.nodes.find((row: any) => row.role === 'link');
       expect(link.isDOMClickable).toBe(true); expect(link.isPressUnsupported).toBe(false);
       expect(link.isDisabled).toBe(false);
-      expect(await f.press(link)).toEqual({ dispatched: true, noReplay: true });
+      expect(await f.press(link)).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
       expect(f.link.clicks).toBe(1);
     }
   });
@@ -288,6 +308,158 @@ describe('structural application labels', () => {
       expect(result.nodes.some((node: any) => node.role === 'statictext' && node.name === 'Exact child content')).toBe(true);
       expect(result.nodes.find((node: any) => node.role === 'button').name).toBe('Open record');
     }
+  });
+});
+
+describe('bounded capture of late forms and dialogs', () => {
+  function crowded(kind: 'dialog' | 'native-dialog' | 'form' | 'focus-only', focused = false) {
+    const f = fixture(null), inbox = new f.Node('DIV', { role: 'grid' });
+    for (let index = 0; index < 300; index++) {
+      const row = new f.Node('DIV', { role: 'row' }), cell = new f.Node('DIV', { role: 'gridcell' });
+      cell.append(new f.Node('P', {}, `Synthetic inbox item ${index}: ${'x'.repeat(1000)}`));
+      row.append(cell); inbox.append(row);
+    }
+    const scope = new f.Node(kind === 'native-dialog' ? 'DIALOG' : kind === 'form' ? 'FORM' : 'DIV',
+      { ...(kind === 'dialog' ? { role: 'dialog' } : {}), ...(kind === 'native-dialog' ? { open: '' } : {}),
+        'aria-label': 'New message' });
+    const to = new f.Node('INPUT', { type: 'email', 'aria-label': 'Recipients' });
+    const subject = new f.Node('INPUT', { 'aria-label': 'Subject' });
+    const body = new f.Node('DIV', { contenteditable: 'true', 'aria-label': 'Message body' });
+    const send = new f.Node('BUTTON', {}, 'Send');
+    scope.append(to, subject, body, send); f.document.body.append(inbox, scope);
+    if (focused) f.document.activeElement = to;
+    f.document.elementFromPoint = () => to;
+    return { ...f, inbox, scope, to, subject, body, send };
+  }
+
+  test('late compose controls survive source truncation with or without focus', async () => {
+    for (const kind of ['dialog', 'native-dialog', 'form', 'focus-only'] as const) {
+      const f = crowded(kind, kind === 'focus-only');
+      const result = await f.run({ operation: 'observe' });
+      const fields = result.nodes.filter((node: any) => node.isEditable);
+      expect(fields.map((node: any) => node.name)).toEqual(['Recipients', 'Subject', 'Message body']);
+      expect(result.nodes.find((node: any) => node.name === 'Send').isDOMClickable).toBe(true);
+      expect(result.sourceTruncated).toBe(true);
+      expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+      expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230000);
+      expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20001);
+      expect(result.nodes.length).toBeLessThanOrEqual(3000);
+      expect(new Set(result.nodes.map((node: any) => node.nodeID)).size).toBe(result.nodes.length);
+      for (const field of fields) {
+        const parent = result.nodes.find((node: any) => node.nodeID === field.parentNodeID);
+        expect(parent.name).toBe('New message'); expect(parent.childNodeIDs).toContain(field.nodeID);
+        expect(field.isDisabled).toBe(false); expect(field.isReadOnly).toBe(false);
+      }
+      expect(await f.fill(fields[0], 'fixture@example.invalid'))
+        .toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
+      expect(f.to.value).toBe('fixture@example.invalid'); expect(f.to.events.map((event: any) => event.type)).toEqual(['input', 'change']);
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test('focused path survives the bounded discovery cap without manufacturing missing siblings', async () => {
+    const f = crowded('focus-only', true);
+    // A focused branch is known directly from the DOM, even when structural
+    // discovery cannot enumerate all unrelated descendants within its cap.
+    for (let index = 0; index < 5000; index++) f.inbox.append(new f.Node('DIV'));
+    const result = await f.run({ operation: 'observe' });
+    expect(result.nodes.some((node: any) => node.name === 'Recipients' && node.isEditable)).toBe(true);
+    expect(result.sourceTruncated).toBe(true);
+    expect(result.nodes.filter((node: any) => node.role === 'row').length).toBeLessThan(300);
+    expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20001);
+  });
+
+  test('hidden, inert and aria-hidden late dialogs expose neither controls nor secure values', async () => {
+    for (const hidden of ['hidden', 'inert', 'aria-hidden']) {
+      const f = crowded('dialog', true);
+      f.scope.values[hidden] = hidden === 'aria-hidden' ? 'true' : '';
+      f.scope.append(new f.Node('INPUT', { type: 'password', value: 'DO_NOT_CAPTURE', 'aria-label': 'Password' }));
+      const result = await f.run({ operation: 'observe' });
+      expect(result.nodes.some((node: any) => ['Recipients', 'New message', 'Password'].includes(node.name))).toBe(false);
+      expect(JSON.stringify(result)).not.toContain('DO_NOT_CAPTURE');
+      expect(result.sourceTruncated).toBe(true); expect(f.to.valueWrites).toEqual([]); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test('prioritized fields still reject stale identity, role, parent, route and obstruction before input', async () => {
+    for (const drift of ['replaced', 'role', 'parent', 'route', 'obstructed', 'hidden']) {
+      const f = crowded('dialog', true), capturedURL = f.location.href;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Recipients');
+      expect(row).toBeDefined();
+      if (drift === 'replaced') f.scope.replaceChildren(new f.Node('INPUT', { type: 'email', 'aria-label': 'Recipients' }));
+      if (drift === 'role') f.to.values.role = 'button';
+      if (drift === 'parent') {
+        f.scope.children = f.scope.children.filter(child => child !== f.to);
+        f.document.body.append(f.to);
+      }
+      if (drift === 'route') f.location.href = 'https://example.test/changed';
+      if (drift === 'obstructed') f.document.elementFromPoint = () => f.link;
+      if (drift === 'hidden') f.scope.values.hidden = '';
+      await expect(f.run({ operation: 'fill', nodeID: row.backendNodeID, expected: row,
+        expectedURL: capturedURL, text: 'fixture@example.invalid' })).rejects.toThrow(
+          drift === 'route' ? 'stale_document' : drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(f.to.valueWrites).toEqual([]); expect(f.to.events).toEqual([]); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test('structural groups and table cells retain child text and explicit names without aggregate amplification', async () => {
+    for (const role of ['group', 'dialog', 'table', 'grid', 'rowgroup', 'row', 'cell', 'gridcell', 'toolbar', 'listbox']) {
+      const f = fixture(null), container = new f.Node('DIV', { role });
+      const paragraphs = Array.from({ length: 8 }, (_, index) => `Exact child ${index}: ${'x'.repeat(900)}`);
+      for (const paragraph of paragraphs) container.append(new f.Node('P', {}, paragraph));
+      f.document.body.append(container);
+      const result = await f.run({ operation: 'observe' });
+      expect(result.nodes[0].name).toBe(''); expect(result.nodes[0].isDOMClickable).toBe(false);
+      expect(result.nodes.filter((node: any) => node.role === 'statictext').map((node: any) => node.name)).toEqual(paragraphs);
+      expect(result.sourceTruncated).toBe(false); expect(result.captureDiagnostics.clippedFields).toBe(0);
+      container.values['aria-label'] = 'Explicit scope name';
+      expect((await f.run({ operation: 'observe' })).nodes[0].name).toBe('Explicit scope name');
+    }
+  });
+
+  test('small prioritized captures preserve ordinary page content and honest full coverage', async () => {
+    const f = fixture(null), before = new f.Node('P', {}, 'Visible page background');
+    const dialog = new f.Node('DIV', { role: 'dialog', 'aria-label': 'New message' });
+    dialog.append(new f.Node('INPUT', { 'aria-label': 'Recipients' }), new f.Node('BUTTON', {}, 'Send'));
+    f.document.body.append(before, dialog);
+    const result = await f.run({ operation: 'observe' });
+    expect(result.nodes.map((node: any) => node.name)).toEqual(['New message', 'Recipients', 'Send', 'Visible page background']);
+    expect(result.sourceTruncated).toBe(false); expect(result.captureDiagnostics.stopReason).toBe('none');
+  });
+
+  test('moving focus changes read priority without changing evidence sibling order or text order', async () => {
+    const f = fixture(null), group = new f.Node('DIV', { role: 'group', 'aria-label': 'Stable region' });
+    const first = new f.Node('P', {}, 'First actual text'), second = new f.Node('P', {}, 'Second actual text');
+    group.append(first, second); f.document.body.append(group);
+    const before = await f.run({ operation: 'observe' });
+    f.document.activeElement = second;
+    const after = await f.run({ operation: 'observe' });
+    expect(after.nodes.map((node: any) => node.name)).toEqual(['Stable region', 'Second actual text', 'First actual text']);
+    expect(after.nodes[0].childNodeIDs).toEqual(before.nodes[0].childNodeIDs);
+    expect(after.nodes[0].childNodeIDs.map((id: string) => after.nodes.find((node: any) => node.nodeID === id).name))
+      .toEqual(['First actual text', 'Second actual text']);
+    expect(after.sourceTruncated).toBe(false);
+  });
+
+  test('discovery counts text/comment child slots instead of scanning unbounded non-elements', async () => {
+    const f = fixture(null), dialog = new f.Node('DIV', { role: 'dialog', 'aria-label': 'Late dialog' });
+    dialog.append(new f.Node('INPUT', { 'aria-label': 'Recipients' }));
+    f.document.body.append(dialog);
+    const comments = Array.from({ length: 5000 }, () => ({ nodeType: 8, parentElement: f.document.body }));
+    const children = [...comments, dialog];
+    let lists = 0, discoverySlots = 0;
+    Object.defineProperty(f.document.body, 'childNodes', { get() {
+      lists++;
+      return lists === 1 ? new Proxy(children, { get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) discoverySlots++;
+        return Reflect.get(target, property, receiver);
+      } }) : children;
+    } });
+    const result = await f.run({ operation: 'observe' });
+    expect(discoverySlots).toBe(4096);
+    expect(result.nodes.some((node: any) => node.name === 'Recipients' && node.isEditable)).toBe(true);
+    expect(result.sourceTruncated).toBe(false, 'Exhausted priority discovery is not omitted source when ordinary capture completed');
+    expect(result.captureDiagnostics.stopReason).toBe('none');
   });
 });
 

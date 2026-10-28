@@ -2372,6 +2372,7 @@ actor BrowserTabSessionBroker {
         }
         if document.sourceTruncated {
             lines.append("Source tree is incomplete. Counts describe captured nodes, not the entire page; do not infer absent content from no_matches.")
+            lines.append(Self.incompleteCaptureRecovery)
         }
         if totalMatches == 0 {
             lines.append("No matching captured elements in this view/filter. This is not a website search result or proof of absent content. Read without a local query to inspect the site's actual result state; no unrelated fallback nodes were substituted.")
@@ -2407,6 +2408,11 @@ actor BrowserTabSessionBroker {
         } else if read.view != .all {
             lines.append("VIEW \(readViewName(read.view)) omits kinds; content=text; all=toolbars.")
         }
+        if document.sourceTruncated {
+            lines.append(Self.incompleteCaptureRecovery)
+        } else if totalMatches == 0 {
+            lines.append("FILTER_EMPTY no captured match in this view/query. Fresh overview without query/cursor can reveal controls; this is not a disconnected relay or proof of absence.")
+        }
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
         }
@@ -2417,6 +2423,8 @@ actor BrowserTabSessionBroker {
     }
 
     private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes."
+
+    private static let incompleteCaptureRecovery = "CAPTURE_LIMIT source incomplete; cursors cover captured rows only. For missing controls, fresh overview without query/cursor. Unresolved capture is not relay/access failure. Never replay input."
 
     private func quote(_ value: String) -> String {
         var result = "\""

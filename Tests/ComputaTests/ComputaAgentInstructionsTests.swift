@@ -3,6 +3,35 @@ import XCTest
 @testable import Computa
 
 final class ComputaAgentInstructionsTests: XCTestCase {
+    func testIncompleteReadRecoverySurvivesRetainedRefusalWithoutRewritingUserScopeOrGrantingTools() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let human = "Prepare an unsent email to recipient@example.invalid. Do not send."
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": native],
+            ["role": "user", "content": human],
+            ["role": "assistant", "content": "The browser relay is unavailable."],
+            ["type": "function_call", "name": "browser_read", "call_id": "partial", "arguments": #"{"query":"Recipients","view":"all"}"#],
+            ["type": "function_call_output", "call_id": "partial", "output": "READ source_truncated=1 no_matches=1\nVIEW all omitted_input_nodes=97"],
+        ]
+        let functions = EmbeddedBrowserTools.definitions().map { definition -> [String: Any] in
+            var function = definition
+            function["parameters"] = function.removeValue(forKey: "inputSchema")
+            return function
+        }
+        let original: [String: Any] = ["model": "browser/chatgpt", "input": input, "tools": functions]
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: original))
+        let end = try XCTUnwrap(prepared.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+        let handoff = String(prepared.prompt[end.upperBound...]).replacingOccurrences(of: "\n", with: " ")
+        for rule in ["Partial reads do not mean the relay is unavailable", "cursors cover captured nodes only",
+                     "fresh overview without query/cursor", "never replay input", "Respect actual access denials and approvals"] {
+            XCTAssertTrue(handoff.contains(rule), rule)
+        }
+        let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.continuationRequest) as? NSDictionary)
+        XCTAssertEqual(continued, original as NSDictionary, "Partial-read recovery must preserve draft-only scope and all original tool evidence")
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains("Partial reads do not mean"),
+                       "Historical browser calls do not create current capability")
+    }
+
     func testCompactionKeepsHistoricalClaimsSeparateFromCurrentAuthorityAndEvidence() {
         let prompt = ComputaAgentInstructions.compactionPrompt
             .replacingOccurrences(of: "\n", with: " ")
@@ -458,7 +487,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Never invent deep links, account paths or message IDs"))
         XCTAssertTrue(text.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(text.contains("Respect actual access denials and approvals"))
-        XCTAssertLessThan(checks.utf8.count, 1_800, "The refreshed rule includes bounded loading recovery and distinguishes an existing-account sign-in flow from a real credential block")
+        XCTAssertLessThan(checks.utf8.count, 2_200, "Keep fresh loading, partial-capture and sign-in recovery concise")
     }
 
     func testBackgroundOnlyBrowserRecoveryKeepsSignInInTheBrowserWithoutInventingAnAccessBlock() {
@@ -653,8 +682,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
         let fresh = ComputaAgentInstructions.freshExecutionGuidance
         XCTAssertLessThan(policy.utf8.count, 1_900)
-        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
+        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 2_200)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
         XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_900)
         XCTAssertLessThan(fresh.utf8.count, 800)
         let combinedPolicy = policy + "\n" + fresh
@@ -774,8 +803,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             }
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
-        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
+        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 2_200)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
     }
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
@@ -886,8 +915,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertFalse(handoff.contains(senderRule))
         }
         XCTAssertFalse(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: false).contains(senderRule))
-        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_800)
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
+        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 2_200)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1)
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -1045,7 +1074,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
@@ -1109,7 +1138,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 4_600 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                                 "Named-service and sign-in/loading guidance retain all reference, approval and cleanup rules.")
     }
 

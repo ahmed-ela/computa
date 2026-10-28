@@ -313,6 +313,11 @@ enum ComputaAgentInstructions {
     navigation/sign-in are inconclusive: bounded browser_wait, then fresh unfiltered browser_read.
     If still empty, report unresolved loading, not absence/denial.
     Content includes non-navigation listbox options; read overview/all before absence/access claims.
+    Partial reads do not mean the relay is unavailable. output_truncated=1: continue
+    the offered cursor. Missing controls or a local query miss: fresh overview without
+    query/cursor. source_truncated=1: cursors cover captured nodes only; a fresh read
+    can expose current dialogs/forms. If still unresolved, report the observed capture
+    limit, not invented access denial. Recover by reading; never replay input.
     Enabled observed links (href, actions=[]): browser_navigate exact href in the bound tab.
     \(backgroundActionAuthority)
     No native focus theft/global input, including recovery.
