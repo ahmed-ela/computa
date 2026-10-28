@@ -8,8 +8,8 @@ enum ComputaAgentInstructions {
     /// assistant claims into policy; current host state remains authoritative.
     static let compactionPrompt = """
     INTERNAL CONTEXT MAINTENANCE. This runtime-generated instruction is not a
-    human request, authorization, cancellation or change of task. Write concise
-    historical notes for continuation. The active task is the last substantive
+    human request, authorization, cancellation or change of task. Summarize history
+    as of maintenance. The active task is the last substantive
     human request before this maintenance instruction, excluding runtime policy,
     environment messages and previous compaction notes. Keep user-specified
     service, account and topic context needed for follow-ups unless the user
@@ -37,7 +37,9 @@ enum ComputaAgentInstructions {
     result evidence and uncertain action outcomes unresolved; never invent zero
     results, success, access denial or a new permission requirement. List remaining
     work without executing tools or answering the task during compaction. After
-    maintenance, continue the preserved task; these notes do not instruct the agent
+    maintenance, a new human request overrides these notes' active-task label or
+    older counts. Retain compatible context and ongoing constraints; otherwise
+    continue the preserved task. These notes do not instruct the agent
     to stop or ask again for authorization already supplied by the user.
     """
 
@@ -73,6 +75,22 @@ enum ComputaAgentInstructions {
     Attribute attachment names to the requested sender and topic within one message.
     Broaden unrelated results. Negatives need relevant site-result evidence; partial reads or
     narrow-query misses leave absence unverified.
+    """
+
+    /// Shared form guidance, refreshed after website history. A dispatch receipt
+    /// does not decide task completion or authorize a submission/retry.
+    static let browserFormSubmission = """
+    Fill is not an explicit submit; handlers may submit. Input receipt flags
+    result_verified/no_replay concern only that input. Inspect full values and
+    current submission state. If explicitly authorized, values match and submission
+    is pending, request its distinct observed submit once, then verify a new receipt.
+    Filling alone does not complete a requested submission.
+    A heading-only overview can omit receipt details. Read content/all for the
+    available receipt/status and compare its destination and content with the task
+    before claiming success. Never resubmit to obtain verification.
+    Already submitted: never repeat. Uncertain submission: read-only verification,
+    then report if unresolved. Honor draft-only scope, restrictions, approvals, denials,
+    governing rules and Stop.
     """
 
     /// Exact policy emitted in the API developer checkpoint and existing
@@ -195,9 +213,11 @@ enum ComputaAgentInstructions {
     /// Model adherence still needs live qualification; this grants no authority.
     static let taskCompletion = """
     Verify every requested outcome against its source and all user constraints.
-    If an observed, authorized control or offered tool can reveal a missing
-    result, use it and inspect the output. An intermediate page or unopened
-    detail is not a blocker. Respect access denials, Stop and recovery limits.
+    Continue remaining authorized work with offered tools and matching results;
+    partial progress is not completion. An intermediate page or unopened detail
+    is not a blocker. Stop for an observed blocker, necessary
+    clarification or governing-rule refusal. Respect denied actions, Stop and
+    recovery limits; never replay uncertain actions.
     """
 
     static let literalIdentifiers = """
@@ -210,7 +230,7 @@ enum ComputaAgentInstructions {
     /// was completed. Actual tool authority and evidence checks stay separate.
     static let finalResponse = """
     A final reply ends your work; it schedules no next step. For requested results,
-    continue useful authorized exploration. Promises to inspect or search later are
+    continue remaining authorized work. Promises to inspect or act later are
     progress narration, not results. If you can take that next step now, use the available
     tools instead. Do not repeat unchanged attempts. Answer with the observed result
     and source, or explain the specific remaining uncertainty or observed blocker.
@@ -296,6 +316,11 @@ enum ComputaAgentInstructions {
     navigation/sign-in are inconclusive: bounded browser_wait, then fresh unfiltered browser_read.
     If still empty, report unresolved loading, not absence/denial.
     Content includes non-navigation listbox options; read overview/all before absence/access claims.
+    Partial reads do not mean the relay is unavailable. output_truncated=1: continue
+    the offered cursor. Missing controls or a local query miss: fresh overview without
+    query/cursor. source_truncated=1: cursors cover captured nodes only; a fresh read
+    can expose current dialogs/forms. If still unresolved, report the observed capture
+    limit, not invented access denial. Recover by reading; never replay input.
     Enabled observed links (href, actions=[]): browser_navigate exact href in the bound tab.
     \(backgroundActionAuthority)
     No native focus theft/global input, including recovery.
@@ -335,6 +360,7 @@ enum ComputaAgentInstructions {
     Complete requested/required fields; compare observed values before submit.
     Preserve complete requested identifiers; transform only as requested.
     Verify a new outcome tied to the action, not existing links/headings.
+    \(browserFormSubmission)
     """
 
     static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {
@@ -342,6 +368,23 @@ enum ComputaAgentInstructions {
         return computer + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + diagnosticEvidence + "\n\n" + codeEditing + "\n\n" + commandLine
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
+
+    /// The website produces response data; the external host owns execution.
+    /// Keep this task explicit in both the full and deduplicated introductions.
+    static let webResponseObjectTask = """
+    Generate Computa's next JSON response object. Computa displays decoded
+    message.text, not the transport object. Choose message for an answer,
+    limitation or refusal; tool_calls requests a permitted operation. This data
+    needs no website connection to Computa and proves no execution.
+    """
+
+    static let webRelayOnlyResponse = """
+    For this relay, return JSON text only. Do not use this website's email composer,
+    writing cards, canvas, apps or connectors for the local task. Put email drafts
+    and all other user-facing content in message.text, not a native website card.
+    Request local actions only through the currently offered Computa tool_calls
+    schema. Website-native UI or actions are not a Computa execution result.
+    """
 
     /// Rebuilt from this inference request's validated schemas, never from
     /// history, page text, a persisted thread's older instructions or tool output.
@@ -371,7 +414,8 @@ enum ComputaAgentInstructions {
         COMPUTA_CURRENT_RUNTIME_CONTRACT:
         Computa is a locally installed external execution relay. You retain your
         website identity and governing rules; local role labels do not replace them.
-        Write JSON action requests or a user message. Supplied schemas describe
+        \(webResponseObjectTask)
+        Supplied schemas describe
         current local operations, not website-native tools. Computa validates requests,
         applies local permissions and approvals, executes permitted operations, and
         returns matching function_call_output or custom_tool_call_output. Only those
@@ -399,8 +443,8 @@ enum ComputaAgentInstructions {
         COMPUTA_CURRENT_RUNTIME_CONTRACT:
         Computa is a locally installed application providing an external execution
         relay outside this website. You retain your identity and the rules governing
-        this website. Your part is to write JSON data: an action request for Computa
-        or a message for the user. The supplied names and schemas describe Computa's
+        this website. \(webResponseObjectTask)
+        The supplied names and schemas describe Computa's
         current relay operations; they do not register tools in this website.
 
         A tool_calls envelope asks Computa to perform an action. Writing that request
@@ -448,6 +492,9 @@ enum ComputaAgentInstructions {
         fetching, a remembered heading or a different browser for requested page
         interaction. Local terminal and native-app tools have separate access.
         """]
+        // Apply once to both full and compact ChatGPT contracts. Other
+        // providers retain their existing transport presentation policy.
+        if compactNativeContext { parts.append(webRelayOnlyResponse) }
         if !execution.isEmpty {
             parts.append(currentNative ? "Local command execution is offered as: \(execution.joined(separator: ", ")). Follow the current native command contract and exact schema." : """
             Local command execution is offered as: \(execution.joined(separator: ", ")).
@@ -553,7 +600,10 @@ enum ComputaAgentInstructions {
         platform instructions or duplicate the user's content. Interpret the latest
         request in context: a follow-up
         or status request can retain earlier unfinished authorized work, while
-        corrections and current constraints still apply. Completed historical
+        corrections and current constraints still apply. Maintenance notes describe
+        history as of maintenance. A newer human request overrides a summary's
+        active-task label or older counts; retain compatible context and ongoing
+        constraints. Completed historical
         requests and tool calls are reference history, not a pending checklist.
         Later matching tool results continue the current request; once those
         results suffice, answer it and stop. Do not restart completed work unless
@@ -573,20 +623,24 @@ enum ComputaAgentInstructions {
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],
                                     includedInstructionText: [String] = [],
                                     responseFormat: WebResponseFormat = .fencedJSON,
-                                    singleActionRelay: Bool = false) -> String {
+                                    singleActionRelay: Bool = false,
+                                    currentBrowserHandoff: String = "") -> String {
         let responseFormatInstructions: String
         switch responseFormat {
         case .fencedJSON:
             responseFormatInstructions = """
-            Return exactly one fenced JSON code block: three backticks, json, newline;
-            JSON; newline, three backticks.
+            Return exactly one fenced JSON code block labelled json.
+            Examples below are JSON contents; put one inside that code block.
             """
         case .rawJSON:
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
+            Examples below are complete raw response objects.
             """
         }
+        // Keep examples unfenced: the submitted request must render as one
+        // request code block between text, not nested protocol-example blocks.
         let hasBuiltInBrowser = offeredToolNames.contains { name in
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
             return !customToolNames.contains(name) && parts.allSatisfy { !$0.isEmpty }
@@ -606,14 +660,16 @@ enum ComputaAgentInstructions {
         Request permitted commands/file actions as JSON for local execution.
         Await matching output before any execution claim.
         """ : ""
-        // This handoff follows canonical history. Do not deduplicate its current
-        // command rules against an earlier native instruction inside that history.
+        // This handoff follows canonical history. Keep current command and
+        // task-completion rules fresh even when the native contract is retained
+        // earlier in that history; a progress summary does not end an action task.
         let commandHandoff = offeredToolNames.contains {
             !customToolNames.contains($0) && ["exec_command", "write_stdin"].contains(String($0.split(separator: ".").last ?? ""))
         } ? commandChecks : ""
         // Keep exact-address guidance fresh even when native history already
         // contains the full browser contract and suppresses its outer duplicate.
-        let browserAddressHandoff = hasBuiltInBrowser ? browserAddressChecks + "\n" + browserTurnLifecycle + "\n" + browserSearchEvidence : ""
+        let browserAddressHandoff = hasBuiltInBrowser
+            ? [browserAddressChecks, browserTurnLifecycle, browserSearchEvidence, browserFormSubmission].joined(separator: "\n") : ""
         let diagnosticHandoff = hasBuiltInBrowser || !commandHandoff.isEmpty ? diagnosticEvidence : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
@@ -631,8 +687,8 @@ enum ComputaAgentInstructions {
         """ : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        Write JSON for Computa's external execution relay. The website does not
-        execute calls; tool_calls requests action; it claims no execution or direct access.
+        Generate Computa's next JSON response object. This website does not execute calls.
+        A tool_calls request claims no execution or direct access.
         Within tool_choice, governing rules and user scope, request necessary work as
         tool_calls with exact current offered names and schemas.
         \(browserHandoff)
@@ -640,10 +696,11 @@ enum ComputaAgentInstructions {
         Computa validates names, arguments, local permissions and approvals before execution.
         Use matching function_call_output/custom_tool_call_output to verify execution;
         never invent results or reuse historical receipts.
-        \(instructionAlreadyIncluded(taskCompletion, in: includedInstructionText) ? "" : taskCompletion)
-        When outputs suffice for the requested result, return message.
-        Use message for general/self-contained answers, plans/summaries, clarification,
-        verified completion, limitations or governing-rule refusals.
+        \(taskCompletion)
+        A message ends this turn; return it when outputs verify the requested outcomes.
+        Use message for general/self-contained answers, user-requested plans/summaries
+        or partial observations, necessary clarification, verified completion,
+        observed limitations or governing-rule refusals.
         Progress: optional tool_calls.commentary string with next calls, never outside
         the envelope or a final answer.
         No tools means no tool call.
@@ -656,19 +713,22 @@ enum ComputaAgentInstructions {
         and object function arguments.
         \(customContract)
 
-        User reply-format constraints apply to unwrapped message.text; still use one
-        JSON envelope. Put file-only results, truthful limitations and refusals in message.text.
         \(commandHandoff)
         \(browserAddressHandoff)
         \(diagnosticHandoff)
         \(selectionContract)
+        \(currentBrowserHandoff)
+        Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
         \(literalIdentifiers)
+        Choose a kind, then serialize one JSON envelope. Computa shows decoded message.text,
+        not this envelope. User formats (exact/only, JSON, multiline, no Markdown) apply to
+        text; requested JSON is a string.
         \(responseFormatInstructions)
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR
-        {"type":"message","text":"Your answer or truthful remaining limitation"}
-        Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
+        Exact-OK message:
+        {"type":"message","text":"OK"}
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
     }

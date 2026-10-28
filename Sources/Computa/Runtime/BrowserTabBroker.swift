@@ -121,11 +121,15 @@ enum BrowserCompleteObservation {
                 return String(decoding: data, as: UTF8.self)
             }
             guard case let .input(wasFill, _, feedback) = self else { return text }
+            // This receipt describes one dispatched input, not completion of
+            // the user's task. A different authorized next step still requires
+            // current page evidence; uncertainty never permits input replay.
             let effect = wasFill
-                ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
-                : "Click unverified. For pending navigation: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); then read. Never replay."
+                ? "Fill: no Enter/submit sent; handlers may react. Verify full values/state; no replay."
+                : "If navigating: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); read. No replay."
             var result: [String: Any] = [
                 "dispatched": true, "no_replay": true, "result_verified": false,
+                "receipt_scope": "input",
                 "input_kind": wasFill ? "fill" : "click",
                 "current_observation": ["status": "available", "view": "overview",
                     "snapshot_id": snapshotID.uuidString, "text": text],
@@ -1794,7 +1798,7 @@ actor BrowserTabSessionBroker {
         guard read.view == .overview else {
             return ElementSelection(elements: elements, omittedInputNodeCount: omittedInputNodeCount)
         }
-        // Interleave observed controls, headings, document text, and navigation
+        // Interleave observed controls, headings, readable text, and navigation
         // within the same page budget. Post-input observations must show a
         // bounded sample of the new document, not only its heading and controls.
         // Preserve source order within each lane, then freeze the selection for
@@ -1806,6 +1810,7 @@ actor BrowserTabSessionBroker {
             + elements.filter { overviewCategory($0) == 3 }
         let groups = [controls, elements.filter { overviewCategory($0) == 1 },
                       elements.filter { overviewCategory($0) == 4 },
+                      elements.filter { overviewCategory($0) == 5 },
                       elements.filter { overviewCategory($0) == 2 }]
         var ordered = [BrowserTabElement]()
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
@@ -1826,9 +1831,16 @@ actor BrowserTabSessionBroker {
                 "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
                 "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"].contains(role) { return 0 }
         if element.supportsPress || element.isDOMClickable || element.isFocusablePointer { return 3 }
-        if element.contentKind == .readable, element.contentScope.isDocumentContent,
+        if element.contentKind == .readable,
            !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !(element.value ?? "").isEmpty { return 4 }
+            || !(element.value ?? "").isEmpty {
+            if element.contentScope.isDocumentContent { return 4 }
+            // Many small documents expose real body text without main/article
+            // landmarks. Include a bounded sample while retaining unknown
+            // provenance; this neither promotes it to document content nor
+            // admits navigation, sidebar, footer, metadata, or control echoes.
+            if element.contentScope == .unknown { return 5 }
+        }
         return nil
     }
 
@@ -2346,7 +2358,7 @@ actor BrowserTabSessionBroker {
             lines.insert("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true. Included options retain original actions; read view=overview or all for other controls and before absence/access claims.", at: 2)
         }
         if read.view == .overview {
-            lines.append("OVERVIEW selection=observed_controls_headings_document_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
+            lines.append("OVERVIEW selection=observed_controls_headings_body_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample with its observed or unknown scope; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
         }
         if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
@@ -2368,6 +2380,7 @@ actor BrowserTabSessionBroker {
         }
         if document.sourceTruncated {
             lines.append("Source tree is incomplete. Counts describe captured nodes, not the entire page; do not infer absent content from no_matches.")
+            lines.append(Self.incompleteCaptureRecovery)
         }
         if totalMatches == 0 {
             lines.append("No matching captured elements in this view/filter. This is not a website search result or proof of absent content. Read without a local query to inspect the site's actual result state; no unrelated fallback nodes were substituted.")
@@ -2403,6 +2416,11 @@ actor BrowserTabSessionBroker {
         } else if read.view != .all {
             lines.append("VIEW \(readViewName(read.view)) omits kinds; content=text; all=toolbars.")
         }
+        if document.sourceTruncated {
+            lines.append(Self.incompleteCaptureRecovery)
+        } else if totalMatches == 0 {
+            lines.append("FILTER_EMPTY no captured match in this view/query. Fresh overview without query/cursor can reveal controls; this is not a disconnected relay or proof of absence.")
+        }
         if document.semanticReadiness == .emptyAtDeadline {
             lines.append("READINESS deadline reached without qualifying content; search completion and absence remain unverified.")
         }
@@ -2413,6 +2431,8 @@ actor BrowserTabSessionBroker {
     }
 
     private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes."
+
+    private static let incompleteCaptureRecovery = "CAPTURE_LIMIT source incomplete; cursors cover captured rows only. For missing controls, fresh overview without query/cursor. Unresolved capture is not relay/access failure. Never replay input."
 
     private func quote(_ value: String) -> String {
         var result = "\""

@@ -8,7 +8,7 @@ const resultMessages = {
 } as const;
 
 export function websiteSessionCleanupAction(task: TaskSnapshot, blocked = false): NativeAction | undefined {
-  if (blocked || task.status !== 'Waiting' || task.isBusy || task.websiteSessionCleanupInProgress
+  if (blocked || !['Waiting', 'Failed'].includes(task.status) || task.isBusy || task.websiteSessionCleanupInProgress
       || !task.websiteSessionCleanupAvailable) return undefined;
   return { action: 'retryWebsiteSessionCleanup', taskID: task.id };
 }

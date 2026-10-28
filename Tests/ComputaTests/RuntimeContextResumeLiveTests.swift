@@ -274,7 +274,7 @@ final class RuntimeContextResumeLiveTests: XCTestCase {
             switch event {
             case .taskStatusChanged(let owner, let status) where owner == taskID:
                 if status == .completed { completedTurns += 1 }
-                if status == .waiting { failures.append("Turn interrupted or failed.") }
+                if status == .waiting || status == .failed { failures.append("Turn interrupted or failed.") }
             case .contextCompactionChanged(let owner, let state) where owner == taskID:
                 if case .completed = state { compactionsCompleted += 1 }
                 if case .failed(let message) = state { failures.append(message) }

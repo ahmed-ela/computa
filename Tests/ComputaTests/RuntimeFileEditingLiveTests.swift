@@ -346,7 +346,7 @@ private final class PatchAudit {
             if entry.kind == .assistant { finalTexts.append(entry.body) }
             if entry.kind == .system, ["Agent error", "Saved chat history unavailable"].contains(entry.title) { errors.append(entry.body) }
         case .turnDiffUpdated(_, let turnID, let diff): diffs.append(AgentTurnDiff(id: turnID, diff: diff))
-        case .taskStatusChanged(_, let status): if status == .completed || status == .waiting { terminal = true }
+        case .taskStatusChanged(_, let status): if status == .completed || status == .waiting || status == .failed { terminal = true }
         case .approvalRequested(let request): approvals.append(request)
         case .websiteSessionCleanupUpdated(let receipt): websiteReceipts.append(receipt)
         case .connectionChanged(.failed(let message)): errors.append(message); terminal = true

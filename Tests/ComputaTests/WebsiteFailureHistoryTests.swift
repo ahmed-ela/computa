@@ -3,6 +3,123 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testWebsiteTurnLimitSurvivesReloadWithPriorActionWarningAndExactFailureIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaWebsiteTurnLimit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let serverData = try WebModelServer.errorBody(for: WebModelServer.Failure.turnLimit)
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: serverData) as? [String: Any])
+        let error = try XCTUnwrap(expected["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "website_turn_limit")
+        XCTAssertEqual(error["type"] as? String, "invalid_request")
+        XCTAssertNil(error["retryable"], "Preserve the native envelope without inventing retry authority")
+        XCTAssertNil(error["required_action"])
+        let message = try XCTUnwrap(error["message"] as? String)
+        XCTAssertTrue(message.contains("Earlier actions may have completed"))
+        XCTAssertTrue(message.contains("Review their results before continuing"))
+        XCTAssertFalse(message.contains("start a new task"))
+
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let failures: [any Error] = [WebModelServer.Failure.turnLimit, EmbeddedWebModelTransport.Failure.turnLimit]
+        for failure in failures {
+            let native = try WebModelServer.errorBody(for: failure)
+            let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: actual).isEqual(to: expected), "Both budget boundaries must preserve the same warning")
+            let turnID = UUID().uuidString.lowercased()
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turnID, modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+            let saved = try XCTUnwrap(restored.first { $0.turnID == turnID })
+            XCTAssertEqual(saved, record)
+            XCTAssertEqual(saved.taskID, task.lowercased())
+            XCTAssertEqual(saved.threadID, thread.lowercased())
+            XCTAssertEqual(saved.entry.title, "Agent error")
+            XCTAssertEqual(saved.entry.id, "agent-error:" + turnID)
+            let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.entry.body.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: persisted).isEqual(to: expected))
+            let raw = try history([turn(turnID, status: "failed", error: ["message": "Generic engine failure"])])
+            let entries = try AppServerThreadHistoryContract.entries(from: raw,
+                excludingAssistantTurns: Set(restored.map(\.turnID)))
+            XCTAssertEqual(entries.last?.id, saved.entry.id, "Reload must replace the exact engine error, never another turn")
+            XCTAssertFalse(entries.contains { $0.kind == .assistant })
+            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+                rejectedTurns: Set(restored.map(\.turnID)), failedTurns: Set(restored.map(\.turnID))), .failed)
+        }
+    }
+
+    func testWebsiteTurnLimitStoreRejectsChangedWarningsAndReplayMetadata() throws {
+        let native = try WebModelServer.errorBody(for: WebModelServer.Failure.turnLimit)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        let mutations: [[String: Any]] = [["message": "PRIVATE_ACTION_RESULT"], ["retryable": false],
+            ["retryable": true], ["retryable": 0], ["required_action": "retry_send"],
+            ["type": "server_error"], ["code": "internal_error"], ["param": "input"],
+            ["pageText": "PRIVATE_ACTION_RESULT"]]
+        for mutation in mutations {
+            var changed = original, error = try XCTUnwrap(original["error"] as? [String: Any])
+            mutation.forEach { error[$0.key] = $0.value }; changed["error"] = error
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: syntheticChatGPTModelID,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)))
+        }
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+            modelID: "api/cerebras/model/fixture", diagnosticText: String(decoding: native, as: UTF8.self)))
+    }
+
+    func testUnsupportedChatGPTResponseSurvivesStoreRecreationWithExactHistoryReplacementIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaUnsupportedWebsiteReply-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let error = try XCTUnwrap(object["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "unsupported_website_response")
+        XCTAssertNil(error["retryable"], "Persist the exact existing native envelope without inventing retry authority")
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: turnID, modelID: syntheticChatGPTModelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, [record], "A fresh store must retain the exact local classification")
+        let entry = try XCTUnwrap(restored.first?.entry)
+        let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.body.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: persisted).isEqual(to: object))
+        XCTAssertEqual(entry.turnID, turnID)
+        XCTAssertEqual(entry.title, "Agent error")
+        XCTAssertFalse(entry.body.contains("high demand"))
+
+        // The runtime replaces the generic engine entry by this exact stable
+        // identity after reloading the store; it must never target another turn.
+        let generic = "We’re currently experiencing high demand, which may cause temporary errors."
+        let raw = try history([turn(turnID, status: "failed", error: ["message": generic])])
+        let entries = try AppServerThreadHistoryContract.entries(from: raw,
+            excludingAssistantTurns: Set(restored.map(\.turnID)))
+        XCTAssertEqual(entries.last?.id, entry.id)
+        XCTAssertEqual(entries.last?.body, generic)
+        XCTAssertFalse(entries.contains { $0.kind == .assistant })
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+            rejectedTurns: Set(restored.map(\.turnID)), failedTurns: Set(restored.map(\.turnID))), .failed)
+    }
+
+    func testUnsupportedChatGPTResponseStoreRejectsForgedTextRetryFieldsAndOtherProviders() throws {
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        for modelID in ["browser/gemini", "browser/claude", "api/cerebras/model/fixture"] {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: modelID, diagnosticText: String(decoding: native, as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [["message": "PRIVATE_PROVIDER_REPLY_CANARY"], ["retryable": false],
+            ["retryable": true], ["retryable": 0], ["type": "server_error"], ["code": "internal_error"],
+            ["required_action": "retry_send"], ["pageText": "PRIVATE_PROVIDER_REPLY_CANARY"], ["param": "input"]]
+        for mutation in mutations {
+            var changed = original, error = try XCTUnwrap(original["error"] as? [String: Any])
+            mutation.forEach { error[$0.key] = $0.value }; changed["error"] = error
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: syntheticChatGPTModelID,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)))
+        }
+    }
+
     func testNativeBrowserFailuresSurviveStoreRecreationWithExactTaskAndTurn() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserStartupError-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -62,10 +179,10 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         return value
     }
 
-    func testSavedFailureRestoresOriginalEngineErrorAndWaitingWithoutAssistantClaims() throws {
+    func testSavedFailureRestoresOriginalEngineErrorAndFailedWithoutAssistantClaims() throws {
         let message = "We’re currently experiencing high demand, which may cause temporary errors."
         let data = try history([turn("failed", status: "failed", error: ["message": message, "codexErrorInfo": "internal_server_error"])])
-        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .failed)
         let entries = try AppServerThreadHistoryContract.entries(from: data)
         XCTAssertEqual(entries.map(\.title), ["You", "Agent error"])
         XCTAssertEqual(entries.last?.body, message); XCTAssertEqual(entries.last?.turnID, "failed")
@@ -76,7 +193,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         let errors: [Any] = [["code": "failure"], ["message": ""], ["message": String(repeating: "X", count: 8_193)], "malformed error"]
         for error in errors {
             let data = try history([turn("failed", status: "completed", error: error)])
-            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .waiting)
+            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data), .failed)
             XCTAssertTrue(try AppServerThreadHistoryContract.entries(from: data).allSatisfy { $0.kind == .user })
         }
     }
@@ -87,6 +204,20 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         XCTAssertFalse(try AppServerThreadHistoryContract.entries(from: data).contains { $0.title == "Agent error" })
         XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data, rejectedTurns: ["active"]), .waiting)
         XCTAssertFalse(try AppServerThreadHistoryContract.entries(from: data, excludingAssistantTurns: ["active"]).contains { $0.kind == .assistant })
+    }
+
+    func testExactWebsiteFailureRecordRestoresFailedWithoutRelabellingNativeStops() throws {
+        let data = try history([turn("native-stop", status: "interrupted"), turn("website", status: "inProgress")])
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data,
+            rejectedTurns: ["native-stop", "website"], failedTurns: ["website"]), .failed)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: data,
+            rejectedTurns: ["native-stop", "website"], failedTurns: ["older-website"]), .waiting)
+        let interrupted = try history([turn("native-stop", status: "interrupted", error: ["message": "Stopped"])])
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: interrupted,
+            rejectedTurns: ["native-stop"]), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: interrupted), .waiting)
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(
+            from: history([turn("no-error-text", status: "failed")])), .failed)
     }
 
     func testLatestActualUserTurnSupersedesOlderFailureAndMaintenanceIsNotANewUserOutcome() throws {

@@ -1851,6 +1851,8 @@ final class LocalQwenLiveTests: XCTestCase {
             case .running:
                 observedRunning = true
                 consecutiveWaitingPolls = 0
+            case .failed:
+                throw LiveTestFailure(message: "Task failed during \(operation). \(diagnostics(for: state))")
             case .waiting:
                 consecutiveWaitingPolls += 1
                 let hasTerminalFailure = task.entries.contains {

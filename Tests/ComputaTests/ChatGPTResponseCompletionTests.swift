@@ -5,6 +5,75 @@ import XCTest
 
 @MainActor
 final class ChatGPTResponseCompletionTests: XCTestCase {
+    func testOwnedTerminalFailureIsFiniteBoundAndCannotBecomeAResponse() throws {
+        for reason in ["empty_stream", "provider_error"] {
+            let fixture = try LeaseFixture()
+            let packet = fixture.failurePacket(reason: reason)
+            XCTAssertTrue(fixture.lease.receive(packet))
+            let failure = try XCTUnwrap(fixture.failureReceipt())
+            XCTAssertEqual(failure.reason.rawValue, reason)
+            XCTAssertNil(fixture.receipt())
+            XCTAssertFalse(fixture.lease.receive(packet))
+            XCTAssertEqual(fixture.failureReceipt(), failure)
+            XCTAssertNil(fixture.lease.failureReceipt(view: ObjectIdentifier(NSObject()), ownerToken: fixture.owner,
+                generation: fixture.generation, sequence: fixture.sequence))
+            XCTAssertNil(fixture.lease.failureReceipt(view: fixture.viewID, ownerToken: UUID().uuidString,
+                generation: fixture.generation, sequence: fixture.sequence))
+            XCTAssertNil(fixture.lease.failureReceipt(view: fixture.viewID, ownerToken: fixture.owner,
+                generation: UUID(), sequence: fixture.sequence))
+            XCTAssertNil(fixture.lease.failureReceipt(view: fixture.viewID, ownerToken: fixture.owner,
+                generation: fixture.generation, sequence: fixture.sequence + 1))
+            XCTAssertNil(fixture.failureReceipt(now: fixture.deadline))
+            XCTAssertTrue(fixture.lease.receive(fixture.packet()), "Conflicting output invalidates rather than converting a failed stream")
+            XCTAssertNil(fixture.failureReceipt()); XCTAssertNil(fixture.receipt())
+        }
+    }
+
+    func testTerminalFailureRejectsMissingProofMalformedCountsForeignIdentityAndChangedDuplicates() throws {
+        for mutation: (inout [String: Any]) -> Void in [
+            { $0["reason"] = "arbitrary website message" }, { $0["calls"] = true }, { $0["calls"] = 2 },
+            { $0["calls"] = 257 }, { $0["assistantMessages"] = 1 }, { $0["messageTerminalCount"] = 0 },
+            { $0["messageTerminalCount"] = true }, { $0["mainTerminalCount"] = 0 },
+            { $0["text"] = "not accepted" }, { $0["conversationID"] = "not a conversation" },
+        ] {
+            let fixture = try LeaseFixture(); var packet = fixture.failurePacket()
+            mutation(&packet); XCTAssertTrue(fixture.lease.receive(packet))
+            XCTAssertTrue(fixture.lease.invalidated); XCTAssertNil(fixture.failureReceipt())
+        }
+        let fixture = try LeaseFixture()
+        var foreign = fixture.failurePacket(); foreign["inputSHA256"] = String(repeating: "b", count: 64)
+        XCTAssertFalse(fixture.lease.receive(foreign)); XCTAssertFalse(fixture.lease.invalidated)
+        XCTAssertTrue(fixture.lease.receive(fixture.failurePacket()))
+        var changed = fixture.failurePacket(); changed["calls"] = 4
+        XCTAssertTrue(fixture.lease.receive(changed)); XCTAssertNil(fixture.failureReceipt())
+    }
+
+    func testProviderErrorNeedsBothTerminalProofsAndCannotCarryOpaqueContent() throws {
+        for mutation: (inout [String: Any]) -> Void in [
+            { $0["mainTerminalCount"] = 0 }, { $0["messageTerminalCount"] = 0 },
+            { $0["calls"] = 3 }, { $0["assistantMessages"] = 1 },
+            { $0["message"] = ["content": "not a terminal-only receipt"] },
+        ] {
+            let fixture = try LeaseFixture(); var packet = fixture.failurePacket(reason: "provider_error")
+            mutation(&packet); XCTAssertTrue(fixture.lease.receive(packet))
+            XCTAssertTrue(fixture.lease.invalidated); XCTAssertNil(fixture.failureReceipt())
+        }
+    }
+
+    func testFailureObservationCannotSurviveCancellationRevocationOrOverwriteSuccessfulCandidate() async throws {
+        let fixture = try LeaseFixture(); XCTAssertTrue(fixture.lease.receive(fixture.failurePacket()))
+        let cancelled = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            XCTAssertNil(fixture.failureReceipt())
+            XCTAssertFalse(fixture.lease.receive(fixture.failurePacket()))
+        }
+        await cancelled.value
+        fixture.lease.revoke(); XCTAssertNil(fixture.failureReceipt())
+        let success = try LeaseFixture(); XCTAssertTrue(success.lease.receive(success.packet()))
+        XCTAssertTrue(success.lease.receive(success.failurePacket()))
+        XCTAssertNil(success.receipt()); XCTAssertNil(success.failureReceipt())
+    }
+
     func testNativeBindingBoundsAndCurrentLookupCannotCrossViewsOwnersGenerationsOrRounds() throws {
         let fixture = try LeaseFixture()
         XCTAssertTrue(fixture.lease.isCurrent(view: fixture.viewID, ownerToken: fixture.owner,
@@ -213,6 +282,28 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         XCTAssertNil(fixture.receipt())
     }
 
+    func testCacheStageDiagnosticsStayContentFreeAndCannotChangeAnOwnedReceipt() throws {
+        let fixture = try LeaseFixture()
+        XCTAssertTrue(fixture.lease.receive(fixture.packet()))
+        let receipt = try XCTUnwrap(fixture.receipt())
+        for reason in ["runtime_cache_shape", "runtime_cache_empty", "runtime_cache_limit",
+                       "runtime_getter_unavailable", "runtime_getter_failed", "runtime_method_unsupported",
+                       "runtime_decoder_ambiguous"] {
+            var packet = fixture.diagnosticPacket(reason: reason)
+            packet["calls"] = 0
+            packet["instances"] = 0
+            XCTAssertEqual(try XCTUnwrap(fixture.lease.diagnostic(packet)).reason.rawValue, reason)
+            for field in ["moduleID", "getterSource", "replyText"] {
+                var contaminated = packet
+                contaminated[field] = "PRIVATE WEBSITE DATA"
+                XCTAssertNil(fixture.lease.diagnostic(contaminated))
+            }
+            XCTAssertEqual(fixture.receipt(), receipt)
+            XCTAssertEqual(fixture.lease.revision, receipt.revision)
+            XCTAssertFalse(fixture.lease.invalidated)
+        }
+    }
+
     func testDiagnosticRejectsForeignMalformedAndUnboundedRecordsWithoutMutatingAnyAuthority() throws {
         let fixture = try LeaseFixture()
         XCTAssertTrue(fixture.lease.receive(fixture.packet()))
@@ -380,6 +471,14 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         }
         func diagnosticPacket(reason: String) -> [String: Any] {
             identity().merging(["kind": "diagnostic", "reason": reason, "calls": 257, "instances": 4]) { _, right in right }
+        }
+        func failurePacket(reason: String = "empty_stream") -> [String: Any] {
+            identity().merging(["kind": "terminal_failure", "inputMessageID": inputMessage.uuidString.lowercased(),
+                "conversationID": conversation.uuidString.lowercased(), "reason": reason, "calls": reason == "empty_stream" ? 3 : 4,
+                "assistantMessages": 0, "messageTerminalCount": 1, "mainTerminalCount": 1]) { _, right in right }
+        }
+        func failureReceipt(now: ContinuousClock.Instant = .now) -> ChatGPTResponseCompletion.FailureReceipt? {
+            lease.failureReceipt(view: viewID, ownerToken: owner, generation: generation, sequence: sequence, now: now)
         }
         func receipt(now: ContinuousClock.Instant = .now) -> ChatGPTResponseCompletion.Receipt? {
             lease.receipt(view: viewID, ownerToken: owner, generation: generation, sequence: sequence, now: now)

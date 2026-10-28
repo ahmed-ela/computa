@@ -166,11 +166,10 @@ struct AppServerSteerRequest: Sendable {
 
 enum AppServerTurnCompletionContract {
     static func status(for turn: [String: Any]?) -> TaskStatus {
-        guard let turn, turn["status"] as? String == "completed",
-              turn["error"] == nil || turn["error"] is NSNull else {
-            return .waiting
-        }
-        return .completed
+        guard let turn, turn["status"] as? String != "interrupted" else { return .waiting }
+        if turn["status"] as? String == "failed"
+            || (turn["error"] != nil && !(turn["error"] is NSNull)) { return .failed }
+        return turn["status"] as? String == "completed" ? .completed : .waiting
     }
 
     static func cleanupCause(for turn: [String: Any]?, wasNativeStopped: Bool = false,
@@ -361,14 +360,19 @@ enum AppServerThreadHistoryContract {
 
     /// A thread's unloaded/list status is not its last user turn's outcome.
     /// Unknown/missing turn outcomes provide no evidence of failure.
-    static func latestUserTurnStatus(from data: Data, rejectedTurns: Set<String> = []) throws -> TaskStatus? {
+    static func latestUserTurnStatus(from data: Data, rejectedTurns: Set<String> = [],
+                                     failedTurns: Set<String> = []) throws -> TaskStatus? {
         let turns = try savedTurns(data)
         guard let turn = turns.last(where: { ($0["items"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "userMessage" } }),
               let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
+        // Native safety stops invalidate output without certifying a failed
+        // provider request. Website failure records carry that separate proof.
+        if failedTurns.contains(id) { return .failed }
         if turn["status"] as? String == "inProgress", !rejectedTurns.contains(id) { return .running }
-        if rejectedTurns.contains(id) || hasSavedError(turn) { return .waiting }
+        if rejectedTurns.contains(id) || turn["status"] as? String == "interrupted" { return .waiting }
+        if hasSavedError(turn) { return .failed }
         switch turn["status"] as? String {
-        case "failed", "interrupted": return .waiting
+        case "failed": return .failed
         case "completed": return .completed
         default: return nil
         }
@@ -2569,7 +2573,7 @@ private extension CodexAppServerRuntime {
                 guard generation == serverGeneration,
                       submission == latestSubmissionClaims[taskID],
                       turnIdentity.latestTurnID(for: taskID) == turnID else { return }
-                events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty ? status : .waiting))
+                events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty || status == .failed ? status : .waiting))
             }
         }
 
@@ -3167,7 +3171,8 @@ private extension CodexAppServerRuntime {
                     let latestTurnID = try AppServerThreadHistoryContract.latestUserTurnID(from: history)
                     if let latestTurnID { turnIdentity.restoreLatestTurnID(taskID: taskID, turnID: latestTurnID) }
                     if (tasks[index].status != .running || latestTurnID.map(rejectedTurns.contains) == true),
-                       let restoredStatus = try AppServerThreadHistoryContract.latestUserTurnStatus(from: history, rejectedTurns: rejectedTurns) {
+                       let restoredStatus = try AppServerThreadHistoryContract.latestUserTurnStatus(from: history,
+                            rejectedTurns: rejectedTurns, failedTurns: Set(websiteFailures.map(\.turnID))) {
                         tasks[index].status = restoredStatus
                     }
                     do {
@@ -3426,7 +3431,7 @@ private extension CodexAppServerRuntime {
                 let wasNativeStopped = nativeStoppedTurns[taskID] == turn?["id"] as? String
                 var completionStatus: TaskStatus = wasContextStopped || wasNativeStopped ? .waiting : AppServerTurnCompletionContract.status(for: turn)
                 let commandTurnFailed = completionStatus != .completed
-                if completionStatus == .waiting, let turnID = turn?["id"] as? String {
+                if completionStatus != .completed, let turnID = turn?["id"] as? String {
                     let rawMessage = (turn?["error"] as? [String: Any])?["message"] as? String
                     let savedMessage = rawMessage.flatMap { !$0.isEmpty && $0.utf8.count <= 8_192 ? $0 : nil }
                     if let message = terminalFailureMessage(taskID: taskID, threadID: threadID, turnID: turnID, nativeMessage: savedMessage) {
@@ -3436,7 +3441,7 @@ private extension CodexAppServerRuntime {
                 if managedCompactions[taskID] == nil, !wasNativeStopped, !wasContextStopped,
                    let diagnostic = computerCompletionDiagnostic(taskID: taskID) {
                     emitComputerOutcomeDiagnostic(taskID: taskID, turnID: turn?["id"] as? String ?? "unknown", message: diagnostic)
-                    completionStatus = .waiting
+                    if completionStatus != .failed { completionStatus = .waiting }
                 }
                 compactionProgress.remove(taskID: taskID)
                 if let failure = compactionTracker.finishTurn(taskID: taskID,
@@ -3445,7 +3450,7 @@ private extension CodexAppServerRuntime {
                     expectedCompaction: manualCompactionExpected) {
                     events.yield(.contextCompactionChanged(taskID: taskID, state: failure))
                     events.yield(.contextUsageUpdated(taskID: taskID, usage: nil))
-                    completionStatus = .waiting
+                    if completionStatus != .failed { completionStatus = .waiting }
                 }
                 if let maintenance, let turnID = turn?["id"] as? String {
                     managedCompactions[taskID]?.barrier.terminal(turnID: turnID,
@@ -3785,9 +3790,9 @@ private extension CodexAppServerRuntime {
                     compactionReservations.remove(taskID)
                 }
                 publishAgentError(taskID: taskID, turnID: failedTurnID, message: message)
-                publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true,
-                    cleanupCause: nativeStoppedTurns[taskID] == failedTurnID || contextStoppedTurns[taskID] == failedTurnID
-                        ? .cancelled : .failedTurn, failedCommandTurnID: failedTurnID)
+                let wasStopped = nativeStoppedTurns[taskID] == failedTurnID || contextStoppedTurns[taskID] == failedTurnID
+                publishTerminalStatus(taskID: taskID, status: wasStopped ? .waiting : .failed, cancelled: true,
+                    cleanupCause: wasStopped ? .cancelled : .failedTurn, failedCommandTurnID: failedTurnID)
 
             default:
                 break

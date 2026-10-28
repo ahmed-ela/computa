@@ -85,17 +85,17 @@ final class AppServerSteerContractTests: XCTestCase {
         XCTAssertEqual(AppServerTurnCompletionContract.status(for: [
             "status": "completed", "error": NSNull(),
         ]), .completed)
-        for status in ["failed", "interrupted", "inProgress", "unknown", ""] {
+        for status in ["interrupted", "inProgress", "unknown", ""] {
             XCTAssertEqual(AppServerTurnCompletionContract.status(for: ["status": status]), .waiting)
         }
         XCTAssertEqual(AppServerTurnCompletionContract.status(for: nil), .waiting)
         XCTAssertEqual(AppServerTurnCompletionContract.status(for: [:]), .waiting)
         XCTAssertEqual(AppServerTurnCompletionContract.status(for: [
             "status": "completed", "error": ["message": "provider failed"],
-        ]), .waiting)
+        ]), .failed)
         XCTAssertEqual(AppServerTurnCompletionContract.status(for: [
             "status": "completed", "error": "provider failed",
-        ]), .waiting)
+        ]), .failed)
     }
 
     func testOrdinaryFailedTerminalSourcePreservesPostBlockObservation() {
@@ -107,7 +107,7 @@ final class AppServerSteerContractTests: XCTestCase {
             ["status": "completed", "error": "provider failed"],
         ]
         for turn in failedTurns {
-            XCTAssertEqual(AppServerTurnCompletionContract.status(for: turn), .waiting)
+            XCTAssertEqual(AppServerTurnCompletionContract.status(for: turn), .failed)
             XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: turn), .failedTurn)
         }
     }
@@ -118,6 +118,7 @@ final class AppServerSteerContractTests: XCTestCase {
             ["status": "interrupted", "error": ["message": "interrupted while blocked"]],
         ]
         for turn in interruptedTurns {
+            XCTAssertEqual(AppServerTurnCompletionContract.status(for: turn), .waiting)
             XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: turn), .cancelled)
         }
         let failed: [String: Any] = ["status": "failed", "error": ["message": "terminal failure after stop"]]

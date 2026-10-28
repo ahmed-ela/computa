@@ -14,7 +14,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let human = try browser.createTab()
         let model = try browser.createUnloadedModelTabForTesting()
         XCTAssertTrue(try XCTUnwrap(browser.webView(for: human)).configuration.userContentController.userScripts.isEmpty)
-        XCTAssertTrue(try XCTUnwrap(browser.webView(for: model)).configuration.userContentController.userScripts.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(browser.webView(for: model)).configuration.userContentController.userScripts.contains { $0.source.contains("const captureDecodedEvents =") })
         let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
         XCTAssertFalse(browser.installModelRequestMetadata(try arm.lease(), tabID: human))
         XCTAssertTrue(try XCTUnwrap(browser.webView(for: human)).configuration.userContentController.userScripts.isEmpty)
@@ -29,10 +29,17 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             let browser = EmbeddedBrowserSession(persistent: false); defer { browser.shutdown() }
             let id = try browser.createUnloadedModelTabForTesting()
             let view = try XCTUnwrap(browser.webView(for: id))
+            let ordinary = try XCTUnwrap(view.configuration.userContentController.userScripts.first { $0.source.contains("const diagnosticReasons =") })
+            let ordinaryConfig = try injectedConfiguration(ordinary.source)
             XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: decoded), tabID: id))
-            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+            let completionScripts = view.configuration.userContentController.userScripts.filter { $0.source.contains("const diagnosticReasons =") }
+            XCTAssertEqual(completionScripts.count, 1, "Diagnostic opt-in must preserve exactly one completion observer")
+            let configured = try injectedConfiguration(XCTUnwrap(completionScripts.first).source)
+            XCTAssertEqual(configured["key"] as? String, ordinaryConfig["key"] as? String)
+            XCTAssertEqual(configured["allowsDiagnosticSubscribers"] as? Bool, decoded ? true : nil)
+            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first { $0.source.contains("const captureDecodedEvents =") }).source
             let config = try injectedConfiguration(source)
-            XCTAssertEqual(Set(config.keys), decoded ? ["key", "durationMs", "captureDecodedEvents"] : ["key", "durationMs"])
+            XCTAssertEqual(Set(config.keys), decoded ? ["key", "durationMs", "captureDecodedEvents", "completionKey"] : ["key", "durationMs"])
             if decoded { XCTAssertEqual(config["captureDecodedEvents"] as? Bool, true) }
             else { XCTAssertNil(config["captureDecodedEvents"]) }
             for nativeID in [arm.task, arm.thread, arm.turn, arm.preparation] {
@@ -48,7 +55,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             let id = try browser.createUnloadedModelTabForTesting()
             let view = try XCTUnwrap(browser.webView(for: id))
             XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: decoded), tabID: id))
-            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first { $0.source.contains("const captureDecodedEvents =") }).source
             let key = try XCTUnwrap(injectedConfiguration(source)["key"] as? String)
             let token = UUID().uuidString
             try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
@@ -58,7 +65,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
                 var snapshot: [String: Any] = ["schemaVersion": decodedMode ? 2 : 1, "active": true, "expired": false, "rows": []]
                 if decodedMode {
                     snapshot["decoder"] = ["state": "installed", "completionCalls": 0, "programObservations": 0,
-                                           "recoveredNullObservations": 0, "lastProgram": NSNull()]
+                                           "recoveredNullObservations": 0, "lastProgram": NSNull(), "stream": ["inputMessages": 0, "assistantMessages": 0, "nonemptyTextMessages": 0, "opaqueMessages": 0, "mainTerminals": 0, "messageTerminals": 0, "errorEvents": 0, "originalThrows": 0, "decoderInstances": 0, "decoderOverflow": false]]
                 }
                 _ = try await view.callAsyncJavaScript("""
                     Object.defineProperty(window, key, {configurable:true, value:async function() {
@@ -85,7 +92,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let id = try browser.createUnloadedModelTabForTesting()
         let view = try XCTUnwrap(browser.webView(for: id))
         XCTAssertTrue(browser.installModelRequestMetadata(lease, tabID: id))
-        let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+        let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first { $0.source.contains("const captureDecodedEvents =") }).source
         let key = try XCTUnwrap(injectedConfiguration(source)["key"] as? String)
         let token = UUID().uuidString
         try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
@@ -95,7 +102,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             Object.defineProperty(window, key, {configurable:true, value:async function() {
               await new Promise(resolve => setTimeout(resolve, 1100));
               return {schemaVersion:2,active:true,expired:false,rows:[],decoder:{state:'installed',
-                completionCalls:0,programObservations:0,recoveredNullObservations:0,lastProgram:null}};
+                completionCalls:0,programObservations:0,recoveredNullObservations:0,lastProgram:null,stream:{inputMessages:0,assistantMessages:0,nonemptyTextMessages:0,opaqueMessages:0,mainTerminals:0,messageTerminals:0,errorEvents:0,originalThrows:0,decoderInstances:0,decoderOverflow:false}}};
             }}); return true;
             """, arguments: ["key": key], in: nil, contentWorld: .page)
         let late = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
@@ -114,9 +121,9 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let view = try XCTUnwrap(browser.webView(for: id))
         XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: true), tabID: id))
         let controller = view.configuration.userContentController
-        let installed = try XCTUnwrap(controller.userScripts.first)
-        // Match the version-pinned minified method and namespace getter in a
-        // real WebKit ESM namespace. Only the import URL changes in production JS.
+        let installed = try XCTUnwrap(controller.userScripts.first { $0.source.contains("const captureDecodedEvents =") })
+        // Match the verified minified method and namespace getter in a real
+        // WebKit ESM namespace shared by diagnostic and completion subscribers.
         let module = """
             const T={safeParse(e){window.localOriginalCalls++;return{success:true,data:{type:"message_stream_complete"}}}};
             class O{
@@ -129,12 +136,21 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             window.localOriginalDescriptor=Object.getOwnPropertyDescriptor(O.prototype,'recordCompletion');
             export {__webpack_require__};
             """
-        let runtimeURL = "https://chatgpt.com/cdn/assets/633146.1f9c264032.js"
-        XCTAssertEqual(installed.source.components(separatedBy: runtimeURL).count, 2)
+        let completion = try XCTUnwrap(controller.userScripts.first { $0.source.contains("const diagnosticReasons =") })
+        XCTAssertEqual(completion.source.components(separatedBy: "import(runtimeURL)").count, 2)
         let moduleURL = "data:text/javascript;base64," + Data(module.utf8).base64EncodedString()
-        let localSource = installed.source.replacingOccurrences(of: runtimeURL, with: moduleURL)
+        // Local ESM substitutes for the already-observed runtime only. The
+        // production cache, getter, method and shared-subscription guards run.
+        let inventory = """
+            const fixtureGetEntries=performance.getEntriesByType.bind(performance);
+            performance.getEntriesByType=function(type){return type==='resource'
+              ? [{name:'https://chatgpt.com/cdn/assets/633146.8ccf94f4a9.js',initiatorType:'script',startTime:0,
+                  responseEnd:performance.now(),responseStatus:200}]:fixtureGetEntries(type);};
+            """
+        let localCompletion = completion.source.replacingOccurrences(of: "import(runtimeURL)", with: "import('" + moduleURL + "')")
         controller.removeAllUserScripts()
-        controller.addUserScript(WKUserScript(source: localSource, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+        controller.addUserScript(WKUserScript(source: inventory + "\n" + localCompletion, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+        controller.addUserScript(installed)
         let token = UUID().uuidString
         try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
         let conversation = "00000000-0000-4000-8000-000000000001"
@@ -214,6 +230,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let human = try browser.createTab()
         let id = try browser.createUnloadedModelTabForTesting()
         let view = try XCTUnwrap(browser.webView(for: id))
+        let ordinaryScripts = view.configuration.userContentController.userScripts.map(\.source)
         let cookieStore = view.configuration.websiteDataStore.httpCookieStore
         let syntheticCookies = try [
             cookie(name: "synthetic_a", value: "alpha"),
@@ -316,8 +333,8 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             Set(cookies.map { [$0.domain, $0.path, $0.name, $0.value].joined(separator: "|") })
         }
         XCTAssertEqual(syntheticFacts(cookiesAfter), syntheticFacts(cookiesBefore), "The diagnostic only reads this nonpersistent synthetic cookie store")
-        XCTAssertEqual(view.configuration.userContentController.userScripts.map(\.source), [localFetch.source],
-            "Stopping removes the production observer while preserving the unrelated fixture predecessor")
+        XCTAssertEqual(view.configuration.userContentController.userScripts.map(\.source), ordinaryScripts + [localFetch.source],
+            "Stopping removes only request metadata while preserving ordinary completion and the fixture predecessor")
         view.configuration.userContentController.removeAllUserScripts()
         let hooksRemain = try await view.evaluateJavaScript("Object.getOwnPropertyNames(window).some(key => /^__computaRequestMetadata_[a-f0-9]{32}$/.test(key))")
         XCTAssertEqual(hooksRemain as? Bool, false)
@@ -336,6 +353,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             defer { browser.shutdown() }
             let id = try browser.createUnloadedModelTabForTesting()
             let view = try XCTUnwrap(browser.webView(for: id))
+            let ordinaryScripts = view.configuration.userContentController.userScripts.map(\.source)
             XCTAssertTrue(browser.installModelRequestMetadata(lease, tabID: id))
             let token = UUID().uuidString
             try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
@@ -355,7 +373,8 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             let stale = await browser.modelRequestMetadata(command: "snapshot", tabID: id, view: view, ownerToken: token)
             XCTAssertNil(stale, mode)
             XCTAssertFalse(lease.isCurrent, mode)
-            XCTAssertTrue(view.configuration.userContentController.userScripts.isEmpty)
+            XCTAssertEqual(view.configuration.userContentController.userScripts.map(\.source), mode == "close" ? [] : ordinaryScripts,
+                "Navigation and expiry revoke only diagnostics; closing also removes ordinary completion")
             XCTAssertFalse(view.isInspectable)
         }
     }
@@ -639,7 +658,7 @@ private actor MetadataIntegrationTransport: WebModelTransport {
         var value: [String: Any] = ["schemaVersion": decoded ? 2 : 1, "active": active, "expired": false, "rows": []]
         if decoded {
             value["decoder"] = ["state": activationSucceeds ? "restored" : "unavailable", "completionCalls": 0,
-                                "programObservations": 0, "recoveredNullObservations": 0, "lastProgram": NSNull()]
+                                "programObservations": 0, "recoveredNullObservations": 0, "lastProgram": NSNull(), "stream": ["inputMessages": 0, "assistantMessages": 0, "nonemptyTextMessages": 0, "opaqueMessages": 0, "mainTerminals": 0, "messageTerminals": 0, "errorEvents": 0, "originalThrows": 0, "decoderInstances": 0, "decoderOverflow": false]]
         }
         return (try? JSONSerialization.data(withJSONObject: value)).flatMap { try? ChatGPTRequestMetadataSnapshot.parse($0) }
     }

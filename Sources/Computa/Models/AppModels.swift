@@ -3,6 +3,7 @@ import SwiftUI
 enum TaskStatus: String, CaseIterable, Sendable {
     case running
     case waiting
+    case failed
     case completed
     case draft
 
@@ -10,6 +11,7 @@ enum TaskStatus: String, CaseIterable, Sendable {
         switch self {
         case .running: "Running"
         case .waiting: "Waiting"
+        case .failed: "Failed"
         case .completed: "Completed"
         case .draft: "Draft"
         }

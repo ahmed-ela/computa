@@ -57,7 +57,7 @@ final class AccessModeLiveTests: XCTestCase {
                 case .taskStatusChanged(let id, let status) where id == taskID:
                     if status == .running { running = true }
                     if running && status == .completed { completed += 1; running = false }
-                    if status == .waiting { errors.append("The permission fixture turn failed or stopped.") }
+                    if status == .waiting || status == .failed { errors.append("The permission fixture turn failed or stopped.") }
                 case .timelineEntryAppended(let id, let entry) where id == taskID:
                     if entry.title == "Agent error" { errors.append(entry.body) }
                 case .connectionChanged(.failed(let message)): errors.append(message)
@@ -498,7 +498,7 @@ final class AccessModeLiveTests: XCTestCase {
             case .approvalResolved(let id): resolvedIDs.insert(id)
             case .taskStatusChanged(let id, let status) where taskIDs.contains(id):
                 if status == .completed { completedTaskIDs.insert(id) }
-                if status == .waiting { failures.append("A fixture turn failed or was interrupted.") }
+                if status == .waiting || status == .failed { failures.append("A fixture turn failed or was interrupted.") }
             case .timelineEntryAppended(let id, let entry) where taskIDs.contains(id):
                 if let tool = entry.toolEvent, tool.name != "computer_v2_open" {
                     failures.append("Model deviated from the Calculator-only fixture: \(tool.name).")

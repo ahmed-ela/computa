@@ -73,6 +73,7 @@ final class BrowserCompleteObservationEncodingTests: XCTestCase {
             XCTAssertEqual(body["dispatched"] as? Bool, true)
             XCTAssertEqual(body["no_replay"] as? Bool, true)
             XCTAssertEqual(body["result_verified"] as? Bool, false)
+            XCTAssertEqual(body["receipt_scope"] as? String, "input")
             XCTAssertEqual(body["input_kind"] as? String, wasFill ? "fill" : "click")
             let observation = try XCTUnwrap(body["current_observation"] as? [String: Any])
             XCTAssertEqual(observation["status"] as? String, "available")
@@ -80,11 +81,39 @@ final class BrowserCompleteObservationEncodingTests: XCTestCase {
             XCTAssertEqual(Array(try XCTUnwrap(observation["text"] as? String).utf8), Array(page.utf8))
             XCTAssertTrue(try XCTUnwrap(observation["text"] as? String).contains(send))
             XCTAssertTrue(try XCTUnwrap(observation["text"] as? String).contains(sent))
+            let next = try XCTUnwrap(body["next"] as? String)
+            XCTAssertTrue(next.lowercased().contains("no replay"))
             if wasFill {
-                XCTAssertTrue(try XCTUnwrap(body["next"] as? String).contains("no Enter/submit"))
+                XCTAssertTrue(next.contains("no Enter/submit sent"))
+                XCTAssertTrue(next.contains("handlers may react"))
+                XCTAssertTrue(next.contains("Verify full values/state"))
+            } else {
+                XCTAssertTrue(next.contains("browser_wait(after_snapshot=\"\(snapshotID.uuidString)\")"))
             }
             XCTAssertEqual(try BrowserCompleteObservation.excessBytes(envelope, actionReceipt: receipt), 0)
             XCTAssertLessThanOrEqual(wire.count, 4_608)
+        }
+    }
+
+    func testInputReceiptScopeAndCuesDoNotReduceExistingCompletePageBudget() throws {
+        // Longer explanatory cues once displaced the Send row from an ordinary
+        // mailbox's complete form. Scope the receipt without shrinking the old
+        // page budget, including both levels of JSON escaping on the wire.
+        let page = #"#0 role="AXButton" label="Send message" click_ref="bclick_exact""#
+        for wasFill in [false, true] {
+            let receipt = cue(wasFill: wasFill)
+            let encoded = try BrowserCompleteObservation.Encoding.input(wasFill: wasFill, receipt: receipt)
+                .encode(page, snapshotID: snapshotID)
+            var previous = try object(encoded)
+            previous.removeValue(forKey: "receipt_scope")
+            previous["next"] = wasFill
+                ? "Fill: input/change only, no Enter/submit; page handlers may react. Verify full value before separate submit; no replay."
+                : "Click unverified. For pending navigation: browser_wait(after_snapshot=\"\(snapshotID.uuidString)\"); then read. Never replay."
+            let previousEnvelope = String(decoding: try JSONSerialization.data(withJSONObject: previous,
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+            XCTAssertLessThanOrEqual(rawBytes(encoded, receipt: receipt), rawBytes(previousEnvelope, receipt: receipt))
+            XCTAssertLessThanOrEqual(try serializedParts(encoded, receipt: receipt).count,
+                                     try serializedParts(previousEnvelope, receipt: receipt).count)
         }
     }
 

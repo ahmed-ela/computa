@@ -24,6 +24,15 @@ describe('website cleanup recovery', () => {
     expect(render(task())).toContain('Retry website cleanup');
     expect(render(task())).toContain('keeping your local chat');
   });
+  test('failed tasks can clean up without changing their failure or resuming input', () => {
+    const value = task({ status: 'Failed', statusTone: 'red' });
+    expect(websiteSessionCleanupAction(value)).toEqual({ action: 'retryWebsiteSessionCleanup', taskID: value.id });
+    expect(render(value)).toContain('Retry website cleanup');
+    expect(value.status).toBe('Failed');
+    expect(value.queuePaused).toBe(true);
+    expect(websiteSessionCleanupAction({ ...value, isBusy: true })).toBeUndefined();
+    expect(websiteSessionCleanupAction(value, true)).toBeUndefined();
+  });
   test('running, busy, unavailable, duplicate, approval and completed states cannot request cleanup', () => {
     for (const changes of [{ status: 'Running' }, { status: 'Completed' }, { isBusy: true },
       { websiteSessionCleanupAvailable: false }, { websiteSessionCleanupInProgress: true }]) {

@@ -2,6 +2,27 @@ import XCTest
 @testable import Computa
 
 final class WebSnapshotTests: XCTestCase {
+    @MainActor
+    func testFailedTaskRoundTripsWithRedStatusAndNoActiveTurn() throws {
+        let task = AgentTask(id: "failed", title: "Failed task", summary: "", status: .running,
+            workspace: "/tmp", model: "local", entries: [])
+        let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
+        state.activeTurnTaskIDs.insert(task.id)
+        state.apply(.timelineEntryAppended(taskID: task.id,
+            entry: TimelineEntry(kind: .system, title: "Agent error", body: "Provider response failed")))
+        state.apply(.taskStatusChanged(taskID: task.id, status: .failed))
+        let snapshot = WebUISnapshot(state: state)
+        let projected = try XCTUnwrap(snapshot.tasks.first)
+        XCTAssertEqual(projected.status, "Failed")
+        XCTAssertEqual(projected.statusTone, "red")
+        XCTAssertFalse(projected.isBusy)
+        XCTAssertNil(projected.activeTurnStartedAt)
+        XCTAssertEqual(projected.entries.last?.title, "Agent error")
+        XCTAssertEqual(try JSONDecoder().decode(WebUISnapshot.self,
+            from: JSONEncoder().encode(snapshot)), snapshot)
+        XCTAssertEqual(TaskStatus(rawValue: "failed"), .failed)
+    }
+
     func testActivityMetadataRoundTripsWithoutRequiringItOnOldEntries() throws {
         let entry = TimelineEntry(id: "answer", kind: .assistant, title: "Computa", body: "Answer",
                                   activityGroupID: "original-user", assistantPhase: "final_answer")

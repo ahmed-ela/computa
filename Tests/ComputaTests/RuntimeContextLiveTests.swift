@@ -475,7 +475,7 @@ final class RuntimeContextLiveTests: XCTestCase {
             case .taskStatusChanged(let owner, let status) where owner == taskID:
                 lastStatus = status
                 if status == .completed { completedTurns += 1 }
-                if status == .waiting, !(acceptExpectedContextFailure && !contextFailures.isEmpty) {
+                if status == .waiting || status == .failed, !(acceptExpectedContextFailure && !contextFailures.isEmpty) {
                     failures.append("Turn failed or was interrupted.")
                 }
             case .timelineEntryAppended(let owner, let entry) where owner == taskID:

@@ -2715,3 +2715,1279 @@ unchanged evidence-store task cap, the completed synthetic journals were
 reversibly archived with exact copies; native chat history was retained.
 The greeting capture arm was consumed, no renderer diagnostic expiry remained,
 and Safari's developer setting remained restored to off. No release or merge.
+
+### Build 272: empty-response fixes and remaining discovery failure
+
+Signed, non-notarized Computa 0.7.0 (272), source `3b29d76`, completed these
+normal ChatGPT Chat/Instant cases without diagnostic arms:
+
+| Controlled task | Native duration | Verified responses | Successful native tools |
+| --- | ---: | ---: | ---: |
+| Literal `hi` | 6.855 s | 1 | 0 |
+| Unsent `example.invalid` email draft | 6.922 s | 1 | 0 |
+| Two separate terminal commands | 21.086 s | 3 | 2 |
+| 24,576-byte local mailbox request | 50.303 s | 7 | 6 |
+
+All 12 inferences retained full ownership/model/lifecycle verification and
+saved closed website-session receipts, with zero corrections or failed tools.
+The draft used the exact prompt that previously produced a native website
+email card, and returned an ordinary local draft without external actions.
+Both terminal commands exited zero and returned the expected marker and 437.
+The mailbox fixture recorded exactly one POST with the expected fields and
+receipt `LOCAL-62b674b4e1b40c25`, independently matched to the browser read and
+final answer. No real email was sent.
+
+These passes used the verified completion fallback: the new runtime discovery
+still reported `runtime_unsupported`. Two subsequent long synthetic rendering
+diagnostics failed the response-envelope check; neither is counted as a pass.
+Their generic runtime "high demand" text was not evidence of a provider outage.
+Scoped Inspector reads showed missing startup resource records, while retained
+provider source installs a resource-timing buffer-clear handler. This discovery
+gap and persistence of the new response-format error require another candidate.
+
+The exact-byte journal audit preserved all 564 pre-install files: 530 remained
+active and 34 were archived, with five completed retirements, no pending work
+and a healthy SQLite archive. The active 256-task cap was unchanged. The local
+fixture process stopped, port 62240 was free, inspection arms were consumed,
+and Safari's developer setting was restored to off.
+
+Before installation, 670 of 671 unique native cases passed across the broad and
+targeted repair runs; one existing opt-in microbenchmark was skipped. This was
+not a single clean full-suite run: all nine initial failing cases were mapped
+to subsequent passes, including the final fixture-only rerun. JavaScript
+validation passed 567 tests across eight files, and the Web UI passed eight
+tests, type checking and its build. Build 271 was built but never installed.
+The original upstream cause of the empty real-user reply remains unproven.
+
+### Build 273: runtime discovery fixed; partial messages still used fallback
+
+Installed signed, non-notarized 0.7.0 (273), source `4518428`, returned `Hi.`
+in 7.607 seconds with one verified inference and closed session. The observer
+armed and observed ten calls on one decoder, resolving `runtime_unsupported`
+for this case. It then rejected incomplete assistant metadata with `final_status`
+and used the verified quiet fallback. The public decoder schema permits messages
+before status and finish metadata arrive; those partial updates cannot be
+treated as final-response evidence or as an immediate protocol failure.
+
+A separate scoped long-response diagnostic in that fresh chat returned all 200
+requested fictional entries in 74.728 seconds, with one verified inference,
+no tools and normal cleanup. It did not produce a rejected reply. Repeating the
+same request in the retained diagnostic conversation first compacted history,
+then returned only 180 entries. Both inferences passed protocol and cleanup,
+but the requested count did not pass: the maintenance notes described an older
+180-entry request as active. The next candidate clarifies that later human
+requests override a summary's task label and quantities while retaining
+compatible context and ongoing constraints.
+
+Neither run reproduced or classifies the two uncaptured build272 format errors.
+The retained-chat capture arm used its earlier UI task ID, while the restored
+runtime used its thread ID as the task ID; it would not have captured a failure.
+Both unused arms were disarmed and retained locally. The first fresh-chat arm
+was correctly scoped. No real email, new fixture server or Inspector session
+was used for these build273 diagnostics.
+
+### Build 274: installed qualification
+
+Signed, non-notarized Computa 0.7.0 (274), source `669b7ff`, completed four fresh
+normal ChatGPT Chat/Instant tasks with the same native prompts as build272:
+
+| Controlled task | Native duration | Verified responses | Successful native tools |
+| --- | ---: | ---: | ---: |
+| Literal `hi` | 7.751 s | 1 | 0 |
+| Unsent `example.invalid` email draft | 7.978 s | 1 | 0 |
+| Two separate terminal commands | 24.035 s | 3 | 2 |
+| 24,576-byte local mailbox request | 51.439 s | 7 | 6 |
+
+All 12 inferences completed full ownership/model/lifecycle verification and
+saved closed website-session receipts. There were zero failed inferences,
+failed tools or corrections. The terminal results matched both exact commands
+with exit code zero. The mailbox fixture recorded exactly one POST with all
+requested fields and receipt `LOCAL-5c848aadbdcb79a7`, independently matched to
+the subsequent browser read and final answer. No real email was sent.
+
+A separate retained-context follow-up requested exactly three fictional entries
+in the chat whose earlier summary had preserved an older 180-entry task. Automatic
+maintenance completed in 11.025 seconds and the queued user turn in 8.179 seconds.
+It returned exactly three numbered, nonempty one-sentence entries, with no extra
+items, tools, errors or corrections. Both inference sessions were verified and
+closed. This bounded check exercises newer-request precedence after compaction.
+
+All 12 completion observers armed. They reached the strict final/message-terminal
+path but could not prove the additional system-only ancestry walk; each used the
+normal verified quiet fallback. This is a remaining successful-response latency
+limitation, not evidence of a failed task. The empty/error-stream classifier uses
+separate exact-input ownership and terminal checks and does not depend on that
+final ancestry walk. Deterministic JavaScript and real-WebKit tests cover its
+empty/error receipts, rejection cases and no-replay behavior; these successful
+live tasks do not constitute a live empty/error-stream test.
+
+The final partial-metadata observer suite passed 48 tests / 667 assertions;
+the focused native completion/history/capture suites passed 47 tests, and the
+instruction suite passed 50. Broader earlier regression results remain recorded
+above rather than being represented as one new full-suite run.
+
+All 564 original journal files remained byte-exact after the mailbox case:
+520 active and 44 archived, no pending retirement, SQLite integrity healthy.
+The fixture process stopped and port 62240 was free. All scoped diagnostic arms
+were absent, Safari's developer setting was reverified off and its owned settings
+window closed. Existing user browser tabs were preserved. No release or merge.
+
+
+### Build 276: runtime recognition repaired; one semantic task failure
+
+Installed signed, non-notarized 0.7.0 (276), source `8ca1a07`, recognizes the
+observed decoder's equivalent minified binding rename (`T` to `x`). All 29
+observers armed across four fresh normal ChatGPT Chat/Instant tasks. Each still
+used verified quiet fallback because the additional ancestry proof was absent.
+The model and temporary-session ownership checks remained enforced.
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Read schedule and send the fact to the local fixture | 63.025 s | 8 | 7 | Pass |
+| Read library hours and send the fact to the local fixture | 67.559 s | 9 | 8 | Pass |
+| Identify an attachment and send its name to the local fixture | 124.538 s | 9 | 8 | Incomplete |
+| Two separate terminal commands | 22.030 s | 3 | 2 | Pass |
+
+The first two browser tasks each produced exactly one local POST, with the
+correct source fact and a unique delivery receipt independently matched to the
+browser read and final answer. The terminal commands returned the expected
+marker and 437, both with exit code zero. All 29 inferences passed ownership,
+model, lifecycle and saved-closed-session checks. There were no failed native
+calls, failed inferences or correction attempts. No real email was sent.
+
+The attachment task did **not** pass. It identified the correct filename and
+filled the recipient and subject, then stopped with an unsupported statement
+that local browser relay actions were unavailable. Its last successful native
+result exposed a fresh, writable Message field and enabled Send button. The
+fixture recorded zero POSTs. There was no browser error, compaction, observed
+permission denial, eight-call limit or reported binding expiry. Matching tool-byte
+counts do not prove which exact tools and policy were offered; build277 adds
+finite post-projection catalog diagnostics to resolve that remaining evidence
+gap. This failure remains in the denominator and was not silently retried.
+
+Each fixture process was stopped and its port released. Task-created browser
+tabs and all owned website sessions were closed, including the failed case.
+All 564 original journal files remained byte-exact (506 active, 58 archived),
+with no pending retirement and a healthy archive. Safari's temporary developer
+setting was restored off. Build275 was built but never installed.
+
+Focused validation for these changes passed 190 codec/catalog tests, 53
+JavaScript observer tests with 885 assertions, and 28 native completion/WebKit
+tests. These results repair the observed decoder-recognition defect and improve
+capability instructions; they do not establish the upstream cause of the
+uncaptured original build270 empty response or general task reliability.
+
+
+### Build 277: reproduced post-action missing answer and identified byte cap
+
+Signed, non-notarized 0.7.0 (277), source `28a4cd9`, repeated the exact frozen
+attachment prompt in a fresh ChatGPT Chat/Instant task. Ten browser calls
+succeeded, including identifying the staff attachment, filling the correct
+message and submitting it exactly once. The local fixture recorded one correct
+POST and receipt `LOCAL-4aa82205f7251349`, independently visible in the native
+browser observation. All ten inference sessions passed ownership/model/lifecycle
+verification and closed. Every observer armed and used verified quiet fallback.
+
+The task nevertheless failed after 78.118 seconds without a final answer.
+Computa rejected inference 11 before website startup with `website_turn_limit`.
+The first ten full canonical prompts consumed 934,397 cumulative UTF-8 bytes.
+The next request required 131,032 bytes: 1,065,429 total, exceeding the 1,048,576
+byte cap by 16,853. It was below both the per-request 160 KiB bound and the
+16-inference count bound. The final projected catalog remained bound, with all
+ten browser functions offered and allowed under `auto`.
+
+This is a confirmed app-side cause for this missing answer, distinct from the
+uncaptured original build270 empty provider reply and build276's premature
+semantic final. The initial catalog collector conservatively marked the overall
+record incomplete because it expected started inferences only; the extra log
+was the exact journaled pre-admission rejection, not unrelated traffic. That
+original report is preserved separately from the causal audit.
+
+The failed test is not counted as a pass. No send was replayed. Its task-created
+tab, website sessions and fixture process were closed, with the listener absent.
+The diagnostic changes passed 193 focused codec/catalog tests and eight bounded
+collector tests. The next candidate aligns cumulative byte bounds with the
+existing finite inference and per-request limits, preserving actual-byte
+accounting, ownership verification, correction limits and no-replay behavior.
+
+
+### Build 278: byte-budget regression passes; premature final remains
+
+Installed signed, non-notarized 0.7.0 (278), source `73455ad`, retained the same
+frozen task prompts and independent fixture checks:
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Identify attachment and send its name | 136.311 s | 11 | 10 | Pass |
+| Read schedule and send the fact | 61.388 s | 8 | 7 | Pass |
+| Read library hours and send the fact | 55.807 s | 7 | 6 | Incomplete |
+| Two separate terminal commands | 22.356 s | 3 | 2 | Pass |
+
+The attachment task exercised the exact previous byte-budget failure: its first
+ten prompts used 934,397 bytes, and its final response required 131,032 more.
+The 1,065,429 total exceeded the former cap by 16,853 bytes but fit the derived
+finite allowance. It delivered exactly once and returned the matching receipt
+`LOCAL-d377f9c5e5a7e138`. All eleven sessions passed verification and closed.
+The schedule task also recorded one exact delivery and matching final receipt;
+both terminal commands returned their actual expected output with exit zero.
+
+The library task stopped after filling recipient and subject. Its final answer
+truthfully reported that the body was unfilled and the message unsent; no POST
+occurred. The exact final inference had all ten native browser functions offered
+and allowed, `auto` policy and a current bound page. The last native observation
+exposed a writable body field and enabled Send button. There was no tool error,
+permission denial or budget failure. This is a semantic premature final, not a
+missing-tool or transport failure. Its cause inside the model is not observable.
+The failure remains in the denominator and was not resumed or silently retried.
+
+All 29 inferences passed transport/model/ownership verification and closed;
+there were no failed tool calls or correction attempts. Every observer armed,
+using the verified quiet fallback. All three fixture processes and task tabs
+were closed, including the failed case. No real email was sent.
+
+The byte-budget/history changes passed 26 focused native/real-WebKit regressions,
+including a final response after ten completed actions, all sixteen permitted
+large requests, rejection before a seventeenth insertion, correction counting,
+cancellation, marker overhead and exact error persistence through reload.
+The next instruction candidate addresses an actual presentation ambiguity:
+the fresh response handoff allowed unqualified plans/summaries as final messages,
+while completion guidance could be deduplicated into earlier canonical history.
+That is an improvement hypothesis, not proof of the model's internal cause.
+
+
+### Build 279: final controlled qualification
+
+Installed signed, non-notarized 0.7.0 (279), source `8eb532d`, completed all four
+fresh normal ChatGPT Chat/Instant tasks with the unchanged frozen prompts:
+
+| Controlled task | Native duration | Verified responses | Native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Read library hours and send the fact | 69.372 s | 9 | 8 | Pass |
+| Identify attachment and send its name | 80.725 s | 11 | 10 | Pass |
+| Read schedule and send the fact | 69.477 s | 8 | 7 | Pass |
+| Two separate terminal commands | 22.599 s | 3 | 2 | Pass |
+
+All 31 inferences passed model, ownership, submission and release verification,
+and all owned website sessions closed. The 27 native calls succeeded without
+errors or correction attempts. Each browser fixture recorded exactly one POST
+with the required source fact and fields, independently matched to its current
+browser receipt and final answer. The terminal returned both actual expected
+outputs with exit zero. All four exact catalog audits were complete. Every
+completion observer armed and used the normal verified quiet fallback.
+
+The library test continued beyond the earlier premature-final point. The
+attachment task also completed its eleventh response after ten browser actions.
+These are bounded qualification passes with the new completion instructions,
+not proof of the model's internal cause or universal reliability. Build276,
+277 and278 failures remain recorded; no failed action was automatically replayed.
+
+The final instruction/codec run passed 144 tests after updating two obsolete
+assertions (six failures in the initial run): completion text is now intentionally
+fresh, and its measured handoff-size bound changed. Other deduplication, request
+fidelity, tool-choice and no-tools tests remain enforced. The shared guidance
+adds 107 unescaped bytes to the native contract and at most 483 to a previously
+deduplicated fresh handoff. The preceding budget/history change passed 26 focused
+native/real-WebKit tests. These are separate runs, not a new whole-app suite.
+
+Fixture processes and task-created tabs were closed, with all listeners absent.
+No Inspector session was used for these four tasks; user tabs were preserved.
+A read-only preservation check retained all 564 original journal files byte-exact,
+with no pending retirement and a healthy archive. No real email was sent, no
+release was published, and no PR was merged. The original uncaptured build270
+empty-response failure remains unattributed, as detailed in
+`CHATGPT-EMPTY-RESPONSE.md`.
+
+
+### Build 280: working capture and a new premature final — October 27, 2026
+
+Installed signed Computa 0.7.0 (280), source `46f669ae81172df52052225d8fcc840c278dbbb4`. The installed executable matched the validated build. This is a controlled local build, not a published release.
+
+The fresh capture setup exposed defects in the diagnostic infrastructure: decoded-event capture still pinned an obsolete ChatGPT asset and would wrap the same decoder independently of the normal completion observer. Both now use one verified decoder wrapper with separate lifetimes. Diagnostics remain active when completion proof is rejected, but cannot accept a response or authorize an action. Ordinary views expose no diagnostic subscription API. Native tests also caught a pre-navigation script-upgrade bug: clearing the bridged script collection before materializing its replacement removed the completion script. The replacement array is now materialized first, and native regression coverage verifies one observer, its stable key, and diagnostic opt-in.
+
+Final focused validation passed **85 JavaScript tests / 1,146 assertions** and **54 native tests**, including real WebKit capture, lifecycle, failure, and ownership cases. Earlier failed runs are retained separately; these counts describe the final focused runs, not the whole app suite.
+
+Three controlled ChatGPT Chat / Instant turns completed:
+
+| Turn | Result | Duration | Inferences | Tool calls |
+| --- | --- | ---: | ---: | ---: |
+| Instrumented unsent draft | Exact synthetic recipient/subject/body returned; no tools or message sent | 8.901 s | 1 | 0 |
+| Browser lookup | Library opening time of 8 AM matched the actual page observation and fixture GET `/message/other`; zero POSTs in this turn's window | 34.543 s | 5 | 4 |
+| Terminal | Actual marker and `437`; both commands exited 0 | 21.161 s | 3 | 2 |
+
+All nine response inferences had verified submission, selected normal Chat/Instant model, response, release, and saved closed-session evidence. Browser open/click primitives themselves reported an unverified action outcome; the read task was qualified independently from the returned source observation and fixture request. Root also verified the app's live cleanup notice that one task-created browser tab was closed and existing user tabs were preserved. Both terminal processes exited; no interactive command remained.
+
+The instrumented draft captured one decoder instance and one input, nonempty assistant content, a message-terminal event, HTTP 200 for the conversation request, and no observed error events or original decoder throws. The normal observer was armed but lacked final ancestry, so acceptance used the existing verified **quiet fallback**, not the event shortcut. The preceding null-final native turn was context compaction and is excluded from the user-task result.
+
+The original empty-response failure was **not reproduced**, and its historical cause remains unknown. HTTP status and diagnostic counters alone are not causal or completion proof. This opt-in lease captures only its first physical model view; it must not be described as capture of every inference in a multi-step task. A harmless seed initialized the new native chat before arming; the measured turns were follow-ups in that fresh controlled chat, each with fresh owned website inference sessions. No original real email was replayed.
+
+A fourth controlled turn requested a local message saying `hi`. It failed the task
+outcome check after 48.257 seconds: six verified responses and five tools opened
+the mailbox, clicked Compose and filled the three fields, then returned a final
+answer saying the message was unsent. There was no Send call and zero POSTs.
+The final fresh observation contained all correct field values and an enabled
+Send control with a current reference. Its exact native catalog was bound,
+`auto`, and offered/allowed all ten browser functions. All six owned sessions
+closed; all six normal observers armed and used verified quiet fallback.
+
+The initial inference's scoped diagnostic captured one input and one decoder,
+nonempty assistant content, a message terminal, HTTP 200 and no error events or
+original throws. It did not capture the later five views. This is a semantic
+premature final, not an empty provider response, missing Send capability or
+failed dispatch. The model's internal reason is not established. The prior
+unsent-draft instruction is historical task context, not proof of contamination.
+
+One concrete presentation ambiguity remains: input receipts expose
+`result_verified:false` and `no_replay:true` without stating their action scope.
+Their fill cue says to verify before separate submission but does not distinguish
+uncertainty about that input from a different remaining authorized step. The
+current send authorization and completion guidance were already present. Any
+clarification of those cues is an adherence improvement hypothesis, not proof
+of this model decision's cause. No automatic resend, forced tool call or relaxed
+verification is warranted.
+
+The failed turn remains in the denominator: three complete tasks and one
+incomplete task, fifteen verified response inferences and eleven native calls.
+The failed task was not resumed or replayed. Its task-created tab and all owned
+website sessions closed, the fixture process was stopped and its listener was
+absent. The one-shot arm was consumed. No real email was sent; no Inspector or
+developer setting change was used in these tests.
+
+### Build 281: form guardrails pass; setup exposes product-proof overflow
+
+Installed signed, non-notarized 0.7.0 (281), source `ce9c7c3`, scopes input
+receipts to that input and refreshes conditional form-submission guidance.
+It keeps verification, no replay, draft-only scope, approvals and Stop. The new
+receipt is smaller than the prior envelope; an initial longer version displaced
+one ordinary form row and was corrected without increasing either output cap.
+The complete-page regression remains enforced.
+
+The final contract/controller/codec run passed 297 tests. All 48 runtime browser
+tests passed in the preceding run on unchanged production sources; its only
+remaining failure was an obsolete navigation-cue assertion corrected before the
+final run. Earlier results retain the output-capacity failure, stale assertions,
+a test compile error and missing fixture-interpreter configuration. These are
+separate focused runs, not a whole-app test result.
+
+A fresh neutral marker setup then failed after 2.340 seconds with
+`product_mode_unverified`, before either planned local-send qualification task
+started. It must not be called a verified no-Send failure: insertion completed,
+native submission was pending, and cleanup observed one clipped user message.
+No local tool ran. The cleanup body was the first 10,240 characters of the
+57,824-character submitted prompt; its marker could not be verified and display
+expansion lacked valid product binding. Cleanup remained unconfirmed and the
+exact owned view was retained. No refresh, replay or second setup was attempted.
+
+The retained first product-proof invalidation reason was `mutation_overflow`:
+513 relevant records exceeded the 512-record bound, with zero ignored records.
+That reason was recorded during cleanup, not timestamped at the invalidating
+mutation. Its exact record types and targets are unavailable. Chat/temporary
+and model checks passed earlier; there is no recorded evidence of a Work switch.
+Source and the existing deterministic test show that ordinary composer class
+mutations also consume this budget. This establishes an overly broad accounting
+case, while the live batch composition remains unknown. The subsequent candidate
+narrows only provably irrelevant editor presentation changes and records finite
+mutation categories on first invalidation. Unknown or ambiguous batches must
+still fail closed; no submitted action is replayed.
+
+### Build 282: editor fix validated; live capture identifies structural overflow
+
+Installed signed, non-notarized 0.7.0 (282), source `3a1a0da`, with executable
+SHA-256 `b88d7e3060fbb11a0e74e280dbb5565d881ecde531e486fa952725a01bca3e32`.
+The source, signature and copied resources matched the build receipt.
+
+The mutation change excludes only class/style records on the unique current
+editor when a bounded whole-batch provenance check proves disjointness. Any
+structural/text/relabel ambiguity, referenced label dependency, unknown shape
+or exceeded classification bound disables that exception. The existing 512
+relevant-record bound and transient Work-selection checks remain. First failure
+freezes finite type/scope counts and the private submission phase; no message
+text, attribute values or arbitrary identifiers enter those diagnostics.
+
+The final ChatGPT adapter run passed 458 tests / 16,188 assertions. Seven focused
+native product-proof/diagnostic tests passed, including strict histogram parsing,
+log bounds and withholding output without current product/model/body proof.
+Independent code review found no remaining material blocker. These results do
+not establish what comprised build281's unretained mutation batch or prove the
+original build270 failure's cause.
+
+The new neutral setup failed after 1.480 seconds with `sign_in_required`, before
+insertion or submission was recorded. Native logs show a settled sign-in blocker
+after an initial inspection, with zero user/assistant messages. The exact failure
+and unconfirmed cleanup receipts were retained. Neither planned send fixture was
+started; the mutation change and form-submission behavior remain unqualified live
+on this build. There was no refresh, automatic retry or replay of either failed
+setup.
+
+Read-only inspection of the normal built-in browser also reached ChatGPT's login
+page. Google's existing account showed signed out and required passkey/password
+verification. The user was asked to complete that sign-in in the browser. The
+saved persistent profile identity and profile/cookie lifecycle code are unchanged;
+there is no evidence of a newly created profile or direct human-cookie deletion
+by inference cleanup. Expiry, session-only persistence and server-side credential
+rotation remain hypotheses, not an attributed logout cause.
+
+The prior build281 process was closed to install this build, disposing its
+physical views. That is not proof of remote website-session cleanup; its saved
+unconfirmed state remains. The build282 failed view and the ordinary sign-in tab
+are retained while authentication is pending. No real email was replayed, no
+fixture listener remains from build280, and no release or merge was performed.
+
+After the user completed sign-in, root verified the normal ChatGPT composer with
+Chat selected and Work off. A new independent seed failed in 136 ms with
+`sign_in_required`. Its exact journal contains only `start_requested` and
+`failed`, with no session token or browser preparation. This was the earlier
+in-memory provider gate, not evidence of another authentication redirect.
+Human sign-in does not clear that gate; the supported prompt-free model refresh
+must successfully discover choices and close its discovery session first.
+
+Root invoked that refresh. The same process subsequently admitted a fresh
+ChatGPT prewarm at 22:36:47 UTC, which the retained gate would prohibit.
+Source-correlated admission supports successful discovery and gate clearance;
+there is no separately persisted discovery-cleanup receipt. Five normal Chat
+choices remained available. No failed inference was replayed.
+
+The next distinct seed failed in 2.352 seconds with `product_mode_unverified`.
+Root observed the native task settle to Failed with its specific error and
+cleanup warning, rather than remaining in Running or Waiting.
+Its first-invalidation histogram finally captures the failing category:
+`send_claimed`, 513 relevant records, zero ignored, 495 `childList` and 18
+attribute changes. Every examined target was classified `other`; none was
+classified as composer, message or tracked product. The earlier editor-only
+exception therefore did not address this live failure. The capture proves
+structural analysis exceeded its capacity; it does not identify those nodes or
+show a Work selection. The candidate repair analyzes a larger finite batch with
+bounded structural work instead of declaring these unknown targets irrelevant.
+
+The submit callback failed after 252 ms. Cleanup observed one rendered user
+prefix of 10,240 characters from the 57,827-character prompt, with submission
+pending and product binding invalid. Cleanup remains unconfirmed, the failed
+view is retained, and no Send retry or local tool ran. Exact diagnostics were
+preserved before any app replacement. The original build270 empty-response
+cause and the earlier logout cause remain unknown.
+
+Offline preparation also caught a fixture defect: its recipient allowlist did
+not match the new case's unique synthetic address. A case-bound adapter now
+changes only that guard and its displayed rejection text, verifies both source
+and effective hashes, and rejects any unexpected source shape. Independent
+in-process checks proved one exact recipient/subject/body delivery and rejected
+a different recipient with HTTP 400 and no additional delivery. These checks
+opened no sockets and are fixture validation, not installed-app qualification.
+
+### Build 283: complete bounded mutation analysis
+
+The scanner now analyzes up to 4,096 relevant records within an 8,192-record
+batch and 16,384 total analysis visits. Traversal, ancestry, classification and
+candidate work share that budget. Child-list width, tree depth, product groups
+and controls have separate finite limits. Per-batch caches avoid repeating
+subtree scans; no added/removed list or candidate tail is silently discarded.
+Uninspectable data, exhausted work budgets and ambiguous product history remain
+terminal. No new page-scope exemption was added.
+
+Structural provenance is processed before historical Work-state checks, including
+changes after the old 512-record cutoff. Tests cover newly mounted, detached,
+relabelled and wrapped/moved controls; role removal; and referenced-label changes
+that are restored within the same batch. The actual observer now includes `id`
+changes. Ordinary model-picker references are kept distinct from product-mode
+label dependencies. These changes address the demonstrated analysis-capacity
+failure without attributing the unrecorded DOM targets or accepting an invalid
+product, model or submission proof.
+
+Final source validation passed 461 adapter tests / 16,347 assertions and eight
+focused native tests. The real WebKit regression delivered a single batch of
+600 child-list changes plus 18 attributes, completed a subsequent synthetic
+response and cleanup, and separately verified that late Work and label-ID
+transitions prevent Send with zero submitted prompts. The native run recorded
+unchanged source hashes. Independent review found no remaining blocker within
+this bounded scope. These are focused suites, not a whole-app test result.
+
+Earlier runs remain preserved: they caught overly broad reference handling,
+inaccurate synthetic DOM movement/record shapes, an opaque native lifecycle
+error, and assertions against cached idle-poll readiness instead of the guarded
+Send boundary. The final tests exercise the guarded operation and retain the
+original negative assertions. Installed build283 was then tested with a new
+neutral seed; no old failed inference was replayed.
+
+
+### Build 283 live capture: full first-message proof followed by collapse
+
+Installed 0.7.0 (283), source `0f72b3069514bd17ef83198e6733f964efcedc21`,
+passed the signed-in normal Chat UI check (Chat selected, Work unselected,
+composer present). Its new neutral Instant seed failed after 5.802 seconds.
+The native task settled to Failed with `website_ownership_unverified` and
+`ownership_reason=first_user_message`; no tools or local mailbox actions ran.
+
+The request-bound diagnostics record a complete 57,824-character first message
+at 22:59:42.695533 UTC, a unique final session marker, a matching private
+fingerprint, and intact snapshot identities. After the root-to-local-conversation
+route transition, the next inspect at 22:59:43.145422 UTC saw a 10,240-character
+prefix and one scoped expansion control. The final marker was absent. Native
+still had one confirmed user, a verified current submission, and the same owned
+document/view. No mutation-budget rejection appears in this captured window.
+
+The first expansion had succeeded; the subsequent bound-message path could not
+expand again because expansion authority was restricted to the pending initial
+binding. The evidence establishes a collapsed representation after binding. It
+does not distinguish the same DOM nodes collapsing from a message remount, and
+does not establish the original uncaptured build270 blank-answer cause. The
+failed view and exact native/website/cleanup journals were retained; cleanup
+remains unconfirmed. No failed prompt was replayed.
+
+Evidence: `work/action-reliability-20261027-capture/candidate283-plan/fresh-send/`
+`setup-failure-capture/independent-failure-summary.json`, the 22-record
+`first-user-diagnostics.json`, and the exact 158-row provider window. Diagnostic
+expansion-text fields retain the earlier successful expansion and must not be
+misread as current full-body evidence after the collapse.
+
+
+### Build 284: bound first-message display recovery
+
+A separate native capability now permits one display-only expansion while the
+sole, already verified first submission is still running. It requires current
+native and private first-message/submission fingerprints, the same physical
+root/body, owner, document and route, and current selected-model, Chat-product
+and temporary-session guards. It grants no Send, new binding, replacement-node
+or cleanup authority. A collapsed prefix only admits the local display attempt;
+acceptance still requires the entire canonical body and a fresh SHA-256 match,
+followed by the ordinary submission and response checks. Failed or incomplete
+claims remain spent, and another collapse cannot trigger another expansion.
+Finite root/body/native-pin flags distinguish later rejection cases without
+recording page content.
+
+The full adapter suite passed 467 tests / 17,044 assertions on unchanged source.
+Independent source review found no blocker within this one-recovery, same-node
+scope. The first native run preserved three helper failures: the deliberately
+busy fixture exposes `pendingSubmissionContext`, while the helper had required
+final `modelProofContext`. The helper was corrected to verify both native
+fingerprints in the pending context and still require final model evidence on
+completion. No production admission rule was changed for that test correction.
+The corrected native run passed all nine focused tests on unchanged source,
+including real WebKit recovery, changed/ignored/repeated/remounted bodies,
+cleanup/cancellation, original unbound expansion and native-certified route
+continuation. Installed build284 was subsequently exercised with a fresh neutral seed; its
+failure and physical-identity evidence follow.
+
+
+### Build 284 live capture: collapsed replacement nodes
+
+Signed installed build284, source `a33927c742a3ff74ee3c75d216fd4feb36939ca0`,
+passed normal Chat sign-in and exact installed-artifact checks. A fresh neutral
+seed failed after 2.901 seconds, with no tool calls or released answer. Native
+settled to Failed and retained the specific first-user ownership error.
+
+At 23:09:41.822510 UTC the full 57,824-character first message bound successfully,
+with both physical-node match flags true. At 23:09:42.298346 UTC the native bound
+expansion grant was true and the native/private fingerprint still matched, but
+both `boundRootSame` and `boundBodySame` were false. The currently displayed body
+was a 10,240-character prefix without the marker. This establishes replacement
+of both displayed message nodes after binding, rather than the same-node collapse
+covered by build284. The log alone does not establish whether the old nodes were
+still connected; any replacement recovery must inspect that directly. Cleanup
+had no expansion capability, stayed unconfirmed, and the failed attempt was not
+replayed. Exact native/website/cleanup evidence is retained under
+`candidate284-plan/fresh-send/setup-failure-capture/` in the same evidence root.
+
+
+### Build 285: collapsed replacement recovery with native reinspection
+
+The replacement path retains the verified first-submission record and requires
+both previous nodes to be detached, a unique distinct current root/body, the
+same owner/document/route and pinned native/private/outbound fingerprints. One
+local display claim may expand an exact canonical prefix; a prefix is never
+accepted as message proof. The entire rendered body, unique final marker and
+SHA-256 must match, with current model/product/temporary checks, before emitting
+the existing replacement-observation discard. That read returns no answer or
+ownership proof.
+
+Only the accepted native discard branch grants the explicit one-time refresh
+handoff. The fresh inspect keeps the original deadline and consumed read-refresh
+budget, rehashes the full current body, and adopts only the exact certified
+replacement before ordinary submission/response validation can succeed. A fresh
+inspect cannot start an expansion without its original awaiting claim. Changed
+or missing receipts, partial detachment, replaced nodes, changed text or model,
+second refreshes and cleanup remain conservative failures. The same single
+claim covers either same-node recovery or replacement recovery. Old-node
+connection facts are finite booleans in diagnostics.
+
+Focused JavaScript validation passed ten groups / 1,213 assertions. Review
+caught and fixed a fresh-inspect-without-claim edge before release; earlier full
+runs retain their obsolete source hashes and cannot qualify the final patch.
+The final adapter suite passed 471 tests / 17,560 assertions on unchanged source.
+The initial native run also caught a test expecting an ownership error where the
+foreign-route classifier correctly rejects earlier as `unexpectedPage`; only that
+case assertion was corrected and no-extra-click/no-resend checks remain required.
+Final native validation passed all 16 focused tests on unchanged source,
+including actual WebKit remount/recollapse and negative cases, cleanup, the
+consumed replacement budget, and the existing Gemini synthetic replacement
+regression. Independent review found no blocker in the final production source.
+Installed build285 was then exercised with a fresh neutral seed; the earlier
+private-only binding window found by that run follows.
+
+
+### Build 285 live capture: replacement before native first binding
+
+Installed signed build285 (`6e78627095b19b1623a2ac2c5c261df1edc04a1f`) passed
+normal Chat/profile and exact artifact checks. Its independent neutral seed failed
+in 3.018 seconds. At the first rejection native still had zero confirmed users,
+a pending submission, no adopted first fingerprint, and no verified current
+submission. JavaScript already held a private first-message pin. Both old nodes
+were explicitly detached, while the current root/body differed and contained
+only the 10,240-character prefix of the 57,824-character prompt.
+
+The root-to-local route change was accepted at 23:19:46.147329 UTC; the next
+inspection rejected the private pin about 55 milliseconds later. Initial
+expansion/binding permission was true, but bound-native expansion permission
+was correctly false. No replacement discard or native recovery handoff occurred.
+This exposes a separate timing window between private JS verification and native
+first-fingerprint adoption. Retained earlier expansion text/click facts do not
+establish another recovery click. The specific failure persisted as Failed,
+cleanup remained unconfirmed, and no tool calls, fixture actions or retries ran.
+Exact journals, 142 native rows and 17 finite diagnostic records remain under
+`candidate285-plan/fresh-send/setup-failure-capture/` in the same evidence root.
+
+
+### Build 286: private proof before native first-message adoption
+
+A separate provisional-display capability derives from the existing pending
+first-submission gate, with a dispatched native sequence-one outbound binding
+and no verified native submission or adopted first fingerprint. JavaScript must
+already hold the complete privately verified first record, with its fingerprint
+matching the native outbound proof. Both old nodes must be detached and the
+unique current root/body must be a real replacement. This path uses the same
+durable one-attempt display recovery claim as the native-bound path.
+
+After a guarded expansion, the complete canonical message and hash must still
+match. The existing provisional replacement and ordinary first-message adoption
+then validate the actual new nodes. No native-bound replacement discard or
+refresh certificate is fabricated before native has a first-message pin. Missing
+or inconsistent authority, existing native adoption, same-node provisional
+collapse, altered content, model/hash races and later attempts to restart the
+failed claim through the bound path remain rejected. Cleanup receives no new
+capability.
+
+Focused adapter validation passed 13 groups / 1,708 assertions. Independent
+review found no blocker in the frozen combined source. The new actual-WebKit
+regression replaces the DOM and changes root-to-local route in the result callback
+after private verification but before native validation, matching the captured
+timing without writing private proof state. It covers exact recovery, altered
+body, ignored expansion, partial detachment and repeated collapse, with native
+fingerprint, one-Send/view and cleanup assertions. Final validation passed all
+474 adapter tests / 18,055 assertions and 17 focused native tests on unchanged
+source.
+
+### Build 286 live result: ownership recovered, separate format rejection
+
+The new 26-character marker seed reached verified submission and response
+ownership. Its first-bound diagnostic shows the provisional recovery reading all
+57,824 canonical characters after both original nodes detached. This is live
+evidence that the captured pre-adoption remount path now recovers. The completed
+answer was instead rejected as `unsupported_website_response`: the page exposed
+one 26-character paragraph, no code block, and no JSON envelope. The exact reply
+was not armed for capture, so matching length does not prove its contents. The
+task failed after 8.782 seconds with no tools, and its owned session has a saved
+closed receipt. This is separate from the original uncaptured blank response.
+
+A fresh harmless diagnostic on the same build used the existing nonce-scoped
+payload capture and an exact-task rejected-reply arm. The watcher armed after
+native identity appeared, during `start_requested`, 8.863 seconds before native
+completion. The full 57,869-byte outbound payload was retained with matching
+hashes. This independent request returned exactly `HI` in 9.117 seconds, with
+zero tools, verified ChatGPT Chat/Instant ownership and a saved closed receipt.
+The rejected-reply arm remained unused and was removed by its file identity.
+This passing request does not explain or erase the earlier format failure.
+
+Both captures are preserved under `candidate286-plan/fresh-send/setup-failure-capture/`
+and `candidate286-reply-diagnostic/` in the same evidence root. No failed seed or
+uncertain action was replayed. Browser/action qualification remains outstanding.
+
+### Build 287: keep exact-answer formatting beside the final envelope example
+
+The captured build286 prompt already contained the exact-answer rule, but it
+was 5,720 characters before the end of the 8,316-character response handoff.
+The rule now follows the tool-specific guidance, beside the final output syntax
+and examples. It explicitly explains that Computa
+displays `message.text`, with an example preserving the user's exact `OK`
+answer inside the message envelope. This is an instruction-salience mitigation
+for the observed format failure, not proof of why the model omitted its envelope.
+Strict parsing, complete ownership/model checks and no replay of uncertain
+actions are unchanged. Independent source review found no blocker.
+All 171 focused instruction, response-codec and format-correction tests passed
+on frozen source, including the existing prompt-size ceilings and all 25
+format-correction/no-replay cases. The unchanged adapter and ownership code
+retain build286's 474 adapter tests and 17 focused native tests. Live build287
+qualification remains pending.
+
+### Build 287 live capture: initial expansion before the first ownership pin
+
+The signed installed build287 (`5e8a0d511be7c301d1c6da9656fc9e5373d95a1c`)
+failed its new seed in 2.680 seconds. Native accepted the initial root-to-local
+route transition at 23:39:09.749621 UTC; the next JavaScript inspection rejected
+the initial expansion continuation about 50 milliseconds later. No private or
+native first-message fingerprint had yet been adopted. The current body showed
+the 10,240-character prefix of the 57,843-character prompt. Earlier retained
+expansion diagnostics show a complete ASCII-whitespace-equivalent body; these
+facts neither prove exact bytes nor establish current ownership.
+
+The initial continuation supports an unchanged complete original body or a
+URL-only interruption, but cannot recapture a display that collapses or remounts
+after expansion and before first binding. Its generic continuation rejection
+does not identify which individual predicate failed in this live capture.
+The bound-node diagnostics refer to an absent `lastVerified` record here, so
+their false values must not be treated as evidence that initial nodes detached.
+Canonical hash and route requirements remain authoritative.
+
+The rejected-reply watcher armed at `start_requested`; no reply reached the
+codec, and its unused arm was removed. The specific ownership error persisted
+as Failed, cleanup remains unconfirmed, and no seed, tool or action was replayed.
+Exact journals, 134 native rows and 17 finite diagnostic records are preserved
+under `candidate287-plan/fresh-send/setup-failure-capture/` in the same evidence
+root. This run does not qualify the format mitigation or browser actions.
+
+### Build 288: recapture initial display after a certified route transition
+
+A successful initial expansion may now use the existing single display-recovery
+claim after the native first-route classifier discards a crossed observation.
+It requires the original exact expanded text, the same pending sequence-one
+outbound proof, the unchanged document/owner/model, and the original deadline.
+The current message must be unique and contain the exact prefix, with either
+the same physical root/body or both old nodes detached and replaced together.
+The normal local expansion guards still apply, including native suppression.
+Its complete current canonical text and SHA-256 must pass ordinary first-message
+adoption. No old prefix, cached display result or rejected observation grants
+ownership or a tool call, and no Send is repeated.
+
+Failed, unfinished, inexact or expired predecessors, partial replacement,
+changed bytes, foreign route edges and altered outbound bindings remain errors.
+The original expansion's seven finite boolean facts are latched before generic
+continuation rejection can overwrite its state, and logged separately under
+the existing per-record bound. No prompt text or URL is added to logs.
+
+Frozen validation passed 477 adapter tests / 18,623 assertions and 21 focused
+native tests. The new actual-WebKit test changes normal DOM/history after a
+real digest completes and before the initial private pin, without writing proof
+state. Both same-body collapse and full remount recover with one original Send;
+wrong content, mixed-node replacement, expiration and unfinished expansion fail.
+Existing route-promotion, unchanged deadline, cleanup and no-repeat regressions
+also pass. The instruction/codec/no-replay source is unchanged from build287's
+171-test passing cohort. Independent review found no remaining blocker; live
+build288 qualification remains pending.
+
+### Build 288 live capture: private proof before submission-finalization promotion
+
+The signed installed build288 (`39d91660f9beaeee2a6fed43bcd83aa2652019ad`)
+failed its independent seed in 2.866 seconds. Native accepted root-to-local at
+23:49:12.221291 UTC and local-to-server promotion at 23:49:12.421725 UTC.
+The following fresh inspection rejected ownership about 20 milliseconds later.
+Its current reconstructed body was all 57,843 canonical characters with a unique
+final marker, and the private first pin was present. Native still had zero
+confirmed users and a pending, unverified submission.
+
+The new initial-expansion facts retained success, exact canonical equality and
+a live display deadline, with both original nodes detached at the earlier
+display-recovery transition. These latched facts do not prove another physical
+replacement at the second promotion. The last failure had no first snapshot;
+the successful display claim and still-pending native adoption require separate
+lifecycle handling. No response reached the codec, the unused rejected-reply arm
+was removed, and cleanup remains unconfirmed. Exact journals, 137 native rows
+and 19 finite diagnostic records remain in
+`candidate288-plan/fresh-send/setup-failure-capture/`; no replay occurred.
+
+### Build 289: separate completed display recovery from pending submission proof
+
+A new actual-WebKit regression reproduces the build288 rejection on unchanged
+production source: it performs the second route promotion during submission's
+real digest, after the first private pin exists and while submission remains
+pending. The native route classifier accepts both edges, then the fresh read
+fails with `javaScriptFirstUser`. The trigger observes the digest/pending/private
+pin boundary independently of the display-completion flag, and changes no private
+proof state. The corrected baseline is retained under
+`swift289-adoption-baseline-final-tests.log` with its source-hashed receipt.
+
+The defect is the display claim's completion flag being deferred until after
+the separate awaited submission-finalization stage. A valid route crossing in
+that await discards the observation, leaving an already fully checked display
+claim classified as unfinished. Its next fresh native inspect then fails before
+it can complete normal submission adoption. This is a demonstrated lifecycle
+failure in the controlled regression, distinct from the uncaptured original
+blank response.
+
+The fix preserves a completed initial-route display claim when submission
+finalization returns only the existing URL-crossed read discard. This exception
+requires the same current non-revoked state, pending first outbound record,
+native outbound hash, private first hash, document, owner and invocation lease,
+plus the finite context witness identifying the URL change. Native must still
+certify that route and request fresh complete first-body and submission hashes.
+No answer or submission proof is accepted from the discarded read. Other display
+recovery phases retain success-only behavior; errors and thrown finalization
+leave the claim unverified. Classification occurs after the await, avoiding a
+temporarily successful flag visible to another invocation.
+
+Frozen build289 validation passed all 480 adapter tests / 19,017 assertions
+and 22 focused native tests. The new native regression passes unchanged and
+remounted full-body cases, including a later read without renewing the display
+click deadline; altered bytes, re-collapse and Work mode remain rejected.
+Focused JavaScript cases additionally prove that thrown digests, stale leases,
+private-pin failures and restored invalid state cannot revive a spent claim.
+Receipts are `adoption289-tests/full-result.json` and
+`swift289-adoption-final-tests-result.json` in the retained capture directory.
+Live build289 qualification remains pending.
+
+### Build 289 live capture and build 290 diagnostic boundary
+
+The signed installed build289 (`314b4756a6e0460c6aa7b0025a2c7504dfbbce57`)
+failed its fresh no-tool seed in 5.685 seconds. The capture still shows a complete
+57,843-character reconstructed first body, a unique final marker, a private pin,
+and zero native confirmed users with submission pending. Native certified both
+root-to-local and local-to-server transitions, then rejected the fresh read about
+50.6 milliseconds after the latter. Its specific error persisted as Failed.
+No response reached the codec, no tools ran, and the unused reply arm was removed.
+Cleanup remains unconfirmed; the attempt was not replayed. Evidence is retained
+under `candidate289-plan/fresh-send/setup-failure-capture/`.
+
+The existing `snapshot_before_action` diagnostic covers multiple checks and does
+not identify the internal rejecting branch. Build289's deterministic lifecycle
+fix is therefore insufficient to qualify this live case. Native also discards
+a crossed-route adapter result before ordinary result parsing; the previous
+read's reason was not retained. Build290 adds finite recovery-lifecycle and
+route-discard categories at those boundaries. It changes no acceptance, action,
+retry, route or deadline policy. The diagnostics carry only complete validated
+booleans and enumerated labels, in separate records bounded to 960 bytes, with
+no page text, URLs, credentials or hashes exported.
+
+Build290 frozen validation passed 481 adapter tests / 19,099 assertions and
+23 focused native tests. The tests cover exact lifecycle-field types and enums,
+missing/extra/private values, record size limits, route-discard projection and
+unchanged failure/recovery behavior. The initial full adapter run's outdated
+allowed-key test is retained; its schema expectation was corrected and the full
+suite rerun passed. Source-hashed receipts are
+`recovery290-diagnostics-tests/full-final-result.json` and
+`swift290-recovery-diagnostic-tests-result.json`. Live capture remains pending.
+
+### Build 290 controlled action: delivery succeeded, final inference failed
+
+The signed installed build290 (`10ed16566760db700b4f201f538e7c3939d7a6be`)
+passed its exact no-tool seed in 8.603 seconds with verified Instant ownership
+and a saved closed-session receipt. This pass used a different adoption path
+and does not establish that the previous intermittent failure was fixed.
+
+Its independent local mailbox task then completed seven model inferences and
+seven browser tools (open, navigate, three fills, click, wait). Each completed
+inference retained current Instant/temporary/submission proof and closed cleanup.
+Exactly one local POST delivered the requested recipient, subject and body with
+receipt `LOCAL-d80916ab6cbf2504`. The eighth inference failed before it could
+produce the final answer; the native task ended Failed after 57.441 seconds.
+This is local fixture delivery evidence, not an external-email delivery claim.
+The action was not replayed. The app closed its one task-created fixture tab;
+root stopped the exact fixture process after preserving the evidence. The final
+website-session cleanup remains unconfirmed.
+
+The new diagnostics capture `document_changed / model_read_context` on the first
+route discard, followed about 29 milliseconds later by `marker_not_final`. The
+current body is a 10,239-character prefix of the 114,960-character prompt, with
+one scoped expansion control. The private first-message pin exists, native has
+zero confirmed users and a pending submission, and no recovery claim exists.
+The prior initial expansion succeeded with complete canonical bytes and a live
+deadline; its old nodes are both detached. The recovery admission failure is
+`private_pin`. Exact evidence is retained in
+`candidate290-plan/fresh-send/terminal-capture/failed-inference-diagnostics/`.
+
+### Build 291: pending private proof before native submission adoption
+
+The missing stage is a private first-message proof created before the separate
+submitted-body hash completes. A certified route transition can discard that
+submission read; ChatGPT then replaces and collapses the message. Existing
+provisional recovery expects a completed submission record, while initial-route
+recovery expects no private pin. Neither admits this intermediate state.
+
+Both JavaScript and actual-WebKit regressions reproduce rejection on unchanged
+build290 production source. The native route checkpoint verifies private pin
+present, pending `send_claimed`, no last-verified record and no recovery claim.
+Its preserved pre-teardown error is `javaScriptFirstUser`; WebKit teardown also
+reports an `InvalidTransition`, which is retained separately and is not the
+causal assertion.
+
+Build291 adds a pending-private case to the existing provisional recovery claim.
+It requires the pending first outbound hash to equal the private full-message
+hash, no native pin or completed submission, a successful exact predecessor,
+both predecessor nodes detached, and the already certified first-route chain.
+The one shared recovery claim retains the predecessor's original deadline.
+After expansion, current complete canonical bytes and their hashes still pass
+ordinary submission adoption and model/product/temporary checks. The existing
+URL-only discard handling applies to this same pending stage; it grants no answer
+or submission authority from a discarded observation. Final validation and live
+qualification are pending.
+
+Frozen build291 validation passed 485 adapter tests / 19,988 assertions and
+24 focused native tests. The new WebKit regression now passes recovery after
+the exact pending-private boundary; changed full text, mixed old/new nodes
+and expired deadlines remain rejected, with no repeat Send or deadline renewal.
+JavaScript coverage additionally checks 16 admission negatives, five post-click
+failures and a second route discard requiring fresh complete proof. Evidence is
+`pending291-tests/full-result.json` and
+`swift291-pending-private-final-tests-result.json`. Live qualification is pending.
+
+Build291 live capture verified the exact seed reply and four inferences for a
+fresh local mailbox task, with all ownership/model/temporary checks and website
+session closure passing. The mailbox task nevertheless failed: after successful
+open, Compose click and navigation wait, the model ended with an unsupported
+claim that continuation tools were unavailable. No `browser_read` followed the
+wait, and the fixture recorded zero POSTs. The completed transport does not
+establish completed task execution.
+
+Final inference `937021dc-f850-49fb-97bc-b310134bbccc` logged native binding
+`bound`, automatic tool choice, 22 offered/allowed tools and browser masks 1023.
+These diagnostics derive from the same validated schemas and tool policy used
+to construct the prepared prompt: all ten built-in browser operations were
+available. This rules out omission from the local prepared catalog, but does not
+reveal why the model misinterpreted it. The final physical provider payload was
+not retained by the first-inference-only metadata capture. Evidence is
+`candidate291-plan/fresh-send/terminal-capture/independent-qualification.json`
+and `prepared-request-tool-catalog-proof.json`; the failed task was not replayed.
+The owned fixture process was stopped after capture.
+
+### Build 292: current browser handoff after history
+
+The prepared catalog in build291 was correct, but the final handoff did not
+distinguish current fresh reads from cursor-based continuation. Build292 adds a
+short post-history reminder only when native admission reports a bound page
+and the validated, tool-choice-allowed catalog contains the native fresh-read
+schema. It names the exact callable read operation and its valid empty arguments.
+When available, wait and continuation guidance explains that readiness requires
+a fresh observation, while continuation only advances a current captured page.
+The text grants no references, permissions or action authority and does not
+retry actions or change parser admission. This is a model-guidance mitigation;
+the captured false capability claim does not prove the model's internal cause.
+All 174 focused native instruction, codec and format-correction tests passed
+with unchanged source hashes. New cases cover exact post-history delivery,
+qualified fresh-read arguments, withheld hints for absent/foreign/modified
+schemas and excluded tool choices, preserved canonical history and the full
+prompt-size bound. Independent review found no material blocker. Evidence is
+`browser-handoff292-tests/result.json` and
+`candidate292-handoff-independent-review.json`. New live qualification is pending.
+
+Installed build292 (`bebc9be`) passed its exact seed (8.185 seconds, zero tools)
+and the fresh local send (76.556 seconds, nine successful browser calls, ten
+verified/closed inferences). It proceeded through wait, fresh read, three field
+fills and the separate Send control, then read the new receipt. Exactly one POST
+matched recipient, subject and body, receipt `LOCAL-ca043fc00ee240a9`, and the
+accurate final answer. This establishes the controlled case, not universal model
+adherence or external delivery. The fixture process was stopped after capture.
+
+The independent draft-only setup then failed after 7.071 seconds with no tools
+and no final answer. The task displayed Failed and preserved
+`website_ownership_unverified/first_user_message`; website cleanup is unconfirmed.
+No draft fixture was started and no send or retry was made. Captured lifecycle
+facts identify a separate missing transition: an expanded provisional recovery
+already has `lastVerified`/`phase=verified`, but the URL-only discard classifier
+only recognizes pending first records. The second certified route crosses the
+independent submission check, which returns `document_changed/model_read_context`.
+The following read contains the full 57,987-character body and unique final
+marker, but rejects the spent recovery because its verified flag stayed false.
+Evidence is `candidate292-plan/draft-then-send/setup-failure-capture/` and the
+separate passing fresh-send qualification. Browser and terminal regressions were
+not dispatched on this failed candidate.
+
+### Build 293: verified provisional recovery across finalization
+
+The build292 draft capture identifies a provisional remount whose first
+submission is privately verified but not yet adopted natively. Its final
+submission rehash crossed the second native-certified URL transition. An
+unchanged-source JavaScript regression reproduces the exact finite lifecycle:
+`recordPhase=verified`, `lastVerifiedMatches=true`, no pending record, a URL-only
+context witness, and an incorrectly unverified spent display recovery.
+
+Build293 extends only that URL-discard classification to the exact provisional
+state. It requires the same verified record, no pending submission or native
+first pin, no replacement certificate, both detached original physical nodes,
+and all existing private/native hash, owner, invocation and URL-context checks.
+The discarded result remains an error; it carries no response or action
+authority. Native must certify the route and obtain fresh complete evidence.
+No recovery claim, deadline, expansion click or Send is added or renewed.
+
+The frozen candidate passed all 488 adapter tests / 20,389 assertions. The real
+WebKit differential also reproduces the same failure with immutable build292
+JavaScript and passes the fixed candidate with fresh full-body proof. Five
+focused WebKit tests passed, including changed-body and second-local-route
+rejections and the existing pending-private/initial-route controls. Only the
+owned test bundle resource was swapped for the differential and restored; source
+and installed app resources were not changed. Initial test-only cleanup
+expectations were corrected: a rejected task response does not prevent ordinary
+cleanup from independently proving and closing its exact owned temporary page.
+The original test logs remain preserved. Evidence is
+`provisional293-tests/full-result.json` and
+`provisional293-native-final-validation.json`. Fresh live qualification is pending.
+
+### Build 293: installed controlled qualification
+
+Signed, non-notarized Computa 0.7.0 (293), source `5d51d0f`, passed artifact
+identity, signature and exact-resource checks before installation. The running
+executable matched the validated artifact. Normal ChatGPT Chat mode was signed
+in, with Work off. The prior build292 failure restored as Failed with its exact
+ownership error and unconfirmed-cleanup status; it did not return to Waiting.
+
+| Controlled task | Duration | Verified responses | Successful native calls | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Fresh local mailbox send | 68.298 s | 9 | 8 | Exact receipt and fields verified |
+| Explicit send after a draft-only task | 78.166 s | 9 | 8 | Delivery verified; greeting capitalization differs |
+| Staff attachment lookup | 29.746 s | 4 | 3 | Exact filename from the requested message |
+| Two separate terminal commands | 25.187 s | 3 | 2 | Exact marker/digest, both exits zero |
+
+The separate seed (8.957 seconds) and draft-only setup (6.322 seconds) each
+completed with one verified response and zero tools. Across these six turns,
+all 27 inferences passed current model, temporary-session, submission, ownership
+and release checks, with saved closed cleanup. All 21 dispatched tools succeeded.
+The browser lookup expanded the requested Course staff message, read its sender
+and attached `course-staff-evidence-packet.pdf` in that message, and made no extra
+POST. The terminal ran two separate actual commands and matched an independently
+computed SHA-256 value.
+
+Each send produced exactly one POST and a new matching receipt, subsequently
+read through the browser and accurately reported: `LOCAL-634144cfb2f05113` and
+`LOCAL-80195f05bea67db0`. The second body was `Hi`, matching its earlier draft,
+while the frozen literal expectation was `hi`. Its strict literal comparison
+remains failed. The natural-language task requested an email "saying hi", so
+this is accepted as operational success with a recorded capitalization
+deviation, not an exact-payload pass. An additive, explicit preflight recorded
+that distinction before the independent lookup/terminal checks; the original
+prompts, expectations, gate and evidence were preserved. No action was replayed.
+
+Evidence lives under `candidate293-plan/`: per-case independent qualification,
+the explicit operational preflights, exact native tool/website journals,
+bounded diagnostics, fixture events, installation attestation and cleanup
+receipts. Both owned fixture processes and listeners were stopped. The app
+closed its three task-created browser tabs; final UI inspection retained only
+the normal ChatGPT tab. Old unconfirmed website cleanup remains unconfirmed.
+
+These controlled passes qualify the reproduced fixes and current tool workflow;
+they do not establish external email delivery, universal reliability, or the
+cause of the original uncaptured build270 response. No release or merge occurred.
+
+### Build 294: native-bound message replacement and route transitions
+
+A later build293 user task failed after 5.201 seconds, before any tool call.
+The first prompt had already passed native verification. ChatGPT then replaced
+the message elements and promoted its local conversation URL. Display expansion
+completed, but its replacement verification crossed that route change. Native
+discarded the obsolete read without carrying the route continuation into the
+already-bound recovery. The next read rejected the spent recovery claim even
+though the full 57,830-character prompt, final marker and parsed payload still
+matched. Cleanup hit the same guard and remained unconfirmed. The real email
+request was not replayed.
+
+This is separate from build293's provisional-before-native-adoption fix. The
+saved diagnostics establish the bound-stage race but cannot distinguish the
+original interrupted hash from model recertification. Deterministic JavaScript
+and real WebKit fixtures reproduce the failure at these boundaries, including
+the JavaScript-to-native certificate handoff.
+
+The repair keeps the two existing monotonic route edges independent of the
+single display-expansion claim and single replacement-read handoff. Only a
+complete native-bound prompt on the same physical replacement can retain a
+discarded-read witness. A fresh native-certified route read must rehash the
+complete body and recheck model, Chat mode, temporary mode, owner, document and
+submission before adopting the replacement. Both unfinished certification and
+an already-issued replacement receipt consume the same bounded route suffix.
+No crossed read releases an answer; no Send, expansion click, deadline or
+replacement allowance is renewed. Cleanup receives no new recovery capability.
+
+Finite diagnostics now retain the interrupted stage, consumed route-edge count
+and whether a route witness remains pending. These fields contain no prompt,
+URL or page text and cannot authorize an action. The original failed evidence
+is preserved under `work/failed-email-20261028-042737`; build294 qualification
+artifacts use `work/bound-route-20261028` and the adjacent JS/native test folders.
+
+The adapter suite passed 494 tests / 21,509 assertions on unchanged candidate
+sources. Twenty-one focused real WebKit/native tests (33 scenarios) passed, covering six
+valid timing sequences, four new rejection scenarios, the earlier bound and
+provisional recovery controls, cleanup restrictions, response deadlines and
+strict finite diagnostic sanitization. The native tests assert one Send, one
+display expansion, unchanged deadlines and fresh full-body/model proof. The
+independent source review found no remaining blocking issue. The immutable
+build293 adapter fails both native hash/model-await reproductions; the candidate
+passes with the same native test binary. The test resource was restored afterward.
+
+### Build 294: installed live qualification
+
+Signed, non-notarized Computa 0.7.0 (294), source `ee30c03`, passed build,
+signature and installation checks. An independent audit matched all 171 source
+files and 44 installed resources to the tested artifact. The running executable
+matched its build receipt. Normal ChatGPT Chat mode, Instant and the signed-in
+composer were checked on this installed build; Work remained off.
+
+| Fresh native chat | Duration | Verified responses | Successful tools | Verified outcome |
+| --- | ---: | ---: | ---: | --- |
+| Exact marker 1 | 8.934 s | 1 | 0 | Exact final text |
+| Local send 1 | 54.589 s | 7 | 6 | One POST, exact fields and visible receipt |
+| Local send 2 | 53.315 s | 7 | 6 | One POST, exact fields and visible receipt |
+| Staff attachment lookup | 28.278 s | 4 | 3 | Correct sender and exact filename; no additional POST |
+| Two terminal commands | 23.131 s | 3 | 2 | Exact marker and independently calculated digest; both exits zero |
+| Exact marker 2 | 6.255 s | 1 | 0 | Exact final text |
+
+Both sends were the first user message in separate fresh native chats, without
+a seed turn. Both bodies were exactly lowercase `hi`. Independent fixture POST
+records matched receipts `LOCAL-408f053f37f7ed76` and `LOCAL-937fe35475b6dbbd`;
+the Send tool results exposed complete live receipt-page observations, and the
+final answers accurately reported them. All browser references came from
+current observations. The attachment was read within the requested Course staff
+message. The terminal executed two separate commands and returned their actual
+outputs, with the digest checked against the frozen expected UTF-8 input.
+
+All six tasks completed with 23 verified model responses, 17 successful tool
+calls and 23 matching saved closed website-session receipts. No request was
+retried, no tool failed, and no cleanup remained unconfirmed for these tests.
+Both loopback fixture processes/listeners were stopped and the app closed all
+three task-created browser tabs. Only the normal ChatGPT tab remained. No Safari
+Inspector setting was changed. The optional draft/send cases were not run.
+
+Evidence is retained in `work/bound-route-20261028/live294`, with per-case
+independent reports, raw tool/website/cleanup journals, bounded native logs,
+fixture events and final cleanup attestations. The deterministic tests establish
+the repaired timing behavior; these live runs establish successful task flows,
+not that the exact interrupted recovery fired naturally during every run.
+Synthetic delivery is not external email delivery. The earlier real email was
+not replayed, and its historical unconfirmed cleanup remains unconfirmed.
+No release or merge was performed.
+
+### Builds 295–298: browser identity, crowded forms, and receipt visibility
+
+The October 28 build294 Gmail attempt stopped after seven successful browser calls. Its final filtered read had 218 captured nodes, `source_truncated=1`, zero local matches for Recipients, and 97 captured input nodes excluded by the query. No input filled or sent that real message. The model's claim that its browser relay was unavailable was unsupported by those successful calls.
+
+Two independent defects were reproduced. The WebKit browser sent its default user agent without Safari product/version tokens, although the installed Safari and loaded system WebKit had the same engine build. The DOM capture also traversed the long inbox before the appended compose form, exhausting its source budget; continuation could only page the already incomplete capture. Aggregate names on structural rows duplicated descendant text and consumed the budget faster.
+
+Browser identification now preserves WebKit's native prefix and appends Safari-compatible tokens only when installed Safari and loaded WebKit have exactly matching, validated bundle builds. The product version is read from that matching Safari, and Computa identifies itself separately. Missing or mismatched metadata falls back to Computa-only identification; this does not promise universal site support. The compatibility token is documented in WebKit's own macOS source.
+
+Capture now prioritizes the focused branch and visible form/dialog branches using a discovery pass bounded to 4,096 examined children. The original 20,000-visited, 3,000-node and approximately 220 KB capture limits remain. Explicit labels, real semantic ancestry and readable child text are retained. Prioritized output does not change DOM child order in the verification graph, so focus changes cannot manufacture changed-region evidence. Hidden, inert, stale, moved, changed-role and obstructed targets remain rejected. Source completeness is still reported honestly.
+
+A first installed build295 run found another real gap. It filled the exact three fields and dispatched one Send, creating exactly one correct synthetic delivery, but its final overview exposed only the new Message sent heading. The native capture contained all six receipt nodes; readable plain body text without a main/article landmark was excluded from the overview. The model stopped without reading the actual receipt. The collector and independent review both rejected that run. Its eight website inferences had valid Chat/Instant/submission/completion/closed-cleanup evidence; the failure was outcome verification, not model transport or duplicate delivery.
+
+The overview now includes a bounded separate lane of readable text with unknown scope, preserving that unknown provenance and unverified relevance. Known navigation, sidebar and footer text, control echoes and metadata labels are not promoted into it. Plain receipt pages expose their details while long pages keep exact cursor/UTF-8 fragmentation and output limits. Fresh browser guidance distinguishes source omissions from local filters and a disconnected relay; heading-only results require reading available receipt details instead of resubmitting.
+
+The build295 compatibility check also showed that a correct current user agent alone did not refresh Gmail's first load. The warning disappeared on reload at the final inbox URL but returned on a new root-URL load. A separate isolated persistent-WebKit experiment reproduced old-UA HTML cache reuse with a same-UA cache-hit control; new navigation using cache revalidation or bypass obtained the current-UA response. That establishes the engine cache mechanism; Gmail's precise server-side detection remains inferred rather than directly traced.
+
+The app now migrates only the shared profile's HTTP disk and memory caches once per validated browser/engine identity change, before its first navigation. Cookies, local/session storage, IndexedDB, FetchCache and service workers are retained. Only WebKit's real removal callback marks the identity ready; cancelled or expired callers cannot authorize navigation. Waiters share one migration, with existing ownership, generation, URL and navigation-ticket checks preserved. Private and isolated model stores do not receive this migration. Real WebKit tests cover cache reuse/revalidation, retained cookies/storage, no duplicate request and cancelled zero-dispatch navigation.
+
+Signed build296 from `e8e0dcf` passed an independent 27-check artifact audit: 172 source files, 44 resources, compiled/link inputs, executable, installed bundle, version and signatures matched. Its 410 focused native tests passed, along with 35 JavaScript tests / 498 assertions and the fixture tests. Gmail opened from its root URL twice in fresh tabs without the unsupported-browser warning or a reload; Inbox and Compose were available, and existing sign-in survived. This is observed compatibility on this profile, not a guarantee about every site or the precise Gmail server decision.
+
+Two marker controls remain separately recorded failures. The first requested a marker followed by a sentence-ending period while its expected value omitted the period; ChatGPT returned the period. The lifecycle passed, but the frozen exact comparison failed. The second used an unambiguous standalone marker and hit `unsupported_website_response`. Its finite DOM diagnostics show one 29-character paragraph, no PRE/code nodes and rendered fallback extraction. The marker also has 29 characters, but the actual rejected reply was not retained, so equality is an inference. Current handoff instructions already require an envelope even for exact-text requests. Strict rejection and closed cleanup were preserved; neither failure is relabeled a passing control or blamed on missing instructions. The generic runtime high-demand message is not evidence of provider capacity trouble.
+
+A separately frozen ordinary-email diagnostic on296 confirmed that format refusal also affected the core workflow. The exact-task rejected-reply capture was armed 9.235 seconds before failure. Its 200-byte reply said it could not access Computa's relay and returned prose, not an envelope; no tool call or fixture request occurred. Full payload comparison and ownership fingerprints verified that the 59,313-byte prompt reached ChatGPT, and its offered browser entry schemas matched the previously successful295 request. Thus neither capture truncation nor missing native tool definitions explains this refusal. The strict parser was correct. The fixture stopped with zero requests and zero POSTs; rejected evidence was privately archived and the one-shot arm was consumed.
+
+Build297 clarifies the website's immediate task as generating the next JSON response object, including final text or refusals, and adds a schema-derived unbound-browser entry handoff. The entry guidance is present only for current native unbound availability and recognized entry schemas allowed by the current tool choice. It tells the website model to request the operation in JSON for Computa to execute; it does not invent a website connection or a browser binding. Bound-page guidance and strict response validation, permissions and replay guards remain unchanged. This is a controlled mitigation for observed model behavior, not a demonstrated deterministic cause of model cooperation.
+
+A separately frozen ordinary-email diagnostic on297 passed the collector and independent raw tool/journal/ledger review in 68.814 seconds. Eight successful tool calls opened the crowded local mailbox, composed the message, filled the three exact values and clicked Send once. Nine website inferences verified normal Chat/Instant selection, submission, completion and closed cleanup. The model recovered from honest `source_truncated=1` captures with fresh reads and read all six plain receipt nodes after Send. The observed recipient, subject, body and receipt matched exactly one accepted fixture POST and one synthetic delivery; no other POST occurred. Each complete field value was observed across successive post-fill observations, not together in one atomic final form snapshot. The task-created browser tab and fixture process were subsequently cleaned up. This is one bounded local workflow pass, not external email delivery or a general reliability qualification. Evidence: `live297-email-diagnostic/send/capture/independent-qualification.json` and `live297-email-diagnostic/fixture-cleanup.json`.
+
+The exact-output marker limitation remains unresolved. Build297 returned the requested marker as plain paragraph text, with no required JSON envelope. This time the task-scoped rejected reply was retained, so exact content equality is verified rather than inferred. Submission and normal Chat/Instant selection were verified; the strict parser rejected the malformed response with `unsupported_website_response`, no tools ran and cleanup closed. The six-case297 campaign stopped at that failed control. The later ordinary-email pass does not relabel the marker failure or prove that the instruction change fixed exact-output adherence. Evidence: `live297/marker/capture/independent-format-failure-review.json`.
+
+A fresh297 no-focus email fixture then exposed a separate ownership race before any tool or fixture request. It failed after 5.516 seconds with `website_ownership_unverified / first_user_message`; website cleanup remained unconfirmed and the evidence was preserved. The initial exact first-user proof had already been adopted. Reads then crossed root-to-local and local-to-public conversation routes; the second returned an expanded but unverified recovery with no route witness, and the next read rejected the spent recovery. Full prompt comparison and native pins still matched. The native layer correctly withheld authority because the adapter had not returned the required witness. Finite live diagnostics establish that chain but cannot prove every microscopic DOM interleaving. Evidence: `live297-browser-followups/send-no-focus/capture/independent-ownership-failure-review.json`.
+
+Deterministic adapter and real-WebKit regressions reproduced the missing transition: the bound user message collapses and expands on its original physical nodes, then the conversation route changes during the complete-body digest and those nodes are replaced. Earlier coverage started with already-replaced nodes. The old adapter failed this ordering with the same spent-recovery signature; its pre-remounted control passed. Build298 now preserves only the existing discarded-read route witness for this original-node expansion and, when both old nodes detach, one exact current successor. It does not publish a recovered answer, replace the verified record, renew the deadline or replay a prompt. The existing native-certified route continuation and a fresh complete body/model/product/temporary-mode check must still authorize replacement. The original one-Send, one recovery expansion, two monotonic route edges and one authorized replacement-read bounds remain.
+
+The new-order native positive changed from red to green with six fresh complete-body digests on the final route, unchanged deadline and verified final replacement. Changed body, model, temporary mode and second-local-route negatives still reject without replay. Adapter negatives additionally cover changed owner, old nodes remaining connected, invalid or duplicate continuation edges and expired recovery. Final298 validation passed 532 native tests, including the 20 bound-ownership tests, plus 497 ChatGPT adapter tests / 21,947 assertions and 35 browser-control tests / 498 assertions. These are controlled regression results, not live ChatGPT reliability. Evidence: `ownership297-experiment/validation.json`, `ownership298-native-qualification.json` and `native298-final-tests.log`.
+
+Computa 0.7.0 (298), commit `fe902ee28cafe817f287795833114bbc91377c34`, was signed, installed and independently audited. All 34 checks passed: 172 frozen source files, 44 bundle resources, compiler/link inputs, final adapter, executable, installed-bundle equality, version and Developer ID signature matched. The installed executable SHA-256 is `68b4ccb17dc515c0d3b69ff10706ef6dfda913869c1f44d477e761c7bff1c5d4`; the adapter SHA-256 is `36281951f2a00d42ea10015f50ae104aa5691800783b155ed43768d46ca05954`. This audit verifies the artifact used for testing, not a published or notarized release. Evidence: `artifact298-independent-audit.json`.
+
+### Build 298: installed browser-email qualification
+
+The initial `live298` preparation was rejected before dispatch because root
+invoked the frozen fixture launcher through a relative path rather than its
+required absolute path. It made no model request, fixture request or POST; the
+watcher expired unarmed. That preparation error is preserved and is not an
+app/provider result. The unchanged harness was frozen in `live298b` with fresh
+identities and absolute commands, then independently reviewed.
+
+Five fresh native chats on the installed build298 used normal ChatGPT Chat /
+Instant. Each received only its ordinary email task; no user-supplied relay or
+tool-format padding was added. All five passed independent raw tool, reference,
+field-value, final-answer, website-journal and fixture-ledger review.
+
+| Scenario | Duration | Browser calls | Verified responses | Observed outcome |
+| --- | ---: | ---: | ---: | --- |
+| Default form | 72.497 s | 8 | 9 | One exact send; `LOCAL-f34c828a032dba0f` |
+| No autofocus | 68.099 s | 8 | 9 | One exact send; `LOCAL-adc2f88caa6dc912` |
+| Stale prefilled values | 64.835 s | 8 | 9 | One exact send; `LOCAL-61761dd4f3fdfd99` |
+| Draft only | 71.717 s | 8 | 9 | One unsent draft; `DRAFT-1a5fbe485550de8c` |
+| Send unavailable | 69.876 s | 8 | 9 | Observed restriction; zero POSTs, no draft |
+
+All 40 browser calls succeeded. All 45 website inferences verified current
+Chat/Instant selection, submission, ownership, completion and release, with
+matching saved closed-session receipts. All five crowded source captures
+honestly reported `source_truncated=1`; fresh queries/reads recovered the
+needed controls and actual outcome details. Every mutation used a currently
+observed reference. Complete requested values were observed after their last
+fill and before Send/Save, across successive reads; this is not a claim that
+all three values shared one atomic form snapshot.
+
+The three send cases each created exactly one accepted POST and exact synthetic
+delivery, with matching receipt, recipient, subject and body visible to the
+model. The prefilled case replaced all three stale values. Draft-only used one
+Save draft operation, observed the explicit unsent status and produced zero
+sends. The unavailable-Send case read the positive restriction and a fresh form
+scope, reported it accurately, and produced zero POSTs or draft actions. It did
+not mislabel the browser relay as unavailable.
+
+Three fresh Gmail root navigations after installing298 opened signed-in
+Inbox/Compose without the unsupported-browser warning or a reload. This is
+profile-specific observed compatibility, consistent with the identity/cache
+repair; it does not prove Gmail's internal detection algorithm. Root UI checks
+after every task retained the three restored Gmail tabs and normal ChatGPT tab,
+with each task-created fixture tab absent. Each task-scoped diagnostic arm was
+independently archived and removed. Fixture cleanup compares final immutable
+ledgers with the terminal captures and stops only the exact recorded servers.
+
+Evidence is under `work/browser-reliability-20261028`, including the frozen
+`live298b` plan, per-case captures/independent reviews, diagnostics and fixture
+cleanup records; native/adapter/capture regression logs; installation/source
+attestations; and the independent build audit. Local synthetic receipts are not
+external email delivery. The original real email was not replayed, historical
+unconfirmed cleanup remains unconfirmed, and the separate exact-text envelope
+failure remains unresolved. The deterministic regressions establish the repaired
+race and capture behavior; the five live passes establish these controlled
+browser-email workflows, not universal provider reliability or proof that the
+race naturally fired in every live response. No release or merge was performed.
+
+### Builds 299–301: exact-text response framing and initial-route ownership
+
+Computa 0.7.0 (301), source commit `66468f8db148dbeb69fe0c7db83cbf6c37ca1624`, contains clearer response serialization instructions and bounded recovery handoffs for route changes during ordinary model reads and during initial submission adoption. Build300 was based on `2e2a830`; its live campaign stopped at a preserved ownership failure. The final build301 qualification is recorded below. All evidence paths in this section are relative to `work/exact-text-format-20261028`.
+
+The exact-text failure was a format violation by the website response. On installed build298, an ordinary exact-word request succeeded in 9.331 seconds. A separate request using the historical marker wording failed in 7.126 seconds: the privately captured website answer contained exactly the requested marker as a plain paragraph, with no JSON response envelope. The journal verified normal Chat mode and Instant selection, then recorded `unsupported_website_response`; no local tool ran and cleanup closed. The generic high-demand message shown by the native layer was not evidence of provider overload. These observations establish the rejected format and exclude missing extracted content in this case. They do not establish that wording alone deterministically causes the website to omit the envelope.
+
+The framing change explicitly distinguishes the decoded `message.text` shown to the user from the JSON transport object generated for Computa. Exact-output, JSON, multiline and no-Markdown user requirements apply to that decoded text. The capability inventory now precedes the final serialization instruction; examples are labelled for fenced or raw response mode. The strict codec was not broadened: plain prose is still rejected for ChatGPT, no wrapper is guessed, tool policy is enforced, and an unsupported response does not acquire a retry or corrective replay. Examples deliberately contain no literal Markdown fences, preserving the ownership verifier's one request code block between ordinary text. Existing prompt byte budgets remain unchanged.
+
+Build299's first four frozen live cases passed: historical marker wording, a word, a number with leading zeros, and punctuation/backslashes. Their elapsed times were 6.880, 9.484, 7.970 and 6.919 seconds. The next multiline case failed after 3.103 seconds with `website_ownership_unverified` / `first_user_message`, before response decoding or any tool call. The run stopped there; Unicode, draft-control and the final marker were not dispatched. Its unconfirmed website cleanup remains recorded as unconfirmed. This partial run is evidence of four successful formatted answers, not a completed reliability qualification.
+
+Build300 then passed its first five frozen live cases: historical marker wording, word, leading-zero number, punctuation/backslashes and multiline, in 6.574, 7.296, 7.076, 6.646 and 8.887 seconds. Each had one verified Chat/Instant inference, zero tools and confirmed closed cleanup. Its Unicode case stopped after 2.965 seconds at first-message ownership verification, before an answer or tool call; cleanup remained unconfirmed. The draft-control and last marker were not dispatched. The stopped campaign is preserved and is not relabelled as a completed pass.
+
+The ownership investigation found a separate missing recovery boundary. A natively pinned first message could be collapsed, expanded and fully hashed, then have its URL promoted and physical nodes replaced during an ordinary model read. The earlier fix covered hashing and the remount certifier; the ordinary guarded-action return did not hand that valid pending recovery to the existing route-discard helper. A native WebKit fixture reproduced the failure with immutable build299 JavaScript, then passed using the same test binary and the candidate JavaScript. The baseline discarded `conversation_changed` / `first_user_message` with `snapshot_after_action` / `action_final_guard`. The live failure retained lifecycle path `other`, so the exact live microtask ordering is not claimed to be reproduced. Adapter tests separately reproduced and covered the adjacent later-return interval.
+
+The fix invokes the existing strict route-discard helper when a bound recovery crosses an actual URL change during the ordinary read, including its narrow late-return interval. Other errors remain terminal. The helper still requires the original native route handoff, unchanged deadline, complete current body hash, physical-node checks and selected-model/product/temporary-session proof before accepting a fresh observation. No prompt, Send, or display-expansion action is replayed. New diagnostics retain only bounded reason/scope/recovery categories and boolean remount/provisional flags; they add no acceptance authority or page content.
+
+The build300 Unicode failure exposed an earlier version of the route race, before either native or private first-message pin exists. The initial expanded display crossed root-to-local navigation, remounted and expanded once, then crossed local-to-public navigation during its full-body hash. The pending record was still `send_claimed`. Existing second-promotion coverage explicitly waited for a private pin, so it missed this ordering. New native fixtures reproduce the same finite chain—`hash_snapshot`, then `pinned_fingerprint` with initial-route/remount/pending recovery, then spent recovery—for both ASCII and Unicode payloads. This establishes that Unicode is not necessary to trigger the failure; no byte-encoding defect is required to explain it. The same binary failed with immutable build300 JavaScript and passed both payloads with the candidate.
+
+Build301 retains a narrowly scoped pending-initial route witness. It requires the complete current canonical body and computed digest to match the already dispatched native pending submission, the original predecessor, exact first native edge, original deadline, current physical nodes, and owner/model/product/temporary-session checks. It cannot use a partial prefix as proof or create an early first pin or verified flag. The existing continuation must consume the second native-certified edge and re-prove the full current message before normal finalization. The one Send, display-action budget and two-edge limit remain fixed; altered bodies, model/product drift, stale leases, expired deadlines and invalid edge chains remain rejected.
+
+Validation completed before the final live run:
+
+- 160 native framing, codec and server tests passed. Coverage includes exact UTF-8 preservation in completed/streamed messages, whitespace and Unicode, tool-choice enforcement, rejection of plain cards/prose and multiple/prefixed objects, and no corrective request or action replay.
+- Build300 separately passed 24 native ownership/diagnostic tests in 38.897 seconds. They retain one original Send and expansion, fixed deadlines, fresh whole-body/model proof, user-tab preservation and rejection of changed bodies, wrong models, non-temporary chat and a second local route.
+- The final 35-test native301 cohort passed in 75.387 seconds and covers all prior ownership cases plus initial-route, pending-private, provisional, two-edge and new before-private-pin positive/negative cases. Its first run passed both ASCII/Unicode positives; two Work-negative assertions inherited the later-phase error code and were corrected to the exact earlier ownership rejection. The old post-pin error assertion remains unchanged; no broad accepted-error set was introduced.
+- 504 adapter tests passed with 23,521 assertions on final JavaScript SHA256 `2e0af1db8dbad5b79a836b81c9b50d9149cfbe6794b0f35ffc415be9cdc8d348`.
+
+Signed Computa 0.7.0 (301) was installed and passed all 48 independent artifact checks. The 172 frozen source files, 44 resources, compiler/link inputs, Developer ID signature and entire installed bundle matched the committed build. Installed executable SHA-256: `e9b77fc72c66be08a547bb21c2e3026103f1fd6fd6ad19c851d2c3bbc48dac24`; adapter SHA-256: `2e0af1db8dbad5b79a836b81c9b50d9149cfbe6794b0f35ffc415be9cdc8d348`. The artifact audit is `artifact301-independent-audit.json`. This is an installed test build, not a published or notarized release.
+
+All eight fresh normal ChatGPT Chat / Instant tasks passed independent raw-response, tool and outcome review. The comparison did not trim whitespace, normalize Unicode or convert line endings.
+
+| Case | Duration | Browser calls | Verified responses | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Marker before | 7.273 s | 0 | 1 | Exact UTF-8 match |
+| Exact word | 6.628 s | 0 | 1 | Exact UTF-8 match |
+| Leading-zero digits | 9.620 s | 0 | 1 | Exact UTF-8 match |
+| Quotes and backslashes | 6.981 s | 0 | 1 | Exact UTF-8 match |
+| Multiline with blank line | 7.696 s | 0 | 1 | Exact UTF-8 match |
+| Unicode | 6.818 s | 0 | 1 | Exact UTF-8 match |
+| Draft receipt | 77.127 s | 8 | 9 | One exact unsent draft; exact receipt only |
+| Marker after | 7.472 s | 0 | 1 | Exact UTF-8 match |
+
+All 16 inferences verified normal Chat/Instant selection, full submission/ownership, completion and release, with matching saved closed-session receipts. All eight browser calls succeeded. The draft workflow recovered the needed form from honest incomplete source captures, used only currently observed action references, and read all three exact field values together before Save draft. One accepted local POST saved one draft, zero sends occurred, and the actual browser-observed unsent receipt agreed with the independent ledger and both exact native final records: `DRAFT-1c2804c9aa6f2034`. No user-supplied tool-format instructions were added to these tasks.
+
+The task-created fixture tab closed automatically; the three restored Gmail tabs and normal ChatGPT tab remained. All task-scoped diagnostic arms were archived and removed under the shared lock. Only the recorded fixture process was stopped; its final ledger remained byte-identical to the capture and port62412 had no listener. Final UI and fixture cleanup evidence are in `live301/root-final-ui.json` and `live301/draft-control/fixture-cleanup/result.json`. This qualifies the controlled cases and does not promise universal website-model reliability. Local fixture success does not prove external email delivery. All prior failed captures and uncertain cleanup records remain preserved.
+
+Evidence: `baseline298/marker/capture/summary.json`; `baseline298b/marker/capture/independent-format-failure-review.json`; `live299b/*/capture`; `native-framing-codec-qualification.json`; `native-ordinary-model-qualification.json`; `native-initial-recovery-before-pin-baseline300.json`; `native-initial-recovery-before-pin-candidate-metadata.json`; `native-initial-recovery-qualification.json`; `native-initial-recovery-final-ownership-green.log`; `ownership301-adapter-final.log`, `ownership300-unicode-causal-analysis.json`, `live301/aggregate.json` and per-case independent reviews. The failed build300 case remains in `live300/unicode/capture`. The qualification JSON files bind their source, binary and log hashes. No final live result is inferred from native or adapter tests.

@@ -714,7 +714,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         return { f, picker, root, expand, send, prompt };
       };
       const notify = (f: any) => f.observers.forEach((observer: any) => observer.callback([
-        { type: 'characterData', target: f.userBody },
+        { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody } },
       ]));
       const noSend = (f: any, picker: any, send: any) => {
         expect(send.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.composer.events).toHaveLength(0);
@@ -976,6 +976,218 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         ? { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody } }
         : index % 3 === 1 ? { type: 'attributes', target: f.userBody, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }
           : { type: 'childList', target: f.userBody, addedNodes: [new Node('SPAN', {}, 'PRIVATE RENDER FRAGMENT')], removedNodes: [] });
+      const composerChurn = (f: any, count: number) => Array.from({ length: count }, (_, index) => ({
+        type: 'attributes', target: f.composer, attributeName: index % 2 ? 'style' : 'class', oldValue: 'PRIVATE PRESENTATION' }));
+      const structuralChurn = (f: any, count: number) => {
+        const holder = new Node('DIV'); f.body.append(holder);
+        return Array.from({ length: count }, () => {
+          const node = new Node('SPAN', {}, 'render'); holder.append(node);
+          return { type: 'childList', target: holder, addedNodes: [node], removedNodes: [] };
+        });
+      };
+
+      test('bounded product analysis completes a full 600-record structural render batch', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; productRecords(f, structuralChurn(f, 600)); };
+        const result = await f.run('inspect', expansionInput);
+        expect(result.firstUserVerified).toBe(true); expect(f.world.__computaChatProductMode.invalidated).toBe(false);
+        noSend(f, picker, send);
+      });
+
+      test('complete structural analysis keeps late Work, moved controls and historical relabels negative', async () => {
+        for (const kind of ['tracked', 'new_detached', 'late_descendant', 'moved_group', 'new_moved_group', 'new_wrapped_moved_group', 'group_label', 'control_label', 'control_role', 'control_text', 'label_id']) {
+          const { f, picker, root, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt; const records: any[] = structuralChurn(f, 600);
+            if (kind === 'tracked') records.push({ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+            if (kind === 'new_detached' || kind === 'late_descendant' || kind === 'control_label') {
+              const work = new Node('BUTTON', { 'aria-pressed': 'false', ...(kind === 'control_label' ? { 'aria-label': 'Other' } : {}) }, 'Work');
+              const added = kind === 'late_descendant' ? new Node('DIV') : work;
+              if (kind === 'late_descendant') { added.append(...Array.from({ length: 130 }, () => new Node('SPAN'))); added.append(work); }
+              records.push({ type: 'childList', target: f.modeGroup, addedNodes: [added], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: kind === 'control_label' ? 'aria-label' : 'aria-pressed',
+                  oldValue: kind === 'control_label' ? 'Work' : 'true' },
+                { type: 'childList', target: f.modeGroup, addedNodes: [], removedNodes: [added] });
+            }
+            if (kind === 'moved_group') {
+              f.body.children = f.body.children.filter((node: any) => node !== f.modeGroup); root.append(f.modeGroup);
+              records.push({ type: 'childList', target: f.body, addedNodes: [], removedNodes: [f.modeGroup] },
+                { type: 'childList', target: root, addedNodes: [f.modeGroup], removedNodes: [] },
+                { type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+            }
+            if (kind === 'group_label') {
+              const group = new Node('DIV', { 'aria-label': 'Other' });
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); group.append(work); f.body.append(group);
+              records.push({ type: 'childList', target: f.body, addedNodes: [group], removedNodes: [] },
+                { type: 'attributes', target: group, attributeName: 'aria-label', oldValue: 'Composer mode' },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' });
+            }
+            if (kind === 'new_moved_group' || kind === 'new_wrapped_moved_group') {
+              const group = new Node('DIV', { 'aria-label': 'Composer mode' });
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); group.append(work);
+              const mounted = kind === 'new_wrapped_moved_group' ? new Node('DIV') : group;
+              if (mounted !== group) mounted.append(group); root.append(mounted);
+              records.push({ type: 'childList', target: f.body, addedNodes: [mounted], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' },
+                { type: 'childList', target: f.body, addedNodes: [], removedNodes: [mounted] },
+                { type: 'childList', target: root, addedNodes: [mounted], removedNodes: [] });
+            }
+            if (kind === 'control_text') records.push({ type: 'characterData', target: { nodeType: 3, parentElement: f.chatMode }, oldValue: 'Work' });
+            if (kind === 'control_role') {
+              const work = new Node('DIV', { role: 'group', 'aria-label': 'Work', 'aria-pressed': 'false' });
+              records.push({ type: 'childList', target: f.modeGroup, addedNodes: [work], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: 'role', oldValue: 'button' },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' },
+                { type: 'childList', target: f.modeGroup, addedNodes: [], removedNodes: [work] });
+            }
+            if (kind === 'label_id') {
+              const label = new Node('SPAN', { id: 'original-label' }, 'Other'), group = new Node('DIV', { 'aria-labelledby': 'original-label' });
+              group.append(new Node('BUTTON', { 'aria-pressed': 'true' }, 'Chat'), new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'));
+              f.body.append(label, group);
+              records.push({ type: 'attributes', target: label, attributeName: 'id', oldValue: 'original-label' },
+                { type: 'attributes', target: label, attributeName: 'id', oldValue: 'temporary-label' });
+            }
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          const expected = ['new_moved_group', 'new_wrapped_moved_group', 'group_label', 'control_label', 'control_role', 'control_text', 'label_id'].includes(kind) ? 'product_history_ambiguous' : 'work_selected';
+          expect(JSON.parse(result.debugStructure).productProofFailure).toBe(expected);
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('record, child-list, depth and actual traversal limits reject rather than truncate semantic tails', async () => {
+        for (const kind of ['records', 'children', 'depth', 'visits']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            let records: any[];
+            if (kind === 'records') records = Array.from({ length: 4_097 }, () => ({ type: 'attributes', target: f.composer, attributeName: 'aria-busy', oldValue: 'false' }));
+            else if (kind === 'children') records = [{ type: 'childList', target: f.body,
+              addedNodes: Array.from({ length: 4_097 }, () => new Node('SPAN')), removedNodes: [] }];
+            else {
+              const root = new Node('DIV'); let node = root;
+              for (let i = 0; i < (kind === 'depth' ? 130 : 20); i++) {
+                const child = new Node('DIV');
+                if (kind === 'visits') node.append(...Array.from({ length: 1_000 }, () => new Node('SPAN')));
+                node.append(child); node = child;
+              }
+              records = [{ type: 'childList', target: f.body, addedNodes: [root], removedNodes: [] }];
+            }
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).productProofFailure).toBe(kind === 'records' ? 'mutation_overflow' : 'mutation_scan_overflow');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('only exact disjoint editor class and style churn is excluded from the product budget', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; productRecords(f, composerChurn(f, 1_100)); };
+        const result = await f.run('inspect', expansionInput);
+        expect(result.firstUserVerified).toBe(true); expect(f.world.__computaChatProductMode.invalidated).toBe(false);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('editor presentation exclusion preserves transient Work selection and first-failure phase metadata', async () => {
+        for (const attribute of ['aria-pressed', 'aria-checked']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          if (attribute === 'aria-checked') {
+            delete f.chatMode.values['aria-pressed']; delete f.workMode.values['aria-pressed'];
+            f.chatMode.values.role = 'radio'; f.workMode.values.role = 'radio';
+            f.chatMode.values['aria-checked'] = 'true'; f.workMode.values['aria-checked'] = 'false';
+          }
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const saved = f.world.__computaChatSubmissionState;
+            f.world.__computaChatSubmissionState = { document: f.document, owner: f.world.__computaChatProductMode.owner,
+              pending: { phase: 'send_claimed' } };
+            productRecords(f, [...composerChurn(f, 1_100), { type: 'attributes', target: f.workMode,
+              attributeName: attribute, oldValue: 'true' }]);
+            f.world.__computaChatSubmissionState.pending.phase = 'verified';
+            productRecords(f, [{ type: 'attributes', target: f.composer, attributeName: 'class', oldValue: 'PRIVATE LATER' }]);
+            f.world.__computaChatSubmissionState = saved;
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'work_selected',
+            productMutationRelevantCount: 1, productMutationIgnoredCount: 1_000,
+            productMutationHistogram: { version: 1, phase: 'send_claimed', capped: true,
+              types: { attributes: 1_000, childList: 0, characterData: 0, other: 0 },
+              scopes: { trackedProduct: 1, message: 0, composer: 1_000, other: 0 },
+              composerAttributes: { class: 550, style: 550, other: 0 } } });
+          const proof = f.world.__computaChatProductMode, histogram = proof.productMutationHistogram;
+          expect(Object.isFrozen(histogram)).toBe(true);
+          expect(Object.isFrozen(histogram.composerAttributes)).toBe(true);
+          for (const malformed of [
+            { ...histogram, phase: 'PRIVATE PHASE' },
+            { ...histogram, PRIVATE_EXTRA: 'PRIVATE CONTENT' },
+            { ...histogram, types: { ...histogram.types, attributes: 'PRIVATE COUNT' } },
+            { ...histogram, scopes: { ...histogram.scopes, other: 1_001 } },
+          ]) {
+            proof.productMutationHistogram = malformed;
+            const again = await f.run('inspect', expansionInput), serialized = JSON.stringify(again);
+            expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('productMutationHistogram');
+          }
+          proof.productMutationHistogram = histogram;
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('ambiguous editor provenance and oversized or unknown batches retain the conservative budget', async () => {
+        for (const kind of ['ancestor', 'tracked', 'duplicate', 'control', 'relabel', 'referenced_label', 'message_referenced_label',
+          'message_referenced_label_childlist',
+          'editor_label', 'editor_descendant_label', 'editor_ancestor_label', 'reference_limit', 'reference_size',
+          'moved', 'unknown', 'unknown_children', 'oversized_children', 'prescan_limit']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const records = composerChurn(f, kind === 'prescan_limit' ? 4_097 : 513);
+            if (kind === 'ancestor') records.forEach(record => { record.target = f.body; });
+            if (kind === 'tracked') records.forEach(record => { record.target = f.modeGroup; });
+            if (kind === 'duplicate') f.body.append(new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' }));
+            if (kind === 'control') f.composer.append(new Node('BUTTON'));
+            if (['editor_label', 'editor_descendant_label', 'editor_ancestor_label'].includes(kind)) {
+              const id = 'editor-related-label';
+              if (kind === 'editor_label') f.composer.values.id = id;
+              if (kind === 'editor_descendant_label') f.composer.append(new Node('SPAN', { id }));
+              if (kind === 'editor_ancestor_label') f.composer.parentElement.values.id = id;
+              // Preserve editor recognition independently of its ID.
+              f.composer.values['aria-label'] = 'Ask ChatGPT';
+              f.body.append(new Node('DIV', { 'aria-labelledby': id }));
+            }
+            if (kind === 'reference_limit') for (let i = 0; i < 129; i++) f.body.append(new Node('DIV', { 'aria-labelledby': `label-${i}` }));
+            if (kind === 'reference_size') f.body.append(new Node('DIV', { 'aria-labelledby': 'x'.repeat(1_025) }));
+            if (kind === 'relabel') records.push({ type: 'attributes', target: f.composer,
+              attributeName: 'aria-label', oldValue: 'Composer mode' });
+            if (kind === 'referenced_label') records.push({ type: 'attributes', target: f.modeGroup,
+              attributeName: 'aria-labelledby', oldValue: 'PRIVATE LABEL ID' });
+            if (kind === 'message_referenced_label' || kind === 'message_referenced_label_childlist') {
+              f.userBody.values.id = 'transient-label';
+              const group = new Node('DIV', { 'aria-labelledby': 'transient-label' });
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); group.append(work); f.body.append(group);
+              records.push(kind === 'message_referenced_label'
+                ? { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody }, oldValue: 'Composer mode' } as any
+                : { type: 'childList', target: f.userBody, addedNodes: [new Node('SPAN', {}, 'Current label')],
+                  removedNodes: [new Node('SPAN', {}, 'Composer mode')] } as any);
+              records.push({ type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' });
+            }
+            if (kind === 'moved') records.push({ type: 'childList', target: f.modeGroup,
+              addedNodes: [f.composer], removedNodes: [f.composer] } as any);
+            if (kind === 'unknown') records.push({ type: 'PRIVATE_UNKNOWN', target: f.composer } as any);
+            if (kind === 'unknown_children') records.unshift({ type: 'childList', target: f.modeGroup,
+              addedNodes: { length: 1 }, removedNodes: [] } as any);
+            if (kind === 'oversized_children') records.push({ type: 'childList', target: f.userBody,
+              addedNodes: Array.from({ length: 129 }, () => new Node('SPAN')), removedNodes: [] } as any);
+            records.push({ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(['work_selected', 'product_history_ambiguous', 'mutation_overflow', 'mutation_uninspectable', 'mutation_scan_overflow'])
+            .toContain(JSON.parse(result.debugStructure).productProofFailure);
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
 
       test('product provenance ignores more than 512 message-only rendering mutations during first expansion', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
@@ -1087,17 +1299,17 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(expand.clicks).toBe(1); noSend(f, picker, send);
       });
 
-      test('more than 512 relevant product records still fail and preserve first-cause bounded counts', async () => {
+      test('unsupported attributes fail closed and preserve first-cause bounded counts', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
         expand.onClick = () => {
           f.userBody.text = prompt;
           productRecords(f, [...messageChurn(f, 1_100), ...Array.from({ length: 513 }, () => ({
-            type: 'attributes', target: f.composer, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }))]);
+            type: 'attributes', target: f.composer, attributeName: 'data-unknown', oldValue: 'PRIVATE OLD ATTRIBUTE' }))]);
           productRecords(f, [{ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' }]);
         };
         const result = await f.run('inspect', expansionInput); rejected(result);
-        expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'mutation_overflow',
-          productMutationRelevantCount: 513, productMutationIgnoredCount: 1_000 });
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'mutation_uninspectable',
+          productMutationRelevantCount: 1, productMutationIgnoredCount: 1_000 });
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(f.world.__computaModelFirstProof).toBeUndefined();
         expect(expand.clicks).toBe(1); noSend(f, picker, send);
       });
@@ -1108,11 +1320,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           f.userBody.text = prompt;
           const group = new Node('DIV', { 'aria-label': 'Composer mode' });
           root.append(group);
-          productRecords(f, Array.from({ length: 513 }, () => ({ type: 'childList', target: root, addedNodes: [group], removedNodes: [] })));
+          productRecords(f, Array.from({ length: 4_097 }, () => ({ type: 'childList', target: root, addedNodes: [group], removedNodes: [] })));
         };
         const result = await f.run('inspect', expansionInput); rejected(result);
-        expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'mutation_overflow',
-          productMutationRelevantCount: 513, productMutationIgnoredCount: 0 });
+        expect(['mutation_overflow', 'mutation_scan_overflow']).toContain(JSON.parse(result.debugStructure).productProofFailure);
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ productMutationRelevantCount: 1_000, productMutationIgnoredCount: 0 });
         expect(expand.clicks).toBe(1); noSend(f, picker, send);
       });
 
@@ -2007,18 +2219,30 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
         const allowed = new Set(['kind', 'provider', 'reason', 'scope', 'action', 'userCount', 'root', 'body', 'textLength',
           'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
-          'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
+          'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'allowBoundFirstUserExpansion', 'allowProvisionalFirstUserExpansion',
+          'boundRootSame', 'boundBodySame', 'boundOldRootConnected', 'boundOldBodyConnected', 'boundNativePinMatches',
+          'initialExpansionSucceeded', 'initialExpansionCanonicalMatches', 'initialExpansionRootSame', 'initialExpansionBodySame',
+          'initialExpansionOldRootConnected', 'initialExpansionOldBodyConnected', 'initialExpansionDeadlineLive', 'recoveryLifecycle',
+          'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
           'bodyInnerTextLength', 'bodyTextContentLength', 'rootRenderedTextLength', 'rootTextContentLength', 'firstPromptLength',
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
           'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure',
-          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount',
+          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount', 'productMutationHistogram',
           'expansionTextAnalyzed', 'expansionClicked', 'expansionExactPrefixMatches', 'expansionASCIIPrefixMatches',
           'expansionASCIIPromptMatches', 'expansionASCIIRenderedLength', 'expansionASCIIPrefixLength', 'expansionASCIIPromptLength',
           'expansionUnicodeSpaceCount', 'expansionExpectedUnicodeSpaceCount', 'expansionFormatCount', 'expansionExpectedFormatCount',
           'expansionFirstMismatchClass', 'expansionFirstMismatchOffset', 'expansionAdmissionFailure']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
+        const lifecycle = JSON.parse(result.debugStructure).recoveryLifecycle;
+        expect(Object.keys(lifecycle).sort()).toEqual(['path', 'present', 'verified', 'initialRoute', 'remount', 'provisional', 'outcome',
+          'finalizationStage', 'finalizationError', 'urlWitness', 'urlDiscard', 'pendingMatches', 'lastVerifiedMatches',
+          'recordPhase', 'contextStateMatches', 'leaseCurrent', 'urlChanged'].sort());
+        expect(lifecycle).toMatchObject({ path: 'other', present: false, verified: false, initialRoute: false, remount: false, provisional: false,
+          outcome: 'none', finalizationStage: 'not_reached', finalizationError: 'not_returned', recordPhase: 'none' });
+        for (const key of ['present', 'verified', 'initialRoute', 'remount', 'provisional', 'urlWitness', 'urlDiscard', 'pendingMatches',
+          'lastVerifiedMatches', 'contextStateMatches', 'leaseCurrent', 'urlChanged']) expect(typeof lifecycle[key]).toBe('boolean');
         const admission = JSON.parse(result.debugStructure).expansionAdmissionFailure;
         if (admission !== undefined) expect(['suppressed', 'action', 'binding', 'native_pin', 'private_pin', 'claim_spent',
           'user_count', 'submission', 'submission_count', 'marker', 'prompt', 'model_choice', 'text_prefix',
@@ -3496,9 +3720,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(finished).toBe(false); expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(targetClose);
           expect(picker.trigger.clicks).toBe(opens);
           delete picker.trigger.values.hidden; picker.trigger.disabled = false; picker.trigger.values['data-state'] = 'closed';
-          for (const observer of f.observers) observer.callback([{ type: 'attributes', target: picker.trigger, attributeName: 'hidden' },
+          const changes = [{ type: 'attributes', target: picker.trigger, attributeName: 'hidden' },
             { type: 'attributes', target: picker.trigger, attributeName: 'disabled' },
-            { type: 'attributes', target: picker.trigger, attributeName: 'data-state', oldValue: 'open' }]);
+            { type: 'attributes', target: picker.trigger, attributeName: 'data-state', oldValue: 'open' }];
+          for (const observer of f.observers) observer.callback(changes.filter(record =>
+            !observer.options?.attributeFilter || observer.options.attributeFilter.includes(record.attributeName)));
           const result = await pending;
           expect(result.modelEvidence.selected).toEqual(choice(action === 'selectModel' ? target : initial));
           expect(picker.trigger.clicks).toBe(1);

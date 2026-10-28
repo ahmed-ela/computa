@@ -8,6 +8,78 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     private let malformed = "Synthetic observed result\n{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"fixture\"}}]}"
     private let valid = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#
 
+    func testNativeEmailCardIsTerminalWithoutCorrectionOrReleasedContent() async throws {
+        let card = "Hello\n\nReconnect email\ncourse-staff@example.invalid\nHi course staff,\nJust wanted to say hi!\n\nAdd a clear reason for writing"
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let base = FormatCorrectionFixtureTransport(replies: [card, valid])
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let bytes = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "stream": false,
+            "input": "Draft an email here only; do not send it or use tools.", "tools": [], "tool_choice": "none"])
+        do {
+            _ = try await server.fixtureInfer(bytes, taskID: "email-card-terminal")
+            XCTFail("Native website card text must not become a Computa final answer")
+        } catch {
+            XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse)
+            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "unsupported_website_response")
+        }
+        // This unit fixture calls the server directly. Supply the same normal
+        // terminal-turn finish handoff that CodexAppServerRuntime performs;
+        // it closes the existing lease without retrying the failed inference.
+        let beforeCleanup = await base.ledger()
+        XCTAssertEqual(beforeCleanup.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll"])
+        let issues = await server.fixtureFinish(taskID: "email-card-terminal")
+        XCTAssertTrue(issues.isEmpty)
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.receiptSaved, true)
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 1, "Uncertain website-native actions must never be replayed by a format correction")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/format-corrections-v1").path))
+        let journal = try transactionJournal(root: root, task: "email-card-terminal")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 0)
+    }
+
+    func testNativeCardAfterLocalActionDoesNotCorrectOrReplayEitherAction() async throws {
+        let card = "Reconnect email\nHi course staff\nMake the greeting more professional"
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let base = FormatCorrectionFixtureTransport(replies: [valid, card, valid])
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command once, then summarize."]]
+        let first = try await server.fixtureInfer(request(input: input), taskID: "card-after-action")
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: first) as? [String: Any])
+        let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?["name"] as? String, "exec_command")
+        input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
+            "output": "Observed fixture command finished once."]]
+        let bytes = try request(input: input)
+        do {
+            _ = try await server.fixtureInfer(bytes, taskID: "card-after-action")
+            XCTFail("A card reply cannot release another response or replay the completed command")
+        } catch {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "unsupported_website_response")
+        }
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 2, "Only the first action and one rejected inference; no correction")
+        let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: canonicalRequestBytes(in: prompts[1])) as? [String: Any])
+        let retained = try XCTUnwrap(canonical["input"] as? [[String: Any]])
+        XCTAssertEqual(retained.count, 3)
+        XCTAssertEqual(retained[1]["call_id"] as? String, input[1]["call_id"] as? String)
+        XCTAssertEqual(retained[2]["output"] as? String, "Observed fixture command finished once.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/format-corrections-v1").path))
+        let journal = try transactionJournal(root: root, task: "card-after-action")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 1,
+            "Only the original call was released; the rejected card dispatched no action")
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2)
+    }
+
     func testChatInvalidJSONClosesOriginalBeforeOneFreshFormatCorrection() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
         let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
@@ -495,13 +567,13 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testRendererRecoveryConsumesUnchangedInferenceAndCumulativePromptBudgets() async throws {
-        for byteLimit in [false, true] {
+        for largePrompts in [false, true] {
             let base = FormatCorrectionFixtureTransport(replies: Array(repeating: valid, count: 20),
                 pollFailures: [1: .responseRenderingFailed])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
-            let task = "renderer-budget-\(byteLimit)"
-            var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command"]]
+            let task = "renderer-budget-\(largePrompts)"
+            var input: [[String: Any]] = [["role": "user", "content": largePrompts ? String(repeating: "A", count: 90_000) : "Use the offered fixture command"]]
             var accepted = 0, reached = false
             for _ in 0..<18 {
                 let data = try request(input: input)
@@ -514,14 +586,18 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
                     let response = try XCTUnwrap(JSONSerialization.jsonObject(with: output) as? [String: Any])
                     let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
                     input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
-                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed fixture result"]]
+                        "output": "Observed fixture result"]]
                 } catch {
                     XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
                     let prompts = await base.prompts()
                     XCTAssertEqual(prompts.count, accepted + 1, "The failed renderer inference spends one normal slot")
-                    XCTAssertTrue(byteLimit
-                        ? prompts.reduce(0) { $0 + $1.utf8.count } + nextPromptBytes > WebModelServer.maximumTurnPromptUTF8Bytes
-                        : prompts.count == WebModelServer.maximumTurnInferences)
+                    XCTAssertEqual(prompts.count, WebModelServer.maximumTurnInferences)
+                    XCTAssertEqual(accepted, WebModelServer.maximumTurnInferences - 1)
+                    let actualBytes = prompts.reduce(0) { $0 + $1.utf8.count }
+                    XCTAssertLessThanOrEqual(actualBytes, WebModelServer.maximumTurnPromptUTF8Bytes)
+                    XCTAssertLessThanOrEqual(nextPromptBytes, WebModelResponseCodec.maximumPromptBytes)
+                    XCTAssertGreaterThan(prompts[1].utf8.count, prompts[0].utf8.count, "The correction reminder is charged as actual bytes")
+                    if largePrompts { XCTAssertGreaterThan(actualBytes, 1_048_576) }
                     reached = true
                     break
                 }

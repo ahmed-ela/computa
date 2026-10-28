@@ -31,13 +31,17 @@
   const now = performance.now.bind(performance);
   const created = now();
   const rows = [];
-  // A different, explicit native purpose enables this version-pinned diagnostic.
+  // A different, explicit native purpose enables this finite diagnostic.
   // It observes the site's existing decoder, never a response stream or a reply
   // accepted by Computa. No module factory or protected parser is replaced.
   const captureDecodedEvents = config.captureDecodedEvents === true;
   const decoder = { state: 'pending', completionCalls: 0, programObservations: 0,
-    recoveredNullObservations: 0, lastProgram: null };
-  let decoderTarget = null, decoderOriginal = null, decoderWrapper = null, decoderActivation = null;
+    recoveredNullObservations: 0, lastProgram: null,
+    stream: { inputMessages: 0, assistantMessages: 0, nonemptyTextMessages: 0, opaqueMessages: 0,
+      mainTerminals: 0, messageTerminals: 0, errorEvents: 0, originalThrows: 0,
+      decoderInstances: 0, decoderOverflow: false } };
+  const decoderInstances = new Set();
+  let decoderSubscription = null, decoderActivation = null;
   let active = false, stopped = false, began = 0;
   const expired = () => now() - created >= config.durationMs;
   const elapsed = () => Math.max(0, Math.min(config.durationMs, now() - began));
@@ -55,7 +59,6 @@
     } catch { return unknown; }
   }
   const nullProgram = 'DIL.render(__dil.jsx(()=>{const __dilConstants=DIL.useConstants();const __dilModelDataBindings=DIL.useAppData((appData)=>appData.opGenui?.modelDataBindings??{});return null;},{"key":"body:0"}));';
-  const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
   const conversationID = new RegExp('^' + uuid + '$');
   const conversationPath = new RegExp('^/c/(' + uuid + ')/?$');
@@ -99,7 +102,25 @@
       knownNullProgram: knownNull, emptyFallbackMarkdown: typeof fallback === 'string' ? fallback.length === 0 : null,
       recovery, recoveryLine: line, recoveryColumn: column };
   }
-  function observeDecoded(payload) {
+  function increment(key) { decoder.stream[key] = Math.min(65535, decoder.stream[key] + 1); }
+  function observeReceiver(receiver) {
+    if (!decoderInstances.has(receiver)) {
+      if (decoderInstances.size >= 16) decoder.stream.decoderOverflow = true;
+      else { decoderInstances.add(receiver); decoder.stream.decoderInstances = decoderInstances.size; }
+    }
+  }
+  // These are leased-view counters, not exact-input ownership or completion
+  // proof. Multiple instances/inputs must be treated as attribution ambiguity.
+  function observeDecoded(receiver, payload) {
+    observeReceiver(receiver);
+    const type = data(payload, 'type');
+    if (type === 'input_message') increment('inputMessages');
+    if (type === 'main_stream_complete') increment('mainTerminals');
+    if (type === 'message_stream_complete') increment('messageTerminals');
+    const error = data(payload, 'error'), code = data(payload, 'error_code');
+    if (['error', 'message_error', 'conversation_error'].includes(type)
+      || error !== unknown && error != null && (typeof error === 'object' || typeof error === 'string' && error.length > 0)
+      || typeof code === 'string' && code.length > 0) increment('errorEvents');
     decoder.completionCalls = Math.min(65535, decoder.completionCalls + 1);
     const message = data(payload, 'message'), metadata = data(message, 'metadata');
     const rawStatus = data(message, 'status');
@@ -107,6 +128,12 @@
       : typeof rawStatus === 'string' ? 'other' : 'unknown';
     const association = conversationMatchesDocument(payload);
     if (data(data(message, 'author'), 'role') === 'assistant') {
+      increment('assistantMessages');
+      const content = data(message, 'content'), parts = data(content, 'parts');
+      const text = isArray(parts) && data(parts, 'length') === 1 ? data(parts, '0') : unknown;
+      if (data(content, 'content_type') === 'text' && typeof text === 'string') {
+        if (text.length > 0) increment('nonemptyTextMessages');
+      } else increment('opaqueMessages');
       observeProgram(data(metadata, 'model_dil_v2'), 'message', status, association);
       const references = data(metadata, 'content_references');
       if (isArray(references)) observeProgram(data(data(references, '0'), 'model_dil_v2'), 'reference', status, association);
@@ -117,57 +144,38 @@
     }
   }
   function restoreDecoder() {
-    if (!decoderTarget) {
+    if (!decoderSubscription) {
       if (decoder.state === 'pending') decoder.state = 'restored';
       return;
     }
-    try {
-      const current = descriptor(decoderTarget, 'recordCompletion');
-      if (current && current.value === decoderWrapper && current.writable === true
-        && current.configurable === true && current.enumerable === false) {
-        define(decoderTarget, 'recordCompletion', decoderOriginal);
-        decoder.state = 'restored';
-      } else { decoder.state = 'superseded'; }
-    } catch { decoder.state = 'superseded'; }
-    decoderTarget = null; decoderOriginal = null; decoderWrapper = null;
+    const subscription = decoderSubscription; decoderSubscription = null;
+    try { decoder.state = subscription.stop() ? 'restored' : 'superseded'; }
+    catch { decoder.state = 'superseded'; }
   }
   function activateDecoder() {
     if (active || stopped || expired()) return snapshot();
     if (decoderActivation) return decoderActivation;
     decoderActivation = (async () => {
       try {
-        // This exact public runtime is already used by the current website.
-        // Read only its initialized cache; never call require or initialize dd.
-        const runtime = await import('https://chatgpt.com/cdn/assets/633146.1f9c264032.js');
-        if (stopped || expired() || descriptor(window, config.key)?.value !== hook) return snapshot();
-        const require = data(runtime, '__webpack_require__');
-        const cached = data(data(require, 'c'), 'dd'), exports = data(cached, 'exports');
-        const exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
-        if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
-          || exported.enumerable !== true || exported.configurable !== false
-          || call(functionSource, exported.get, []) !== '()=>O') throw unknown;
-        const Decoder = call(exported.get, exports, []), prototype = data(Decoder, 'prototype');
-        const original = prototype && prototype !== unknown ? descriptor(prototype, 'recordCompletion') : null;
-        if (!original || typeof original.value !== 'function' || original.writable !== true
-          || original.configurable !== true || original.enumerable !== false
-          || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
-          || call(functionSource, original.value, []) !== completionSource) throw unknown;
-        const wrapped = function (...args) {
-          const result = call(original.value, this, args);
-          try {
-            if (available()) observeDecoded(result);
-            else if (expired()) restoreDecoder();
-          } catch { /* Observations never change a decoded return or throw. */ }
-          return result;
-        };
-        // Cache/export inspection can enter page Proxy traps. Recheck after
-        // that work and immediately before changing the method descriptor.
-        const stillCurrent = descriptor(window, config.key)?.value === hook;
-        if (stopped || !stillCurrent || expired()) return snapshot();
-        define(prototype, 'recordCompletion', { ...original, value: wrapped });
-        decoderTarget = prototype; decoderOriginal = original; decoderWrapper = wrapped;
-        decoder.state = 'installed'; active = true; began = now();
-      } catch { decoder.state = 'unavailable'; }
+        if (!/^__computaCompletion_[a-f0-9]{32}$/.test(config.completionKey)) throw unknown;
+        const completion = data(window, config.completionKey), subscribe = data(completion, 'subscribeDiagnostic');
+        if (typeof subscribe !== 'function') throw unknown;
+        const admitted = () => !stopped && !expired() && descriptor(window, config.key)?.value === hook
+          && data(window, config.completionKey) === completion;
+        const subscription = await call(subscribe, completion, [{
+          durationMs: Math.max(1, Math.floor(config.durationMs - (now() - created))), admitted,
+          value(receiver, result) { if (available()) observeDecoded(receiver, result); },
+          thrown(receiver) { if (available()) { observeReceiver(receiver); increment('originalThrows'); } },
+          invalidated(reason) {
+            active = false;
+            decoder.state = reason === 'expired' || reason === 'route_changed' ? 'restored' : 'superseded';
+            decoderSubscription = null;
+          }
+        }]);
+        if (!subscription) throw unknown;
+        if (!admitted()) { subscription.stop(); return snapshot(); }
+        decoderSubscription = subscription; decoder.state = 'installed'; active = true; began = now();
+      } catch { if (decoder.state === 'pending') decoder.state = 'unavailable'; }
       return snapshot();
     })();
     return decoderActivation;
@@ -350,10 +358,10 @@
     return promise;
   }
   function snapshot() {
-    if (captureDecodedEvents && expired()) restoreDecoder();
+    if (captureDecodedEvents && (expired() || decoderSubscription && !decoderSubscription.active())) restoreDecoder();
     const value = { schemaVersion: captureDecodedEvents ? 2 : 1, active: available(), expired: expired(),
       rows: rows.map(row => ({ ...row })) };
-    if (captureDecodedEvents) value.decoder = { ...decoder,
+    if (captureDecodedEvents) value.decoder = { ...decoder, stream: { ...decoder.stream },
       lastProgram: decoder.lastProgram ? { ...decoder.lastProgram } : null };
     return value;
   }

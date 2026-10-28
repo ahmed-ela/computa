@@ -311,6 +311,69 @@ enum ComputaModelToolCatalog {
         }
     }
 
+    /// Explain host-deferred capabilities separately from the callable catalog.
+    /// Use the original registered shapes, before projection can refresh them;
+    /// a name, historical call or foreign namespace cannot establish capability.
+    static func deferredBrowserToolInstructions(_ definitions: [[String: Any]],
+                                                availability: EmbeddedBrowserToolAvailability?) -> String? {
+        guard availability == .unbound else { return nil }
+        var deferred = Set<String>()
+        var entryTools = Set<String>()
+        func inspect(_ definition: [String: Any], namespace: String?) {
+            guard let name = definition["name"] as? String else { return }
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            if requiresBrowserBinding(definition, namespace: namespace) {
+                deferred.insert(qualified)
+                return
+            }
+            guard ["browser_open", "browser_bind"].contains(name),
+                  nativeBrowserToolName(definition, namespace: namespace) != nil else { return }
+            entryTools.insert(qualified)
+        }
+        for definition in definitions {
+            if definition["type"] as? String == "namespace", let name = definition["name"] as? String,
+               let children = definition["tools"] as? [[String: Any]] {
+                children.forEach { inspect($0, namespace: name) }
+            } else {
+                inspect(definition, namespace: nil)
+            }
+        }
+        guard !deferred.isEmpty, !entryTools.isEmpty else { return nil }
+        return """
+        COMPUTA_DEFERRED_BROWSER_CAPABILITIES:
+        This turn has no bound built-in browser page. Computa temporarily withholds
+        these registered page tools from the callable catalog: \(deferred.sorted().joined(separator: ", ")).
+        They are deferred until binding, not missing capabilities. An empty tab
+        inventory does not mean webpage interaction is unavailable.
+        Currently offered binding entry tools: \(entryTools.sorted().joined(separator: ", ")).
+        Within tool_choice, task scope and permissions, use an offered entry tool
+        with its exact schema. Successful open/bind refreshes the next request's
+        callable catalog; then use its offered page tools and current observations.
+        Do not call a deferred tool now or infer action authority from this notice.
+        END_COMPUTA_DEFERRED_BROWSER_CAPABILITIES.
+        """
+    }
+
+    /// Diagnostic recognition shares the projection's exact native contracts.
+    /// It never makes an unrecognized declaration callable or changes a schema.
+    static func nativeBrowserToolName(_ definition: [String: Any], namespace: String?) -> String? {
+        guard definition["type"] as? String == "function", namespace == nil || namespace == "functions",
+              let name = definition["name"] as? String, EmbeddedBrowserTools.names.contains(name) else { return nil }
+        if !["browser_tabs", "browser_open", "browser_bind"].contains(name) {
+            return requiresBrowserBinding(definition, namespace: namespace) ? name : nil
+        }
+        let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
+        guard !keys.isEmpty, keys.allSatisfy({ key in
+            guard let schema = definition[key] as? [String: Any], nativeConstraintTypesAreValid(schema) else { return false }
+            if name == "browser_tabs" {
+                return browserCursorSchemaVariants(name: name, namespace: namespace, schema: schema) != nil
+            }
+            guard let canonical = EmbeddedBrowserTools.definitions().first(where: { $0["name"] as? String == name })?["inputSchema"] as? [String: Any] else { return false }
+            return matchesNativeReadSchema(schema, canonical)
+        }) else { return nil }
+        return name
+    }
+
     /// Also applies to schemas retained by old native threads. History stays
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String,

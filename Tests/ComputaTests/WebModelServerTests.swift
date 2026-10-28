@@ -458,14 +458,15 @@ final class WebModelServerTests: XCTestCase {
                 replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
             let blocked = root.appendingPathComponent("cleanup")
+            let receiptTransport = ReceiptBlockingFixtureTransport(base: base, blockedDirectory: blocked)
             if persistence {
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(
-                    ReceiptBlockingFixtureTransport(base: base, blockedDirectory: blocked), defaultChatChoice: syntheticChatGPTChoice))
+                    receiptTransport, defaultChatChoice: syntheticChatGPTChoice))
             } else { await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base)) }
             let request = try turnRequest(input: [["role": "user", "content": "A tool call requiring durable closure"]], model: syntheticChatGPTModelID)
             do { _ = try await server.fixtureInfer(request, taskID: "fresh-cleanup"); XCTFail("Unconfirmed/unsaved closure must withhold tool output") }
             catch { }
-            if persistence { try FileManager.default.removeItem(at: blocked) }
+            if persistence { try await receiptTransport.restoreReceiptDirectory() }
             let receipt = await server.retryWebsiteSessionCleanup(taskID: websiteInferenceFixtureTaskID("fresh-cleanup"),
                 runtimeGeneration: websiteInferenceFixtureGeneration)
             XCTAssertEqual(receipt.outcome, .closed); XCTAssertTrue(receipt.receiptSaved)
@@ -479,12 +480,12 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testChatFreshLeasesCarryNativeTurnCountAndByteBudgetsWithoutAnotherStart() async throws {
-        for byteLimit in [false, true] {
+        for largePrompts in [false, true] {
             let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"bounded"}}]}"#
             let base = FixtureWebModelTransport(replyTexts: Array(repeating: tool, count: 20))
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
-            var input: [[String: Any]] = [["role": "user", "content": "Exact bounded task"]]
+            var input: [[String: Any]] = [["role": "user", "content": largePrompts ? String(repeating: "A", count: 90_000) : "Exact bounded task"]]
             var dispatched = 0, total = 0, reached = false
             for _ in 0..<18 {
                 let request = try turnRequest(input: input, model: syntheticChatGPTModelID)
@@ -496,18 +497,67 @@ final class WebModelServerTests: XCTestCase {
                     dispatched += 1; total += bytes
                     let calls = try responseOutput(response)
                     input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
-                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed exit 0"]]
+                        "output": "Observed exit 0"]]
                 } catch {
                     XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
-                    XCTAssertTrue(byteLimit ? total + bytes > WebModelServer.maximumTurnPromptUTF8Bytes : dispatched == 16)
+                    XCTAssertEqual(dispatched, WebModelServer.maximumTurnInferences)
+                    XCTAssertLessThanOrEqual(total, WebModelServer.maximumTurnPromptUTF8Bytes)
+                    XCTAssertLessThanOrEqual(bytes, WebModelResponseCodec.maximumPromptBytes)
+                    if largePrompts { XCTAssertGreaterThan(total, 1_048_576, "Legal full-history requests must pass the former premature byte cap") }
                     reached = true; break
                 }
             }
             XCTAssertTrue(reached)
+            let actualPrompts = await base.sentPrompts()
+            XCTAssertEqual(actualPrompts.reduce(0) { $0 + $1.utf8.count }, total, "Charge every full submitted prompt without deduplicating history")
             let operations = await base.operations()
             XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, dispatched)
             XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, dispatched)
             XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, dispatched)
+        }
+    }
+
+    func testChatFinalAfterTenCompletedActionsUsesFullHistoryWithoutReplayingDelivery() async throws {
+        let replies = (0..<10).map { index in
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":""#
+                + (index == 9 ? "fixture-send-once" : "fixture-read-\(index)") + #""}}]}"#
+        } + [#"{"type":"message","text":"Delivered once: LOCAL-budget-final-proof"}"#]
+        let base = FixtureWebModelTransport(replyTexts: replies)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
+        var input: [[String: Any]] = [["role": "user", "content": String(repeating: "A", count: 90_000)]]
+        var releasedCommands: [String] = []
+        for index in 0..<10 {
+            let output = try responseOutput(await server.fixtureInfer(
+                turnRequest(input: input, model: syntheticChatGPTModelID), taskID: "large-final-after-action"))
+            let call = try XCTUnwrap(output.first)
+            XCTAssertEqual(output.count, 1)
+            XCTAssertEqual(call["type"] as? String, "function_call")
+            let arguments = try XCTUnwrap(call["arguments"] as? String)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String])
+            releasedCommands.append(try XCTUnwrap(fields["cmd"]))
+            input += output + [["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"] as? String),
+                "output": index == 9 ? "Observed one completed delivery: LOCAL-budget-final-proof"
+                    : "Observed read \(index): " + String(repeating: "B", count: 1_000)]]
+        }
+        let final = try responseOutput(await server.fixtureInfer(
+            turnRequest(input: input, model: syntheticChatGPTModelID), taskID: "large-final-after-action"))
+        XCTAssertEqual(final.count, 1)
+        XCTAssertEqual(final.first?["type"] as? String, "message", "The next inference must report the existing outcome, not release another action")
+        let content = try XCTUnwrap(final.first?["content"] as? [[String: Any]])
+        XCTAssertEqual(content.first?["text"] as? String, "Delivered once: LOCAL-budget-final-proof")
+        XCTAssertEqual(releasedCommands.filter { $0 == "fixture-send-once" }.count, 1)
+        XCTAssertEqual(releasedCommands.count, 10)
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 11)
+        XCTAssertTrue(prompts.allSatisfy { $0.utf8.count <= WebModelResponseCodec.maximumPromptBytes })
+        XCTAssertGreaterThan(prompts.reduce(0) { $0 + $1.utf8.count }, 1_048_576,
+            "The final inference must remain eligible after legal full-context traffic exceeds the former cumulative cap")
+        XCTAssertEqual((try canonicalRequest(in: XCTUnwrap(prompts.last)))["input"] as? NSArray, input as NSArray,
+            "Every completed call and exact output stays in the canonical history")
+        let operations = await base.operations()
+        for operation in ["webProviderStart", "webProviderSend", "webProviderFinish"] {
+            XCTAssertEqual(operations.filter { $0 == operation }.count, 11)
         }
     }
 
@@ -1077,13 +1127,13 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testChatPilotCapsCloseTheRetainedLeaseWithoutRolloverOrAnotherSend() async throws {
-        for byteLimit in [false, true] {
+        for largePrompts in [false, true] {
             let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"bounded"}}]}"#
             let base = FixtureWebModelTransport(replyTexts: Array(repeating: tool, count: 20))
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.retainChatGPTConversationForTesting()
             await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
-            var input: [[String: Any]] = [["role": "user", "content": "Exact bounded task"]]
+            var input: [[String: Any]] = [["role": "user", "content": largePrompts ? String(repeating: "A", count: 90_000) : "Exact bounded task"]]
             var dispatched = 0, total = 0, reached = false
             for _ in 0..<18 {
                 let request = try turnRequest(input: input, model: syntheticChatGPTModelID)
@@ -1095,14 +1145,19 @@ final class WebModelServerTests: XCTestCase {
                     total += promptBytes; dispatched += 1
                     let calls = try responseOutput(response)
                     input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
-                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed exit 0"]]
+                        "output": "Observed exit 0"]]
                 } catch {
                     XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
-                    XCTAssertTrue(byteLimit ? total + promptBytes > WebModelServer.maximumTurnPromptUTF8Bytes : dispatched == 16)
+                    XCTAssertEqual(dispatched, WebModelServer.maximumTurnInferences)
+                    XCTAssertLessThanOrEqual(total, WebModelServer.maximumTurnPromptUTF8Bytes)
+                    XCTAssertLessThanOrEqual(promptBytes, WebModelResponseCodec.maximumPromptBytes)
+                    if largePrompts { XCTAssertGreaterThan(total, 1_048_576, "Retained pages share the same finite inference allowance") }
                     reached = true; break
                 }
             }
             XCTAssertTrue(reached)
+            let actualPrompts = await base.sentPrompts()
+            XCTAssertEqual(actualPrompts.reduce(0) { $0 + $1.utf8.count }, total, "Charge every full submitted prompt without deduplicating history")
             let operations = await base.operations()
             XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
             XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, dispatched)
@@ -1333,7 +1388,7 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(before.filter { $0 == "webProviderSend" }.count, 2)
         XCTAssertEqual(before.filter { $0 == "webProviderFinish" }.count, 1)
         do { _ = try await server.fixtureInfer(turnRequest(input: next), taskID: "closed-unsaved"); XCTFail("No retry while cleanup persistence is pending") } catch { }
-        try FileManager.default.removeItem(at: blocked)
+        try await transport.restoreReceiptDirectory()
         let issues = await server.fixtureFinish(taskID: "closed-unsaved")
         XCTAssertTrue(issues.isEmpty)
         let after = await base.operations()
@@ -1420,7 +1475,7 @@ final class WebModelServerTests: XCTestCase {
         } catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.cleanupFailed.localizedDescription) }
         let before = await base.operations()
         XCTAssertEqual(before, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
-        try FileManager.default.removeItem(at: blocked)
+        try await transport.restoreReceiptDirectory()
         let issues = await server.fixtureFinish(taskID: "persistence")
         XCTAssertTrue(issues.isEmpty)
         let savedReceipts = await server.latestCleanupReceipts()
@@ -2264,9 +2319,32 @@ private actor ReceiptBlockingFixtureTransport: WebModelTransport {
         let value = try await base.request(operation: operation, params: params)
         if operation == "webProviderFinish", !blocked {
             blocked = true
-            try Data("owned-fixture-blocks-first-receipt".utf8).write(to: blockedDirectory)
+            // Admission now reserves both journal directories before Start.
+            // Preserve that state while making only receipt persistence fail;
+            // throwing during Finish would simulate a different physical result.
+            if FileManager.default.fileExists(atPath: blockedDirectory.path) {
+                try FileManager.default.moveItem(at: blockedDirectory, to: savedDirectory)
+            }
+            do { try blocker.write(to: blockedDirectory) }
+            catch {
+                if FileManager.default.fileExists(atPath: savedDirectory.path) {
+                    try? FileManager.default.moveItem(at: savedDirectory, to: blockedDirectory)
+                }
+                throw error
+            }
         }
         return value
+    }
+    private var savedDirectory: URL { blockedDirectory.appendingPathExtension("before-fixture-block") }
+    private var blocker: Data { Data("owned-fixture-blocks-first-receipt".utf8) }
+    func restoreReceiptDirectory() throws {
+        guard blocked, try Data(contentsOf: blockedDirectory) == blocker else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try FileManager.default.removeItem(at: blockedDirectory)
+        if FileManager.default.fileExists(atPath: savedDirectory.path) {
+            try FileManager.default.moveItem(at: savedDirectory, to: blockedDirectory)
+        }
     }
 }
 

@@ -35,9 +35,9 @@ struct WebsiteTurnFailureStore: Sendable {
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // The fixed local inspection error has no retry metadata. Only its
-            // exact generated envelope can pass the canonical equality below.
-            if code != "browser_model_error" {
+            // These fixed local errors have no retry metadata. Only their
+            // exact generated envelopes can pass the canonical equality below.
+            if code != "browser_model_error" && code != "unsupported_website_response" && code != "website_turn_limit" {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
             }
@@ -49,6 +49,10 @@ struct WebsiteTurnFailureStore: Sendable {
                       !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
                 nativeError = reason
             case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
+            case "unsupported_website_response":
+                guard provider == "chatgpt" else { return nil }
+                nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+            case "website_turn_limit": nativeError = WebModelServer.Failure.turnLimit
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,
                       let reason = WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason(rawValue: rawReason),

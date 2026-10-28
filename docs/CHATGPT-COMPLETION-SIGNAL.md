@@ -250,3 +250,29 @@ workflow report `optimized189-fixtures1.json`, SHA-256
 `80632e0da92c3df62f6158a87c288e4a9e59805feeafb5b9b76d0c3dc6989b13`;
 matched HI audit `native189-one-pair-analysis1.json`, SHA-256
 `d93536c370d323cc90b5f5eced2a89c37433475edd139e3d1cb1169b77d90732`.
+
+## Current runtime compatibility and empty streams
+
+The October 26 investigation found that the pinned runtime asset and module
+identifier had changed while the verified decoder method had not. The observer
+now uses the one completed current runtime resource observed in this document
+and searches a bounded initialized module cache for the exact method. It does
+not guess replacement URLs or run module factories. Importing an observed
+resource reuses it if already evaluated; Resource Timing alone does not prove
+evaluation. Ambiguity or an unsupported shape keeps the existing fallback.
+
+A later deployment renamed the decoder's validator binding from `T` to `x`.
+Build 276 accepts consistent renaming of the three distinct strict binding
+identifiers in the complete existing method grammar. It still rejects additional
+operations, changed literals, capture of `this`/`super`/`arguments`, inconsistent
+references and trailing content. Export-getter, descriptor, arity, unique-target,
+property-identity and ownership checks remain required. Cache failures now carry
+finite stage labels rather than only one broad compatibility error.
+
+A separate failure receipt covers an exact-owned empty or error stream only
+after both message and main terminal events, with no alternate response expected
+and no nonempty or opaque assistant content. Mixed error/content envelopes are
+diagnostic-only. Native code rechecks the current session, document, submission,
+model and empty idle DOM before terminating. These events never release an
+answer or replay a prompt. See [the investigation](CHATGPT-EMPTY-RESPONSE.md)
+for confirmed findings and the original request's remaining upstream uncertainty.

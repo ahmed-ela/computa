@@ -10,6 +10,7 @@ final class AppStateWebsiteSessionCleanupTests: XCTestCase {
     func testClaimBlocksDuplicatesAndDeliveryKeepsFailureAndQueuePaused() async throws {
         let runtime = CleanupUIRuntime()
         let state = fixture(runtime: runtime)
+        state.tasks[0].status = .failed
         state.queuedPrompts[taskID] = [QueuedPrompt(text: "Unsent follow-up")]
         state.pausedQueueTaskIDs.insert(taskID)
         XCTAssertTrue(state.canRetryWebsiteSessionCleanup(taskID: taskID))
@@ -33,7 +34,7 @@ final class AppStateWebsiteSessionCleanupTests: XCTestCase {
         let submissions = await runtime.submissions
         XCTAssertEqual(calls, [taskID])
         XCTAssertTrue(submissions.isEmpty)
-        XCTAssertEqual(state.tasks[0].status, .waiting)
+        XCTAssertEqual(state.tasks[0].status, .failed)
         XCTAssertEqual(state.queuedPrompts[taskID]?.map(\.text), ["Unsent follow-up"])
         XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
         XCTAssertEqual(state.tasks[0].entries.filter { $0.title == "Agent error" }.count, 1)

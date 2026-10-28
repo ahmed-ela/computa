@@ -126,7 +126,7 @@ final class AppStateReasoningStreamingTests: XCTestCase {
     }
 
     func testTerminalStatusesDropOnlyUnfinishedReasoning() {
-        for status in [TaskStatus.waiting, .completed, .draft] {
+        for status in [TaskStatus.waiting, .failed, .completed, .draft] {
             let state = AppState(tasks: [task("first")], preferences: isolatedTestPreferences())
             state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
                 id: "saved", kind: .reasoning, title: "Thought", body: "Completed"

@@ -8,16 +8,20 @@
     || config.handlerName !== 'computaChatGPTCompletion'
     || Object.prototype.hasOwnProperty.call(window, config.key)) return;
   const apply = Reflect.apply, descriptor = Object.getOwnPropertyDescriptor, define = Object.defineProperty;
-  const prototypeOf = Object.getPrototypeOf, functionSource = Function.prototype.toString;
+  const prototypeOf = Object.getPrototypeOf, ownKeys = Reflect.ownKeys, functionSource = Function.prototype.toString;
   const unknown = Symbol('unknown'), initialDocument = document;
   const now = performance.now.bind(performance), encoder = new TextEncoder();
+  const resourceEntries = typeof performance.getEntriesByType === 'function'
+    ? performance.getEntriesByType.bind(performance) : null;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
   const sendSelector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]';
   const stopSelector = 'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]';
-  const diagnosticReasons = Object.freeze(['runtime_unsupported', 'call_limit', 'decoder_limit', 'route_changed',
+  const diagnosticReasons = Object.freeze(['runtime_unsupported', 'runtime_resources_unavailable', 'runtime_import_failed',
+    'runtime_cache_unsupported', 'runtime_cache_shape', 'runtime_cache_empty', 'runtime_cache_limit',
+    'runtime_getter_unavailable', 'runtime_getter_failed', 'runtime_method_unsupported', 'runtime_decoder_ambiguous',
+    'runtime_identity_changed', 'call_limit', 'decoder_limit', 'route_changed',
     'wrapper_changed', 'input_shape', 'input_hash', 'owner_conflict', 'parent_changed', 'parent_limit', 'ancestry_missing',
-    'final_status', 'final_changed', 'terminal_order', 'error', 'send_changed', 'expired', 'observer_exception']);
+    'final_status', 'final_changed', 'terminal_order', 'terminal_opaque', 'error', 'send_changed', 'expired', 'observer_exception']);
   let lease = null;
   function data(object, key) {
     if (object == null) return undefined;
@@ -28,6 +32,253 @@
       const prototype = prototypeOf(object);
       return prototype === Object.prototype || prototype === null ? undefined : unknown;
     } catch { return unknown; }
+  }
+  // Website telemetry clears its global resource timing buffer after startup.
+  // Retain only up to eight completed exact runtime URLs in this document; no
+  // request bodies, headers, arbitrary URLs or resource payloads are retained.
+  const runtimeResources = new Set(), inventoryDeadline = now() + 600000;
+  let resourceObserver = null, resourceTakeRecords = null, resourceDisconnect = null;
+  let inventoryInvalid = false, inventoryTimer = null, inventoryPagehide = null;
+  function stopRuntimeInventory() {
+    inventoryInvalid = true; runtimeResources.clear();
+    bestEffort(() => resourceDisconnect?.());
+    bestEffort(() => { if (inventoryTimer !== null) clearTimeout(inventoryTimer); });
+    bestEffort(() => { if (inventoryPagehide) window.removeEventListener('pagehide', inventoryPagehide); });
+    resourceObserver = null; resourceTakeRecords = null; resourceDisconnect = null; inventoryTimer = null; inventoryPagehide = null;
+  }
+  function collectRuntimeResources(entries) {
+    if (inventoryInvalid) return;
+    if (document !== initialDocument || window !== window.top || location.origin !== 'https://chatgpt.com'
+      || now() >= inventoryDeadline || !Array.isArray(entries) || entries.length > 4096) {
+      stopRuntimeInventory(); return;
+    }
+    try {
+      for (const entry of entries) {
+        if (!entry || !['script', 'link'].includes(entry.initiatorType) || typeof entry.name !== 'string'
+          || !/^https:\/\/chatgpt\.com\/cdn\/assets\/633146\.[a-f0-9]{10}\.js$/.test(entry.name)
+          || !Number.isFinite(entry.startTime) || entry.startTime < 0
+          || !Number.isFinite(entry.responseEnd) || entry.responseEnd <= 0
+          || entry.responseEnd < entry.startTime || entry.responseEnd > now()) continue;
+        if (entry.responseStatus !== undefined && entry.responseStatus !== 0 && entry.responseStatus !== 200) continue;
+        if (!runtimeResources.has(entry.name) && runtimeResources.size >= 8) { stopRuntimeInventory(); return; }
+        runtimeResources.add(entry.name);
+      }
+    } catch { stopRuntimeInventory(); }
+  }
+  // Install before website startup. Observer records are independent of the
+  // website's clearResourceTimings(); draining them avoids a delivery race.
+  try {
+    if (typeof PerformanceObserver === 'function') {
+      resourceObserver = new PerformanceObserver(list => {
+        try { collectRuntimeResources(list.getEntries()); } catch { stopRuntimeInventory(); }
+      });
+      resourceTakeRecords = resourceObserver.takeRecords.bind(resourceObserver);
+      resourceDisconnect = resourceObserver.disconnect.bind(resourceObserver);
+      resourceObserver.observe({ type: 'resource', buffered: true });
+      inventoryPagehide = () => stopRuntimeInventory();
+      window.addEventListener('pagehide', inventoryPagehide);
+      inventoryTimer = setTimeout(stopRuntimeInventory, Math.max(0, inventoryDeadline - now()));
+    }
+    if (resourceEntries) collectRuntimeResources(resourceEntries('resource'));
+  } catch { stopRuntimeInventory(); }
+  function observedRuntimeURL() {
+    // Observation proves a completed fetch, not ESM evaluation. Import only the
+    // unique same-document observed URL, never a guessed or pinned predecessor.
+    try {
+      if (resourceTakeRecords) collectRuntimeResources(resourceTakeRecords());
+      if (resourceEntries) collectRuntimeResources(resourceEntries('resource'));
+    } catch { stopRuntimeInventory(); }
+    return !inventoryInvalid && now() < inventoryDeadline && runtimeResources.size === 1
+      ? [...runtimeResources][0] : null;
+  }
+  function completionMethodMatches(source) {
+    // Minifiers rename bindings independently of behavior. Admit only the
+    // existing method grammar with three distinct, consistently used names;
+    // no added operations, changed literals, source whitespace or escapes.
+    if (typeof source !== 'string' || source.length > 1024) return false;
+    const match = /^recordCompletion\(([A-Za-z_$][A-Za-z0-9_$]{0,63})\)\{let ([A-Za-z_$][A-Za-z0-9_$]{0,63})=([A-Za-z_$][A-Za-z0-9_$]{0,63})\.safeParse\(\1\);return \2\.success&&"message_stream_complete"===\2\.data\.type&&\(this\.messageStreamCompleted=!0\),\1\}$/.exec(source);
+    // `this`, `super` and implicit `arguments` change receiver semantics, and
+    // strict bindings cannot use keywords, eval or arguments in any slot.
+    const forbidden = ' arguments eval await break case catch class const continue debugger default delete do else enum export extends false finally for function if implements import in instanceof interface let new null package private protected public return static super switch this throw true try typeof var void while with yield ';
+    return !!match && match[0] === source && new Set(match.slice(1)).size === 3
+      && match.slice(1).every(name => !forbidden.includes(' ' + name + ' '));
+  }
+  function initializedDecoder(runtime, current) {
+    // Website chunk/module IDs change independently. Inspect bounded initialized
+    // cache entries only: no require, module factory, or unapproved export getter.
+    // Stage labels explain a failed guard only; no module identity, source or
+    // website content is emitted, and every acceptance predicate stays exact.
+    const fail = reason => { current.armFailureReason = reason; throw unknown; };
+    const require = data(runtime, '__webpack_require__'), cache = data(require, 'c');
+    if (!cache || typeof cache !== 'object' || ![Object.prototype, null].includes(prototypeOf(cache))) fail('runtime_cache_shape');
+    const keys = ownKeys(cache);
+    if (keys.length > 16384) fail('runtime_cache_limit');
+    if (keys.length === 0) fail('runtime_cache_empty');
+    let found = null, approvedGetters = 0, returnedGetters = 0;
+    for (const key of keys) {
+      if (typeof key !== 'string' || key.length > 64) continue;
+      const cached = data(cache, key), exports = data(cached, 'exports');
+      const exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
+      if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
+        || exported.enumerable !== true || exported.configurable !== false
+        || apply(functionSource, exported.get, []) !== '()=>O') continue;
+      approvedGetters++;
+      // A different cached module can expose the same literal getter while its
+      // binding is not initialized yet. It supplies no decoder evidence.
+      let Decoder;
+      try { Decoder = apply(exported.get, exports, []); } catch { continue; }
+      returnedGetters++;
+      const target = data(Decoder, 'prototype');
+      const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
+      if (!original || typeof original.value !== 'function' || original.writable !== true
+        || original.configurable !== true || original.enumerable !== false
+        || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
+        || !completionMethodMatches(apply(functionSource, original.value, []))) continue;
+      if (found && found.target !== target) fail('runtime_decoder_ambiguous');
+      found = { cache, key, cached, exports, exported, target, original };
+    }
+    if (!found) fail(approvedGetters === 0 ? 'runtime_getter_unavailable'
+      : returnedGetters === 0 ? 'runtime_getter_failed' : 'runtime_method_unsupported');
+    return found;
+  }
+  // Completion and an explicitly leased diagnostic share one verified method
+  // wrapper. Subscribers have independent lifetimes: losing completion proof
+  // must not erase the diagnostic events needed to explain that loss.
+  let decoderTap = null, pendingTap = null;
+  function tapContext() {
+    return document === initialDocument && window === window.top && location.origin === 'https://chatgpt.com'
+      && descriptor(window, config.key)?.value === api;
+  }
+  function restoreTap(tap) {
+    if (decoderTap !== tap || tap.subscribers.size !== 0) return;
+    decoderTap = null;
+    bestEffort(() => window.removeEventListener('pagehide', tap.pagehide));
+    bestEffort(() => {
+      const present = descriptor(tap.target, 'recordCompletion');
+      if (present?.value === tap.wrapper && present.writable === true
+        && present.configurable === true && present.enumerable === false)
+        define(tap.target, 'recordCompletion', tap.original);
+    });
+  }
+  function removeSubscriber(tap, subscriber, reason = null) {
+    if (!tap.subscribers.delete(subscriber)) return;
+    bestEffort(() => clearTimeout(subscriber.timer));
+    restoreTap(tap);
+    if (reason !== null) bestEffort(() => subscriber.invalidated(reason));
+  }
+  function invalidateTap(tap, reason) {
+    for (const subscriber of [...tap.subscribers]) removeSubscriber(tap, subscriber, reason);
+  }
+  function liveTap(tap) {
+    if (decoderTap !== tap) return false;
+    const present = descriptor(tap.target, 'recordCompletion');
+    const reason = !tapContext() ? 'route_changed'
+      : !present || present.value !== tap.wrapper || present.writable !== true
+        || present.configurable !== true || present.enumerable !== false ? 'wrapper_changed' : null;
+    if (reason) { invalidateTap(tap, reason); return false; }
+    return true;
+  }
+  async function subscribeDecoder(kind, durationMs, admitted, value, thrown, invalidated) {
+    const deadline = now() + durationMs;
+    const current = () => now() < deadline && tapContext() && admitted();
+    if (!current()) return { reason: 'expired' };
+    if (decoderTap && !liveTap(decoderTap)) return { reason: 'wrapper_changed' };
+    if (!decoderTap) {
+      if (!pendingTap) pendingTap = (async () => {
+        const state = { armFailureReason: 'runtime_resources_unavailable' };
+        try {
+          const runtimeURL = observedRuntimeURL();
+          if (!runtimeURL) throw unknown;
+          state.armFailureReason = 'runtime_import_failed';
+          const runtime = await import(runtimeURL);
+          state.armFailureReason = 'runtime_identity_changed';
+          if (!current() || observedRuntimeURL() !== runtimeURL) throw unknown;
+          state.armFailureReason = 'runtime_cache_unsupported';
+          const found = initializedDecoder(runtime, state), { target, original } = found;
+          const tap = { ...found, runtimeURL, subscribers: new Set(), wrapper: null, pagehide: null };
+          tap.wrapper = function (...args) {
+            let result;
+            try { result = apply(original.value, this, args); }
+            catch (error) {
+              bestEffort(() => {
+                if (liveTap(tap)) for (const subscriber of [...tap.subscribers]) {
+                  if (!tap.subscribers.has(subscriber)) continue;
+                  try {
+                    if (!subscriber.current()) { removeSubscriber(tap, subscriber, 'expired'); continue; }
+                    subscriber.thrown(this);
+                  } catch { removeSubscriber(tap, subscriber, 'observer_exception'); }
+                }
+              });
+              throw error;
+            }
+            bestEffort(() => {
+              if (liveTap(tap)) for (const subscriber of [...tap.subscribers]) {
+                if (!tap.subscribers.has(subscriber)) continue;
+                try {
+                  if (!subscriber.current()) { removeSubscriber(tap, subscriber, 'expired'); continue; }
+                  subscriber.value(this, result);
+                } catch { removeSubscriber(tap, subscriber, 'observer_exception'); }
+              }
+            });
+            return result;
+          };
+          state.armFailureReason = 'runtime_identity_changed';
+          if (!current()) throw unknown;
+          const currentExport = descriptor(found.exports, 'c');
+          if (observedRuntimeURL() !== runtimeURL
+            || data(found.cache, found.key) !== found.cached || data(found.cached, 'exports') !== found.exports
+            || !currentExport || currentExport.get !== found.exported.get || currentExport.set !== undefined
+            || currentExport.enumerable !== true || currentExport.configurable !== false
+            || data(apply(found.exported.get, found.exports, []), 'prototype') !== target) throw unknown;
+          // No subscriber callback runs after the final descriptor read. In
+          // particular admitted() cannot swap the method between proof/write.
+          const currentMethod = descriptor(target, 'recordCompletion');
+          if (!currentMethod || currentMethod.value !== original.value || currentMethod.writable !== true
+            || currentMethod.configurable !== true || currentMethod.enumerable !== false) throw unknown;
+          if (now() >= deadline || !tapContext()) throw unknown;
+          define(target, 'recordCompletion', { ...original, value: tap.wrapper });
+          decoderTap = tap;
+          tap.pagehide = () => invalidateTap(tap, 'route_changed');
+          try { window.addEventListener('pagehide', tap.pagehide); }
+          catch { restoreTap(tap); throw unknown; }
+          return { tap };
+        } catch { return { reason: state.armFailureReason }; }
+      })();
+      const pending = pendingTap, result = await pending;
+      if (pendingTap === pending) pendingTap = null;
+      if (!result.tap) return result;
+    }
+    const tap = decoderTap;
+    let admittedNow = false;
+    try { admittedNow = !!tap && liveTap(tap) && current(); }
+    catch {
+      if (tap) restoreTap(tap);
+      return { reason: 'observer_exception' };
+    }
+    if (!admittedNow) {
+      if (tap) restoreTap(tap);
+      return { reason: 'expired' };
+    }
+    // A retained diagnostic may outlive one completion. A new subscriber must
+    // still prove the current initialized cache/export identity before joining.
+    try {
+      const exported = descriptor(tap.exports, 'c');
+      if (observedRuntimeURL() !== tap.runtimeURL || data(tap.cache, tap.key) !== tap.cached
+        || data(tap.cached, 'exports') !== tap.exports || !exported || exported.get !== tap.exported.get
+        || exported.set !== undefined || exported.enumerable !== true || exported.configurable !== false
+        || data(apply(tap.exported.get, tap.exports, []), 'prototype') !== tap.target
+        || !current() || !liveTap(tap)) throw unknown;
+    } catch { invalidateTap(tap, 'runtime_identity_changed'); return { reason: 'runtime_identity_changed' }; }
+    if (tap.subscribers.size >= 2 || [...tap.subscribers].some(item => item.kind === kind))
+      return { reason: 'owner_conflict' };
+    const subscriber = { kind, current, value, thrown, invalidated, timer: null };
+    tap.subscribers.add(subscriber);
+    try { subscriber.timer = setTimeout(() => removeSubscriber(tap, subscriber, 'expired'), Math.max(0, deadline - now())); }
+    catch { removeSubscriber(tap, subscriber); return { reason: 'observer_exception' }; }
+    return { subscription: Object.freeze({
+      active() { return tap.subscribers.has(subscriber) && liveTap(tap) && current(); },
+      stop() { const valid = liveTap(tap); removeSubscriber(tap, subscriber); return valid; }
+    }) };
   }
   const id = value => typeof value === 'string' && uuid.test(value) ? value : null;
   function keys(object, expected) {
@@ -62,14 +313,7 @@
     bestEffort(() => window.removeEventListener('pagehide', current.pagehide));
     bestEffort(() => window.removeEventListener('popstate', current.pathchange));
     bestEffort(() => window.removeEventListener('hashchange', current.pathchange));
-    if (current.target) {
-      try {
-        const present = descriptor(current.target, 'recordCompletion');
-        if (present && present.value === current.wrapper && present.writable === true
-          && present.configurable === true && present.enumerable === false)
-          define(current.target, 'recordCompletion', current.original);
-      } catch { /* Never replace a newer owner's method. */ }
-    }
+    bestEffort(() => current.subscription?.stop());
     if (notify) post(identity(current, 'invalidated'));
   }
   function route(current) {
@@ -93,11 +337,7 @@
   function live(current) {
     if (lease !== current || current.stopped) return false;
     if (!route(current)) { restore(current, true, now() >= current.deadline ? 'expired' : 'route_changed'); return false; }
-    if (current.target) {
-      const present = descriptor(current.target, 'recordCompletion');
-      if (!present || present.value !== current.wrapper || present.writable !== true
-        || present.configurable !== true || present.enumerable !== false) { restore(current, true, 'wrapper_changed'); return false; }
-    }
+    if (current.subscription && !current.subscription.active()) { restore(current, true, 'wrapper_changed'); return false; }
     return true;
   }
   function reject(current, candidate, reason) {
@@ -120,12 +360,27 @@
   }
   function publish(current, candidate) {
     if (!live(current) || current.owner !== candidate || candidate.rejected || current.sends !== 1
-      || candidate.published || !candidate.final || !candidate.terminal
+      || candidate.published || candidate.failurePublished || candidate.completionDisqualified || !candidate.final || !candidate.terminal
       || candidate.terminal <= candidate.final.ordinal) return;
     if (!ancestry(candidate, candidate.final)) { diagnostic(current, 'ancestry_missing'); return; }
     candidate.published = true;
     post({ ...identity(current, 'terminal'), inputMessageID: candidate.inputMessageID,
       conversationID: candidate.conversationID, messageID: candidate.final.id, text: candidate.final.text });
+  }
+  function publishFailure(current, candidate) {
+    if (!live(current) || current.owner !== candidate || candidate.rejected || current.sends !== 1
+      || candidate.published || candidate.failurePublished) return;
+    const ended = candidate.mainTerminal > 0 && candidate.messageTerminal > 0;
+    if (ended && candidate.opaqueAssistant) diagnostic(current, 'terminal_opaque');
+    const empty = ended && !candidate.final && candidate.nonemptyAssistants === 0 && !candidate.opaqueAssistant;
+    const failed = ended && candidate.providerErrorOrdinal > 0 && candidate.messageTerminal > candidate.providerErrorOrdinal
+      && !candidate.final && candidate.nonemptyAssistants === 0 && !candidate.opaqueAssistant;
+    if (!failed && !empty) return;
+    candidate.failurePublished = true;
+    post({ ...identity(current, 'terminal_failure'), inputMessageID: candidate.inputMessageID,
+      conversationID: candidate.conversationID, reason: failed ? 'provider_error' : 'empty_stream',
+      calls: candidate.ordinal, assistantMessages: candidate.assistantMessages,
+      messageTerminalCount: candidate.messageTerminal > 0 ? 1 : 0, mainTerminalCount: candidate.mainTerminal > 0 ? 1 : 0 });
   }
   function singleText(content, maxBytes) {
     if (data(content, 'content_type') !== 'text') return null;
@@ -141,22 +396,42 @@
     if (!candidate) {
       if (current.instances.size >= 4) { restore(current, true, 'decoder_limit'); return; }
       candidate = { parents: new Map(), ordinal: 0, rejected: false, inputSeen: false,
-        inputMessageID: null, conversationID: null, final: null, terminal: null, published: false };
+        inputMessageID: null, conversationID: null, final: null, terminal: null, published: false,
+        failurePublished: false, completionDisqualified: false, providerErrorOrdinal: 0, mainTerminal: 0, messageTerminal: 0,
+        assistantMessages: 0, nonemptyAssistants: 0, opaqueAssistant: false };
       current.instances.set(receiver, candidate);
     }
     const ordinal = ++candidate.ordinal, type = data(payload, 'type');
-    if (data(payload, 'error') != null || data(payload, 'error_code') != null
-      || ['error', 'message_error', 'conversation_error', 'cancelled', 'canceled'].includes(type)
-      || type === 'main_stream_complete' && data(payload, 'alternate_response_expected') !== false
-      || typeof type === 'string' && /_complete(?:d)?$/.test(type)
-        && !['main_stream_complete', 'message_stream_complete'].includes(type)) {
-      reject(current, candidate, 'error'); return;
-    }
     const conversationID = id(data(payload, 'conversation_id'));
     if (candidate.streamConversationID && conversationID && conversationID !== candidate.streamConversationID) {
       reject(current, candidate, 'owner_conflict'); return;
     }
     if (conversationID) candidate.streamConversationID = conversationID;
+    const providerError = data(payload, 'error'), errorCode = data(payload, 'error_code');
+    if (providerError !== unknown && providerError != null
+        && (typeof providerError === 'object' || typeof providerError === 'string' && providerError.length > 0)
+      || typeof errorCode === 'string' && errorCode.length > 0
+      || ['error', 'message_error', 'conversation_error'].includes(type)) {
+      // An error predating the input cannot be attributed to that input. An
+      // error after it is retained while the exact input digest is pending.
+      candidate.completionDisqualified = true;
+      // The website decoder may prioritize a valid message in an error-bearing
+      // envelope. Any such content excludes an empty/error-only conclusion.
+      if (data(payload, 'message') != null) candidate.opaqueAssistant = true;
+      if (candidate.published) { reject(current, candidate, 'error'); return; }
+      if (candidate.inputSeen) candidate.providerErrorOrdinal = ordinal;
+      diagnostic(current, 'error'); return;
+    }
+    if (['cancelled', 'canceled'].includes(type)
+      || type === 'main_stream_complete' && data(payload, 'alternate_response_expected') !== false
+      || typeof type === 'string' && /_complete(?:d)?$/.test(type)
+        && !['main_stream_complete', 'message_stream_complete'].includes(type)) {
+      reject(current, candidate, 'error'); return;
+    }
+    if (candidate.failurePublished) {
+      if (type === 'input_message' || data(payload, 'message') != null) reject(current, candidate, 'final_changed');
+      return;
+    }
     if (type === 'input_message') {
       if (candidate.inputSeen) { reject(current, candidate, 'input_shape'); return; }
       candidate.inputSeen = true;
@@ -175,15 +450,31 @@
         if (current.serverID && current.serverID !== conversationID) {
           restore(current, true, 'owner_conflict'); return;
         }
-        current.owner = candidate; publish(current, candidate);
+        current.owner = candidate; publishFailure(current, candidate); publish(current, candidate);
       }).catch(() => reject(current, candidate, 'observer_exception'));
     }
     const message = data(payload, 'message');
     if (message && message !== unknown) {
       const messageID = id(data(message, 'id')), role = data(data(message, 'author'), 'role');
-      const metadata = data(message, 'metadata'), parentID = id(data(metadata, 'parent_id'));
+      const metadata = data(message, 'metadata'), rawParentID = data(metadata, 'parent_id'), parentID = id(rawParentID);
+      const status = data(message, 'status'), finishType = data(data(metadata, 'finish_details'), 'type');
       if (data(metadata, 'is_error') === true || data(metadata, 'reasoning_status') === 'reasoning_cancelled'
-        || data(data(metadata, 'finish_details'), 'type') === 'interrupted') { reject(current, candidate, 'error'); return; }
+        || finishType === 'interrupted') { reject(current, candidate, 'error'); return; }
+      if (role === 'assistant') {
+        if (status != null && status !== 'in_progress' && status !== 'finished_successfully'
+          || finishType != null && finishType !== 'stop') { reject(current, candidate, 'final_status'); return; }
+        // Decoded messages can precede their status, finish or parent metadata. Missing
+        // fields supply no final or ancestry evidence, and are not an error.
+        // A previously selected final can never be downgraded this way.
+        if (status == null || status === 'finished_successfully' && finishType == null || rawParentID == null) {
+          if (candidate.final) { reject(current, candidate, 'final_changed'); return; }
+          const previous = messageID ? candidate.parents.get(messageID) : null;
+          if (previous && (previous.role !== role || previous.parentID !== parentID)) {
+            reject(current, candidate, 'parent_changed'); return;
+          }
+          candidate.assistantMessages++; candidate.opaqueAssistant = true; return;
+        }
+      }
       if (messageID) {
         const previous = candidate.parents.get(messageID);
         if (previous && (previous.role !== role || previous.parentID !== parentID)
@@ -193,11 +484,12 @@
         candidate.parents.set(messageID, { role, parentID });
       }
       if (role === 'assistant') {
-        const status = data(message, 'status');
-        const finishType = data(data(metadata, 'finish_details'), 'type');
-        if (status !== 'in_progress' && status !== 'finished_successfully'
-          || typeof finishType === 'string' && finishType !== 'stop'
-          || status === 'finished_successfully' && finishType !== 'stop') { reject(current, candidate, 'final_status'); return; }
+        candidate.assistantMessages++;
+        const content = singleText(data(message, 'content'), 220000);
+        if (content === null || data(message, 'recipient') !== 'all'
+          || data(metadata, 'model_dil_v2') != null
+          || data(metadata, 'content_references') != null) candidate.opaqueAssistant = true;
+        if (content !== null && content.length > 0) candidate.nonemptyAssistants++;
         const text = singleText(data(message, 'content'), 220000);
         const success = messageID && parentID && conversationID
           && data(message, 'status') === 'finished_successfully' && data(message, 'channel') === 'final'
@@ -208,11 +500,19 @@
         if (success && !candidate.final) candidate.final = { id: messageID, parentID, text, ordinal };
       }
     }
+    if (type === 'main_stream_complete') {
+      if (!conversationID || !candidate.conversationID || conversationID !== candidate.conversationID) {
+        reject(current, candidate, 'owner_conflict'); return;
+      }
+      candidate.mainTerminal = ordinal;
+    }
     if (type === 'message_stream_complete') {
       if (!conversationID || !candidate.conversationID || conversationID !== candidate.conversationID
-        || !candidate.final || ordinal <= candidate.final.ordinal) { reject(current, candidate, 'terminal_order'); return; }
+        || candidate.final && ordinal <= candidate.final.ordinal) { reject(current, candidate, 'terminal_order'); return; }
+      candidate.messageTerminal = ordinal;
       candidate.terminal = ordinal;
     }
+    publishFailure(current, candidate);
     publish(current, candidate);
   }
   const api = Object.freeze({
@@ -231,31 +531,13 @@
         if (!route(current)) {
           bestEffort(() => diagnostic(current, now() >= current.deadline ? 'expired' : 'route_changed')); throw unknown;
         }
-        // This is an observed public runtime and an already-initialized cache.
-        // Importing it must never initialize dd or call a module factory.
-        const runtime = await import('https://chatgpt.com/cdn/assets/633146.fa01f470fd.js');
-        if (!live(current)) return { armed: false };
-        const require = data(runtime, '__webpack_require__'), cached = data(data(require, 'c'), 'dd');
-        const exports = data(cached, 'exports'), exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
-        if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
-          || exported.enumerable !== true || exported.configurable !== false
-          || apply(functionSource, exported.get, []) !== '()=>O') throw unknown;
-        const Decoder = apply(exported.get, exports, []), target = data(Decoder, 'prototype');
-        const original = target && target !== unknown ? descriptor(target, 'recordCompletion') : null;
-        if (!original || typeof original.value !== 'function' || original.writable !== true
-          || original.configurable !== true || original.enumerable !== false
-          || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
-          || apply(functionSource, original.value, []) !== completionSource) throw unknown;
-        const wrapper = function (...args) {
-          let result;
-          try { result = apply(original.value, this, args); }
-          catch (error) { restore(current, true, 'error'); throw error; }
-          try { observe(current, this, result); } catch { restore(current, true, 'observer_exception'); }
-          return result;
-        };
-        if (!live(current) || descriptor(target, 'recordCompletion')?.value !== original.value) throw unknown;
-        define(target, 'recordCompletion', { ...original, value: wrapper });
-        current.target = target; current.original = original; current.wrapper = wrapper;
+        const shared = await subscribeDecoder('completion', binding.durationMs,
+          () => lease === current && !current.stopped && route(current),
+          (receiver, result) => observe(current, receiver, result),
+          () => restore(current, true, 'error'), reason => restore(current, true, reason));
+        if (!shared.subscription) { current.armFailureReason = shared.reason; throw unknown; }
+        current.subscription = shared.subscription;
+        if (!live(current)) { shared.subscription.stop(); return { armed: false }; }
         current.click = event => {
           if (!live(current)) return;
           try {
@@ -279,9 +561,20 @@
         window.addEventListener('hashchange', current.pathchange);
         current.timer = setTimeout(() => restore(current, true, 'expired'), Math.max(0, current.deadline - now()));
         return { armed: true };
-      } catch { restore(current, false, 'runtime_unsupported'); return { armed: false }; }
+      } catch { restore(current, false, current.armFailureReason || 'runtime_unsupported'); return { armed: false }; }
     },
-    stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); }
+    stop(correlationID) { if (lease && lease.correlationID === correlationID) restore(lease, false); },
+    // The separately native-configured diagnostic receives this scoped API
+    // key. Page-world keys are not secrets or authorization. Diagnostic results
+    // and callbacks never contribute to a completion receipt.
+    ...(config.allowsDiagnosticSubscribers === true ? { async subscribeDiagnostic(options) {
+      if (!keys(options, 'admitted,durationMs,invalidated,thrown,value')
+        || !Number.isInteger(data(options, 'durationMs')) || options.durationMs < 1 || options.durationMs > 600000
+        || !['admitted', 'value', 'thrown', 'invalidated'].every(key => typeof data(options, key) === 'function')) return null;
+      const result = await subscribeDecoder('diagnostic', options.durationMs,
+        options.admitted, options.value, options.thrown, options.invalidated);
+      return result.subscription ?? null;
+    } } : {})
   });
   define(window, config.key, { value: api, writable: false, configurable: true, enumerable: false });
 })();

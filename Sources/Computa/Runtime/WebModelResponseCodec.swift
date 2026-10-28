@@ -9,6 +9,8 @@ enum WebModelResponseCodec {
     struct Request: Sendable {
         let model: String
         let singleActionRelay: Bool
+        /// Provider-derived transport policy, never model-authored reply text.
+        let requiresEmbeddedEnvelope: Bool
         let stream: Bool
         let prompt: String
         let promptStatistics: WebsitePromptProjection.Statistics
@@ -16,6 +18,7 @@ enum WebModelResponseCodec {
         let currentUserInstructions: String
         /// Derived from validated original definitions; native admission supplies state.
         let requiresBrowserToolAvailability: Bool
+        let toolCatalogDiagnostic: ToolCatalogDiagnostic
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
@@ -35,11 +38,55 @@ enum WebModelResponseCodec {
         let namespace: String?
         let isCustom: Bool
         let browserReadMode: ComputaModelToolCatalog.BrowserReadMode?
+        let nativeBrowserBit: UInt16
     }
 
     fileprivate struct ToolPolicy: Sendable {
         let allowedNames: Set<String>
         let requiresCall: Bool
+        let mode: ToolCatalogDiagnostic.Choice
+    }
+
+    /// Finite request facts only. These fields never alter model instructions,
+    /// parser admission or native execution, and contain no client-authored text.
+    struct ToolCatalogDiagnostic: Codable, Equatable, Sendable {
+        enum Binding: String, Codable, Sendable { case unknown, unbound, bound }
+        enum Choice: String, Codable, Sendable {
+            case auto, none, required, selected
+            case allowedAuto = "allowed_auto", allowedNone = "allowed_none", allowedRequired = "allowed_required"
+        }
+        // Version 1 bit positions; do not reorder without a diagnostic version change.
+        static let browserNames = ["browser_tabs", "browser_open", "browser_bind", "browser_navigate",
+            "browser_read", "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close"]
+        let binding: Binding
+        let choice: Choice
+        let offeredCount: Int
+        let allowedCount: Int
+        let offeredBrowserMask: UInt16
+        /// tool_choice allowance only; no target/reference/permission authority.
+        let allowedBrowserMask: UInt16
+        let requiresCall: Bool
+        let parallel: Bool
+        let maxToolCalls: Int?
+
+        fileprivate init(tools: [String: OfferedTool], policy: ToolPolicy,
+                         availability: EmbeddedBrowserToolAvailability?, parallel: Bool, maxToolCalls: Int?) {
+            binding = availability.map { $0 == .bound ? .bound : .unbound } ?? .unknown
+            choice = policy.mode
+            offeredCount = tools.count
+            allowedCount = policy.allowedNames.count
+            offeredBrowserMask = tools.values.reduce(0) { $0 | $1.nativeBrowserBit }
+            allowedBrowserMask = tools.reduce(0) { mask, entry in
+                mask | (policy.allowedNames.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            requiresCall = policy.requiresCall
+            self.parallel = parallel
+            self.maxToolCalls = maxToolCalls
+        }
+
+        var logFields: String {
+            "binding=\(binding.rawValue) choice=\(choice.rawValue) offeredCount=\(offeredCount) allowedCount=\(allowedCount) offeredBrowserMask=\(offeredBrowserMask) allowedBrowserMask=\(allowedBrowserMask) requiresCall=\(requiresCall) parallel=\(parallel) maxToolCalls=\(maxToolCalls.map(String.init) ?? "unset")"
+        }
     }
 
     enum AssistantPhase: String, Equatable, Sendable {
@@ -102,6 +149,7 @@ enum WebModelResponseCodec {
         case promptTooLarge(actualBytes: Int, maximumBytes: Int)
         case emptyReply
         case malformedEnvelope
+        case unsupportedWebsiteResponse
         case unknownTool(String)
         case argumentsMustBeObject
         case customInputMustBeString
@@ -133,6 +181,7 @@ enum WebModelResponseCodec {
                 "The complete web model prompt is \(actual) bytes, exceeding the \(maximum)-byte limit. No context was truncated or submitted."
             case .emptyReply: "The website returned an empty model reply."
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
+            case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Computa cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
             case .unknownTool: "The website requested an unoffered tool. No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
@@ -175,6 +224,7 @@ enum WebModelResponseCodec {
         }
         let schemas: [[String: Any]]
         let requiresBrowserToolAvailability: Bool
+        let deferredBrowserInstructions: String?
         var toolDefinitionsChanged = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
@@ -187,6 +237,8 @@ enum WebModelResponseCodec {
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
+            deferredBrowserInstructions = ComputaModelToolCatalog.deferredBrowserToolInstructions(values,
+                availability: browserToolAvailability)
             schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
                 browserToolAvailability: browserToolAvailability)
             toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
@@ -194,6 +246,7 @@ enum WebModelResponseCodec {
         } else {
             schemas = []
             requiresBrowserToolAvailability = false
+            deferredBrowserInstructions = nil
         }
         var offered: [String: OfferedTool] = [:]
         for schema in schemas {
@@ -212,8 +265,9 @@ enum WebModelResponseCodec {
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
         let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
-        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
-            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT)
+        let runtimeInstructions = [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
+            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT),
+            deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
@@ -230,7 +284,8 @@ enum WebModelResponseCodec {
         // toward admission and the outbound ownership fingerprint.
         let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT)
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
+            currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability))
         let prompt = """
         \(runtimeInstructions)
 
@@ -251,13 +306,57 @@ enum WebModelResponseCodec {
             runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
-        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
+        return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
+                       toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
+                           parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
                        responseConfiguration: configuration, continuationRequest: data)
+    }
+
+    /// Native state and the final validated catalog establish this handoff,
+    /// never tool-output claims or browser-shaped names in retained history.
+    private static func currentBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
+                                              availability: EmbeddedBrowserToolAvailability?) -> String {
+        let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
+        if availability == .unbound {
+            let entry = allowed.filter { ["browser_tabs", "browser_open", "browser_bind"].contains($0.value.name) }
+            guard !entry.isEmpty else { return "" }
+            var lines = [
+                "COMPUTA_CURRENT_BROWSER_ENTRY:",
+                "Computa offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
+                "Return a tool_calls JSON request for the next needed operation. Computa executes it outside this website; the website itself needs no connection to the browser or target URL.",
+            ]
+            if let open = entry.filter({ $0.value.name == "browser_open" }).keys.sorted().first {
+                lines.append("For a supplied URL, request \(open) with its exact URL in the url argument, including localhost URLs. This creates and binds a task page, subject to native permissions.")
+            }
+            if let tabs = entry.filter({ $0.value.name == "browser_tabs" }).keys.sorted().first {
+                lines.append("To inspect existing user tabs, request \(tabs) with {}. An empty inventory does not establish denied browser access.")
+            }
+            if let bind = entry.filter({ $0.value.name == "browser_bind" }).keys.sorted().first {
+                lines.append("For an existing user tab, request \(bind) only with a matching tab_id actually observed in this turn. Never invent a tab ID or reuse a historical binding.")
+            }
+            lines.append("Wait for matching output and use the next request's permitted schemas. This notice proves no website outcome or existing connection; actual errors, permissions and user scope still govern.")
+            return lines.joined(separator: "\n")
+        }
+        guard availability == .bound else { return "" }
+        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else { return "" }
+        var lines = [
+            "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",
+            "This request has a native browser binding. Tool_choice permits these native browser tools: \(allowed.keys.sorted().joined(separator: ", ")).",
+            "For a fresh current-page observation, call \(read) with {}. No continuation cursor is required.",
+            "These are Computa's local relay tools; absent website-native integrations do not make them unavailable. Actual tool errors, permissions and user scope still govern.",
+        ]
+        if let wait = allowed.filter({ $0.value.name == "browser_wait" }).keys.sorted().first {
+            lines.append("\(wait) reports read-only readiness. After its matching output reports navigation ready, use \(read) for current page evidence and refs; readiness is not task success. Do not replay the preceding input.")
+        }
+        if let continuation = allowed.filter({ $0.value.name == "browser_continue" }).keys.sorted().first {
+            lines.append("\(continuation) is only for a next_cursor from a current read, not a prerequisite for \(read).")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Only actual local instruction fields can establish an already-supplied
@@ -351,14 +450,19 @@ enum WebModelResponseCodec {
         return String(decoding: result, as: UTF8.self)
     }
 
-    /// Website prose is a final message, never an action. JSON-shaped output
-    /// and code fences must satisfy the complete envelope contract; do
-    /// not extract or repair a call hidden inside surrounding prose.
+    /// ChatGPT must use the complete envelope: native website cards can mix
+    /// controls and suggestions into rendered prose. Other providers retain
+    /// ordinary-text compatibility; prose never grants an action. Never extract
+    /// or repair a call hidden inside surrounding text.
     static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
            !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+            // This previously accepted prose is not a JSON format correction:
+            // a website-native action may have happened outside host history.
+            // Do not resend its request automatically.
+            guard !request.requiresEmbeddedEnvelope else { throw Failure.unsupportedWebsiteResponse }
             return try validated(.message(text), request: request)
         }
         return try parseReply(text, request: request, requireEnvelope: true)
@@ -598,14 +702,14 @@ enum WebModelResponseCodec {
 
     private static func toolPolicy(_ raw: Any?, tools: [String: OfferedTool]) throws -> ToolPolicy {
         let allNames = Set(tools.keys)
-        guard let raw, !(raw is NSNull) else { return .init(allowedNames: allNames, requiresCall: false) }
+        guard let raw, !(raw is NSNull) else { return .init(allowedNames: allNames, requiresCall: false, mode: .auto) }
         if let mode = raw as? String {
             switch mode {
-            case "auto": return .init(allowedNames: allNames, requiresCall: false)
-            case "none": return .init(allowedNames: [], requiresCall: false)
+            case "auto": return .init(allowedNames: allNames, requiresCall: false, mode: .auto)
+            case "none": return .init(allowedNames: [], requiresCall: false, mode: .none)
             case "required":
                 guard !allNames.isEmpty else { throw Failure.invalidToolChoice }
-                return .init(allowedNames: allNames, requiresCall: true)
+                return .init(allowedNames: allNames, requiresCall: true, mode: .required)
             default: throw Failure.invalidToolChoice
             }
         }
@@ -629,9 +733,10 @@ enum WebModelResponseCodec {
                 mode = value
             } else { mode = "auto" }
             guard ["auto", "required", "none"].contains(mode) else { throw Failure.invalidToolChoice }
-            return .init(allowedNames: mode == "none" ? [] : Set(names), requiresCall: mode == "required")
+            return .init(allowedNames: mode == "none" ? [] : Set(names), requiresCall: mode == "required",
+                mode: mode == "none" ? .allowedNone : mode == "required" ? .allowedRequired : .allowedAuto)
         }
-        return .init(allowedNames: [try toolName(choice)], requiresCall: true)
+        return .init(allowedNames: [try toolName(choice)], requiresCall: true, mode: .selected)
     }
 
     /// Website adapters have no sampler or provider-side storage controls. The
@@ -752,7 +857,10 @@ enum WebModelResponseCodec {
         let readMode = type == "function" ? (schema["parameters"] as? [String: Any]).flatMap {
             ComputaModelToolCatalog.browserReadMode(name: name, namespace: namespace, schema: $0)
         } : nil
-        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom", browserReadMode: readMode)
+        let browserBit = ComputaModelToolCatalog.nativeBrowserToolName(schema, namespace: namespace)
+            .flatMap { ToolCatalogDiagnostic.browserNames.firstIndex(of: $0) }.map { UInt16(1) << $0 } ?? 0
+        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom",
+            browserReadMode: readMode, nativeBrowserBit: browserBit)
     }
 
     private static func rejectUnsupportedModalities(in input: Any?) throws {

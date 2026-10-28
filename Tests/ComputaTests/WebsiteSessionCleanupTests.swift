@@ -907,8 +907,8 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await first.loadTasks()
             try await first.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
             let deadline = ContinuousClock.now + .seconds(45)
-            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertEqual(audit.status, .waiting)
+            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .failed)
             XCTAssertEqual(audit.errors.count, 1)
             let original = try XCTUnwrap(audit.errors.first)
             let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
@@ -948,7 +948,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             do {
                 let tasks = try await reloadedRuntime.loadTasks()
                 let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
-                XCTAssertEqual(restored.status, .waiting)
+                XCTAssertEqual(restored.status, .failed)
                 XCTAssertEqual(restored.model, modelID)
                 XCTAssertEqual(restored.entries.filter { $0.kind == .user }.map(\.body), [prompt])
                 XCTAssertFalse(restored.entries.contains { $0.kind == .assistant })
@@ -996,8 +996,8 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await first.loadTasks()
             try await first.submit(prompt: prompt, toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(45)
-            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertEqual(audit.status, .waiting)
+            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .failed)
             let original = try XCTUnwrap(audit.errors.last)
             let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
             let originalError = try XCTUnwrap(originalObject["error"] as? [String: Any])
@@ -1016,7 +1016,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             do {
                 let tasks = try await reloadedRuntime.loadTasks()
                 let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
-                XCTAssertEqual(restored.status, .waiting)
+                XCTAssertEqual(restored.status, .failed)
                 XCTAssertEqual(restored.title, prompt)
                 XCTAssertEqual(restored.model, "browser/claude")
                 XCTAssertEqual(restored.entries.filter { $0.kind == .user }.map(\.body), [prompt])
@@ -1165,8 +1165,8 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await first.loadTasks()
             try await first.submit(prompt: "Synthetic failed restart fixture. Do not use tools.", toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(45)
-            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertEqual(audit.status, .waiting)
+            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .failed)
             let original = try XCTUnwrap(audit.errors.last)
             XCTAssertTrue(original.contains("malformed_website_reply")); XCTAssertTrue(original.contains("invalid_json"))
             let automatic = try XCTUnwrap(audit.receipts.first { $0.trigger == .automatic && $0.outcome == .closed })
@@ -1182,7 +1182,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
                 do {
                     let tasks = try await reloadedRuntime.loadTasks()
                     let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
-                    XCTAssertEqual(restored.status, .waiting, "An actual process restart cannot change a recorded failed turn to Completed")
+                    XCTAssertEqual(restored.status, .failed, "An actual process restart cannot change a recorded failed turn to Completed")
                     XCTAssertEqual(restored.model, "browser/claude")
                     XCTAssertTrue(restored.entries.contains { $0.kind == .user && $0.body == "Synthetic failed restart fixture. Do not use tools." })
                     XCTAssertFalse(restored.entries.contains { $0.kind == .assistant })
@@ -1229,8 +1229,8 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await runtime.loadTasks()
             try await runtime.submit(prompt: "Completion-only fixture prompt", toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(15)
-            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertEqual(audit.status, .waiting)
+            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .failed)
             XCTAssertEqual(audit.errors.count, 1)
             XCTAssertTrue(audit.errors.first?.contains("malformed_website_reply") == true)
             _ = await runtime.shutdown()
@@ -1239,7 +1239,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             do {
                 let restoredTasks = try await fresh.loadTasks()
                 let restored = try XCTUnwrap(restoredTasks.first)
-                XCTAssertEqual(restored.status, .waiting)
+                XCTAssertEqual(restored.status, .failed)
                 XCTAssertEqual(restored.entries.filter { $0.title == "Agent error" }.count, 1)
                 XCTAssertTrue(restored.entries.last?.body.contains("malformed_website_reply") == true)
                 let saved = try WebsiteTurnFailureStore(directory: root.appendingPathComponent("WebsiteTurnFailureStore-v1")).load(threadID: restored.id)
@@ -1272,8 +1272,8 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await runtime.loadTasks()
             try await runtime.submit(prompt: "Return the isolated fixture response. Do not use tools.", toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(45)
-            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertEqual(audit.status, .waiting)
+            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .failed)
             let automatic = try XCTUnwrap(audit.receipts.last(where: { $0.trigger == .automatic }))
             XCTAssertEqual(automatic.outcome, .unconfirmed); XCTAssertTrue(automatic.receiptSaved)
             XCTAssertNotNil(automatic.threadID); XCTAssertNotNil(automatic.turnID)

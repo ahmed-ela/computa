@@ -199,6 +199,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
         case usageLimited(Provider), responseFailed(Provider), responseRenderingFailed
+        case responseStreamFailed(ChatGPTResponseCompletion.StreamFailureReason)
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
@@ -210,6 +211,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited: "website_usage_limit"
             case .responseFailed: "website_response_failed"
             case .responseRenderingFailed: "website_response_rendering_failed"
+            case .responseStreamFailed: "website_response_stream_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
             case .ownershipFailure: "website_ownership_unverified"
@@ -225,6 +227,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited: "wait_for_quota_reset"
             case .responseFailed: "inspect_website"
             case .responseRenderingFailed: "inspect_website"
+            case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
             case .ownershipFailure: "inspect_website"
@@ -245,7 +248,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var errorDescription: String? {
             switch self {
             case .invalidRequest: "The built-in browser model request could not be validated."
-            case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
+            case .turnLimit: "The website turn limit was reached. Earlier actions may have completed. Review their results before continuing; no prompt or action was replayed."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
             case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
             case .cookieMaintenancePending: "ChatGPT's previous browser session is still closing. Wait briefly before starting another task."
@@ -268,6 +271,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .responseFailed(let provider): "\(provider.displayName)'s website reported that the response failed to load. Check its page in Computa's built-in browser before starting a new task. No prompt was replayed."
             case .responseRenderingFailed: "ChatGPT could not render its response. The failed response supplied no tool calls or final answer."
+            case .responseStreamFailed(let reason): reason == .emptyStream
+                ? "ChatGPT finished its response stream without an answer. No prompt was replayed and no tool calls were released."
+                : "ChatGPT reported an error and ended its response stream without an answer. No prompt was replayed and no tool calls were released."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
@@ -488,6 +494,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -589,6 +596,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setRouteDiscardDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
+        routeDiscardDiagnosticsObserverForTesting = observer
+    }
+
+    /// Exercise the ordinary full-model observation without the running-answer
+    /// optimization. This read cannot insert, submit, or select a model.
+    func inspectWithFullModelForTesting(sessionToken: String) async throws -> [String: Any] {
+        guard let session = sessions[sessionToken], session.state == "running", session.submitted else {
+            throw Failure.invalidRequest
+        }
+        _ = try await page(session, action: "inspect", allowPendingChatGPTModelVerification: false)
+        guard let state = try JSONSerialization.jsonObject(with: snapshot(session)) as? [String: Any] else {
+            throw Failure.invalidRequest
+        }
+        return state
     }
 
     func setFirstUserStructureEmissionObserverForTesting(_ observer: (@MainActor (Bool, String) -> Void)?) {
@@ -811,19 +835,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "webProviderSend":
                 guard !session.isDiscovery else { throw Failure.invalidRequest }
                 try Task.checkCancellation()
-                guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= 180_000,
+                guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= Self.maximumSubmissionUTF8Bytes,
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
                 browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
-                // These pilot limits bound duplicated website context; they
-                // are engineering guards, not measured provider context sizes.
+                // Count the full outbound bytes, including the ownership marker.
+                // These are finite engineering bounds, not provider context sizes.
                 let submissionMarker = session.submitted && session.usesSubmissionOwnership
                     ? UUID().uuidString.lowercased() : session.firstUserMarker
                 let outbound = !session.submitted || session.usesSubmissionOwnership
                     ? "\(prompt)\n\nComputa session marker: \(submissionMarker)" : prompt
                 let outboundBytes = outbound.utf8.count
-                guard outboundBytes <= 180_000 else { throw Failure.invalidRequest }
+                guard outboundBytes <= Self.maximumSubmissionUTF8Bytes else { throw Failure.invalidRequest }
                 if session.usesBoundedTurn {
                     guard session.sequence < Self.maximumTurnSubmissions,
                           outboundBytes <= Self.maximumTurnUTF8Bytes - session.submittedUTF8Count else {
@@ -1753,6 +1777,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             ownerToken: session.token, generation: generation, sequence: session.sequence)
     }
 
+    private func terminalFailureReceipt(_ session: Session) -> ChatGPTResponseCompletion.FailureReceipt? {
+        // A candidate can request fresh proof while the post-Send body is still
+        // pending. Only the post-inspection branch below can accept a failure.
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              session.acknowledgedSendSequence == session.sequence, session.usesSubmissionOwnership,
+              session.currentSubmission?.sequence == session.sequence,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let generation = session.documentGeneration else { return nil }
+        return browser.chatGPTResponseFailureReceipt(tabID: session.tabID, view: session.view,
+            ownerToken: session.token, generation: generation, sequence: session.sequence)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -1773,6 +1809,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let observed: [String: Any]
         let readTimeoutCount = session.readTimeoutCount
         let terminalCandidate = terminalCompletionReceipt(session)
+        let failureCandidate = terminalFailureReceipt(session)
         let inspectsQuietCompletion = canInspectQuietChatGPTCompletion(session)
         let quietCandidateResponse = inspectsQuietCompletion ? session.response : nil
         let quietCandidateResponseCount = inspectsQuietCompletion ? session.observedResponseCount : nil
@@ -1780,7 +1817,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // The adapter's own waits remain bounded; allow queue time without
         // extending the inference's preparation or response deadline.
         do {
-            if inspectsQuietCompletion {
+            if failureCandidate != nil {
+                // A terminal stream observation can only abort after the same
+                // fresh model/product/submission proof used for ordinary output.
+                observed = try await page(session, action: "inspect",
+                    recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                    allowPendingChatGPTModelVerification: false,
+                    maximumWait: min(inspectionTimeout, deadline - .now))
+            } else if inspectsQuietCompletion {
                 session.responseProfile?.mark(.quietDeadlineReady)
                 session.responseProfile?.mark(.finalFullInspectStart)
                 defer { session.responseProfile?.mark(.finalFullInspectEnd) }
@@ -1933,6 +1977,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.completionCandidate = false
             guard observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
             guard observed["interrupted"] as? Bool != true else { throw Failure.responseInterrupted }
+            if let failureCandidate, failureCandidate == terminalFailureReceipt(session),
+               session.currentSubmissionVerified, !session.pendingSubmission,
+               session.confirmedUsers == session.sequence,
+               observed["modelVerificationPending"] == nil, observed["busy"] as? Bool == false,
+               count(observed, "userCount") == session.sequence,
+               (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
+               (observed["text"] as? String)?.isEmpty == true,
+               (try? validatedModelEvidence(observed, session: session)) != nil {
+                throw Failure.responseStreamFailed(failureCandidate.reason)
+            }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
                 guard session.submitted, session.firstUserFingerprint != nil, !session.pendingSubmission else {
                     throw Failure.ownershipFailure(.promotionFirstUser)
@@ -2541,9 +2595,85 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
         "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
-    private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "group_overflow", "work_overflow",
+    private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "mutation_scan_overflow",
+        "mutation_uninspectable", "product_history_ambiguous", "group_overflow", "work_overflow",
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
+    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]
+    private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
+        "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
+        "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
+    private static let firstUserDiagnosticScopes: Set<String> = ["marker_validation", "digest", "model_precheck", "binding", "action_final_guard", "first_insert", "first_submit", "first_missing"]
+    private static let firstUserDiagnosticReasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
+    private static let recoveryLifecycleFlags = ["present", "verified", "initialRoute", "remount", "provisional", "urlWitness", "urlDiscard",
+        "pendingMatches", "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"]
+    private static let recoveryLifecycleLabels: [String: Set<String>] = [
+        "path": ["spent_recovery", "initial_claim", "expansion_rejected", "hash_snapshot", "action_snapshot", "other"],
+        "outcome": ["none", "expanded", "other"],
+        "finalizationStage": ["not_reached", "entered", "returned", "threw"],
+        "finalizationError": ["not_returned", "none", "document_changed", "first_user_message", "submission_message", "other"],
+        "recordPhase": ["none", "prepared", "send_claimed", "verified", "other"]]
+
+    static func sanitizedRecoveryLifecycle(_ raw: Any?) -> [String: Any]? {
+        guard let value = raw as? [String: Any] else { return nil }
+        let ordinaryKeys = Set(recoveryLifecycleFlags + Array(recoveryLifecycleLabels.keys))
+        let routeKeys: Set<String> = ["boundRouteStage", "boundRouteEdges", "boundRoutePending"]
+        guard Set(value.keys) == ordinaryKeys || Set(value.keys) == ordinaryKeys.union(routeKeys) else { return nil }
+        var safe: [String: Any] = [:]
+        if value["boundRouteStage"] != nil {
+            guard let stage = value["boundRouteStage"] as? String,
+                  ["body_hash", "model_read", "replacement_hash", "other"].contains(stage),
+                  let count = value["boundRouteEdges"] as? NSNumber, CFGetTypeID(count) != CFBooleanGetTypeID(),
+                  [0.0, 1.0, 2.0].contains(count.doubleValue),
+                  let pending = firstUserDiagnosticBool(value["boundRoutePending"]) else { return nil }
+            safe["boundRouteStage"] = stage; safe["boundRouteEdges"] = count.intValue; safe["boundRoutePending"] = pending
+        }
+        for key in recoveryLifecycleFlags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, labels) in recoveryLifecycleLabels {
+            guard let label = value[key] as? String, labels.contains(label) else { return nil }
+            safe[key] = label
+        }
+        return safe
+    }
+
+    // A certified route transition discards the adapter result before ordinary
+    // validation. Preserve only finite diagnostic categories from that result;
+    // these records never participate in route or response acceptance.
+    static func routeDiscardDiagnosticRecords(_ bytes: Data, provider: Provider) -> [String] {
+        guard provider == .chatgpt, bytes.count <= 1_048_576,
+              let value = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return [] }
+        let errors: Set<String> = ["document_changed", "conversation_changed", "first_user_observation_replaced",
+            "product_mode_unverified", "temporary_mode_unverified", "model_mismatch"]
+        let details: Set<String> = ["model_read_context", "first_user_message", "submission_message", "response_changed"]
+        let error = value["error"] as? String
+        let detail = value["detail"] as? String
+        var records: [[String: Any]] = [["kind": "route_discard_result", "provider": provider.rawValue,
+            "error": error.map { errors.contains($0) ? $0 : "other" } ?? (value["error"] == nil ? "none" : "other"),
+            "detail": detail.map { details.contains($0) ? $0 : "other" } ?? (value["detail"] == nil ? "none" : "other")]]
+        if var recovery = sanitizedRecoveryLifecycle(value["recoveryLifecycleDiagnostic"]) {
+            recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
+            records.append(recovery)
+        }
+        if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
+           let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+           diagnostic["kind"] as? String == "first_user_structure", diagnostic["provider"] as? String == provider.rawValue,
+           let reason = diagnostic["reason"] as? String, firstUserDiagnosticReasons.contains(reason),
+           let scope = diagnostic["scope"] as? String, firstUserDiagnosticScopes.contains(scope) {
+            var rejection: [String: Any] = ["kind": "route_discard_first_user", "provider": provider.rawValue,
+                                            "reason": reason, "scope": scope]
+            if let recovery = sanitizedRecoveryLifecycle(diagnostic["recoveryLifecycle"]) {
+                rejection["recoveryPath"] = recovery["path"]
+            }
+            records.append(rejection)
+        }
+        return records.compactMap {
+            guard let data = try? JSONSerialization.data(withJSONObject: $0, options: .sortedKeys), data.count <= 960 else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+    }
     private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
@@ -2572,6 +2702,55 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
+    }
+
+    /// The first invalidating mutation batch's examined prefix, not a full DOM
+    /// history or ownership proof. No page-authored names or values are logged.
+    private static func sanitizedProductMutationHistogram(_ raw: Any) -> [String: Any]? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["version", "phase", "capped", "types", "scopes", "composerAttributes"],
+              ComputerToolArgumentContract.exactInt64(value["version"]) == 1,
+              let phase = value["phase"] as? String,
+              ["none", "prepared", "send_claimed", "verified", "unknown"].contains(phase),
+              let capped = firstUserDiagnosticBool(value["capped"]) else { return nil }
+        var safe: [String: Any] = ["version": 1, "phase": phase, "capped": capped]
+        let buckets = [
+            "types": ["attributes", "childList", "characterData", "other"],
+            "scopes": ["trackedProduct", "message", "composer", "other"],
+            "composerAttributes": ["class", "style", "other"],
+        ]
+        for (key, names) in buckets {
+            guard let counts = value[key] as? [String: Any], Set(counts.keys) == Set(names) else { return nil }
+            var projected: [String: Int64] = [:]
+            for name in names {
+                guard let count = ComputerToolArgumentContract.exactInt64(counts[name]), (0...1_000).contains(count) else { return nil }
+                projected[name] = count
+            }
+            safe[key] = projected
+        }
+        return safe
+    }
+
+    /// Shared projection for product-mode and first-user failure diagnostics.
+    /// Invalid diagnostics suppress logging; they never change admission.
+    private static func sanitizedProductProofDiagnostic(_ value: [String: Any]) -> [String: Any]? {
+        var safe: [String: Any] = [:]
+        if let rawFailure = value["productProofFailure"] {
+            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
+            safe["productProofFailure"] = failure
+        }
+        for key in productMutationCounts {
+            if let rawCount = value[key] {
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        if let rawHistogram = value["productMutationHistogram"] {
+            guard safe["productProofFailure"] != nil, productMutationCounts.allSatisfy({ safe[$0] != nil }),
+                  let histogram = sanitizedProductMutationHistogram(rawHistogram) else { return nil }
+            safe["productMutationHistogram"] = histogram
+        }
+        return safe
     }
 
     /// Finite rendering measurements only. These fields never grant ownership.
@@ -2648,14 +2827,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["action"] = action
         }
         if let scope = value["scope"] {
-            let scopes: Set<String> = ["marker_validation", "digest", "model_precheck", "binding", "action_final_guard", "first_insert", "first_submit", "first_missing"]
-            guard let scope = scope as? String, scopes.contains(scope) else { return nil }
+            guard let scope = scope as? String, firstUserDiagnosticScopes.contains(scope) else { return nil }
             safe["scope"] = scope
         }
         if let rawReason = value["reason"] {
-            let reasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
             guard let reason = rawReason as? String,
-                  reasons.contains(reason) || provider == .gemini && reason == "submission_text" else { return nil }
+                  firstUserDiagnosticReasons.contains(reason) || provider == .gemini && reason == "submission_text" else { return nil }
             safe["reason"] = reason
         }
         if let rawScope = value["descendantScope"] {
@@ -2668,12 +2845,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let projected = sanitizedQueryTemplateDiagnostic(query) else { return nil }
             safe["queryTemplate"] = projected
         }
-        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
+        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion",
+                    "allowBoundFirstUserExpansion", "allowProvisionalFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                    "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
                 safe[key] = flag
             }
+        }
+        if firstUserInitialExpansionFlags.contains(where: { value[$0] != nil }) {
+            guard provider == .chatgpt else { return nil }
+            for key in firstUserInitialExpansionFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+                safe[key] = flag
+            }
+        }
+        if let lifecycle = value["recoveryLifecycle"] {
+            guard provider == .chatgpt, let projected = sanitizedRecoveryLifecycle(lifecycle) else { return nil }
+            safe["recoveryLifecycle"] = projected
         }
         if let rawSelection = value["bodySelection"] {
             let selections: Set<String> = ["markdown_user_message", "whitespace_pre_wrap", "author_user", "root_fallback", "none", "unmatched"]
@@ -2707,16 +2897,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let error = rawError as? String, errors.contains(error) else { return nil }
             safe["expansionModelError"] = error
         }
-        if let rawFailure = value["productProofFailure"] {
-            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
-            safe["productProofFailure"] = failure
-        }
-        for key in productMutationCounts {
-            if let rawCount = value[key] {
-                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
-                safe[key] = count
-            }
-        }
+        guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
+        safe.merge(productDiagnostic) { _, projected in projected }
         for key in firstUserBodyLengths + firstUserBodyCounts {
             if let rawCount = value[key] {
                 let limit: Int64 = firstUserBodyLengths.contains(key) ? 220_001 : 1_000
@@ -2973,7 +3155,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Product-control provenance has its own bounded record so diagnosing
         // message rendering cannot push the body observation past the log cap.
         var productObservation: [String: Any] = [:]
-        for key in ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"] {
+        for key in productProofDiagnosticKeys {
             if let value = summary.removeValue(forKey: key) { productObservation[key] = value }
         }
         if !productObservation.isEmpty {
@@ -2988,18 +3170,37 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             bodyObservation["kind"] = "first_user_body"; bodyObservation["provider"] = provider.rawValue
             for key in ["action", "scope"] { bodyObservation[key] = summary[key] }
         }
+        // Retain the original claim's finite facts separately from a later
+        // generic continuation rejection. No text, route or proof is exported.
+        var initialExpansion: [String: Any] = [:]
+        for key in firstUserInitialExpansionFlags {
+            if let value = summary.removeValue(forKey: key) { initialExpansion[key] = value }
+        }
+        if !initialExpansion.isEmpty {
+            initialExpansion["kind"] = "first_user_initial_expansion"; initialExpansion["provider"] = provider.rawValue
+            for key in ["action", "scope"] { initialExpansion[key] = summary[key] }
+        }
+        var recovery = summary.removeValue(forKey: "recoveryLifecycle") as? [String: Any] ?? [:]
+        if !recovery.isEmpty {
+            recovery["kind"] = "first_user_recovery_lifecycle"; recovery["provider"] = provider.rawValue
+            for key in ["action", "scope"] { recovery[key] = summary[key] }
+        }
         // Keep optional context separate if the full summary exceeds the same
         // existing log cap. Adding diagnostics must not discard the branch.
         var context: [String: Any] = [:]
         if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
             context = ["kind": "first_user_context", "provider": provider.rawValue]
-            for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
+            for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion",
+                        "allowBoundFirstUserExpansion", "allowProvisionalFirstUserExpansion", "boundRootSame", "boundBodySame", "boundNativePinMatches",
+                        "boundOldRootConnected", "boundOldBodyConnected", "privatePinPresent", "expectedFingerprintPresent",
                         "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
                 if let value = summary.removeValue(forKey: key) { context[key] = value }
             }
         }
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
+            + (initialExpansion.isEmpty ? [] : [initialExpansion])
+            + (recovery.isEmpty ? [] : [recovery])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
             + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
             + (queryObservation.isEmpty ? [] : [queryObservation]) + children {
@@ -3019,6 +3220,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_body\"") {
                 event = "firstUserBody"
+            }
+            else if safe.contains("\"kind\":\"first_user_initial_expansion\"") {
+                event = "firstUserInitialExpansion"
+            }
+            else if safe.contains("\"kind\":\"first_user_recovery_lifecycle\"") {
+                event = "firstUserRecoveryLifecycle"
             }
             else if safe.contains("\"kind\":\"first_user_text\"") {
                 event = "firstUserText"
@@ -3570,6 +3777,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
+                      allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       preferQuietChatGPTCompletion: Bool = false,
@@ -3646,10 +3854,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.sequence == 1 && session.confirmedUsers == 0 && session.pendingSubmission
             && session.temporary && session.firstUserFingerprint == nil
             && session.modelSelectionVerified && session.modelChoice != nil
+        // JavaScript may have privately verified a first message before a
+        // route refresh lets native adopt it. A remount recovery still requires
+        // this already-dispatched native outbound binding, never a new Send.
+        let allowProvisionalFirstUserExpansion = allowFirstUserExpansion && !session.currentSubmissionVerified
+            && session.currentSubmission.map { $0.sequence == 1 && $0.outboundFingerprint.utf8.count == 64 } == true
+        // A verified first message can collapse again while its reply is still
+        // running. This separate grant permits one local display recovery; JS
+        // must retain physical-node lineage and re-prove the complete digest.
+        // Cleanup and other actions never inherit this inspection capability.
+        let allowBoundFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
+            && !session.isDiscovery && session.state == "running" && session.submitted
+            && session.sequence == 1 && session.confirmedUsers == 1 && !session.pendingSubmission
+            && session.currentSubmissionVerified && session.temporary && session.firstUserFingerprint != nil
+            && session.currentSubmission.map { $0.sequence == 1 && $0.outboundFingerprint == session.firstUserFingerprint } == true
+            && session.modelSelectionVerified && session.modelChoice != nil
         var routeContinuation = firstUserExpansionRouteContinuation
         var routeRefreshAvailable = refreshChangedRoute
         if let preceding = routeContinuation.last {
-            guard allowFirstUserExpansion else { throw Failure.ownershipFailure(.routeBefore) }
+            guard allowFirstUserExpansion || allowBoundFirstUserExpansion else { throw Failure.ownershipFailure(.routeBefore) }
             if preceding.toURL != url {
                 // The allowed public promotion can arrive after native accepts
                 // the local edge but before this recursive inspect starts.
@@ -3671,6 +3894,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowFirstUserBinding": action == "inspect" && session.sequence == 1
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
+            "allowBoundFirstUserExpansion": allowBoundFirstUserExpansion,
+            "allowProvisionalFirstUserExpansion": allowProvisionalFirstUserExpansion,
+            // This is the accepted replacement-discard continuation, never a
+            // general retry or another permission to click a display control.
+            "allowBoundFirstUserRemountRefresh": allowBoundFirstUserExpansion
+                && allowBoundFirstUserRemountRefresh && !refreshReadOnlyObservation,
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
@@ -3764,7 +3993,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 input["submissionSequence"] = binding.sequence
             }
         }
-        if allowFirstUserExpansion, !routeContinuation.isEmpty {
+        if allowFirstUserExpansion || allowBoundFirstUserExpansion, !routeContinuation.isEmpty {
             // A bounded contiguous chain survives an unconsumed intermediate
             // read. Cleanup and unrelated read refreshes receive no receipts.
             input["firstUserExpansionRouteContinuation"] = routeContinuation.map {
@@ -3772,7 +4001,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         if let choice = session.modelChoice {
-            if allowFirstUserExpansion {
+            if allowFirstUserExpansion || allowBoundFirstUserExpansion {
                 input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
             }
             if action == "selectModel" { input["modelChoice"] = ["key": choice.key, "label": choice.label] }
@@ -3928,7 +4157,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // predicates above reject another local or public conversation.
                 let awaitingLocalPromotion = firstConversation && current == nil
                     && provider.isLocalConversation(nextConversation)
-                let nextContinuation = allowFirstUserExpansion
+                let nextContinuation = allowFirstUserExpansion || allowBoundFirstUserExpansion
                     ? try Self.appendingFirstUserExpansionRoute(routeContinuation, from: url, to: currentURL) : []
                 if provider == .chatgpt, !nextContinuation.isEmpty {
                     for edge in nextContinuation {
@@ -3939,9 +4168,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 #if DEBUG
                 if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
                 #endif
+                // A completed replacement certificate may arrive just before
+                // this same native-certified route edge. Preserve its existing
+                // one-read handoff while discarding every result field. The
+                // fresh read must still prove the exact replacement in full.
+                let crossedRead = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+                let crossedBoundReplacement = provider == .chatgpt && allowBoundFirstUserExpansion
+                    && refreshReadOnlyObservation
+                    && crossedRead?["error"] as? String == "first_user_observation_replaced"
+                    && crossedRead?["detail"] as? String == "readonly_model_observation"
+                let routeDiagnostics = Self.routeDiscardDiagnosticRecords(bytes, provider: provider)
+                #if DEBUG
+                routeDiscardDiagnosticsObserverForTesting?(routeDiagnostics)
+                #endif
+                for diagnostic in routeDiagnostics {
+                    Self.inspectionLog.info("routeDiscardDiagnostic provider=\(provider.rawValue, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
+                }
                 return try await page(session, action: pendingSubmissionProductRecheck ? "verifyProductMode" : "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                                      refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                      refreshReadOnlyObservation: refreshReadOnlyObservation && !crossedBoundReplacement,
+                                      allowBoundFirstUserRemountRefresh: allowBoundFirstUserRemountRefresh || crossedBoundReplacement,
                                       allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
@@ -4063,6 +4309,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // discard after checking both pinned hashes and the exact
                 // marker on the disconnected node's replacement. Admit nothing
                 // from that read; use the same one-inspect budget as an append.
+                // Keep the separately bounded, unconsumed first-route budget;
+                // a replacement handoff does not consume a navigation edge.
                 guard refreshReadOnlyObservation, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
                       observed["detail"] as? String == "readonly_model_observation",
                       session.submitted, session.firstUserFingerprint != nil else {
@@ -4070,10 +4318,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
-                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                                      refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      refreshChangedRoute: provider == .chatgpt && allowBoundFirstUserExpansion && routeRefreshAvailable, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
+                                      refreshReadOnlyObservation: false,
+                                      allowBoundFirstUserRemountRefresh: provider == .chatgpt && allowBoundFirstUserExpansion,
+                                      allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
+                                      firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
@@ -4545,7 +4796,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
         let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
                                      "proofPresent", "proofInvalidated", "chatClickClaimed"]
-        let optional: Set<String> = ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"]
+        let optional = Set(productProofDiagnosticKeys)
         guard let value = raw as? [String: Any],
               required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
@@ -4560,16 +4811,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
             guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
         }
-        if let rawFailure = value["productProofFailure"] {
-            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
-            safe["productProofFailure"] = failure
-        }
-        for key in productMutationCounts {
-            if let rawCount = value[key] {
-                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
-                safe[key] = count
-            }
-        }
+        guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
+        safe.merge(productDiagnostic) { _, projected in projected }
         for key in ["chat", "work"] {
             if value[key] is NSNull { safe[key] = NSNull(); continue }
             guard let control = value[key] as? [String: Any],
@@ -4782,7 +5025,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     static let turnContinuationCapability = "per_submission_ownership_v1"
     static let maximumTurnSubmissions = 16
-    static let maximumTurnUTF8Bytes = 1_048_576
+    static let maximumSubmissionUTF8Bytes = 180_000
+    // Physical retained sessions count marker-inclusive outbound bytes. The
+    // server separately bounds canonical prompt bytes across replaced pages.
+    static let maximumTurnUTF8Bytes = maximumTurnSubmissions * maximumSubmissionUTF8Bytes
 
     nonisolated static func promptFingerprint(_ prompt: String) -> String {
         SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()

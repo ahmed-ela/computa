@@ -101,7 +101,7 @@ final class AppStateStreamingTests: XCTestCase {
 
     @MainActor
     func testTerminalStatusesRemoveUnfinishedOutputWithoutTimingIt() async {
-        for terminalStatus in [TaskStatus.waiting, .completed, .draft] {
+        for terminalStatus in [TaskStatus.waiting, .failed, .completed, .draft] {
             var task = makeTask(id: "first")
             task.status = .draft
             let state = AppState(

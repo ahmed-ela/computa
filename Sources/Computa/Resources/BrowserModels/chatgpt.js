@@ -3546,13 +3546,31 @@ function chatGPTProductModeDiagnostic(state) {
 }
 function chatGPTProductProofFailureDiagnostic() {
   const proof = globalThis.__computaChatProductMode;
-  const reasons = ['work_selected', 'mutation_overflow', 'group_overflow', 'work_overflow', 'contradictory_controls',
+  const reasons = ['work_selected', 'mutation_overflow', 'mutation_scan_overflow', 'mutation_uninspectable', 'product_history_ambiguous', 'group_overflow', 'work_overflow', 'contradictory_controls',
     'owner', 'document', 'frame', 'origin', 'route', 'not_ready', 'temporary_unclaimed'];
   if (!proof?.invalidated || !reasons.includes(proof.invalidationReason)) return {};
   const diagnostic = { productProofFailure: proof.invalidationReason };
   for (const key of ['productMutationRelevantCount', 'productMutationIgnoredCount'])
     if (Number.isInteger(proof[key]) && proof[key] >= 0) diagnostic[key] = Math.min(proof[key], 1_000);
+  const histogram = chatGPTProductMutationHistogramDiagnostic(proof.productMutationHistogram);
+  if (histogram) diagnostic.productMutationHistogram = histogram;
   return diagnostic;
+}
+function chatGPTProductMutationHistogramDiagnostic(value) {
+  try {
+    const keysMatch = (object, keys) => object && typeof object === 'object' && !Array.isArray(object)
+      && Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
+    if (!keysMatch(value, ['version', 'phase', 'capped', 'types', 'scopes', 'composerAttributes']) || value.version !== 1
+      || !['none', 'prepared', 'send_claimed', 'verified', 'unknown'].includes(value.phase) || typeof value.capped !== 'boolean') return null;
+    const result = { version: 1, phase: value.phase, capped: value.capped };
+    for (const [name, keys] of [['types', ['attributes', 'childList', 'characterData', 'other']],
+      ['scopes', ['trackedProduct', 'message', 'composer', 'other']], ['composerAttributes', ['class', 'style', 'other']]]) {
+      const bucket = value[name];
+      if (!keysMatch(bucket, keys) || !keys.every(key => Number.isInteger(bucket[key]) && bucket[key] >= 0 && bucket[key] <= 1_000)) return null;
+      result[name] = Object.fromEntries(keys.map(key => [key, bucket[key]]));
+    }
+    return result;
+  } catch { return null; }
 }
 function chatGPTInvalidateProductProof(proof, reason, counts = null) {
   if (!proof.invalidated) {
@@ -3560,6 +3578,7 @@ function chatGPTInvalidateProductProof(proof, reason, counts = null) {
     if (counts) {
       proof.productMutationRelevantCount = Math.min(counts.relevant, 1_000);
       proof.productMutationIgnoredCount = Math.min(counts.ignored, 1_000);
+      if (counts.histogram) proof.productMutationHistogram = counts.histogram;
     }
   }
   proof.invalidated = true;
@@ -3578,6 +3597,95 @@ function chatGPTControlExposed(node) {
 function chatGPTObserveProductMutations(proof, state, records) {
   if (proof.invalidated) return;
   const groups = proof.groups, works = proof.works;
+  const limits = { relevant: 4_096, records: 8_192, visits: 16_384, children: 4_096, depth: 128 };
+  let analysisFailure = null, visits = 0;
+  const unavailable = reason => { if (!analysisFailure) analysisFailure = reason; return []; };
+  const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
+  const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
+  const ancestry = new Map(), containments = new Map();
+  const contains = (ancestor, node) => {
+    if (!ancestor || !node) return false;
+    const cached = containments.get(ancestor);
+    if (cached?.has(node)) return cached.get(node);
+    if (!charge()) return false;
+    if (!ancestry.has(node)) {
+      const chain = new Set(); let current = node;
+      for (; current && chain.size <= limits.depth; current = current.parentElement) {
+        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable'); return false; }
+        chain.add(current);
+      }
+      if (current) { unavailable('mutation_scan_overflow'); return false; }
+      ancestry.set(node, chain);
+    }
+    const result = ancestry.get(node).has(ancestor), values = cached || new Map();
+    values.set(node, result); containments.set(ancestor, values); return result;
+  };
+  // Inspect actual nodes before considering semantic candidates. No selector
+  // result or added/removed list may silently discard an unexamined tail.
+  const elements = root => {
+    if (subtrees.has(root)) return subtrees.get(root);
+    const result = [], stack = [{ node: root, depth: 0 }], seen = new Set();
+    try {
+      while (stack.length) {
+        const { node, depth } = stack.pop();
+        if (!charge()) return [];
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable');
+        if (depth > limits.depth) return unavailable('mutation_scan_overflow');
+        seen.add(node);
+        if (node.nodeType === 1) result.push(node);
+        if (![1, 9, 11].includes(node.nodeType)) continue;
+        const children = node.childNodes;
+        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable');
+        if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
+          return unavailable('mutation_scan_overflow');
+        for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
+      }
+      subtrees.set(root, result); return result;
+    } catch { return unavailable('mutation_uninspectable'); }
+  };
+  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
+    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
+  const candidates = (root, kind) => {
+    const cached = candidateLists.get(root) || {};
+    if (cached[kind]) return cached[kind];
+    const result = [];
+    for (const node of elements(root)) {
+      if (!charge()) return [];
+      if (kind === 'controls' ? control(node) : node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null)
+        result.push(node);
+    }
+    cached[kind] = result; candidateLists.set(root, cached); return result;
+  };
+  let labelInventory = null;
+  const labelData = () => {
+    if (labelInventory) return labelInventory;
+    const ids = new Map(), references = new Set(), referrers = new Map();
+    for (const node of elements(document.documentElement)) {
+      if (!charge()) break;
+      const id = node.getAttribute('id');
+      if (id) { const matches = ids.get(id) || []; matches.push(node); ids.set(id, matches); }
+      const value = node.getAttribute('aria-labelledby');
+      if (value != null) {
+        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable'); break; }
+        for (const token of value.trim().split(/\s+/)) if (token) {
+          references.add(token); const referring = referrers.get(token) || new Set(); referring.add(node); referrers.set(token, referring);
+        }
+      }
+    }
+    labelInventory = { ids, references, referrers }; return labelInventory;
+  };
+  const labelledGroup = node => {
+    if (!node || node.nodeType !== 1) return false;
+    if (groupNames.has(node)) return groupNames.get(node);
+    let named = false;
+    const label = node.getAttribute('aria-label'), id = node.getAttribute('aria-labelledby');
+    if (label != null) named = websiteModelNormalize(label) === 'Composer mode';
+    else if (typeof id === 'string' && id && id.length <= 256 && !/\s/.test(id)) {
+      const labels = labelData().ids.get(id) || [];
+      named = labels.length === 1 && state.physical(labels[0]) && websiteModelNormalize(labels[0].textContent) === 'Composer mode';
+    }
+    groupNames.set(node, named); return named;
+  };
   // Rendering a conversation is not a product-mode event. Tracked product
   // nodes take precedence even after moving into a message or detaching.
   const messageBoundary = '[data-message-author-role="user"], [data-message-author-role="assistant"], '
@@ -3585,11 +3693,10 @@ function chatGPTObserveProductMutations(proof, state, records) {
     + 'article[data-turn="user"], article[data-turn="assistant"], [data-user-message-bubble]';
   const tracked = [...groups, ...works];
   const touchesTracked = node => !!node && tracked.some(control => control === node
-    || control.contains(node) || node.contains?.(control));
+    || contains(control, node) || contains(node, control));
   const containsGroup = node => {
     if (node?.nodeType !== 1) return false;
-    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')];
-    return candidates.length > 128 || candidates.some(candidate => state.labelledGroup(candidate));
+    return candidates(node, 'labels').some(labelledGroup) || !!analysisFailure;
   };
   const messageOnly = record => {
     // State transitions stay relevant until structural records establish which
@@ -3598,58 +3705,230 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const element = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
     if (!element?.closest(messageBoundary) || touchesTracked(record.target)) return false;
     // A new/moved product group in a message is still relevant to provenance.
-    for (let node = element; node; node = node.parentElement) if (state.labelledGroup(node)) return false;
+    for (let node = element; node; node = node.parentElement) {
+      if (!charge() || labelledGroup(node)) return false;
+    }
     if (record.type === 'attributes' && record.attributeName === 'aria-label' && record.oldValue === 'Composer mode') return false;
     return [...(record.addedNodes || []), ...(record.removedNodes || [])]
       .every(node => !touchesTracked(node) && !containsGroup(node));
+  };
+  // Only the exact current editor can qualify for this presentation exclusion.
+  // It does not extend to ancestors, arbitrary page nodes or product controls.
+  const composerCandidates = elements(document.documentElement).filter(node => {
+    if (!charge()) return false;
+    const editable = node.getAttribute('contenteditable') === 'true', textarea = node.tagName?.toLowerCase() === 'textarea';
+    return node.getAttribute('id') === 'prompt-textarea' && (editable || textarea)
+      || editable && (node.parentElement?.closest('#prompt-textarea') || node.getAttribute('aria-label') === 'Ask ChatGPT')
+      || textarea && node.getAttribute('data-testid') === 'prompt-textarea';
+  });
+  const composer = composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
+    && composerCandidates[0].isConnected ? composerCandidates[0] : null;
+  const productNodes = [...tracked, ...(state.groups || []), state.work].filter(Boolean);
+  const intersects = (left, right) => !!left && !!right && (left === right || contains(left, right) || contains(right, left));
+  const emptyNodes = value => value == null || Number.isInteger(value.length) && value.length === 0;
+  const observedAttributes = new Set(globalThis.__computaModelSignal?.attributeNames || []);
+  const knownRecord = record => !!record && !!record.target
+    && (record.type === 'attributes' && record.target.nodeType === 1 && typeof record.attributeName === 'string'
+        && observedAttributes.has(record.attributeName)
+        && emptyNodes(record.addedNodes) && emptyNodes(record.removedNodes)
+      || record.type === 'characterData' && record.target.nodeType === 3
+      || record.type === 'childList' && record.target.nodeType === 1
+        && record.addedNodes != null && record.removedNodes != null
+        && Number.isInteger(record.addedNodes.length) && record.addedNodes.length >= 0
+        && Number.isInteger(record.removedNodes.length) && record.removedNodes.length >= 0
+        && typeof record.addedNodes[Symbol.iterator] === 'function' && typeof record.removedNodes[Symbol.iterator] === 'function');
+  const presentationAttribute = record => knownRecord(record) && record.type === 'attributes'
+    && record.target === composer && ['class', 'style'].includes(record.attributeName);
+  const editorCanAffectReferencedLabel = () => {
+    // An outside mode group may obtain its label through an editor-related ID.
+    // Class/style can change that label's physical visibility without moving
+    // either node. Bounded ID intersections suffice; no label text is read.
+    const descendants = elements(composer).filter(node => node !== composer && node.getAttribute('id') != null);
+    const references = elements(document.documentElement).filter(node => node.getAttribute('aria-labelledby') != null);
+    if (descendants.length > 128 || references.length > 128) return true;
+    const sources = [composer, ...descendants];
+    let ancestor = composer.parentElement, depth = 0;
+    for (; ancestor && depth < 64; ancestor = ancestor.parentElement, depth++) sources.push(ancestor);
+    if (ancestor) return true;
+    const ids = new Set(sources.map(node => node.getAttribute('id')).filter(id => typeof id === 'string' && id));
+    for (const node of references) {
+      const value = node.getAttribute('aria-labelledby');
+      if (typeof value !== 'string' || value.length > 1_024) return true;
+      const tokens = value.trim().split(/\s+/);
+      if (tokens.length > 32 || tokens.some(id => ids.has(id))) return true;
+    }
+    return false;
+  };
+  const presentationBatchSafe = () => {
+    if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
+      || productNodes.some(node => intersects(node, composer)) || containsGroup(composer)
+      || candidates(composer, 'controls').length
+      || editorCanAffectReferencedLabel()) return false;
+    for (const record of records) {
+      if (!knownRecord(record)) return false;
+      // Labels can be referenced from elsewhere. Their intermediate values and
+      // structural/text replacements retain the existing conservative budget,
+      // including replacements inside a message that labels an outside group.
+      if (record.type === 'childList' || record.type === 'characterData' || record.type === 'attributes'
+        && ['aria-label', 'aria-labelledby', 'id', 'role'].includes(record.attributeName)) return false;
+      if (presentationAttribute(record) || messageOnly(record)) continue;
+      if (record.type === 'attributes' && intersects(record.target, composer)) return false;
+    }
+    return true;
+  };
+  const ignorePresentation = presentationBatchSafe();
+  // Metadata only, frozen at first invalidation. The phase comes from the
+  // current private submission record, never the observer's older invocation.
+  const submission = globalThis.__computaChatSubmissionState;
+  const submissionRecord = submission?.pending || submission?.lastVerified;
+  const phase = !submission ? 'none' : submission.document !== document || submission.owner !== proof.owner || submission.revoked
+    ? 'unknown' : !submissionRecord ? 'none' : ['prepared', 'send_claimed', 'verified'].includes(submissionRecord.phase)
+      ? submissionRecord.phase : 'unknown';
+  const histogram = { version: 1, phase, capped: false,
+    types: { attributes: 0, childList: 0, characterData: 0, other: 0 },
+    scopes: { trackedProduct: 0, message: 0, composer: 0, other: 0 },
+    composerAttributes: { class: 0, style: 0, other: 0 } };
+  const increment = (bucket, key) => { if (bucket[key] < 1_000) bucket[key]++; else histogram.capped = true; };
+  const countRecord = record => {
+    const type = ['attributes', 'childList', 'characterData'].includes(record?.type) ? record.type : 'other';
+    const target = record?.target, element = target?.nodeType === 1 ? target : target?.parentElement;
+    const scope = productNodes.some(node => intersects(node, target)) ? 'trackedProduct'
+      : element?.closest?.(messageBoundary) ? 'message' : element === composer && composer ? 'composer' : 'other';
+    increment(histogram.types, type); increment(histogram.scopes, scope);
+    if (scope === 'composer' && type === 'attributes')
+      increment(histogram.composerAttributes, ['class', 'style'].includes(record.attributeName) ? record.attributeName : 'other');
   };
   const relevant = [];
   let ignored = 0;
   // Counts describe the examined prefix, stopping at the first over-budget
   // relevant record. Unrelated message rendering does not consume that budget.
   for (const record of records) {
-    if (messageOnly(record)) ignored++;
+    countRecord(record);
+    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable'); break; }
+    if (record.type === 'childList' && record.addedNodes.length + record.removedNodes.length > limits.children) {
+      relevant.push(record); unavailable('mutation_scan_overflow'); break;
+    }
+    if (messageOnly(record) || ignorePresentation && presentationAttribute(record)) ignored++;
     else relevant.push(record);
-    if (relevant.length > 512) break;
+    if (analysisFailure || relevant.length > limits.relevant || relevant.length + ignored >= limits.records) break;
   }
-  const counts = { relevant: relevant.length, ignored };
+  Object.freeze(histogram.types); Object.freeze(histogram.scopes); Object.freeze(histogram.composerAttributes); Object.freeze(histogram);
+  const counts = { relevant: relevant.length, ignored, histogram };
   const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
+  if (analysisFailure) { invalidate(analysisFailure); return; }
+  if (records.length > limits.records || relevant.length > limits.relevant) { invalidate('mutation_overflow'); return; }
+  const ownedControls = new Set(works);
+  const historicallyOwnedNodes = new Set(works);
+  const ownControl = node => { ownedControls.add(node); if (ownedControls.size > 128) unavailable('mutation_scan_overflow'); };
   const trackWork = (node, observedInTrackedGroup = false) => {
-    const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => group.contains(node));
+    const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => contains(group, node));
     if (!state.modeControl(node, trackedGroup)) return;
     works.add(node);
+    if (works.size > 128) { unavailable('work_overflow'); return; }
     if (node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-checked') === 'true') invalidate('work_selected');
   };
-  const register = (node, allowNewGroups) => {
+  const register = (node, allowNewGroups, historicalOutsideRoot = false) => {
     if (!node || node.nodeType !== 1) return;
-    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 128);
-    for (const candidate of candidates) if (allowNewGroups && state.namedGroup(candidate)) groups.add(candidate);
-    const owned = groups.has(node) || [...groups].some(group => group.contains(node));
-    if (owned) for (const candidate of [node, ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
-      trackWork(candidate);
+    for (const candidate of candidates(node, 'labels')) {
+      if (!charge()) return;
+      if (historicalOutsideRoot && allowNewGroups && !groups.has(candidate)
+        && labelledGroup(candidate) && !state.outside(candidate)
+        && (candidate === node || !contains(node, candidate.closest(messageBoundary)))) {
+        unavailable('product_history_ambiguous'); return;
+      }
+      if (allowNewGroups && state.outside(candidate) && labelledGroup(candidate)) {
+        groups.add(candidate); if (groups.size > 64) { unavailable('group_overflow'); return; }
+      }
+    }
+    const owned = groups.has(node) || [...groups].some(group => contains(group, node));
+    if (owned) for (const candidate of candidates(node, 'controls')) {
+      if (!charge()) return;
+      ownControl(candidate); trackWork(candidate);
+    }
   };
   if (state.group) groups.add(state.group);
+  if (groups.size > 64 || works.size > 128) { invalidate(groups.size > 64 ? 'group_overflow' : 'work_overflow'); return; }
   if (state.work) trackWork(state.work);
+  for (const group of groups) register(group, false);
+  if (analysisFailure) { invalidate(analysisFailure); return; }
   // Process structural provenance before attribute records. A control can be
   // mounted, switched to Work, switched back and detached within one batch.
-  for (const record of relevant.slice(0, 512)) if (record.type === 'childList') {
+  for (const record of relevant) if (record.type === 'childList') {
     // A detached group authored in a message cannot become trusted just
     // because its final ancestry no longer contains that message boundary.
     const allowNewGroups = state.outside(record.target);
     register(record.target, allowNewGroups);
-    const ownedTarget = groups.has(record.target) || [...groups].some(group => group.contains(record.target));
-    for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])].slice(0, 128)) {
-      register(node, allowNewGroups);
-      if (ownedTarget && node?.nodeType === 1) for (const candidate of [node,
-        ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
-        trackWork(candidate, true);
+    const ownedTarget = groups.has(record.target) || [...groups].some(group => contains(group, record.target));
+    if (record.addedNodes.length + record.removedNodes.length > limits.children) { unavailable('mutation_scan_overflow'); break; }
+    for (const node of [...record.addedNodes, ...record.removedNodes]) {
+      elements(node);
+      register(node, allowNewGroups, true);
+      if (ownedTarget) for (const descendant of elements(node)) {
+        if (!charge()) break;
+        historicallyOwnedNodes.add(descendant);
+        if (historicallyOwnedNodes.size > limits.children) { unavailable('mutation_scan_overflow'); break; }
+      }
+      if (ownedTarget && node?.nodeType === 1) for (const candidate of candidates(node, 'controls')) {
+        if (!charge()) break;
+        ownControl(candidate); trackWork(candidate, true);
+      }
+      if (analysisFailure) break;
     }
+    if (analysisFailure) break;
   }
+  if (analysisFailure) { invalidate(analysisFailure); return; }
   if (groups.size > 64) { invalidate('group_overflow'); return; }
   if (works.size > 128) { invalidate('work_overflow'); return; }
-  if (relevant.length > 512) { invalidate('mutation_overflow'); return; }
-  if (state.contradictory) invalidate('contradictory_controls');
-  if (relevant.some(record => record.type === 'attributes'
+  if (state.contradictory) { invalidate('contradictory_controls'); return; }
+  // A later current label cannot explain a historical label or referenced-ID
+  // transition. Keep that uncertainty negative instead of inventing provenance.
+  const relevantRecords = new Set(relevant);
+  const controlName = node => websiteModelNormalize(node.getAttribute('aria-label') || node.innerText || node.textContent);
+  const potentialLabelHistory = relevant.some(record => record.type === 'characterData'
+    ? ['Chat', 'Work', 'Composer mode'].includes(websiteModelNormalize(record.oldValue || ''))
+    : record.type === 'attributes' && (record.attributeName === 'aria-label'
+      && [record.oldValue, record.target.getAttribute('aria-label')].some(value => ['Chat', 'Work', 'Composer mode'].includes(websiteModelNormalize(value || '')))
+      || ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true' && controlName(record.target) === 'Work'
+      || record.attributeName === 'role' && ['button', 'radio', 'switch', 'checkbox'].includes(record.oldValue) && controlName(record.target) === 'Work'));
+  const productReferrers = new Map();
+  const potentialReferrer = node => {
+    if (productReferrers.has(node)) return productReferrers.get(node);
+    const potential = potentialLabelHistory || groups.has(node) || ownedControls.has(node)
+      || candidates(node, 'controls').some(candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
+    productReferrers.set(node, potential); return potential;
+  };
+  let productReferenceData = null;
+  const referencedSources = () => {
+    if (productReferenceData) return productReferenceData;
+    const data = labelData(), sources = new Set(), ids = new Set();
+    for (const [id, nodes] of data.referrers) if ([...nodes].some(potentialReferrer)) {
+      ids.add(id); for (const node of data.ids.get(id) || []) sources.add(node);
+    }
+    productReferenceData = { sources, ids }; return productReferenceData;
+  };
+  for (const record of records) {
+    const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+    if (!charge()) break;
+    if (record.type === 'attributes') {
+      const name = record.attributeName;
+      if (relevantRecords.has(record) && (name === 'aria-labelledby' && potentialReferrer(target) || name === 'aria-label'
+        && [record.oldValue, target.getAttribute('aria-label')].some(value => ['Composer mode', 'Work'].includes(websiteModelNormalize(value || '')))
+        ) || name === 'id' && [record.oldValue, target.getAttribute('id')].some(value => value && referencedSources().ids.has(value))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      if (name === 'role' && [record.oldValue, target.getAttribute('role')].some(value => ['button', 'radio', 'switch', 'checkbox'].includes(value))
+        && (historicallyOwnedNodes.has(target) || ownedControls.has(target) || [...groups].some(group => contains(group, target)))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+    } else if (record.type === 'childList' || record.type === 'characterData') {
+      if ([...ownedControls].some(node => node === target || contains(node, target))
+        || [...referencedSources().sources].some(node => node === target || contains(node, target))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+    }
+  }
+  if (analysisFailure) { invalidate(analysisFailure); return; }
+  if (relevant.some(record => record?.type === 'attributes'
     && ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true'
     && works.has(record.target))) invalidate('work_selected');
 }
@@ -4776,17 +5055,17 @@ if (input.action === 'failedPageDiagnostic') {
   return chatGPTObservationDiagnosticResult({ failureDiagnostic: chatGPTFailedPageDiagnostic(), ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) });
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
-  const signal = { ownerToken: input.ownerToken, observer: null };
-  signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
-  // The HTML element can be replaced without replacing this Document or owner.
-  // Observe its parent so replacement and the new subtree still wake a fresh read.
-  signal.observer.observe(document, {
-    subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
-    attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
+  const signal = { ownerToken: input.ownerToken, observer: null,
+    attributeNames: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style", "id",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
       "data-user-message-bubble", "data-talvt-turn-state", "data-content-search-turn-key",
-      "data-chatgpt-selection-message-id", "data-tool-call-id", "role"]
+      "data-chatgpt-selection-message-id", "data-tool-call-id", "role"] };
+  signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
+  // Observe the document so replacement and the new subtree remain visible.
+  signal.observer.observe(document, {
+    subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
+    attributeFilter: signal.attributeNames
   });
   globalThis.__computaModelSignal = signal;
 }
@@ -4840,6 +5119,328 @@ function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
 // from this diagnostic. In particular a pre-claim context failure must not be
 // lost merely because the expansion was correctly refused.
 let chatGPTFirstUserExpansionAdmissionFailure = null;
+let chatGPTInitialRouteRecovery = null;
+function chatGPTFirstUserExpansionRouteStart(candidate) {
+  const edges = input.firstUserExpansionRouteContinuation;
+  const valid = !!candidate && Array.isArray(edges) && edges.length >= 1 && edges.length <= 2
+    && Object.keys(edges).join(',') === (edges.length === 1 ? '0' : '0,1')
+    && edges.every((edge, index) => edge && !Array.isArray(edge) && typeof edge === 'object'
+      && Object.keys(edge).sort().join(',') === 'fromURL,toURL'
+      && typeof edge.fromURL === 'string' && typeof edge.toURL === 'string' && edge.fromURL !== edge.toURL
+      && (index === 0 || edges[index - 1].toURL === edge.fromURL))
+    && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1
+    && edges.at(-1).toURL === input.expectedURL && document.URL === input.expectedURL;
+  const starts = valid ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
+  return starts.length === 1 ? starts[0] : -1;
+}
+function chatGPTBoundFirstUserExpansionPins(candidate) {
+  const state = candidate.state, record = candidate.record, pinned = globalThis.__computaModelFirstProof;
+  return input.action === 'inspect' && input.suppressFirstUserExpansionClaim !== true && (candidate.provisional || candidate.initialRoute
+    ? input.allowProvisionalFirstUserExpansion === true && input.allowBoundFirstUserExpansion !== true
+      && input.allowFirstUserBinding === true && input.allowFirstUserExpansion === true
+      && input.expectedFirstUserFingerprint == null && (candidate.initialRoute || candidate.remount === true)
+      && record?.nativeFirstPinned !== true && input.allowBoundFirstUserRemountRefresh !== true
+    : input.allowBoundFirstUserExpansion === true && input.allowProvisionalFirstUserExpansion !== true
+      && input.allowFirstUserBinding !== true && input.allowFirstUserExpansion !== true)
+    && state === globalThis.__computaChatSubmissionState && chatGPTSubmissionContext(state)
+    && record?.sequence === 1 && (candidate.initialRoute || candidate.pendingPrivate
+      ? state.pending === record && state.lastVerified == null && record.phase === 'send_claimed'
+        && record.root == null && record.body == null
+        && (candidate.pendingPrivate ? pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint : pinned == null)
+        && candidate.predecessor != null && candidate.predecessor === globalThis.__computaModelFirstExpansion
+        && candidate.predecessor.outcome === 'expanded' && candidate.predecessor.contextFailure == null
+        && candidate.predecessor.clicked === true && candidate.predecessor.expandedText === record.canonical
+        && candidate.predecessor.document === document && candidate.predecessor.owner === input.ownerToken
+        && candidate.predecessor.prompt === candidate.prompt && candidate.predecessor.marker === candidate.marker
+        && candidate.predecessor.root === candidate.oldRoot && candidate.predecessor.body === candidate.oldBody
+        && candidate.deadline === candidate.predecessor.deadline && Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline
+        && (!candidate.pendingPrivate || chatGPTFirstUserExpansionRouteStart(candidate.predecessor) >= 0)
+      : state.pending == null && state.lastVerified === record && record.phase === 'verified')
+    && record.document === document && record.owner === input.ownerToken
+    && (candidate.awaitingNativeRefresh === true ? candidate.remount === true
+      && record.replacement === candidate.replacementReceipt && candidate.replacementReceipt != null : record.replacement == null)
+    && input.submissionSequence === 1 && input.submissionMarker === record.marker
+    && (candidate.remount ? (candidate.initialRoute || candidate.pendingPrivate || record.root === candidate.oldRoot && record.body === candidate.oldBody)
+      && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false
+      && candidate.root !== candidate.oldRoot && candidate.body !== candidate.oldBody
+      : candidate.initialRoute ? candidate.oldRoot === candidate.root && candidate.oldBody === candidate.body
+        : record.root === candidate.root && record.body === candidate.body)
+    && record.marker === candidate.marker && record.canonical === candidate.canonical
+    && typeof record.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.fingerprint)
+    && record.fingerprint === candidate.fingerprint
+    && (candidate.provisional || candidate.initialRoute || record.fingerprint === input.expectedFirstUserFingerprint)
+    && (candidate.initialRoute || pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint)
+    && chatGPTSubmissionPins(record)
+    && websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    && websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice);
+}
+async function chatGPTRecaptureInitialRoute(predecessor) {
+  // A native-certified first route can cross a successful display expansion
+  // before either first-message pin exists. Identity still comes from the
+  // dispatched canonical request and native outbound hash, never the prefix.
+  if (globalThis.__computaModelBoundFirstExpansion != null || input.allowBoundFirstUserRemountRefresh === true
+    || input.suppressFirstUserExpansionClaim === true
+    || predecessor.outcome !== 'expanded' || predecessor.contextFailure != null
+    || predecessor.clicked !== true || predecessor.expandedText !== predecessor.canonical
+    || !Number.isFinite(predecessor.deadline) || Date.now() > predecessor.deadline) return false;
+  const state = globalThis.__computaChatSubmissionState, record = state?.pending;
+  const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+  const rendered = body && normalizedFirstBody(body), canonical = predecessor.canonical;
+  if (roots.length !== 1 || typeof canonical !== 'string' || !rendered || rendered.length >= canonical.length
+    || !canonical.startsWith(rendered) || rendered.includes(`Computa session marker: ${predecessor.marker}`)) return false;
+  const candidate = { bound: true, initialRoute: true, predecessor, state, record, fingerprint: record?.fingerprint,
+    remount: predecessor.root !== root || predecessor.body !== body, oldRoot: predecessor.root, oldBody: predecessor.body,
+    root, body, rendered, prompt: predecessor.prompt, canonical, marker: predecessor.marker,
+    clicked: false, outcome: 'claimed', deadline: predecessor.deadline,
+    document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
+  if (!chatGPTFirstUserExpansionContext(candidate)) return false;
+  chatGPTInitialRouteRecovery = candidate;
+  return await chatGPTExpandFirstUser(candidate);
+}
+function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
+  const reject = reason => { chatGPTFirstUserExpansionAdmissionFailure = reason; return null; };
+  if (input.suppressFirstUserExpansionClaim === true) return reject('suppressed');
+  if (input.action !== 'inspect') return reject('action');
+  if (input.allowBoundFirstUserExpansion !== true && input.allowProvisionalFirstUserExpansion !== true) return reject('binding');
+  if (input.allowBoundFirstUserRemountRefresh === true) return reject('binding');
+  if (globalThis.__computaModelBoundFirstExpansion != null) return reject('claim_spent');
+  const state = globalThis.__computaChatSubmissionState;
+  const pendingPrivate = input.allowProvisionalFirstUserExpansion === true
+    && state?.pending?.sequence === 1 && state.pending.phase === 'send_claimed' && state.lastVerified == null;
+  const record = pendingPrivate ? state.pending : state?.lastVerified;
+  const predecessor = pendingPrivate ? globalThis.__computaModelFirstExpansion : null;
+  const oldRoot = pendingPrivate ? predecessor?.root : record?.root, oldBody = pendingPrivate ? predecessor?.body : record?.body;
+  const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
+  if (typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker)) return reject('marker');
+  if (typeof prompt !== 'string' || prompt.length > 180_000
+    || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)) return reject('prompt');
+  if (!websiteModelChoiceValid(input.firstUserExpansionModelChoice)) return reject('model_choice');
+  const canonical = chatGPTSubmissionCanonical(prompt);
+  if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
+    || rendered.includes(`Computa session marker: ${marker}`)) return reject('text_prefix');
+  // A private first proof may finish before native adopts it, then its display
+  // can remount. Native's pending outbound hash and the private verified hash
+  // must agree; this shares the same recovery budget with the bound phase.
+  // If submission finalization crossed the first route, its pending record has
+  // no physical pin yet. Only the successful initial display's detached nodes,
+  // native-certified route and original live deadline can supply that witness.
+  const candidate = { bound: true, provisional: input.allowProvisionalFirstUserExpansion === true,
+    state, record, pendingPrivate, predecessor, deadline: pendingPrivate ? predecessor?.deadline : undefined, fingerprint: record?.fingerprint,
+    remount: pendingPrivate || !!record && (record.root !== root || record.body !== body), oldRoot, oldBody,
+    root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
+    document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
+  const failure = chatGPTFirstUserExpansionContextFailure(candidate);
+  return failure === null ? candidate : reject(failure);
+}
+function chatGPTFirstRouteModelPins(candidate) {
+  // Preserve negative model history and physical picker continuity when URL
+  // drift discarded a read. This is not fresh model evidence; the continued
+  // invocation still performs the ordinary complete model proof.
+  const pin = globalThis.__computaChatPresetPin;
+  websiteChatDrainPinnedMutations(pin);
+  const picker = websiteChatPickerState(), selected = pin && websiteChatPresetChoice(pin.selection?.family, pin.selection?.power);
+  if (!pin || pin.owner !== candidate.owner || pin.document !== document || pin.invalidated === true
+    || !selected || selected.key !== candidate.modelChoice.key
+    || picker.trigger !== pin.headerTrigger || !picker.trigger || !picker.enabled(picker.trigger)
+    || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous
+    || picker.headerPower && picker.headerPower.key !== pin.selection.power.key
+    || picker.semanticSlider && picker.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
+    || picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key) return false;
+  return true;
+}
+// Before either first-message pin exists, only the already dispatched native
+// outbound hash can retain a completed initial-route display. This witness
+// grants no first proof, verified flag, response or extra display attempt.
+function chatGPTPendingInitialRouteDiscard(candidate, fingerprint, stage) {
+  const state = candidate?.state, record = candidate?.record, predecessor = candidate?.predecessor;
+  if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
+    || candidate !== chatGPTInitialRouteRecovery || !candidate.bound || !candidate.initialRoute
+    || candidate.provisional || candidate.pendingPrivate || candidate.verified === true
+    || candidate.routeDiscard || candidate.routeContinuationEdges || candidate.contextFailure || candidate.modelFailure
+    || candidate.outcome !== 'expanded' || candidate.clicked !== true
+    || input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.allowFirstUserExpansion !== true
+    || input.allowProvisionalFirstUserExpansion !== true || input.allowBoundFirstUserExpansion === true
+    || input.allowBoundFirstUserRemountRefresh === true || input.suppressFirstUserExpansionClaim === true
+    || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null) return null;
+  chatGPTSubmissionContext(state);
+  const context = chatGPTSubmissionContextFailure, edges = input.firstUserExpansionRouteContinuation;
+  if (!state || context?.state !== state || context.checks.urlMatches !== false
+    || !chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+      .every(key => context.checks[key] === true)
+    || document.URL === input.expectedURL || candidate.routeURL !== input.expectedURL
+    || candidate.document !== document || candidate.owner !== input.ownerToken
+    || state.pending !== record || state.lastVerified != null || record?.phase !== 'send_claimed'
+    || record.sequence !== 1 || record.nativeFirstPinned === true || record.root != null || record.body != null || record.replacement != null
+    || record.document !== document || record.owner !== candidate.owner || state.firstMarker !== candidate.marker
+    || input.submissionSequence !== 1 || input.submissionMarker !== candidate.marker || record.marker !== candidate.marker
+    || input.expectedFirstUserMarker !== candidate.marker || globalThis.__computaModelFirstMarker !== candidate.marker
+    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
+    || globalThis.__computaModelFirstPrompt !== candidate.prompt || record.canonical !== candidate.canonical
+    || candidate.expandedText !== candidate.canonical || candidate.fingerprint !== fingerprint || record.fingerprint !== fingerprint
+    || !chatGPTSubmissionPins(record)
+    || !predecessor || predecessor !== globalThis.__computaModelFirstExpansion || predecessor.contextFailure || predecessor.modelFailure
+    || predecessor.outcome !== 'expanded' || predecessor.clicked !== true || predecessor.expandedText !== candidate.canonical
+    || predecessor.canonical !== candidate.canonical || predecessor.prompt !== candidate.prompt || predecessor.marker !== candidate.marker
+    || predecessor.document !== document || predecessor.owner !== candidate.owner
+    || candidate.oldRoot !== predecessor.root || candidate.oldBody !== predecessor.body
+    || candidate.deadline !== predecessor.deadline || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
+    || !Array.isArray(edges) || edges.length !== 1 || Object.keys(edges).join(',') !== '0'
+    || !edges[0] || Array.isArray(edges[0]) || Object.keys(edges[0]).sort().join(',') !== 'fromURL,toURL'
+    || edges[0].fromURL !== predecessor.routeURL || edges[0].toURL !== candidate.routeURL || edges[0].fromURL === edges[0].toURL
+    || input.expectedConversationIdentity || input.expectedConversation
+    || !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    || !websiteModelChoiceEqual(predecessor.modelChoice, candidate.modelChoice)
+    || !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice)
+    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice)
+    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified() || !chatGPTFirstRouteModelPins(candidate)) return null;
+  const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+  if (roots.length !== 1 || root !== candidate.root || body !== candidate.body || !root?.isConnected || !body?.isConnected
+    || normalizedFirstBody(body) !== candidate.canonical
+    || (candidate.remount ? candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
+      || root === candidate.oldRoot || body === candidate.oldBody : root !== candidate.oldRoot || body !== candidate.oldBody)) return null;
+  // Retain the already certified first edge; the existing continuation consumes
+  // only its second edge. Neither the two-edge budget nor deadline is renewed.
+  candidate.routeContinuationEdges = edges.map(edge => Object.freeze({ ...edge }));
+  candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
+  return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
+}
+// A route crossing after display completion is a discarded read, not a new
+// display attempt. Retain only an exact, native-bound physical candidate. This
+// witness grants no response, replacement receipt, or retry; the next call must
+// present the native-certified route edge and repeat the complete proof.
+function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
+  const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
+  const roots = chatGPTMessageRoots('user');
+  const root = roots[0], body = root && chatGPTUserBody(root);
+  // Display recovery can start on the originally verified nodes, then cross
+  // the route either before or during their one physical replacement. This
+  // witness retains no response or replacement authority. The native route
+  // edge and the next full read must still hash the exact current body; a
+  // replacement additionally needs the ordinary certificate and fresh read.
+  const sameNodeRecovery = candidate?.remount === false
+    && candidate.root === record?.root && candidate.body === record?.body
+    && candidate.oldRoot === record?.root && candidate.oldBody === record?.body;
+  const lateRemount = sameNodeRecovery && candidate.root?.isConnected === false
+    && candidate.body?.isConnected === false && root !== candidate.root && body !== candidate.body;
+  const currentBodyIntact = roots.length === 1 && root?.isConnected === true && body?.isConnected === true
+    && (lateRemount || root === candidate?.root && body === candidate?.body)
+    && normalizedFirstBody(body) === candidate?.canonical;
+  if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
+    || !candidate.bound || candidate.provisional || candidate.initialRoute || candidate.pendingPrivate
+    || !candidate.remount && !sameNodeRecovery
+    || candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard
+    || (candidate.routeContinuationEdges?.length || 0) >= 2 || candidate.modelFailure || candidate.contextFailure
+    || candidate.outcome !== 'expanded' || candidate.clicked !== true
+    || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
+    || input.action !== 'inspect' || input.allowBoundFirstUserExpansion !== true
+    || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
+    || input.suppressFirstUserExpansionClaim === true
+    || input.allowFirstUserBinding !== false || input.allowFirstUserExpansion === true
+    || input.allowProvisionalFirstUserExpansion === true
+    || window !== window.top || input.provider !== 'chatgpt' || location.origin !== 'https://chatgpt.com'
+    || candidate.document !== document || candidate.owner !== input.ownerToken
+    || globalThis.__computaModelOwner !== candidate.owner
+    || websiteChatInvocationLease == null || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+    || candidate.routeURL !== input.expectedURL || document.URL === input.expectedURL
+    || !state || state !== globalThis.__computaChatSubmissionState || state.revoked
+    || state.document !== document || state.owner !== candidate.owner || state.firstMarker !== candidate.marker
+    || state.pending != null || state.lastVerified !== record || record?.phase !== 'verified'
+    || record.sequence !== 1 || record.document !== document || record.owner !== candidate.owner
+    || (candidate.awaitingNativeRefresh === true
+      ? !candidate.refreshClaimed || record.replacement !== candidate.replacementReceipt || !candidate.replacementReceipt
+      : record.replacement != null)
+    || record.root !== candidate.oldRoot || record.body !== candidate.oldBody
+    || candidate.remount && (candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
+      || candidate.root === candidate.oldRoot || candidate.body === candidate.oldBody)
+    || !currentBodyIntact
+    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
+    || globalThis.__computaModelFirstPrompt !== candidate.prompt || globalThis.__computaModelFirstMarker !== candidate.marker
+    || candidate.expandedText !== candidate.canonical
+    || record.canonical !== candidate.canonical || record.fingerprint !== fingerprint || candidate.fingerprint !== fingerprint
+    || input.expectedFirstUserFingerprint !== fingerprint || pinned?.fingerprint !== fingerprint || pinned.marker !== candidate.marker
+    || input.expectedFirstUserMarker !== candidate.marker || input.submissionSequence !== 1 || input.submissionMarker !== record.marker
+    || record.marker !== candidate.marker || !chatGPTSubmissionPins(record)
+    || !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    || !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice)
+    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice)
+    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return null;
+  if (!chatGPTFirstRouteModelPins(candidate)) return null;
+  // Any non-route conversation identity remains a hard boundary. Route-only
+  // lineage is independently checked against the original URL by native.
+  if (input.expectedConversationIdentity) return null;
+  if (input.expectedConversation) {
+    try {
+      const old = new URL(input.expectedURL);
+      if (input.expectedConversation !== old.origin + decodeURIComponent(old.pathname).replace(/\/$/, '')) return null;
+    } catch { return null; }
+  }
+  if (lateRemount) {
+    // Retain only this observed successor to both detached original nodes.
+    // Do not change the verified record, create a certificate, mark recovery
+    // verified, repeat expansion, or renew its existing deadline.
+    candidate.remount = true;
+    candidate.root = root; candidate.body = body;
+  }
+  candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
+  return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
+}
+// Both a discarded certification and a completed replacement receipt consume
+// the same native-certified route suffix. The two-edge navigation budget is
+// independent of the one display click and one replacement-read handoff.
+function chatGPTConsumeBoundFirstRoute(candidate, witness = null) {
+  const start = chatGPTFirstUserExpansionRouteStart(candidate), edges = input.firstUserExpansionRouteContinuation;
+  if (start < 0 || (candidate.routeContinuationEdges?.length || 0) + edges.length - start > 2
+    || witness && (edges[start].fromURL !== witness.fromURL || edges[start].toURL !== witness.toURL)) return false;
+  candidate.routeContinuationEdges = [...(candidate.routeContinuationEdges || []), ...edges.slice(start)];
+  candidate.routeURL = input.expectedURL;
+  return true;
+}
+function chatGPTContinueBoundFirstRoute(candidate) {
+  const witness = candidate.routeDiscard, unused = candidate.routeDiscardConsumed !== witness;
+  candidate.routeDiscardConsumed = witness;
+  if (!unused || !witness || candidate.verified === true || candidate.outcome !== 'expanded'
+    || candidate.modelFailure || candidate.contextFailure
+    || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
+    || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
+    || !chatGPTFirstUserExpansionContext(candidate)
+    || candidate.expandedText !== candidate.canonical || normalizedFirstBody(candidate.body) !== candidate.canonical) return false;
+  return chatGPTConsumeBoundFirstRoute(candidate, witness);
+}
+async function chatGPTCertifyBoundFirstRemount(candidate, fingerprint) {
+  // The former nodes were fully verified on the previous read. They remain
+  // the record's authority until this exact replacement has complete bytes,
+  // a current model proof, and the existing full-hash discard certificate.
+  // A prefix authorizes only the bounded display click, never this receipt.
+  const model = await websiteModelReadEvidence('chatgpt', candidate.modelChoice, null,
+    { scope: 'action_precheck', action: input.action });
+  if (model.error) {
+    const discarded = model.error === 'document_changed'
+      ? chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'model_read') : null;
+    if (discarded) return discarded;
+    chatGPTLatchExpansionModelFailure(candidate, model); return null;
+  }
+  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical)
+    return chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'model_read');
+  const discarded = await chatGPTFirstReplacementObservation({ ...input, expectedModelChoice: candidate.modelChoice }, 1,
+    { root: candidate.oldRoot, body: candidate.oldBody, text: candidate.canonical },
+    { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
+      identity: () => null, temporary: chatGPTTemporaryVerified });
+  const receipt = candidate.record.replacement;
+  if (discarded?.error !== 'first_user_observation_replaced' || !receipt
+    || receipt.root !== candidate.root || receipt.body !== candidate.body
+    || receipt.oldRoot !== candidate.oldRoot || receipt.oldBody !== candidate.oldBody)
+    return chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'replacement_hash');
+  candidate.replacementReceipt = receipt;
+  candidate.awaitingNativeRefresh = true;
+  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+    candidate.refreshClaimed = true;
+    return null;
+  }
+  // Return no response or ownership proof. Only native's specifically granted
+  // fresh inspect can consume this exact receipt; it cannot expand again.
+  return discarded;
+}
 function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
   const reject = reason => { chatGPTFirstUserExpansionAdmissionFailure = reason; return null; };
@@ -4876,7 +5477,7 @@ function chatGPTFirstUserExpansionContextFailure(candidate) {
   if (globalThis.__computaModelLastSubmissionCount !== 0) return 'submission_count';
   if (globalThis.__computaModelFirstMarker !== candidate.marker) return 'marker';
   if (globalThis.__computaModelFirstPrompt !== candidate.prompt) return 'prompt';
-  if (globalThis.__computaModelFirstProof != null) return 'private_pin';
+  if (candidate.bound ? !chatGPTBoundFirstUserExpansionPins(candidate) : globalThis.__computaModelFirstProof != null) return 'private_pin';
   if (!chatGPTProductModeProof()) return 'product';
   if (!chatGPTTemporaryVerified()) return 'temporary';
   if (roots[0] !== candidate.root || !candidate.root.isConnected) return 'root';
@@ -5168,34 +5769,37 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
   return true;
 }
 async function chatGPTContinueFirstUserExpansion(candidate) {
+  const latch = () => { candidate.initialTransitionDiagnostic ||= chatGPTInitialExpansionFacts(candidate); };
   const edges = input.firstUserExpansionRouteContinuation;
-  const validChain = Array.isArray(edges) && edges.length >= 1 && edges.length <= 2
-    && Object.keys(edges).join(',') === (edges.length === 1 ? '0' : '0,1')
-    && edges.every((edge, index) => edge && !Array.isArray(edge) && typeof edge === 'object'
-      && Object.keys(edge).sort().join(',') === 'fromURL,toURL'
-      && typeof edge.fromURL === 'string' && typeof edge.toURL === 'string' && edge.fromURL !== edge.toURL
-      && (index === 0 || edges[index - 1].toURL === edge.fromURL))
-    && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1;
-  const starts = validChain ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
+  const routeStart = chatGPTFirstUserExpansionRouteStart(candidate);
   // The local display can finish before a later digest/model read crosses the
   // route. Native still discards that read and certifies the same first-route
   // edge. Preserve only its already-completed, exact physical body; a failed or
   // still-pending expansion keeps its original bounded observation path below.
   const completed = candidate.outcome === 'expanded' && candidate.contextFailure == null
     && typeof candidate.expandedText === 'string' && candidate.expandedText === candidate.canonical
+    && candidate.root.isConnected && candidate.body.isConnected
+    && chatGPTMessageRoots('user')[0] === candidate.root && chatGPTUserBody(candidate.root) === candidate.body
     && normalizedFirstBody(candidate.body) === candidate.expandedText;
   const interrupted = candidate.outcome === 'context_changed' && candidate.contextFailure === 'url';
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
-    || !validChain || starts.length !== 1 || edges.at(-1).toURL !== input.expectedURL || edges.at(-1).toURL !== document.URL
-    || candidate.clicked !== true || !completed && !interrupted
-    || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice))
+    || routeStart < 0
+    || candidate.clicked !== true
+    || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice)) {
+    latch();
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
-  if (!chatGPTFirstUserExpansionContext(candidate)) return chatGPTRejectFirstUserExpansionContext(candidate);
+  }
+  if (!completed && !interrupted) {
+    latch();
+    if (await chatGPTRecaptureInitialRoute(candidate)) return true;
+    return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
+  }
+  if (!chatGPTFirstUserExpansionContext(candidate)) { latch(); return chatGPTRejectFirstUserExpansionContext(candidate); }
   // Consume only the unconsumed suffix of the exact native-certified chain.
   // A route may have promoted before this read or before the previous script
   // consumed its receipt. Neither the deadline nor click claim is reset.
-  for (const edge of edges.slice(starts[0])) candidate.routeURL = edge.toURL;
+  for (const edge of edges.slice(routeStart)) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
   // Display completion does not grant lineage. The caller must still hash the
   // unchanged body and complete the ordinary current model/product/temporary
@@ -5208,7 +5812,8 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
 async function chatGPTExpandFirstUser(candidate) {
   // One private claim survives timeout/reinspection. It grants only this local
   // display expansion, never Send, lineage, cleanup, or another attempt.
-  globalThis.__computaModelFirstExpansion = candidate;
+  if (candidate.bound) globalThis.__computaModelBoundFirstExpansion = candidate;
+  else globalThis.__computaModelFirstExpansion = candidate;
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
     const intact = () => chatGPTFirstUserExpansionContext(candidate)
@@ -5248,7 +5853,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
-    candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate) candidate.deadline = Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
@@ -5324,18 +5929,19 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     }
     result.bodySelection = selection;
     Object.assign(result, chatGPTProductProofFailureDiagnostic());
-    Object.assign(result, globalThis.__computaModelFirstExpansion?.textDiagnostic || {});
-    const outcome = globalThis.__computaModelFirstExpansion?.outcome;
+    const expansion = globalThis.__computaModelBoundFirstExpansion || globalThis.__computaModelFirstExpansion;
+    Object.assign(result, expansion?.textDiagnostic || {});
+    const outcome = expansion?.outcome;
     if (chatGPTFirstUserExpansionAdmissionFailure !== null)
       result.expansionAdmissionFailure = chatGPTFirstUserExpansionAdmissionFailure;
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)
-      ? outcome : input.allowFirstUserExpansion === true ? 'ineligible' : 'not_requested';
-    const contextFailure = globalThis.__computaModelFirstExpansion?.contextFailure;
+      ? outcome : input.allowFirstUserExpansion === true || input.allowBoundFirstUserExpansion === true ? 'ineligible' : 'not_requested';
+    const contextFailure = expansion?.contextFailure;
     if (['frame', 'provider', 'origin', 'owner', 'user_count', 'submission', 'submission_count', 'marker', 'prompt',
       'private_pin', 'product', 'temporary', 'root', 'body', 'conversation_route', 'conversation_identity', 'url',
       'continuation', 'deadline'].includes(contextFailure)) result.expansionContextFailure = contextFailure;
-    const modelError = globalThis.__computaModelFirstExpansion?.modelFailure?.error;
+    const modelError = expansion?.modelFailure?.error;
     if (chatGPTExpansionModelErrors.includes(modelError)) result.expansionModelError = modelError;
     const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
     const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
@@ -5371,6 +5977,57 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
 }
 // Diagnostics are a finite, best-effort projection. They never authorize an
 // action, await, or publish page text, private pins, attributes, or addresses.
+function chatGPTInitialExpansionFacts(candidate, root = chatGPTMessageRoots('user')[0], body = root && chatGPTUserBody(root)) {
+  return {
+    initialExpansionSucceeded: candidate.outcome === 'expanded' && candidate.contextFailure == null,
+    initialExpansionCanonicalMatches: typeof candidate.expandedText === 'string' && candidate.expandedText === candidate.canonical,
+    initialExpansionRootSame: candidate.root === root, initialExpansionBodySame: candidate.body === body,
+    initialExpansionOldRootConnected: candidate.root?.isConnected === true,
+    initialExpansionOldBodyConnected: candidate.body?.isConnected === true,
+    initialExpansionDeadlineLive: Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline,
+  };
+}
+function chatGPTRecoveryFinalizationFacts(candidate, stage, observed = null, urlDiscard = false) {
+  // Pure finite facts: never call a proof getter or expose page text/identifiers.
+  const state = globalThis.__computaChatSubmissionState, record = candidate?.record, context = chatGPTSubmissionContextFailure;
+  const error = !observed ? 'not_returned' : !observed.error ? 'none'
+    : observed.error === 'document_changed' ? 'document_changed'
+      : observed.error === 'conversation_changed' && ['first_user_message', 'submission_message'].includes(observed.detail)
+        ? observed.detail : 'other';
+  return { finalizationStage: stage, finalizationError: error,
+    urlWitness: !!state && context?.state === state && context.checks.urlMatches === false,
+    urlDiscard: urlDiscard === true, pendingMatches: !!record && state?.pending === record,
+    lastVerifiedMatches: !!record && state?.lastVerified === record,
+    recordPhase: !record ? 'none' : ['prepared', 'send_claimed', 'verified'].includes(record.phase) ? record.phase : 'other',
+    contextStateMatches: !!state && context?.state === state,
+    leaseCurrent: websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease,
+    urlChanged: document.URL !== input.expectedURL };
+}
+function chatGPTLatchRecoveryFinalization(candidate, stage, observed = null, urlDiscard = false) {
+  try {
+    if (!candidate || candidate.finalizationDiagnostic && candidate.finalizationDiagnostic.finalizationStage !== 'entered') return;
+    candidate.finalizationDiagnostic = chatGPTRecoveryFinalizationFacts(candidate, stage, observed, urlDiscard);
+  } catch { /* Diagnostics cannot change finalization or revive a claim. */ }
+}
+function chatGPTRecoveryLifecycle(path = 'other') {
+  try {
+    const candidate = globalThis.__computaModelBoundFirstExpansion;
+    const paths = ['spent_recovery', 'initial_claim', 'expansion_rejected', 'hash_snapshot', 'action_snapshot', 'other'];
+    return { path: paths.includes(path) ? path : 'other', present: !!candidate, verified: candidate?.verified === true,
+      initialRoute: candidate?.initialRoute === true, remount: candidate?.remount === true, provisional: candidate?.provisional === true,
+      outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
+      ...(candidate?.finalizationDiagnostic || chatGPTRecoveryFinalizationFacts(candidate, 'not_reached')),
+      ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash'].includes(candidate.routeDiscard.stage)
+        ? candidate.routeDiscard.stage : 'other',
+        boundRouteEdges: Math.min(candidate.routeContinuationEdges?.length || 0, 2),
+        boundRoutePending: candidate.routeDiscardConsumed !== candidate.routeDiscard } : {}) };
+  } catch { return null; }
+}
+function chatGPTWithRecoveryLifecycle(observed, path = 'other') {
+  if (!globalThis.__computaModelBoundFirstExpansion) return observed;
+  const recoveryLifecycle = chatGPTRecoveryLifecycle(path);
+  return recoveryLifecycle ? { ...observed, recoveryLifecycleDiagnostic: recoveryLifecycle } : observed;
+}
 function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
   try {
     const reasons = ['first_bound', 'marker_invalid', 'submission_unclaimed', 'marker_mismatch', 'body_limit',
@@ -5399,7 +6056,24 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
       submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
       markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true, allowFirstUserExpansion: input.allowFirstUserExpansion === true,
       privatePinPresent: pinned != null, expectedFingerprintPresent: input.expectedFirstUserFingerprint != null };
+    if (input.allowBoundFirstUserExpansion === true || input.allowProvisionalFirstUserExpansion === true || globalThis.__computaModelFirstProof != null) {
+      const record = globalThis.__computaChatSubmissionState?.lastVerified;
+      diagnostic.allowBoundFirstUserExpansion = input.allowBoundFirstUserExpansion === true;
+      diagnostic.allowProvisionalFirstUserExpansion = input.allowProvisionalFirstUserExpansion === true;
+      diagnostic.boundRootSame = record?.sequence === 1 && record.root === root;
+      diagnostic.boundBodySame = record?.sequence === 1 && record.body === body;
+      diagnostic.boundOldRootConnected = record?.sequence === 1 && record.root?.isConnected === true;
+      diagnostic.boundOldBodyConnected = record?.sequence === 1 && record.body?.isConnected === true;
+      diagnostic.boundNativePinMatches = record?.sequence === 1 && pinned?.marker === marker
+        && pinned?.fingerprint === record.fingerprint && input.expectedFirstUserFingerprint === record.fingerprint
+        && chatGPTSubmissionPins(record);
+    }
     Object.assign(diagnostic, chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots));
+    const initialExpansion = globalThis.__computaModelFirstExpansion;
+    if (initialExpansion != null) Object.assign(diagnostic, initialExpansion.initialTransitionDiagnostic
+      || chatGPTInitialExpansionFacts(initialExpansion, root, body));
+    const recoveryLifecycle = chatGPTRecoveryLifecycle(captured.recoveryPath);
+    if (recoveryLifecycle) diagnostic.recoveryLifecycle = recoveryLifecycle;
     if (scope === 'first_insert' || scope === 'first_submit') {
       diagnostic.firstPromptPresent = typeof globalThis.__computaModelFirstPrompt === 'string';
       diagnostic.firstPromptMatches = globalThis.__computaModelFirstPrompt === input.prompt;
@@ -5424,9 +6098,9 @@ function chatGPTFirstUserFailure(reason, scope, captured = {}, allowSubmittedUse
   const debugStructure = firstUserRejectionDiagnostic
     || chatGPTFirstUserStructure(reason, scope, captured, allowSubmittedUser, fingerprint);
   if (debugStructure) firstUserRejectionDiagnostic = debugStructure;
-  const modelDiagnostic = globalThis.__computaModelFirstExpansion?.modelFailure?.modelDiagnostic;
-  return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
-    ...(modelDiagnostic ? { modelDiagnostic } : {}) };
+  const modelDiagnostic = (globalThis.__computaModelBoundFirstExpansion || globalThis.__computaModelFirstExpansion)?.modelFailure?.modelDiagnostic;
+  return chatGPTWithRecoveryLifecycle({ error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
+    ...(modelDiagnostic ? { modelDiagnostic } : {}) }, captured.recoveryPath);
 }
 const snapshotUnchanged = (allowSubmittedUser = false) => {
   const current = chatGPTMessageRoots('user');
@@ -5505,23 +6179,56 @@ if (ownedUserCount > 0) {
     if (optimistic) return optimistic;
   }
   const consumedExpansion = globalThis.__computaModelFirstExpansion;
+  const consumedBoundExpansion = globalThis.__computaModelBoundFirstExpansion;
+  let boundRefresh = null, boundRouteContinuation = null;
+  // A display recovery is one-shot too. Even a later complete body cannot
+  // revive a failed/unfinished claim or turn it into submission authority.
+  if (consumedBoundExpansion != null && (consumedBoundExpansion.outcome !== 'expanded'
+    || consumedBoundExpansion.verified !== true)) {
+    const candidate = consumedBoundExpansion;
+    if (candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard) {
+      if (!chatGPTContinueBoundFirstRoute(candidate))
+        return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'spent_recovery' });
+      if (candidate.awaitingNativeRefresh === true) boundRefresh = candidate;
+      else {
+        boundRouteContinuation = candidate;
+        if (candidate.initialRoute === true) chatGPTInitialRouteRecovery = candidate;
+      }
+    } else {
+      const unused = candidate.refreshClaimed !== true;
+      candidate.refreshClaimed = true;
+      if (input.allowBoundFirstUserRemountRefresh !== true || !unused || candidate.remount !== true
+        || candidate.awaitingNativeRefresh !== true || candidate.outcome !== 'expanded'
+        || !chatGPTFirstUserExpansionContext(candidate) || rendered !== candidate.canonical)
+        return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'spent_recovery' });
+      // Native may combine a certified route edge with this already-issued
+      // replacement receipt. Account for that edge before a later allowed
+      // promotion crosses the fresh hash; neither allowance is replenished.
+      if (candidate.routeURL !== input.expectedURL && !chatGPTConsumeBoundFirstRoute(candidate))
+        return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'spent_recovery' });
+      boundRefresh = candidate;
+    }
+  }
   let expansionRejected = false;
-  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
+  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null && chatGPTInitialRouteRecovery == null
     && input.firstUserExpansionRouteContinuation != null) {
     expansionRejected = !await chatGPTContinueFirstUserExpansion(consumedExpansion);
     rendered = normalizedFirstBody(first);
   }
-  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
+  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null && chatGPTInitialRouteRecovery == null
     && (consumedExpansion.outcome !== 'expanded' || !chatGPTFirstUserExpansionContext(consumedExpansion)
       || consumedExpansion.root !== ownedMessages[0] || consumedExpansion.body !== first
       || consumedExpansion.marker !== marker || rendered !== consumedExpansion.expandedText))
     // A consumed local claim cannot acquire first-message or cleanup authority
     // on a later read after failure, replacement, or a different full body.
-    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'initial_claim' });
   let expansion; const expansionStarted = chatGPTSyncWorkStart();
-  try { expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered); }
+  try { expansion = boundRouteContinuation || chatGPTInitialRouteRecovery || (boundRefresh ? null : globalThis.__computaModelFirstProof != null
+    && (input.allowBoundFirstUserExpansion === true || input.allowProvisionalFirstUserExpansion === true)
+    ? chatGPTBoundFirstUserExpansionCandidate(ownedMessages[0], first, rendered)
+    : chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered)); }
   finally { chatGPTSyncWorkEnd(4, expansionStarted); }
-  if (expansion) {
+  if (expansion && expansion !== chatGPTInitialRouteRecovery && expansion !== boundRouteContinuation) {
     expansionRejected = !await chatGPTExpandFirstUser(expansion);
     // A display click can mutate the body before a later guard rejects it.
     // Keep diagnostics current; a failed attempt never falls through to bind.
@@ -5541,19 +6248,27 @@ if (ownedUserCount > 0) {
             : renderedLines.filter(line => line === markerLine).length !== 1 ? 'marker_duplicate' : 'body_empty',
       'marker_validation', { roots: ownedMessages, body: first, rendered });
   if (expansionRejected)
-    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'expansion_rejected' });
   firstSnapshot = { root: ownedMessages[0], body: first, text: rendered };
   websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  const boundRecovery = expansion?.bound ? expansion : boundRefresh;
+  if (boundRecovery && (!chatGPTFirstUserExpansionContext(boundRecovery)
+    || rendered !== boundRecovery.canonical || fingerprint !== boundRecovery.fingerprint))
+    return chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
+      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash')
+      || chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
     { snapshotIntact: snapshotUnchanged(true), fingerprint }, chatGPTTemporaryVerified())
     || await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
-    || chatGPTFirstUserFailure('snapshot_before_action', 'digest', {}, false, fingerprint);
+    || chatGPTFirstUserFailure('snapshot_before_action', 'digest', { recoveryPath: 'hash_snapshot' }, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
+  if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) return await chatGPTCertifyBoundFirstRemount(expansion, fingerprint)
+    || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
   firstUserFingerprint = fingerprint;
   const pinned = globalThis.__computaModelFirstProof;
   if (pinned) {
@@ -5572,9 +6287,21 @@ if (ownedUserCount > 0) {
   }
   // Pin only after this same document still confirms the owned temporary chat.
   const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
+  // A completed same-node display recovery uses the ordinary action's model
+  // read, rather than the remount certifier. Preserve the same strictly bounded
+  // route witness if that read crosses the URL after the full hash, including
+  // a successful result whose awaited return crossed before this snapshot.
+  // It returns no answer or ownership proof; native must certify the edge and
+  // request the existing fresh complete proof before any result is admitted.
+  if (boundRecovery && document.URL !== input.expectedURL
+    && (!observed.error || observed.error === 'document_changed')) {
+    const discarded = chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'model_read')
+      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'model_read');
+    if (discarded) return discarded;
+  }
   if (!observed.error && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   const readContextFailure = finalReadContextFailure(observed);
-  if (readContextFailure) return readContextFailure;
+  if (readContextFailure) return chatGPTWithRecoveryLifecycle(readContextFailure);
   if (observed.error === 'first_user_observation_replaced') return observed;
   if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount) {
     const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
@@ -5585,8 +6312,10 @@ if (ownedUserCount > 0) {
     return await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
-      || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', {}, input.action === 'submit');
-  if (observed.error) return observed;
+      || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', { recoveryPath: 'action_snapshot' }, input.action === 'submit');
+  if (observed.error) return chatGPTWithRecoveryLifecycle(observed);
+  if (boundRecovery && !chatGPTFirstUserExpansionContext(boundRecovery))
+    return chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard');
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   if (!pinned) {
@@ -5602,7 +6331,55 @@ if (ownedUserCount > 0) {
       ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
-  return chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
+  const finalizationState = globalThis.__computaChatSubmissionState;
+  chatGPTLatchRecoveryFinalization(boundRecovery, 'entered');
+  let finalized;
+  try {
+    finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(finalizationState != null ? await chatGPTSubmissionResult(input, result) : result));
+  } catch (error) {
+    chatGPTLatchRecoveryFinalization(boundRecovery, 'threw');
+    throw error;
+  }
+  const context = chatGPTSubmissionContextFailure;
+  const recoveryRecord = boundRecovery?.record;
+  const pendingRecoveryRecord = (boundRecovery?.initialRoute === true || boundRecovery?.pendingPrivate === true)
+    && finalizationState?.pending === recoveryRecord && finalizationState?.lastVerified == null
+    && recoveryRecord?.phase === 'send_claimed' && recoveryRecord.root == null && recoveryRecord.body == null;
+  // A provisional remount can start after JS verified the first submission
+  // but before native adopted it. Its URL-discarded rehash still retains the
+  // detached original physical pins; it has no bound replacement certificate.
+  const provisionalRecoveryRecord = boundRecovery?.provisional === true && boundRecovery.pendingPrivate !== true
+    && boundRecovery.remount === true && boundRecovery.awaitingNativeRefresh !== true
+    && finalizationState?.pending == null && finalizationState?.lastVerified === recoveryRecord
+    && recoveryRecord?.phase === 'verified' && recoveryRecord.replacement == null
+    && recoveryRecord.root === boundRecovery.oldRoot && recoveryRecord.body === boundRecovery.oldBody
+    && boundRecovery.oldRoot?.isConnected === false && boundRecovery.oldBody?.isConnected === false;
+  const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
+    && input.action === 'inspect' && (pendingRecoveryRecord || provisionalRecoveryRecord)
+    && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true
+    && input.expectedFirstUserFingerprint == null && input.allowBoundFirstUserRemountRefresh !== true
+    && finalizationState && !finalizationState.revoked && finalizationState.document === document
+    && finalizationState.owner === input.ownerToken && globalThis.__computaChatSubmissionState === finalizationState
+    && globalThis.__computaModelOwner === finalizationState.owner
+    && recoveryRecord.sequence === 1 && recoveryRecord.nativeFirstPinned !== true
+    && recoveryRecord.fingerprint === boundRecovery.fingerprint && chatGPTSubmissionPins(recoveryRecord)
+    && globalThis.__computaModelFirstProof?.marker === boundRecovery.marker
+    && globalThis.__computaModelFirstProof?.fingerprint === boundRecovery.fingerprint
+    && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && window === window.top && input.provider === 'chatgpt' && location.origin === 'https://chatgpt.com'
+    && document.URL !== input.expectedURL && context?.state === finalizationState && context.checks.urlMatches === false
+    && chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+      .every(key => context.checks[key] === true);
+  // This flag certifies only the already completed, fully hashed display
+  // recovery. An independent submission read discarded solely for a crossed
+  // URL does not undo that display proof. Native must still certify the route
+  // and obtain fresh complete submission proof; this read returns no answer.
+  // Publish only after classification: throws and every other error leave the
+  // spent claim unverified, without exposing temporary success across await.
+  if (boundRecovery && globalThis.__computaModelBoundFirstExpansion === boundRecovery
+    && (!finalized.error || discardedURLRead)) boundRecovery.verified = true;
+  chatGPTLatchRecoveryFinalization(boundRecovery, 'returned', finalized, discardedURLRead);
+  return chatGPTWithRecoveryLifecycle(finalized);
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');

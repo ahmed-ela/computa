@@ -1133,7 +1133,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             switch event {
             case .taskStatusChanged(let owner, let status) where owner == taskID:
                 if status == .completed { completedTurns += 1 }
-                if status == .waiting { failures.append("The user turn failed or was interrupted.") }
+                if status == .waiting || status == .failed { failures.append("The user turn failed or was interrupted.") }
             case .contextUsageUpdated(let owner, let value) where owner == taskID:
                 lastUsage = value
             case .contextCompactionChanged(let owner, let phase) where owner == taskID:
