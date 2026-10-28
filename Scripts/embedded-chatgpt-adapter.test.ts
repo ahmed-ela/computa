@@ -1551,6 +1551,91 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
       }
     });
+
+    test('completed initial display recovery survives a discarded submission digest and requires fresh native proof', async () => {
+      for (const mutation of ['unchanged', 'remount', 'delayed']) {
+        const { x, first, body, expand, initialControl, initial, record, continuation } = await initialRouteStage(true);
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-recovery?temporary-chat=true';
+        let crossed = false;
+        const promote = () => {
+          if (!x.f.world.__computaModelFirstProof) { x.f.onDigest(promote, first.outbound); return; }
+          expect((x.f.world.__computaChatSubmissionState as any).pending).toBe(record);
+          expect(record.phase).toBe('send_claimed'); crossed = true;
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-recovery';
+        };
+        x.f.onDigest(promote, first.outbound);
+        const discarded = await x.observe(first, continuation); denied(discarded);
+        expect(crossed).toBe(true); expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const state: any = x.f.world.__computaChatSubmissionState;
+        expect(state.revoked).toBe(false); expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull();
+        expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(x.f.world.__computaModelBoundFirstExpansion).toMatchObject({ initialRoute: true, verified: true, deadline: initial.deadline });
+        let currentBody = body;
+        if (mutation === 'remount') currentBody = replaceRoot(x).body;
+        if (mutation === 'delayed') x.f.advanceTime(2_000);
+        const before = x.f.digestInputs.length;
+        const fresh = await x.observe(first, { ...continuation,
+          firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] });
+        expect(fresh.error).toBeUndefined(); expect(fresh.firstUserFingerprint).toBe(first.fingerprint);
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.body).toBe(currentBody); expect(record.phase).toBe('verified'); expect(state.pending).toBeNull();
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('completed display never excuses changed current bytes or pins after a URL-only discard', async () => {
+      for (const mutation of ['body', 'prefix', 'native_pin', 'private_pin', 'work']) {
+        const { x, first, body, expand, continuation } = await initialRouteStage(true);
+        const promote = () => {
+          if (!x.f.world.__computaModelFirstProof) { x.f.onDigest(promote, first.outbound); return; }
+          x.f.document.URL = 'https://chatgpt.com/c/public-rejected-recovery?temporary-chat=true';
+          x.f.location.pathname = '/c/public-rejected-recovery';
+        };
+        x.f.onDigest(promote, first.outbound);
+        expect((await x.observe(first, continuation)).error).toBe('document_changed');
+        const overrides: any = { ...continuation };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'prefix') body.text = first.outbound.slice(0, 10_240);
+        if (mutation === 'native_pin') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        if (mutation === 'work') { x.f.workMode.values['aria-pressed'] = 'true'; x.f.chatMode.values['aria-pressed'] = 'false'; }
+        denied(await x.observe(first, overrides));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('failed or thrown submission finalization cannot revive a spent successful display claim', async () => {
+      for (const mutation of ['body', 'owner', 'record', 'private_pin', 'throw', 'stale']) {
+        const { x, first, body, expand, record, continuation } = await initialRouteStage(true);
+        x.answer('Owned answer requiring final snapshot verification');
+        const owner = x.f.world.__computaModelOwner;
+        let reached = false;
+        const fail = () => {
+          if (!x.f.world.__computaModelFirstProof) { x.f.onDigest(fail, first.outbound); return; }
+          reached = true;
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'record') record.fingerprint = '0'.repeat(64);
+          if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+          if (mutation === 'throw') throw new Error('Synthetic submission digest failure');
+          if (mutation === 'stale') {
+            x.f.document.URL = 'https://chatgpt.com/c/public-stale-recovery?temporary-chat=true';
+            x.f.location.pathname = '/c/public-stale-recovery'; x.f.world.__computaChatActiveInvocation = {};
+          }
+        };
+        x.f.onDigest(fail, first.outbound);
+        if (mutation === 'throw') await expect(x.observe(first, continuation)).rejects.toThrow('Synthetic submission digest failure');
+        else denied(await x.observe(first, continuation));
+        expect(reached).toBe(true);
+        expect(x.f.world.__computaModelBoundFirstExpansion).not.toHaveProperty('verified', true);
+        if (['body', 'owner', 'record'].includes(mutation)) expect((x.f.world.__computaChatSubmissionState as any).revoked).toBe(true);
+        body.text = first.outbound; record.fingerprint = first.fingerprint; x.f.world.__computaModelOwner = owner;
+        (x.f.world.__computaModelFirstProof as any).fingerprint = first.fingerprint;
+        denied(await x.observe(first, continuation));
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
     const provisionalStage = async (initialExpansion = false) => {
       const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PROVISIONAL PROMPT\n' + 'x'.repeat(40_000));
       const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];

@@ -6381,6 +6381,153 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testInitialDisplayRecoveryRehashesAfterSecondPromotionBeforeNativeAdoptionWithoutReclick() async throws {
+        for condition in ["unchanged", "remounted", "late_read", "changed", "recollapsed", "work"] {
+            let succeeds = ["unchanged", "remounted", "late_read"].contains(condition)
+            let localRoute = "/c/local-chatgpt%3Arecovery-adoption?temporary-chat=true"
+            let publicRoute = "/c/public-recovery-adoption?temporary-chat=true"
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage())
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil); fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await fixturePhaseProbe("recovery_adoption_start") { try await startChoice(choice, in: fixture) }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await fixturePhaseProbe("recovery_adoption_ready") { try await waitForState("ready", fixture.transport, token: token) }
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            _ = try await evaluate(view, """
+                const original = crypto.subtle.digest.bind(crypto.subtle);
+                globalThis.__fixtureRecoveryFreshHashes = 0;
+                crypto.subtle.digest = async (...arguments_) => {
+                  const result = await original(...arguments_);
+                  const initial = globalThis.__computaModelFirstExpansion;
+                  const recovery = globalThis.__computaModelBoundFirstExpansion;
+                  const pinned = globalThis.__computaModelFirstProof;
+                  const pending = globalThis.__computaChatSubmissionState?.pending;
+                  if (location.pathname === '/c/public-recovery-adoption' && recovery?.initialRoute
+                    && new TextDecoder().decode(arguments_[1]) === recovery.canonical)
+                    globalThis.__fixtureRecoveryFreshHashes++;
+                  if (!globalThis.__fixtureInitialAdoptionRoute && initial?.outcome === 'expanded'
+                    && !pinned && location.pathname === '/') {
+                    globalThis.__fixtureInitialAdoptionRoute = true;
+                    history.pushState({}, '', '\(localRoute)');
+                  } else if (!globalThis.__fixtureSecondAdoptionRoute && recovery?.initialRoute
+                    && recovery.outcome === 'expanded' && pinned
+                    && pending?.phase === 'send_claimed' && location.pathname.startsWith('/c/local-chatgpt')) {
+                    globalThis.__fixtureSecondAdoptionRoute = true;
+                    history.pushState({}, '', '\(publicRoute)');
+                  }
+                  return result;
+                }; return true;
+                """, world: privateWorld)
+            var transitions = 0, deadline: Double?
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                guard checkpoint == .routeAccepted else { return }
+                transitions += 1
+                if transitions == 1 {
+                    try? await self.installBoundFirstUserCollapse(view, behavior: "remount")
+                } else if transitions == 2 {
+                    let state = try? await self.evaluate(view, """
+                        const recovery = globalThis.__computaModelBoundFirstExpansion;
+                        return { initialRoute: recovery?.initialRoute, outcome: recovery?.outcome,
+                          verified: recovery?.verified === true, deadline: recovery?.deadline,
+                          privatePinned: !!globalThis.__computaModelFirstProof,
+                          pendingPhase: globalThis.__computaChatSubmissionState?.pending?.phase,
+                          revoked: globalThis.__computaChatSubmissionState?.revoked === true };
+                        """, world: privateWorld) as? [String: Any]
+                    XCTAssertEqual(state?["initialRoute"] as? Bool, true, condition)
+                    XCTAssertEqual(state?["outcome"] as? String, "expanded", condition)
+                    XCTAssertEqual(state?["privatePinned"] as? Bool, true, condition)
+                    XCTAssertEqual(state?["pendingPhase"] as? String, "send_claimed", condition)
+                    XCTAssertEqual(state?["revoked"] as? Bool, false, condition)
+                    deadline = state?["deadline"] as? Double
+                    if condition == "changed" {
+                        _ = try? await self.evaluate(view, """
+                            const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                            body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery'); return true;
+                            """)
+                    } else if condition == "remounted" {
+                        _ = try? await self.evaluate(view, """
+                            const root = document.querySelector('[data-message-author-role="user"]');
+                            root.replaceWith(root.cloneNode(true)); return true;
+                            """)
+                    } else if condition == "late_read" {
+                        // The local display already completed. A later purely
+                        // read-only proof does not renew or need its click deadline.
+                        try? await Task.sleep(for: .milliseconds(1_900))
+                    } else if condition == "recollapsed" {
+                        _ = try? await self.evaluate(view, "return window.fixtureCollapseBoundUser();")
+                    } else if condition == "work" {
+                        _ = try? await self.evaluate(view, """
+                            document.getElementById('fixture-composer-mode').hidden = false;
+                            document.getElementById('fixture-chat-mode').setAttribute('aria-pressed', 'false');
+                            document.getElementById('fixture-work-mode').setAttribute('aria-pressed', 'true'); return true;
+                            """)
+                    }
+                } else { XCTFail("Only the two existing native-certified edges are allowed") }
+            }
+            var complete: [String: Any]?
+            do {
+                _ = try await fixturePhaseProbe("recovery_adoption_send") {
+                    try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": String(repeating: "Bound recovery canonical payload line.\n", count: 600)])
+                }
+                complete = try await fixturePhaseProbe("recovery_adoption_complete") {
+                    try await waitForState("complete", fixture.transport, token: token)
+                }
+                XCTAssertTrue(succeeds, "Changed, collapsed or product-invalid pending proof cannot be adopted: \(condition)")
+            } catch {
+                if succeeds { throw error }
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    condition == "work" ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
+            }
+            XCTAssertEqual(transitions, 2, condition)
+            let clicks = try await evaluate(view,
+                "return {initial:window.fixtureExpansionClicks, recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
+            XCTAssertEqual(clicks?["initial"], 1, condition)
+            XCTAssertEqual(clicks?["recovery"], 1, condition)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            if succeeds {
+                let observed = try XCTUnwrap(complete)
+                XCTAssertEqual(observed["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(observed, choice: choice)
+                let proof = try XCTUnwrap(observed["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
+                let state = try await evaluate(view, """
+                    return { freshHashes: globalThis.__fixtureRecoveryFreshHashes,
+                      deadline: globalThis.__computaModelBoundFirstExpansion?.deadline,
+                      verified: globalThis.__computaModelBoundFirstExpansion?.verified };
+                    """, world: privateWorld) as? [String: Any]
+                XCTAssertGreaterThanOrEqual(state?["freshHashes"] as? Int ?? 0, 2,
+                    "First-body and submitted-body hashes must run again on the final route")
+                XCTAssertNotNil(deadline)
+                XCTAssertEqual(state?["deadline"] as? Double, deadline)
+                XCTAssertEqual(state?["verified"] as? Bool, true)
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+                try await assertHumanTabIntact(fixture)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A rejected pending adoption cannot be revived: \(condition)")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                        condition == "work" ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
+                }
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "failed", condition)
+                let after = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+                XCTAssertEqual(after, 1, "Fresh-read/cleanup cannot replay either display action")
+                try await assertHumanTabIntact(fixture, retaining: ownedID)
+            }
+        }
+    }
+
     func testOneExpansionContinuesAcrossFirstLocalRouteAndItsPublicPromotionBeforeLineageBinding() async throws {
         let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
             earlyExpansionScript: """

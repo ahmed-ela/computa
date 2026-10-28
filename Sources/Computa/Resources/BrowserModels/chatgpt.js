@@ -6060,8 +6060,35 @@ if (ownedUserCount > 0) {
       ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
-  const finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
-  if (boundRecovery && !finalized.error) boundRecovery.verified = true;
+  const finalizationState = globalThis.__computaChatSubmissionState;
+  const finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(finalizationState != null ? await chatGPTSubmissionResult(input, result) : result));
+  const context = chatGPTSubmissionContextFailure;
+  const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
+    && input.action === 'inspect' && boundRecovery?.initialRoute === true
+    && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true
+    && input.expectedFirstUserFingerprint == null && input.allowBoundFirstUserRemountRefresh !== true
+    && finalizationState && !finalizationState.revoked && finalizationState.document === document
+    && finalizationState.owner === input.ownerToken && globalThis.__computaChatSubmissionState === finalizationState
+    && globalThis.__computaModelOwner === finalizationState.owner
+    && finalizationState.pending === boundRecovery.record && finalizationState.lastVerified == null
+    && boundRecovery.record.sequence === 1 && boundRecovery.record.phase === 'send_claimed'
+    && boundRecovery.record.nativeFirstPinned !== true && boundRecovery.record.root == null && boundRecovery.record.body == null
+    && boundRecovery.record.fingerprint === boundRecovery.fingerprint && chatGPTSubmissionPins(boundRecovery.record)
+    && globalThis.__computaModelFirstProof?.marker === boundRecovery.marker
+    && globalThis.__computaModelFirstProof?.fingerprint === boundRecovery.fingerprint
+    && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && window === window.top && input.provider === 'chatgpt' && location.origin === 'https://chatgpt.com'
+    && document.URL !== input.expectedURL && context?.state === finalizationState && context.checks.urlMatches === false
+    && chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+      .every(key => context.checks[key] === true);
+  // This flag certifies only the already completed, fully hashed display
+  // recovery. An independent submission read discarded solely for a crossed
+  // URL does not undo that display proof. Native must still certify the route
+  // and obtain fresh complete submission proof; this read returns no answer.
+  // Publish only after classification: throws and every other error leave the
+  // spent claim unverified, without exposing temporary success across await.
+  if (boundRecovery && globalThis.__computaModelBoundFirstExpansion === boundRecovery
+    && (!finalized.error || discardedURLRead)) boundRecovery.verified = true;
   return finalized;
 }
 if (input.expectedFirstUserFingerprint != null)

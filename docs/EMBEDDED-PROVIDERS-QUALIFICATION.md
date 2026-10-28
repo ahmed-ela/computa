@@ -3470,3 +3470,63 @@ Existing route-promotion, unchanged deadline, cleanup and no-repeat regressions
 also pass. The instruction/codec/no-replay source is unchanged from build287's
 171-test passing cohort. Independent review found no remaining blocker; live
 build288 qualification remains pending.
+
+### Build 288 live capture: private proof before submission-finalization promotion
+
+The signed installed build288 (`39d91660f9beaeee2a6fed43bcd83aa2652019ad`)
+failed its independent seed in 2.866 seconds. Native accepted root-to-local at
+23:49:12.221291 UTC and local-to-server promotion at 23:49:12.421725 UTC.
+The following fresh inspection rejected ownership about 20 milliseconds later.
+Its current reconstructed body was all 57,843 canonical characters with a unique
+final marker, and the private first pin was present. Native still had zero
+confirmed users and a pending, unverified submission.
+
+The new initial-expansion facts retained success, exact canonical equality and
+a live display deadline, with both original nodes detached at the earlier
+display-recovery transition. These latched facts do not prove another physical
+replacement at the second promotion. The last failure had no first snapshot;
+the successful display claim and still-pending native adoption require separate
+lifecycle handling. No response reached the codec, the unused rejected-reply arm
+was removed, and cleanup remains unconfirmed. Exact journals, 137 native rows
+and 19 finite diagnostic records remain in
+`candidate288-plan/fresh-send/setup-failure-capture/`; no replay occurred.
+
+### Build 289: separate completed display recovery from pending submission proof
+
+A new actual-WebKit regression reproduces the build288 rejection on unchanged
+production source: it performs the second route promotion during submission's
+real digest, after the first private pin exists and while submission remains
+pending. The native route classifier accepts both edges, then the fresh read
+fails with `javaScriptFirstUser`. The trigger observes the digest/pending/private
+pin boundary independently of the display-completion flag, and changes no private
+proof state. The corrected baseline is retained under
+`swift289-adoption-baseline-final-tests.log` with its source-hashed receipt.
+
+The defect is the display claim's completion flag being deferred until after
+the separate awaited submission-finalization stage. A valid route crossing in
+that await discards the observation, leaving an already fully checked display
+claim classified as unfinished. Its next fresh native inspect then fails before
+it can complete normal submission adoption. This is a demonstrated lifecycle
+failure in the controlled regression, distinct from the uncaptured original
+blank response.
+
+The fix preserves a completed initial-route display claim when submission
+finalization returns only the existing URL-crossed read discard. This exception
+requires the same current non-revoked state, pending first outbound record,
+native outbound hash, private first hash, document, owner and invocation lease,
+plus the finite context witness identifying the URL change. Native must still
+certify that route and request fresh complete first-body and submission hashes.
+No answer or submission proof is accepted from the discarded read. Other display
+recovery phases retain success-only behavior; errors and thrown finalization
+leave the claim unverified. Classification occurs after the await, avoiding a
+temporarily successful flag visible to another invocation.
+
+Frozen build289 validation passed all 480 adapter tests / 19,017 assertions
+and 22 focused native tests. The new native regression passes unchanged and
+remounted full-body cases, including a later read without renewing the display
+click deadline; altered bytes, re-collapse and Work mode remain rejected.
+Focused JavaScript cases additionally prove that thrown digests, stale leases,
+private-pin failures and restored invalid state cannot revive a spent claim.
+Receipts are `adoption289-tests/full-result.json` and
+`swift289-adoption-final-tests-result.json` in the retained capture directory.
+Live build289 qualification remains pending.
