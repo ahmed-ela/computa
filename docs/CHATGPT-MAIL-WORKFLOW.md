@@ -304,6 +304,46 @@ build-310 adapter fails only the new diagnostic assertion
 in the same final native test binary. This proves diagnostic coverage and the
 normal path's arguments, not the unknown cause of real run 310.
 
+Installed build 311 reproduced the failed second inference after one successful
+Chat / Instant response and one read-only browser inventory. The task failed in
+14.696 seconds with zero email input or Send. Its first retained diagnostic is
+`finalization_hash / route_guard / model_pins`: the route handoff rejected
+`chatGPTFirstRouteModelPins`. The expected model and deferred-verification input
+were present, and the replacement receipt matched and remained retained. The
+identical first cause survived route discard, the spent read and failed cleanup.
+This excludes missing expected-model input and missing or mismatched replacement
+receipt for that rejection. The model-pin helper still combines several
+predicates, so the record does not distinguish a disabled/replaced picker from
+negative selection history or another model-control mismatch. No behavioral
+repair is claimed. Exact evidence is retained, diagnostic arms are cleaned, and
+website cleanup remains unconfirmed.
+
+Build 312 names the individual model-pin rejection operands while preserving
+their order and short-circuit evaluation. A bounded optional snapshot reuses the
+already-computed picker presence/counts to distinguish missing or duplicate
+triggers from a replacement. If the pin was invalidated, the diagnostic retains
+the existing first invalidation history: either the finite header-mutation stage
+and rejection rule or the semantic attribute and four comparison booleans. Header
+mutation traversal records its original rejection without rereading text. No
+model value, page text, URL, identifier or private proof is logged; native parsing
+keeps a closed schema and removes diagnostics before response validation. These
+changes supply evidence for the repair and do not change model verification.
+All eight invalidation writers retain their finite source and first rejected
+operand, including provisional-header and deferred-model paths. The shared
+header helper is updated in its canonical source and regenerated consistently
+into all three provider adapters; this does not claim live qualification of the
+other providers.
+
+The final affected adapter/shared-helper cohort passes all 792 tests (33,195
+assertions), and all 14 focused native tests pass. Actual WebKit cases disable,
+replace or change the model header at the existing product-verification and
+route/hash boundary. They preserve the same rejection, one Send and the original
+expansion/route budgets while retaining distinct model-pin details through the
+spent read and failed cleanup. The immutable build-311 adapter fails the new
+detail assertions in the same final native binary, with the existing safety
+preconditions passing. Canonical-helper parity and unchanged Claude/Gemini
+provider-specific bodies are checked separately from these ChatGPT regressions.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

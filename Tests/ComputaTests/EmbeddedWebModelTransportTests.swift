@@ -5657,6 +5657,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                              verifyCertificateDiagnostic: true, mutateAtFullHash: true)
     }
 
+    func testBoundModelPinLeafFailuresSurviveDiscardSpentReadAndCleanupWithoutAnotherAction() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["disabled_model", "replaced_model", "wrong_model"], crossing: "product_then_hash",
+                                             verifyCertificateDiagnostic: true, mutateAtFullHash: true)
+    }
+
     private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest", verifyCertificateDiagnostic: Bool = false,
                                             mutateAtFullHash: Bool = false) async throws {
         for condition in conditions {
@@ -5748,6 +5753,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                         const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
                         body.textContent = body.textContent.replace('Bound recovery', 'Wrong recovery');
                       } else if ('\(condition)' === 'wrong_model') document.getElementById('fixture-model-header').textContent = 'High';
+                      else if ('\(condition)' === 'disabled_model') document.getElementById('fixture-model-trigger').disabled = true;
+                      else if ('\(condition)' === 'replaced_model') {
+                        const old = document.getElementById('fixture-model-trigger'); old.replaceWith(old.cloneNode(true));
+                      }
                       else if ('\(condition)' === 'normal_chat') {
                         const temporary = document.querySelector('[aria-label="Turn off temporary chat"]');
                         temporary.setAttribute('aria-label', 'Start temporary chat'); temporary.textContent = 'Start temporary chat';
@@ -5977,7 +5986,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(discarded.utf8)) as? [String: Any])
                     XCTAssertEqual(first["stage"] as? String, mutateAtFullHash ? "body_hash" : "receipt_context")
                     XCTAssertEqual(first["rule"] as? String, "context")
-                    XCTAssertEqual(first["routeRule"] as? String, mutateAtFullHash ? "temporary" : "body_canonical")
+                    let modelRule = ["disabled_model": "model_trigger_disabled", "replaced_model": "model_trigger_identity",
+                                     "wrong_model": "model_pin_invalidated"][condition]
+                    XCTAssertEqual(first["routeRule"] as? String, modelRule ?? (mutateAtFullHash ? "temporary" : "body_canonical"))
+                    if modelRule != nil {
+                        XCTAssertEqual(first["modelPinState"] as? NSDictionary,
+                            ["triggerPresent": true, "pinHeaderPresent": true, "triggerCount": 1, "triggerCandidateCount": 1] as NSDictionary)
+                    } else { XCTAssertNil(first["modelPinState"]) }
+                    if condition == "wrong_model" {
+                        XCTAssertEqual(first["modelPinInvalidation"] as? NSDictionary,
+                            ["reason": "header_mutation", "source": "pinned_header", "stage": "current", "rule": "current_power"] as NSDictionary)
+                    } else {
+                        XCTAssertNil(first["modelPinInvalidation"], "Only a recorded pin invalidation may carry negative history")
+                    }
                     XCTAssertEqual(first["receiptPresent"] as? Bool, !mutateAtFullHash)
                     XCTAssertEqual(first["receiptNodesMatch"] as? Bool, !mutateAtFullHash)
                     XCTAssertEqual(first["receiptRetained"] as? Bool, !mutateAtFullHash)
@@ -11037,6 +11058,130 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             try JSONSerialization.data(withJSONObject: changed), provider: .chatgpt)
         XCTAssertEqual(rejected.count, 1, "Malformed optional diagnostics cannot hide the existing route result")
         XCTAssertFalse(rejected.joined().contains("PRIVATE_CANARY"))
+    }
+
+    func testBoundModelPinInvalidationDetailsAreClosedFiniteAndRemovedBeforeInference() throws {
+        let headers: [[String: Any]] = [
+            ["reason": "header_mutation", "stage": "current", "rule": "current_power"],
+            ["reason": "header_mutation", "stage": "reconstruction", "rule": "reconstruction_limit"],
+            ["reason": "header_mutation", "stage": "removed", "rule": "node_missing"]]
+        let semantics: [[String: Any]] = ["aria-valuenow", "aria-checked"].map { attribute in
+            ["reason": "semantic_mutation", "attribute": attribute, "nodeConnected": false,
+             "attributePresent": false, "currentMatches": false, "oldMatches": false]
+        }
+        let sourced: [[String: Any]] = [
+            ["reason": "header_replaced", "source": "header_tracking", "stage": "header_tracking", "rule": "trigger_identity"],
+            ["reason": "header_replaced", "source": "remount_context", "stage": "remount_context", "rule": "previous_connected"],
+            ["reason": "header_replaced", "source": "provisional_context", "stage": "provisional_context", "rule": "selection_identity"],
+            ["reason": "header_mutation", "source": "pinned_header", "stage": "current", "rule": "current_power"],
+            ["reason": "header_mutation", "source": "remount_header", "stage": "records", "rule": "record_limit"],
+            ["reason": "header_mutation", "source": "provisional_header", "stage": "child_list", "rule": "provisional_child"],
+            ["reason": "semantic_mutation", "source": "semantic_observer", "attribute": "aria-valuenow",
+             "nodeConnected": true, "attributePresent": true, "currentMatches": true, "oldMatches": false],
+            ["reason": "semantic_mutation", "source": "deferred_model", "stage": "deferred_model", "rule": "slider_power"],
+            ["reason": "other", "source": "unknown"],
+            ["reason": "header_mutation", "source": "remount_header"]]
+        let details = ["header_replaced", "header_mutation", "semantic_mutation", "other"].map { ["reason": $0] as [String: Any] }
+            + headers + semantics + sourced
+        for detail in details {
+            var diagnostic = boundCertificateDiagnosticFixture()
+            diagnostic["routeRule"] = "model_pin_invalidated"; diagnostic["modelPinInvalidation"] = detail
+            diagnostic["modelPinState"] = ["triggerPresent": false, "pinHeaderPresent": false, "triggerCount": 256, "triggerCandidateCount": 256]
+            XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt) as NSDictionary?, diagnostic as NSDictionary)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .gemini))
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .claude))
+            let authority: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message", "firstUserVerified": false]
+            var observed = authority; observed["boundCertificateDiagnostic"] = diagnostic
+            let text = try XCTUnwrap(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observed, provider: .chatgpt))
+            XCTAssertEqual(observed as NSDictionary, authority as NSDictionary)
+            XCTAssertLessThanOrEqual(text.utf8.count, 960)
+            var wrongRoute = diagnostic; wrongRoute["routeRule"] = "model_trigger_identity"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(wrongRoute, provider: .chatgpt))
+            for key in detail.keys {
+                var incomplete = detail; incomplete.removeValue(forKey: key)
+                // Reason-only history explicitly means the original producer
+                // did not retain finer facts; every partial detailed shape fails.
+                if key != "source" && !(incomplete["reason"] != nil && Set(incomplete.keys).isSubset(of: ["reason", "source"])) {
+                    var changed = diagnostic; changed["modelPinInvalidation"] = incomplete
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt), key)
+                }
+                for invalid in [NSNull(), "PRIVATE_CANARY", 0, 1, ["url": "https://PRIVATE_CANARY"]] as [Any] {
+                    var changedDetail = detail; changedDetail[key] = invalid
+                    var changed = diagnostic; changed["modelPinInvalidation"] = changedDetail
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt), key)
+                    var observation = authority; observation["boundCertificateDiagnostic"] = changed
+                    XCTAssertNil(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: .chatgpt))
+                    XCTAssertEqual(observation as NSDictionary, authority as NSDictionary)
+                }
+                if ["reason", "source", "stage", "rule", "attribute"].contains(key) {
+                    var changedDetail = detail; changedDetail[key] = true
+                    var changed = diagnostic; changed["modelPinInvalidation"] = changedDetail
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt), key)
+                }
+            }
+            for key in ["text", "url", "node", "oldValue", "value", "fingerprint", "owner"] {
+                var changedDetail = detail; changedDetail[key] = "PRIVATE_CANARY"
+                var changed = diagnostic; changed["modelPinInvalidation"] = changedDetail
+                let bytes = try JSONSerialization.data(withJSONObject: ["error": "conversation_changed", "detail": "first_user_message",
+                    "boundCertificateDiagnostic": changed, "text": "PRIVATE_CANARY"])
+                let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(bytes, provider: .chatgpt)
+                XCTAssertEqual(records.count, 1)
+                XCTAssertFalse(records.joined().contains("PRIVATE_CANARY"))
+            }
+        }
+        for detail: [String: Any] in [
+            ["reason": "header_replaced", "source": "semantic_observer"],
+            ["reason": "header_mutation", "source": "header_tracking"],
+            ["reason": "semantic_mutation", "source": "pinned_header"],
+            ["reason": "other", "source": "deferred_model"],
+            ["reason": "header_replaced", "source": "header_tracking", "stage": "provisional_context", "rule": "pin_owner"],
+            ["reason": "header_replaced", "source": "remount_context", "stage": "remount_context", "rule": "pin_owner"],
+            ["reason": "semantic_mutation", "source": "semantic_observer", "stage": "deferred_model", "rule": "header_power"],
+            ["reason": "semantic_mutation", "source": "deferred_model", "attribute": "aria-checked",
+             "nodeConnected": true, "attributePresent": true, "currentMatches": true, "oldMatches": false]] {
+            var diagnostic = boundCertificateDiagnosticFixture()
+            diagnostic["routeRule"] = "model_pin_invalidated"; diagnostic["modelPinInvalidation"] = detail
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt))
+        }
+        for rule in ["model_pin_missing", "model_pin_owner", "model_pin_document", "model_pin_invalidated",
+                     "model_selection_missing", "model_selection_key", "model_trigger_identity", "model_trigger_missing", "model_trigger_disabled",
+                     "model_duplicate", "model_conflicting", "model_indicator", "model_selection_ambiguous", "model_navigation_ambiguous",
+                     "model_header_power", "model_slider_power", "model_checked_family"] {
+            var diagnostic = boundCertificateDiagnosticFixture(); diagnostic["routeRule"] = rule
+            XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt)?["routeRule"] as? String, rule)
+        }
+    }
+
+    func testBoundModelPinStateRejectsUnknownPartialPrivateAndUnboundedValues() throws {
+        let state: [String: Any] = ["triggerPresent": true, "pinHeaderPresent": false, "triggerCount": 0, "triggerCandidateCount": 256]
+        var diagnostic = boundCertificateDiagnosticFixture()
+        diagnostic["routeRule"] = "model_trigger_identity"; diagnostic["modelPinState"] = state
+        XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt) as NSDictionary?, diagnostic as NSDictionary)
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .gemini))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .claude))
+        for key in state.keys {
+            var partial = state; partial.removeValue(forKey: key)
+            var changed = diagnostic; changed["modelPinState"] = partial
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt))
+            let invalid: [Any] = [NSNull(), "PRIVATE_CANARY", ["url": "https://PRIVATE_CANARY"]] +
+                (["triggerCount", "triggerCandidateCount"].contains(key) ? [true, false, -1, 257, 1.5, Double.infinity, Double.nan] : [0, 1])
+            for value in invalid {
+                var malformed = state; malformed[key] = value
+                changed["modelPinState"] = malformed
+                var observation: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message", "boundCertificateDiagnostic": changed]
+                XCTAssertNil(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: .chatgpt), key)
+                XCTAssertEqual(observation as NSDictionary, ["error": "conversation_changed", "detail": "first_user_message"] as NSDictionary)
+            }
+        }
+        var extra = state; extra["header"] = "PRIVATE_CANARY"
+        var changed = diagnostic; changed["modelPinState"] = extra
+        let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(try JSONSerialization.data(withJSONObject:
+            ["error": "conversation_changed", "boundCertificateDiagnostic": changed]), provider: .chatgpt)
+        XCTAssertEqual(records.count, 1); XCTAssertFalse(records.joined().contains("PRIVATE_CANARY"))
+        for rule in ["model_pins", "expected_model", "body_canonical", "none"] {
+            changed = diagnostic; changed["routeRule"] = rule
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt))
+        }
     }
 
     func testBoundCertificateDiagnosticIsRemovedBeforeInferenceRegardlessOfValidity() throws {

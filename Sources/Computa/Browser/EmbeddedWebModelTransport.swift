@@ -2705,7 +2705,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private static let boundCertificateFlags = ["receiptPresent", "receiptNodesMatch", "receiptRetained",
         "awaitingNativeRefresh", "refreshClaimed", "expectedModelPresent", "deferModelVerification"]
-    private static let boundCertificateRouteRules: Set<String> = [
+    private static let boundCertificateRouteRules: Set<String> = Set([
         "none", "not_attempted", "return_result", "return_remount", "return_awaiting",
         "return_unclaimed", "return_grant", "return_receipt", "return_retained", "return_document",
         "return_owner", "return_root", "return_body", "return_old_root", "return_old_body",
@@ -2725,7 +2725,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "record_fingerprint", "candidate_fingerprint", "native_fingerprint", "private_fingerprint", "private_marker",
         "native_marker", "submission_sequence", "submission_marker", "record_marker", "submission_pins",
         "state_model", "expected_model", "expansion_model", "product", "temporary",
-        "model_pins", "conversation_identity", "conversation_route", "conversation_url"]
+        "model_pins", "conversation_identity", "conversation_route", "conversation_url"])
+        .union(boundCertificateModelPinRules)
+    private static let boundCertificateModelPinRules: Set<String> = [
+        "model_pin_missing", "model_pin_owner", "model_pin_document", "model_pin_invalidated",
+        "model_selection_missing", "model_selection_key", "model_trigger_identity", "model_trigger_missing", "model_trigger_disabled",
+        "model_duplicate", "model_conflicting", "model_indicator", "model_selection_ambiguous", "model_navigation_ambiguous",
+        "model_header_power", "model_slider_power", "model_checked_family"]
     private static let boundCertificateLabels: [String: Set<String>] = [
         "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
         "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
@@ -2739,11 +2745,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Closed finite first-failure facts, never model or ownership authority.
     static func sanitizedBoundCertificateDiagnostic(_ raw: Any?, provider: Provider) -> [String: Any]? {
+        let ordinaryKeys = Set(boundCertificateFlags + Array(boundCertificateLabels.keys) + ["kind", "routeRule"])
         guard provider == .chatgpt, let value = raw as? [String: Any],
               value["kind"] as? String == "chatgpt_bound_certificate_v1",
-              Set(value.keys) == Set(boundCertificateFlags + Array(boundCertificateLabels.keys) + ["kind", "routeRule"]),
+              ordinaryKeys.isSubset(of: Set(value.keys)),
+              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState"])),
               let routeRule = value["routeRule"] as? String, boundCertificateRouteRules.contains(routeRule) else { return nil }
         var safe: [String: Any] = ["kind": "chatgpt_bound_certificate_v1", "routeRule": routeRule]
+        if let invalidation = value["modelPinInvalidation"] {
+            guard routeRule == "model_pin_invalidated", let projected = sanitizedModelPinInvalidation(invalidation) else { return nil }
+            safe["modelPinInvalidation"] = projected
+        }
+        if let state = value["modelPinState"] {
+            guard boundCertificateModelPinRules.contains(routeRule), let projected = sanitizedModelPinState(state) else { return nil }
+            safe["modelPinState"] = projected
+        }
         for key in boundCertificateFlags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
             safe[key] = flag
@@ -2754,6 +2770,73 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
               bytes.count <= 960 else { return nil }
+        return safe
+    }
+
+    private static func sanitizedModelPinState(_ raw: Any) -> [String: Any]? {
+        let flags = ["triggerPresent", "pinHeaderPresent"]
+        let counts = ["triggerCount", "triggerCandidateCount"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + counts) else { return nil }
+        var safe: [String: Any] = [:]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for key in counts {
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                  (0...256).contains(number.doubleValue) else { return nil }
+            safe[key] = number.intValue
+        }
+        return safe
+    }
+
+    private static func sanitizedModelPinInvalidation(_ raw: Any) -> [String: Any]? {
+        let sources: [String: Set<String>] = [
+            "header_replaced": ["header_tracking", "remount_context", "provisional_context", "unknown"],
+            "header_mutation": ["pinned_header", "remount_header", "provisional_header", "unknown"],
+            "semantic_mutation": ["semantic_observer", "deferred_model", "unknown"], "other": ["unknown"]]
+        guard let value = raw as? [String: Any], let reason = value["reason"] as? String,
+              let allowedSources = sources[reason] else { return nil }
+        var safe: [String: Any] = ["reason": reason]
+        if let rawSource = value["source"] {
+            guard let source = rawSource as? String, allowedSources.contains(source) else { return nil }
+            safe["source"] = source
+        }
+        let source = safe["source"] as? String
+        let baseKeys = Set(safe.keys)
+        if Set(value.keys) == baseKeys { return safe }
+        if reason == "header_mutation" {
+            guard Set(value.keys) == baseKeys.union(["stage", "rule"]), let stage = value["stage"] as? String,
+                  ["current", "records", "reconstruction", "character_data", "removed", "added", "child_list"].contains(stage),
+                  let rule = value["rule"] as? String,
+                  ["current_power", "record_limit", "child_nodes_limit", "reconstruction_limit", "ancestry_limit",
+                   "old_text_limit", "new_text_limit", "old_power", "new_power", "node_missing", "node_limit", "depth_limit", "text_limit",
+                   "children_limit", "candidate_limit", "aggregate_limit", "power", "provisional_old", "provisional_current", "provisional_child"].contains(rule) else { return nil }
+            safe["stage"] = stage; safe["rule"] = rule; return safe
+        }
+        if reason == "header_replaced" || reason == "semantic_mutation" && value["stage"] != nil {
+            let rules: [String: Set<String>] = reason == "header_replaced" ? [
+                "header_tracking": ["trigger_identity"], "remount_context": ["previous_connected", "trigger_identity"],
+                "provisional_context": ["pin_current", "pin_owner", "pin_document", "global_owner", "document", "frame", "origin",
+                    "selection_identity", "selection_family", "selection_power", "previous_connected", "header_identity", "trigger_count",
+                    "trigger_identity", "trigger_enabled", "closed_presentation", "header_power", "header_presentation", "duplicate",
+                    "conflicting", "indicator", "selection_ambiguous", "navigation_ambiguous", "slider_power", "checked_family"]]
+                : ["deferred_model": ["header_power", "slider_power", "checked_family"]]
+            guard Set(value.keys) == baseKeys.union(["stage", "rule"]), let stage = value["stage"] as? String,
+                  let rule = value["rule"] as? String, rules[stage]?.contains(rule) == true,
+                  source == nil || source == "unknown" || source == stage else { return nil }
+            safe["stage"] = stage; safe["rule"] = rule; return safe
+        }
+        let flags = ["nodeConnected", "attributePresent", "currentMatches", "oldMatches"]
+        guard reason == "semantic_mutation", Set(value.keys) == baseKeys.union(flags + ["attribute"]),
+              source == nil || source == "unknown" || source == "semantic_observer",
+              let attribute = value["attribute"] as? String, ["aria-valuenow", "aria-checked"].contains(attribute) else { return nil }
+        safe["attribute"] = attribute
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
         return safe
     }
 

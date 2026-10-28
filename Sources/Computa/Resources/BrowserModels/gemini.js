@@ -156,23 +156,27 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
     && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
     && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
 }
-function websiteChatHeaderMutationMismatch(records, trigger, expected) {
+function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null) {
   if (!trigger || !expected) return false;
+  const fail = (stage, rule) => {
+    if (diagnostic && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; }
+    return true;
+  };
   const different = value => {
     const power = websiteChatHeaderPresentation(value, true).power;
     return !!power && power.key !== expected.key;
   };
-  if (different(trigger.innerText)) return true;
+  if (different(trigger.innerText)) return fail('current', 'current_power');
   // Current ancestry loses an attached header child that changed and detached
   // before delivery. Undo structural records, then replay their exact lineage.
   // The bounded reconstruction supplies only negative drift evidence.
-  if (records.length > 512) return true;
+  if (records.length > 512) return fail('records', 'record_limit');
   const parents = new Map(), children = new Map(), text = new Map(), afterText = new Map();
   const parent = node => parents.has(node) ? parents.get(node) : node?.parentNode || node?.parentElement || null;
   const bounded = value => typeof value === 'string' && value.length <= 128 ? value : null;
   for (const record of records) if (record.type === 'childList') {
     const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
-    if (nodes.length > 128) return true;
+    if (nodes.length > 128) return fail('records', 'child_nodes_limit');
     const candidates = children.get(record.target) || new Set();
     for (const node of nodes) candidates.add(node);
     children.set(record.target, candidates);
@@ -186,7 +190,7 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
       afterText.set(record, text.has(record.target) ? text.get(record.target) : bounded(record.target?.textContent));
       text.set(record.target, bounded(record.oldValue));
     }
-    if (parents.size + text.size > 4_096) return true;
+    if (parents.size + text.size > 4_096) return fail('reconstruction', 'reconstruction_limit');
   }
   const suppressed = node => node === trigger && node.nodeType === 1
     && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null);
@@ -197,21 +201,30 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
     }
     return node ? null : false;
   };
+  let textFailure = null;
+  const rejectText = rule => { textFailure ||= rule; return null; };
   const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
-    if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
-    if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
+    if (!node) return rejectText('node_missing');
+    if (--budget.nodes < 0) return rejectText('node_limit');
+    if (budget.depth > 32) return rejectText('depth_limit');
+    if (node.nodeType === 3) {
+      const value = text.has(node) ? text.get(node) : bounded(node.textContent);
+      return value === null ? rejectText('text_limit') : value;
+    }
     // AX suppression below the header does not hide rendered innerText. These
     // bounded records can only reject a pin, including after a node detaches.
     if (node.nodeType !== 1 || suppressed(node)) return '';
     const current = [...(node.childNodes || [])];
-    if (current.length > 128) return null;
+    if (current.length > 128) return rejectText('children_limit');
     const candidates = new Set([...current, ...(children.get(node) || [])]);
-    if (candidates.size > 128) return null;
+    if (candidates.size > 128) return rejectText('candidate_limit');
     let value = '';
     budget.depth++;
     for (const child of candidates) if (parent(child) === node) {
       const part = textAt(child, budget);
-      if (part === null || value.length + part.length > 128) { budget.depth--; return null; }
+      if (part === null || value.length + part.length > 128) {
+        budget.depth--; return part === null ? null : rejectText('aggregate_limit');
+      }
       value += part;
     }
     budget.depth--;
@@ -220,36 +233,49 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   for (const record of records) {
     if (record.type === 'characterData') {
       const owned = headerTarget(record.target);
-      if (owned === null || owned && (bounded(record.oldValue) === null || afterText.get(record) === null
-        || different(record.oldValue) || different(afterText.get(record)))) return true;
+      if (owned === null) return fail('character_data', 'ancestry_limit');
+      if (owned) {
+        if (bounded(record.oldValue) === null) return fail('character_data', 'old_text_limit');
+        if (afterText.get(record) === null) return fail('character_data', 'new_text_limit');
+        if (different(record.oldValue)) return fail('character_data', 'old_power');
+        if (different(afterText.get(record))) return fail('character_data', 'new_power');
+      }
       text.set(record.target, afterText.get(record));
     } else if (record.type === 'childList') {
       for (const node of record.removedNodes || []) {
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('removed', 'ancestry_limit');
+        if (owned && value === null) return fail('removed', textFailure);
+        if (owned && different(value)) return fail('removed', 'power');
         if (parent(node) === record.target) parents.set(node, null);
       }
       for (const node of record.addedNodes || []) {
         parents.set(node, record.target);
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('added', 'ancestry_limit');
+        if (owned && value === null) return fail('added', textFailure);
+        if (owned && different(value)) return fail('added', 'power');
       }
     }
   }
   return false;
 }
-function websiteChatInvalidatePin(pin, reason, facts = null) {
+function websiteChatInvalidatePin(pin, reason, facts = null, source = 'unknown') {
   pin.invalidated = true;
   // Preserve the first finite cause. This records negative evidence only;
   // it cannot revive a selection or change any model/ownership guard.
   if (!pin.invalidationReason && ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(reason)) {
     pin.invalidationReason = reason;
     pin.invalidationFacts = facts;
+    pin.invalidationSource = ['header_tracking', 'pinned_header', 'remount_header', 'remount_context', 'provisional_header',
+      'provisional_context', 'semantic_observer', 'deferred_model'].includes(source) ? source : 'unknown';
   }
 }
 function websiteChatTrackPinnedHeader(pin, trigger) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
-  if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) {
+    websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'header_tracking', rule: 'trigger_identity' }, 'header_tracking'); return;
+  }
   pin.headerTrigger = trigger;
   if (pin.headerObserver) return;
   pin.headerObserver = new MutationObserver(records => websiteChatObservePinnedHeader(pin, trigger, records));
@@ -259,7 +285,9 @@ function websiteChatTrackPinnedHeader(pin, trigger) {
 function websiteChatObservePinnedHeader(pin, trigger, records) {
   if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
     || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
-  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
+  const diagnostic = {};
+  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power, diagnostic))
+    websiteChatInvalidatePin(pin, 'header_mutation', Object.freeze(diagnostic), 'pinned_header');
 }
 function websiteChatDrainPinnedMutations(pin) {
   // Only private model observers are drained. The shared notification observer
@@ -299,7 +327,7 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
         attribute: record.attributeName, nodeConnected: record.target.isConnected === true,
         attributePresent: value !== null, currentMatches: value === expected.value,
         oldMatches: record.oldValue === null || record.oldValue === expected.value,
-      });
+      }, 'semantic_observer');
       return;
     }
   }
@@ -444,9 +472,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerReadiness = null;
   const tracked = new Map();
   const observeHeader = records => {
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
+    const diagnostic = {};
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic)) {
       selectionChanged = true;
-      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation');
+      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation', Object.freeze(diagnostic), 'remount_header');
     }
   };
   const headerObserver = new MutationObserver(observeHeader);
@@ -488,8 +517,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
-    if (remount && (remount.previous.isConnected !== false || current.trigger !== remount.replacement)) {
-      websiteChatInvalidatePin(pin, 'header_replaced');
+    let remountFailure = null;
+    const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
+    if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
+      || rejectRemount('trigger_identity', current.trigger !== remount.replacement))) {
+      websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'remount_context', rule: remountFailure }, 'remount_context');
       throw failure('model_mismatch');
     }
     if (current.triggerCount !== 1 || !current.trigger || trigger && current.trigger !== trigger

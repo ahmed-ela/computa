@@ -1359,6 +1359,8 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
       const observed = await x.observe(record, { deferModelVerification: true });
       expect(observed.error).toBe('model_mismatch'); expect(observed).not.toHaveProperty('modelEvidence');
       expect(pin.invalidated).toBe(true); expect(picker.trigger.clicks).toBe(before);
+      expect(pin.invalidationSource).toBe(field === 'power' ? 'semantic_observer' : 'pinned_header');
+      if (field === 'header') expect(pin.invalidationFacts).toEqual({ stage: 'character_data', rule: 'old_power' });
     }
   });
 
@@ -1407,6 +1409,16 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
       expect(observed).not.toHaveProperty('modelVerificationPending'); expect(picker.trigger.clicks).toBe(before);
       expect(pin.headerTrigger).toBe(old); expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(false);
       expect(JSON.stringify(observed)).not.toContain('PRIVATE_UNKNOWN_HEADER');
+      if (['flip_restore', 'unknown_restore', 'detached_flip_restore', 'queued_before_full'].includes(mutation)) {
+        expect(pin.invalidationSource).toBe('provisional_header');
+        expect(pin.invalidationFacts).toEqual({ stage: mutation === 'detached_flip_restore' ? 'removed' : 'character_data',
+          rule: mutation === 'unknown_restore' ? 'provisional_old' : mutation === 'detached_flip_restore' ? 'power' : 'old_power' });
+      }
+      if (['second_replacement', 'old_reconnect'].includes(mutation)) {
+        expect(pin.invalidationSource).toBe('provisional_context');
+        expect(pin.invalidationFacts).toEqual({ stage: 'provisional_context',
+          rule: mutation === 'old_reconnect' ? 'previous_connected' : 'trigger_identity' });
+      }
     }
   });
 
@@ -2445,7 +2457,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
     });
 
-    const remountFinalizationRoute = async (mutation = 'none') => {
+    const remountFinalizationRoute = async (mutation = 'none', afterPromotion?: (staged: any) => void) => {
       const staged = await remounted(), { x, first, record, oldRoot, oldBody } = staged;
       const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;
       const publicURL = 'https://chatgpt.com/c/public-finalization-recovery?temporary-chat=true';
@@ -2471,6 +2483,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         if (mutation === 'receipt') record.replacement = { ...receipt };
         if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
         if (mutation === 'temporary') x.f.temporary.connected = false;
+        afterPromotion?.(staged);
       };
       x.f.onDigest(promote, first.outbound);
       const discarded = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge] });
@@ -2622,7 +2635,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     });
 
     test('certificate diagnostics retain the exact first rejected guard through spent reads and cleanup without text or proof values', async () => {
-      const cases = [['body', 'body_canonical'], ['model', 'model_pins'], ['owner', 'global_owner'],
+      const cases = [['body', 'body_canonical'], ['model', 'model_pin_invalidated'], ['owner', 'global_owner'],
         ['document', 'document'], ['deadline', 'deadline_expired'], ['temporary', 'temporary'],
         ['work', 'product'], ['lease', 'lease_current']] as const;
       for (const [mutation, routeRule] of cases) {
@@ -2659,7 +2672,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     });
 
     test('bound body-hash diagnostics retain exact route refusals before any replacement certificate exists', async () => {
-      for (const [mutation, routeRule] of [['body', 'body_canonical'], ['model', 'model_pins'], ['owner', 'global_owner'],
+      for (const [mutation, routeRule] of [['body', 'body_canonical'], ['model', 'model_pin_invalidated'], ['owner', 'global_owner'],
         ['temporary', 'temporary'], ['expected_model', 'expected_model']] as const) {
         const { x, first, record, body, oldRoot, oldBody, expand } = await remounted();
         const owner = x.f.world.__computaModelOwner;
@@ -2710,6 +2723,71 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       const later = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
       denied(later); expect(later.boundCertificateDiagnostic).toEqual(result.boundCertificateDiagnostic);
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('model-pin route diagnostics distinguish disabled and replaced headers from retained negative history', async () => {
+      for (const mutation of ['disabled', 'replacement', 'missing', 'duplicate', 'header_old', 'header_old_limit',
+        'header_new_limit', 'header_record_limit', 'header_aggregate', 'semantic_current', 'semantic_old']) {
+        let oldTrigger: any;
+        const { x, first, record, candidate, receipt, deadline, firstEdge, secondEdge, discarded, expand }
+          = await remountFinalizationRoute('none', ({ x }: any) => {
+            const pin = x.f.world.__computaChatPresetPin;
+            if (mutation === 'disabled') x.picker.trigger.disabled = true;
+            if (mutation === 'replacement') oldTrigger = x.picker.replaceTrigger();
+            if (mutation === 'missing') x.picker.trigger.connected = false;
+            if (mutation === 'duplicate') x.f.body.append(new Element('BUTTON', {
+              'aria-label': 'Select ChatGPT model', 'aria-haspopup': 'menu' }, 'Medium'));
+            if (mutation.startsWith('header_')) {
+              let once = true;
+              pin.headerObserver.takeRecords = () => { if (!once) return []; once = false;
+                if (mutation === 'header_record_limit') return Array.from({ length: 513 }, () => ({ type: 'childList',
+                  target: x.picker.trigger, addedNodes: [], removedNodes: [] }));
+                if (mutation === 'header_aggregate') {
+                  const removed = new Element('SPAN'); removed.append(new Element('SPAN', {}, 'x'.repeat(80)));
+                  removed.append(new Element('SPAN', {}, 'y'.repeat(80)));
+                  return [{ type: 'childList', target: x.picker.trigger, addedNodes: [], removedNodes: [removed] }];
+                }
+                return [{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker.primary,
+                  textContent: mutation === 'header_new_limit' ? 'x'.repeat(129) : 'Medium' },
+                  oldValue: mutation === 'header_old_limit' ? 'x'.repeat(129) : 'High' }]; };
+            }
+            if (mutation.startsWith('semantic')) {
+              if (mutation === 'semantic_current') x.picker.slider.values['aria-valuenow'] = '2';
+              let once = true;
+              pin.semanticObserver.takeRecords = () => { if (!once) return []; once = false;
+                return [{ type: 'attributes', target: x.picker.slider, attributeName: 'aria-valuenow',
+                  oldValue: mutation === 'semantic_old' ? '2' : '1' }]; };
+            }
+          });
+        const diagnostic = discarded.boundCertificateDiagnostic;
+        expect(diagnostic, mutation).toMatchObject({ stage: 'finalization_hash', rule: 'route_guard',
+          routeRule: mutation === 'disabled' ? 'model_trigger_disabled'
+            : ['replacement', 'missing', 'duplicate'].includes(mutation) ? 'model_trigger_identity' : 'model_pin_invalidated',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true });
+        expect(diagnostic.modelPinState).toEqual({ triggerPresent: !['missing', 'duplicate'].includes(mutation),
+          triggerCount: mutation === 'missing' ? 0 : mutation === 'duplicate' ? 2 : 1,
+          triggerCandidateCount: mutation === 'missing' ? 0 : mutation === 'duplicate' ? 2 : 1, pinHeaderPresent: true });
+        if (mutation.startsWith('header_')) expect(diagnostic.modelPinInvalidation).toEqual({ reason: 'header_mutation', source: 'pinned_header',
+          stage: mutation === 'header_record_limit' ? 'records' : mutation === 'header_aggregate' ? 'removed' : 'character_data',
+          rule: ({ header_old: 'old_power', header_old_limit: 'old_text_limit', header_new_limit: 'new_text_limit',
+            header_record_limit: 'record_limit', header_aggregate: 'aggregate_limit' } as Record<string, string>)[mutation] });
+        else if (mutation.startsWith('semantic')) expect(diagnostic.modelPinInvalidation).toEqual({ reason: 'semantic_mutation', source: 'semantic_observer',
+          attribute: 'aria-valuenow', nodeConnected: false, attributePresent: true,
+          currentMatches: mutation === 'semantic_old', oldMatches: mutation === 'semantic_current' });
+        else expect(diagnostic.modelPinInvalidation).toBeUndefined();
+        expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+        const encoded = JSON.stringify(diagnostic); expect(encoded.length).toBeLessThanOrEqual(768);
+        for (const secret of [first.outbound, first.fingerprint, first.marker, firstEdge.fromURL, secondEdge.toURL])
+          expect(encoded).not.toContain(secret);
+        x.picker!.trigger.disabled = false; x.picker!.slider.values['aria-valuenow'] = '1';
+        if (oldTrigger) oldTrigger.connected = true;
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...fresh, action, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+          denied(refused); expect(JSON.stringify(refused.boundCertificateDiagnostic)).toBe(encoded);
+        }
+        expect(candidate.deadline).toBe(deadline); expect(record.replacement).toBe(receipt);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
     });
 
     test('certificate return and fresh hash can consume the two distinct native route edges in order', async () => {

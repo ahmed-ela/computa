@@ -156,23 +156,27 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
     && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
     && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
 }
-function websiteChatHeaderMutationMismatch(records, trigger, expected) {
+function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null) {
   if (!trigger || !expected) return false;
+  const fail = (stage, rule) => {
+    if (diagnostic && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; }
+    return true;
+  };
   const different = value => {
     const power = websiteChatHeaderPresentation(value, true).power;
     return !!power && power.key !== expected.key;
   };
-  if (different(trigger.innerText)) return true;
+  if (different(trigger.innerText)) return fail('current', 'current_power');
   // Current ancestry loses an attached header child that changed and detached
   // before delivery. Undo structural records, then replay their exact lineage.
   // The bounded reconstruction supplies only negative drift evidence.
-  if (records.length > 512) return true;
+  if (records.length > 512) return fail('records', 'record_limit');
   const parents = new Map(), children = new Map(), text = new Map(), afterText = new Map();
   const parent = node => parents.has(node) ? parents.get(node) : node?.parentNode || node?.parentElement || null;
   const bounded = value => typeof value === 'string' && value.length <= 128 ? value : null;
   for (const record of records) if (record.type === 'childList') {
     const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
-    if (nodes.length > 128) return true;
+    if (nodes.length > 128) return fail('records', 'child_nodes_limit');
     const candidates = children.get(record.target) || new Set();
     for (const node of nodes) candidates.add(node);
     children.set(record.target, candidates);
@@ -186,7 +190,7 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
       afterText.set(record, text.has(record.target) ? text.get(record.target) : bounded(record.target?.textContent));
       text.set(record.target, bounded(record.oldValue));
     }
-    if (parents.size + text.size > 4_096) return true;
+    if (parents.size + text.size > 4_096) return fail('reconstruction', 'reconstruction_limit');
   }
   const suppressed = node => node === trigger && node.nodeType === 1
     && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null);
@@ -197,21 +201,30 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
     }
     return node ? null : false;
   };
+  let textFailure = null;
+  const rejectText = rule => { textFailure ||= rule; return null; };
   const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
-    if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
-    if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
+    if (!node) return rejectText('node_missing');
+    if (--budget.nodes < 0) return rejectText('node_limit');
+    if (budget.depth > 32) return rejectText('depth_limit');
+    if (node.nodeType === 3) {
+      const value = text.has(node) ? text.get(node) : bounded(node.textContent);
+      return value === null ? rejectText('text_limit') : value;
+    }
     // AX suppression below the header does not hide rendered innerText. These
     // bounded records can only reject a pin, including after a node detaches.
     if (node.nodeType !== 1 || suppressed(node)) return '';
     const current = [...(node.childNodes || [])];
-    if (current.length > 128) return null;
+    if (current.length > 128) return rejectText('children_limit');
     const candidates = new Set([...current, ...(children.get(node) || [])]);
-    if (candidates.size > 128) return null;
+    if (candidates.size > 128) return rejectText('candidate_limit');
     let value = '';
     budget.depth++;
     for (const child of candidates) if (parent(child) === node) {
       const part = textAt(child, budget);
-      if (part === null || value.length + part.length > 128) { budget.depth--; return null; }
+      if (part === null || value.length + part.length > 128) {
+        budget.depth--; return part === null ? null : rejectText('aggregate_limit');
+      }
       value += part;
     }
     budget.depth--;
@@ -220,36 +233,49 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   for (const record of records) {
     if (record.type === 'characterData') {
       const owned = headerTarget(record.target);
-      if (owned === null || owned && (bounded(record.oldValue) === null || afterText.get(record) === null
-        || different(record.oldValue) || different(afterText.get(record)))) return true;
+      if (owned === null) return fail('character_data', 'ancestry_limit');
+      if (owned) {
+        if (bounded(record.oldValue) === null) return fail('character_data', 'old_text_limit');
+        if (afterText.get(record) === null) return fail('character_data', 'new_text_limit');
+        if (different(record.oldValue)) return fail('character_data', 'old_power');
+        if (different(afterText.get(record))) return fail('character_data', 'new_power');
+      }
       text.set(record.target, afterText.get(record));
     } else if (record.type === 'childList') {
       for (const node of record.removedNodes || []) {
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('removed', 'ancestry_limit');
+        if (owned && value === null) return fail('removed', textFailure);
+        if (owned && different(value)) return fail('removed', 'power');
         if (parent(node) === record.target) parents.set(node, null);
       }
       for (const node of record.addedNodes || []) {
         parents.set(node, record.target);
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('added', 'ancestry_limit');
+        if (owned && value === null) return fail('added', textFailure);
+        if (owned && different(value)) return fail('added', 'power');
       }
     }
   }
   return false;
 }
-function websiteChatInvalidatePin(pin, reason, facts = null) {
+function websiteChatInvalidatePin(pin, reason, facts = null, source = 'unknown') {
   pin.invalidated = true;
   // Preserve the first finite cause. This records negative evidence only;
   // it cannot revive a selection or change any model/ownership guard.
   if (!pin.invalidationReason && ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(reason)) {
     pin.invalidationReason = reason;
     pin.invalidationFacts = facts;
+    pin.invalidationSource = ['header_tracking', 'pinned_header', 'remount_header', 'remount_context', 'provisional_header',
+      'provisional_context', 'semantic_observer', 'deferred_model'].includes(source) ? source : 'unknown';
   }
 }
 function websiteChatTrackPinnedHeader(pin, trigger) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
-  if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) {
+    websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'header_tracking', rule: 'trigger_identity' }, 'header_tracking'); return;
+  }
   pin.headerTrigger = trigger;
   if (pin.headerObserver) return;
   pin.headerObserver = new MutationObserver(records => websiteChatObservePinnedHeader(pin, trigger, records));
@@ -259,7 +285,9 @@ function websiteChatTrackPinnedHeader(pin, trigger) {
 function websiteChatObservePinnedHeader(pin, trigger, records) {
   if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
     || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
-  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
+  const diagnostic = {};
+  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power, diagnostic))
+    websiteChatInvalidatePin(pin, 'header_mutation', Object.freeze(diagnostic), 'pinned_header');
 }
 function websiteChatDrainPinnedMutations(pin) {
   // Only private model observers are drained. The shared notification observer
@@ -299,7 +327,7 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
         attribute: record.attributeName, nodeConnected: record.target.isConnected === true,
         attributePresent: value !== null, currentMatches: value === expected.value,
         oldMatches: record.oldValue === null || record.oldValue === expected.value,
-      });
+      }, 'semantic_observer');
       return;
     }
   }
@@ -444,9 +472,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerReadiness = null;
   const tracked = new Map();
   const observeHeader = records => {
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
+    const diagnostic = {};
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic)) {
       selectionChanged = true;
-      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation');
+      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation', Object.freeze(diagnostic), 'remount_header');
     }
   };
   const headerObserver = new MutationObserver(observeHeader);
@@ -488,8 +517,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
-    if (remount && (remount.previous.isConnected !== false || current.trigger !== remount.replacement)) {
-      websiteChatInvalidatePin(pin, 'header_replaced');
+    let remountFailure = null;
+    const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
+    if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
+      || rejectRemount('trigger_identity', current.trigger !== remount.replacement))) {
+      websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'remount_context', rule: remountFailure }, 'remount_context');
       throw failure('model_mismatch');
     }
     if (current.triggerCount !== 1 || !current.trigger || trigger && current.trigger !== trigger
@@ -2112,12 +2144,18 @@ function websiteChatProvisionalHeaderRecords(pin, pending, records) {
   const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
   const allowed = value => typeof value === 'string' && value.length <= 128
     && ['', pending.power.label, ...(proving ? ['Thinking effort'] : [])].includes(websiteModelNormalize(value));
-  const changed = records.length > 512 || websiteChatHeaderMutationMismatch(records, pending.header, pending.power)
+  const diagnostic = {};
+  const reject = (stage, rule, value) => {
+    if (value && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; } return value;
+  };
+  const changed = reject('records', 'record_limit', records.length > 512)
+    || websiteChatHeaderMutationMismatch(records, pending.header, pending.power, diagnostic)
     || records.some(record => record.type === 'characterData'
-      ? !allowed(record.oldValue) || !allowed(record.target?.textContent)
-      : record.type === 'childList' && ([...(record.addedNodes || []), ...(record.removedNodes || [])].length > 128
-        || [...(record.addedNodes || []), ...(record.removedNodes || [])].some(node => !allowed(node.textContent || ''))));
-  if (changed) websiteChatInvalidatePin(pin, 'header_mutation');
+      ? reject('character_data', 'provisional_old', !allowed(record.oldValue))
+        || reject('character_data', 'provisional_current', !allowed(record.target?.textContent))
+      : record.type === 'childList' && (reject('child_list', 'child_nodes_limit', [...(record.addedNodes || []), ...(record.removedNodes || [])].length > 128)
+        || [...(record.addedNodes || []), ...(record.removedNodes || [])].some(node => reject('child_list', 'provisional_child', !allowed(node.textContent || '')))));
+  if (changed) websiteChatInvalidatePin(pin, 'header_mutation', Object.freeze(diagnostic), 'provisional_header');
 }
 function websiteChatDrainProvisionalHeader(pin) {
   const pending = pin?.provisionalHeader;
@@ -2126,19 +2164,35 @@ function websiteChatDrainProvisionalHeader(pin) {
   if (pin.invalidated === true) return;
   const current = websiteChatPickerState();
   const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
-  if (globalThis.__computaChatPresetPin !== pin || pin.owner !== pending.owner || pin.document !== pending.document
-    || globalThis.__computaModelOwner !== pending.owner || document !== pending.document
-    || window !== window.top || location.origin !== 'https://chatgpt.com'
-    || pin.selection !== pending.selection || pin.selection?.family?.key !== pending.family
-    || pin.selection?.power?.key !== pending.power.key || pending.previous.isConnected !== false
-    || pin.headerTrigger !== pending.previous && !(proving && pin.headerTrigger === pending.header)
-    || current.triggerCount !== 1 || current.trigger !== pending.header || !current.enabled(pending.header)
-    || !proving && !current.closedPresentation || current.headerPower && current.headerPower.key !== pending.power.key
-    || !current.headerPower && !(proving && current.headerPresentation)
-    || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
-    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pending.power.key))
-    || current.checkedFamily && current.checkedFamily.key !== pending.family) websiteChatInvalidatePin(pin, 'header_replaced');
+  const diagnostic = { stage: 'provisional_context', rule: null };
+  const reject = (rule, value) => { if (value && diagnostic.rule == null) diagnostic.rule = rule; return value; };
+  if (reject('pin_current', globalThis.__computaChatPresetPin !== pin)
+    || reject('pin_owner', pin.owner !== pending.owner)
+    || reject('pin_document', pin.document !== pending.document)
+    || reject('global_owner', globalThis.__computaModelOwner !== pending.owner)
+    || reject('document', document !== pending.document)
+    || reject('frame', window !== window.top)
+    || reject('origin', location.origin !== 'https://chatgpt.com')
+    || reject('selection_identity', pin.selection !== pending.selection)
+    || reject('selection_family', pin.selection?.family?.key !== pending.family)
+    || reject('selection_power', pin.selection?.power?.key !== pending.power.key)
+    || reject('previous_connected', pending.previous.isConnected !== false)
+    || reject('header_identity', pin.headerTrigger !== pending.previous && !(proving && pin.headerTrigger === pending.header))
+    || reject('trigger_count', current.triggerCount !== 1)
+    || reject('trigger_identity', current.trigger !== pending.header)
+    || reject('trigger_enabled', !current.enabled(pending.header))
+    || reject('closed_presentation', !proving && !current.closedPresentation)
+    || reject('header_power', current.headerPower && current.headerPower.key !== pending.power.key)
+    || reject('header_presentation', !current.headerPower && !(proving && current.headerPresentation))
+    || reject('duplicate', current.duplicate)
+    || reject('conflicting', current.conflicting)
+    || reject('indicator', current.indicatorInvalid)
+    || reject('selection_ambiguous', current.selectionAmbiguous)
+    || reject('navigation_ambiguous', current.navigationAmbiguous)
+    || reject('slider_power', current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pending.power.key)))
+    || reject('checked_family', current.checkedFamily && current.checkedFamily.key !== pending.family))
+    websiteChatInvalidatePin(pin, 'header_replaced', Object.freeze(diagnostic), 'provisional_context');
 }
 function websiteChatClaimProvisionalHeader(pin, current) {
   const pending = pin.provisionalHeader;
@@ -2191,11 +2245,13 @@ function websiteChatDeferredModelReadUnprofiled(expected, context) {
   // never transfers the original pin or creates positive model evidence.
   if (current.trigger !== pin.headerTrigger && !websiteChatClaimProvisionalHeader(pin, current))
     return { error: 'model_mismatch' };
-  if (current.headerPower && current.headerPower.key !== pin.selection.power.key
-    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
-    || current.checkedFamily && current.checkedFamily.key !== pin.selection.family.key) {
-    websiteChatInvalidatePin(pin, 'semantic_mutation');
+  const diagnostic = { stage: 'deferred_model', rule: null };
+  const reject = (rule, value) => { if (value && diagnostic.rule == null) diagnostic.rule = rule; return value; };
+  if (reject('header_power', current.headerPower && current.headerPower.key !== pin.selection.power.key)
+    || reject('slider_power', current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)))
+    || reject('checked_family', current.checkedFamily && current.checkedFamily.key !== pin.selection.family.key)) {
+    websiteChatInvalidatePin(pin, 'semantic_mutation', Object.freeze(diagnostic), 'deferred_model');
     return { error: 'model_mismatch' };
   }
   return { modelVerificationPending: true };
@@ -5281,21 +5337,42 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   const failure = chatGPTFirstUserExpansionContextFailure(candidate);
   return failure === null ? candidate : reject(failure);
 }
+let chatGPTFirstRouteModelFailureRule = 'none';
+let chatGPTFirstRouteModelFailurePin = null;
+let chatGPTFirstRouteModelFailureState = null;
 function chatGPTFirstRouteModelPins(candidate) {
   // Preserve negative model history and physical picker continuity when URL
   // drift discarded a read. This is not fresh model evidence; the continued
   // invocation still performs the ordinary complete model proof.
+  chatGPTFirstRouteModelFailureRule = 'none';
+  const reject = (rule, value) => {
+    if (value && chatGPTFirstRouteModelFailureRule === 'none') chatGPTFirstRouteModelFailureRule = rule;
+    return value;
+  };
   const pin = globalThis.__computaChatPresetPin;
+  chatGPTFirstRouteModelFailurePin = pin;
   websiteChatDrainPinnedMutations(pin);
   const picker = websiteChatPickerState(), selected = pin && websiteChatPresetChoice(pin.selection?.family, pin.selection?.power);
-  if (!pin || pin.owner !== candidate.owner || pin.document !== document || pin.invalidated === true
-    || !selected || selected.key !== candidate.modelChoice.key
-    || picker.trigger !== pin.headerTrigger || !picker.trigger || !picker.enabled(picker.trigger)
-    || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous
-    || picker.headerPower && picker.headerPower.key !== pin.selection.power.key
-    || picker.semanticSlider && picker.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
-    || picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key) return false;
+  chatGPTFirstRouteModelFailureState = Object.freeze({ triggerPresent: !!picker.trigger,
+    triggerCount: picker.triggerCount, triggerCandidateCount: picker.triggerCandidates.length, pinHeaderPresent: !!pin?.headerTrigger });
+  if (reject('model_pin_missing', !pin)
+    || reject('model_pin_owner', pin.owner !== candidate.owner)
+    || reject('model_pin_document', pin.document !== document)
+    || reject('model_pin_invalidated', pin.invalidated === true)
+    || reject('model_selection_missing', !selected)
+    || reject('model_selection_key', selected.key !== candidate.modelChoice.key)
+    || reject('model_trigger_identity', picker.trigger !== pin.headerTrigger)
+    || reject('model_trigger_missing', !picker.trigger)
+    || reject('model_trigger_disabled', !picker.enabled(picker.trigger))
+    || reject('model_duplicate', picker.duplicate)
+    || reject('model_conflicting', picker.conflicting)
+    || reject('model_indicator', picker.indicatorInvalid)
+    || reject('model_selection_ambiguous', picker.selectionAmbiguous)
+    || reject('model_navigation_ambiguous', picker.navigationAmbiguous)
+    || reject('model_header_power', picker.headerPower && picker.headerPower.key !== pin.selection.power.key)
+    || reject('model_slider_power', picker.semanticSlider && picker.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)))
+    || reject('model_checked_family', picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key)) return false;
   return true;
 }
 // Before either first-message pin exists, only the already dispatched native
@@ -5484,7 +5561,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
     || reject('product', !chatGPTProductModeProof())
     || reject('temporary', !chatGPTTemporaryVerified())) return null;
-  if (reject('model_pins', !chatGPTFirstRouteModelPins(candidate))) return null;
+  if (!chatGPTFirstRouteModelPins(candidate)) { reject(chatGPTFirstRouteModelFailureRule, true); return null; }
   // Any non-route conversation identity remains a hard boundary. Route-only
   // lineage is independently checked against the original URL by native.
   if (reject('conversation_identity', input.expectedConversationIdentity)) return null;
@@ -6170,6 +6247,39 @@ function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, 
     const record = candidate.record, receipt = record?.replacement;
     const errors = ['document_changed', 'conversation_changed', 'first_user_observation_replaced',
       'model_selection_unverified', 'product_mode_unverified', 'temporary_mode_unverified'];
+    let modelPinInvalidation = null;
+    if (chatGPTBoundRouteFailureRule === 'model_pin_invalidated') {
+      const pin = chatGPTFirstRouteModelFailurePin, facts = pin?.invalidationFacts;
+      const reason = ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(pin?.invalidationReason)
+        ? pin.invalidationReason : 'other';
+      const source = ['header_tracking', 'pinned_header', 'remount_header', 'remount_context', 'provisional_header',
+        'provisional_context', 'semantic_observer', 'deferred_model'].includes(pin?.invalidationSource) ? pin.invalidationSource : 'unknown';
+      modelPinInvalidation = { reason, source };
+      if (reason === 'header_mutation'
+        && ['current', 'records', 'reconstruction', 'character_data', 'removed', 'added', 'child_list'].includes(facts?.stage)
+        && ['current_power', 'record_limit', 'child_nodes_limit', 'reconstruction_limit', 'ancestry_limit',
+          'old_text_limit', 'new_text_limit', 'old_power', 'new_power', 'node_missing', 'node_limit', 'depth_limit',
+          'text_limit', 'children_limit', 'candidate_limit', 'aggregate_limit', 'power',
+          'provisional_old', 'provisional_current', 'provisional_child'].includes(facts?.rule))
+        Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      const contextRules = {
+        header_tracking: ['trigger_identity'], remount_context: ['previous_connected', 'trigger_identity'],
+        provisional_context: ['pin_current', 'pin_owner', 'pin_document', 'global_owner', 'document', 'frame', 'origin',
+          'selection_identity', 'selection_family', 'selection_power', 'previous_connected', 'header_identity', 'trigger_count',
+          'trigger_identity', 'trigger_enabled', 'closed_presentation', 'header_power', 'header_presentation', 'duplicate',
+          'conflicting', 'indicator', 'selection_ambiguous', 'navigation_ambiguous', 'slider_power', 'checked_family'],
+      };
+      if (reason === 'header_replaced' && Object.prototype.hasOwnProperty.call(contextRules, facts?.stage)
+        && contextRules[facts.stage].includes(facts?.rule)) Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      if (reason === 'semantic_mutation' && facts?.stage === 'deferred_model'
+        && ['header_power', 'slider_power', 'checked_family'].includes(facts.rule))
+        Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      if (reason === 'semantic_mutation' && ['aria-valuenow', 'aria-checked'].includes(facts?.attribute)
+        && ['nodeConnected', 'attributePresent', 'currentMatches', 'oldMatches'].every(key => typeof facts[key] === 'boolean'))
+        Object.assign(modelPinInvalidation, { attribute: facts.attribute, nodeConnected: facts.nodeConnected,
+          attributePresent: facts.attributePresent, currentMatches: facts.currentMatches, oldMatches: facts.oldMatches });
+      Object.freeze(modelPinInvalidation);
+    }
     // Read only stored scalar/identity facts. In particular, do not call a
     // model/product/context proof getter again to explain a rejected operand.
     candidate.certificateDiagnostic = Object.freeze({ kind: 'chatgpt_bound_certificate_v1', stage, rule,
@@ -6181,7 +6291,10 @@ function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, 
         && receipt.oldRoot === candidate.oldRoot && receipt.oldBody === candidate.oldBody,
       receiptRetained: !!receipt && receipt === candidate.replacementReceipt,
       expectedModelPresent: input.expectedModelChoice != null, deferModelVerification: input.deferModelVerification === true,
-      awaitingNativeRefresh: candidate.awaitingNativeRefresh === true, refreshClaimed: candidate.refreshClaimed === true });
+      awaitingNativeRefresh: candidate.awaitingNativeRefresh === true, refreshClaimed: candidate.refreshClaimed === true,
+      ...(chatGPTBoundRouteFailureRule === chatGPTFirstRouteModelFailureRule && chatGPTFirstRouteModelFailureRule !== 'none'
+        && chatGPTFirstRouteModelFailureState ? { modelPinState: chatGPTFirstRouteModelFailureState } : {}),
+      ...(modelPinInvalidation ? { modelPinInvalidation } : {}) });
     candidate.certificateDiagnosticDocument = document;
     candidate.certificateDiagnosticOwner = input.ownerToken;
   } catch { /* Diagnostic failure cannot change admission or retry a read. */ }
