@@ -108,6 +108,7 @@ final class EmbeddedBrowserSession {
     }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
+    @ObservationIgnored private var cacheIdentity: EmbeddedBrowserCacheIdentity?
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
     @ObservationIgnored private let defaults: UserDefaults
@@ -210,6 +211,7 @@ final class EmbeddedBrowserSession {
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
         var pendingConversationAdmission: (id: UUID, generation: UUID)?
+        var pendingCacheAdmission: (id: UUID, generation: UUID)?
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -383,6 +385,20 @@ final class EmbeddedBrowserSession {
             store = .nonPersistent()
         }
         websiteDataStore = store
+        if persistent {
+            // ComputaApp creates one session and injects it into AppState; that
+            // session owns this profile and one migration shared by all tabs.
+            #if DEBUG
+            if let removal = cacheIdentityRemovalForTesting {
+                cacheIdentity = EmbeddedBrowserCacheIdentity(profileID: persistentProfileIdentifier(),
+                    identity: EmbeddedBrowserIdentity.currentCacheIdentity, defaults: defaults, remove: removal)
+            } else {
+                cacheIdentity = EmbeddedBrowserCacheIdentity(profileID: persistentProfileIdentifier(), store: store, defaults: defaults)
+            }
+            #else
+            cacheIdentity = EmbeddedBrowserCacheIdentity(profileID: persistentProfileIdentifier(), store: store, defaults: defaults)
+            #endif
+        }
         let registry: ChatGPTTemporaryCookieRegistry?
         if persistent {
             let profile = persistentProfileIdentifier()
@@ -720,6 +736,8 @@ final class EmbeddedBrowserSession {
 
     func stop(tabID: UUID) {
         guard let entry = entries[tabID] else { return }
+        entry.pendingCacheAdmission = nil
+        entry.delegate.cancelCacheAdmission()
         revokeResponseCompletion(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
@@ -2185,6 +2203,7 @@ final class EmbeddedBrowserSession {
     private var prewarmLifetimeForTesting: Duration?
     private(set) var lastInferencePrewarmUnavailableForTesting: String?
     var afterChatGPTNavigationGateForTesting: (@MainActor () -> Void)?
+    var cacheIdentityRemovalForTesting: EmbeddedBrowserCacheIdentity.Removal?
     private(set) var lastChatGPTNavigationDenialForTesting: String?
 
     /// Changes only the fixture's page observer source. All native admission,
@@ -2196,6 +2215,12 @@ final class EmbeddedBrowserSession {
     func admitChatGPTNavigationForTesting(tabID: UUID, view: WKWebView, url: URL) async -> Bool {
         guard let admission = beginChatGPTNavigationAdmission(view, tabID: tabID, url: url) else { return false }
         return await admitChatGPTNavigation(view, tabID: tabID, url: url, admission: admission)
+    }
+
+    func admitCacheIdentityForTesting(tabID: UUID, view: WKWebView, url: URL,
+                                      until deadline: ContinuousClock.Instant) async -> CacheNavigationAdmission {
+        protectPendingConversation(view, tabID: tabID, url: url)
+        return await admitCacheIdentity(view, tabID: tabID, url: url, until: deadline)
     }
 
     func setCookieValidationSourceForTesting(_ factory: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?) {
@@ -2255,6 +2280,7 @@ final class EmbeddedBrowserSession {
         cancelModelNativeFocusDiagnostic()
         #endif
         isShutdown = true
+        cacheIdentity?.close()
         chatGPTInferencePrewarmingEnabled = false
         chatGPTInferencePrewarmAdmission = nil
         if let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
@@ -2266,6 +2292,7 @@ final class EmbeddedBrowserSession {
         modelRenderHost = nil
         modelRenderHosts.removeAll()
         websiteDataStore = nil
+        cacheIdentity = nil
     }
 
     private func entry(_ id: UUID) throws -> Entry {
@@ -2275,6 +2302,8 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        entry.pendingCacheAdmission = nil
+        entry.delegate.cancelCacheAdmission()
         entry.pendingConversationAdmission = nil
         revokeResponseCompletion(entry)
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
@@ -2353,6 +2382,37 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func owns(_ view: WKWebView, tabID: UUID) -> Bool { entries[tabID]?.view === view }
+
+    enum CacheNavigationAdmission { case allowed, cancelled, timedOut }
+
+    fileprivate func needsCacheIdentityAdmission(_ view: WKWebView, url: URL) -> Bool {
+        persistent && view.configuration.websiteDataStore === websiteDataStore
+            && ["http", "https"].contains(url.scheme?.lowercased() ?? "") && cacheIdentity?.ready == false
+    }
+
+    fileprivate func admitCacheIdentity(_ view: WKWebView, tabID: UUID, url: URL,
+                                        until deadline: ContinuousClock.Instant) async -> CacheNavigationAdmission {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view else { return .cancelled }
+        // Isolated model profiles and nonpersistent sessions have no legacy
+        // shared-profile HTTP responses. Never clear a supplied foreign store.
+        guard needsCacheIdentityAdmission(view, url: url), let cacheIdentity else { return .allowed }
+        let ticket = UUID(), generation = entry.tab.documentGeneration
+        entry.pendingCacheAdmission = (ticket, generation)
+        let ready = await cacheIdentity.wait(until: deadline)
+        guard !isShutdown, !Task.isCancelled, entries[tabID] === entry, entry.view === view,
+              entry.pendingCacheAdmission?.id == ticket, entry.tab.documentGeneration == generation,
+              entry.pendingConversationURL == url else { return .cancelled }
+        entry.pendingCacheAdmission = nil
+        guard ready else {
+            entry.tab.isLoading = false
+            entry.navigation = nil
+            entry.preparedDocumentNavigation = false
+            report("The browser cache update did not finish in time. Try opening the page again. No navigation was replayed.", tabID: tabID)
+            signalModelChange(entry)
+            return .timedOut
+        }
+        return .allowed
+    }
 
     fileprivate func protectPendingConversation(_ view: WKWebView, tabID: UUID, url: URL) {
         guard let entry = entries[tabID], entry.view === view else { return }
@@ -2835,9 +2895,31 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
     private static let policyLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserPolicy")
     private weak var session: EmbeddedBrowserSession?
     private let tabID: UUID
+    private var cacheAdmission: (id: UUID, task: Task<Void, Never>)?
 
     init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
-    func invalidate() { session = nil }
+    func invalidate() { cancelCacheAdmission(); session = nil }
+
+    func cancelCacheAdmission() {
+        cacheAdmission?.task.cancel()
+        cacheAdmission = nil
+    }
+
+    private func admitCacheIdentity(_ url: URL, view: WKWebView,
+                                    completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        cancelCacheAdmission()
+        guard session?.needsCacheIdentityAdmission(view, url: url) == true else { completion(true); return }
+        let id = UUID()
+        let task = Task { @MainActor [weak self, weak view] in
+            guard let self, let view, let session = self.session else { completion(false); return }
+            let outcome = await session.admitCacheIdentity(view, tabID: self.tabID, url: url, until: .now + .seconds(5))
+            if self.cacheAdmission?.id == id { self.cacheAdmission = nil }
+            // Every policy callback resolves once, including cancellation. A
+            // late native clear only releases a new request, never this one.
+            completion(outcome == .allowed && !Task.isCancelled)
+        }
+        cacheAdmission = (id, task)
+    }
 
     private func deny(_ message: String, view: WKWebView) {
         guard session?.owns(view, tabID: tabID) == true else { return }
@@ -2861,6 +2943,7 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard session?.owns(webView, tabID: tabID) == true else { decisionHandler(.cancel); return }
+        if navigationAction.targetFrame?.isMainFrame ?? true { cancelCacheAdmission() }
         if navigationAction.shouldPerformDownload {
             deny("Downloads are not enabled. No file was saved.", view: webView)
             decisionHandler(.cancel)
@@ -2874,7 +2957,10 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
                 session?.protectPendingConversation(webView, tabID: tabID, url: url)
             }
             if navigationAction.targetFrame?.isMainFrame ?? true {
-                admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
+                admitCacheIdentity(url, view: webView) { [weak self, weak webView] permitted in
+                    guard permitted, let self, let webView else { decisionHandler(.cancel); return }
+                    self.admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
+                }
             } else { decisionHandler(.allow) }
         } catch {
             let kind = EmbeddedBrowserURLPolicy.diagnosticAddressKind(navigationAction.request.url)

@@ -32,6 +32,12 @@ enum EmbeddedBrowserIdentity {
                         appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
     }()
 
+    // Include the measured engine build as well as every advertised product
+    // token. An engine update can retain the same Safari marketing version.
+    @MainActor static var currentCacheIdentity: String {
+        currentApplicationName + "\nWebKit/" + (Product(bundle: Bundle(for: WKWebView.self))?.build ?? "unknown")
+    }
+
     static func applicationName(safari: Product?, webKit: Product?, appVersion: String?) -> String {
         let app = appVersion.flatMap { validVersion($0) ? "Computa/\($0)" : nil } ?? "Computa"
         guard let safari, let webKit,
@@ -52,5 +58,68 @@ enum EmbeddedBrowserIdentity {
         return components.count <= 6 && components.allSatisfy {
             !$0.isEmpty && $0.utf8.count <= 8 && $0.utf8.allSatisfy { (48...57).contains($0) }
         }
+    }
+}
+
+/// HTTP responses without `Vary: User-Agent` can retain HTML selected for the
+/// previous browser identity. Migrate only this app-owned profile's HTTP caches
+/// before admitting its first request. Cookies and all website storage survive.
+@MainActor
+final class EmbeddedBrowserCacheIdentity {
+    typealias Removal = @MainActor (@escaping @MainActor @Sendable () -> Void) -> Void
+    static let cacheDataTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
+    static func defaultsKey(profileID: UUID) -> String {
+        "Computa.EmbeddedBrowser.HTTPCacheIdentity.v1." + profileID.uuidString.lowercased()
+    }
+
+    private let defaults: UserDefaults
+    private let key: String
+    private let identity: String
+    private let remove: Removal
+    private let changes = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+    private var started = false
+    private var closed = false
+    private(set) var ready: Bool
+
+    init(profileID: UUID, identity: String, defaults: UserDefaults, remove: @escaping Removal) {
+        self.defaults = defaults
+        self.key = Self.defaultsKey(profileID: profileID)
+        self.identity = identity
+        self.remove = remove
+        ready = defaults.string(forKey: key) == identity
+    }
+
+    convenience init(profileID: UUID, store: WKWebsiteDataStore, defaults: UserDefaults) {
+        self.init(profileID: profileID, identity: EmbeddedBrowserIdentity.currentCacheIdentity, defaults: defaults) { completion in
+            store.removeData(ofTypes: Self.cacheDataTypes, modifiedSince: .distantPast, completionHandler: completion)
+        }
+    }
+
+    func wait(until deadline: ContinuousClock.Instant) async -> Bool {
+        guard !closed, !Task.isCancelled, ContinuousClock.now < deadline else { return false }
+        if ready { return true }
+        if !started {
+            started = true
+            remove { [weak self] in
+                guard let self, !self.closed else { return }
+                // A timeout/cancelled caller never marks completion. The real
+                // native callback can release later, freshly requested work.
+                self.defaults.set(self.identity, forKey: self.key)
+                self.ready = true
+                self.changes.signal()
+            }
+        }
+        do {
+            while !closed, !Task.isCancelled, !ready, ContinuousClock.now < deadline {
+                let revision = try changes.currentRevision()
+                _ = try await changes.wait(after: revision, until: deadline)
+            }
+        } catch { return false }
+        return !closed && !Task.isCancelled && ready && ContinuousClock.now < deadline
+    }
+
+    func close() {
+        closed = true
+        changes.close()
     }
 }

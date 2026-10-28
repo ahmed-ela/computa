@@ -1044,7 +1044,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(normalized.contains("Already submitted: never repeat"))
         XCTAssertTrue(normalized.contains("Uncertain submission: read-only verification, then report if unresolved"))
         XCTAssertTrue(normalized.contains("draft-only scope, restrictions, approvals, denials, governing rules and Stop"))
-        XCTAssertLessThan(guidance.utf8.count, 560, "The shared addition has its own bounded byte budget")
+        XCTAssertTrue(normalized.contains("A heading-only overview can omit receipt details"))
+        XCTAssertTrue(normalized.contains("Read content/all for the available receipt/status"))
+        XCTAssertTrue(normalized.contains("compare its destination and content with the task before claiming success"))
+        XCTAssertTrue(normalized.contains("Never resubmit to obtain verification"))
+        XCTAssertLessThan(guidance.utf8.count, 800, "Keep input and outcome verification guidance bounded")
         for delivered in [ComputaAgentInstructions.builtInBrowser,
                           ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
                           ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_fill", "relay.browser_click"])] {

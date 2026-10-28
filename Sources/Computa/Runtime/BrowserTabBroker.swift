@@ -1798,7 +1798,7 @@ actor BrowserTabSessionBroker {
         guard read.view == .overview else {
             return ElementSelection(elements: elements, omittedInputNodeCount: omittedInputNodeCount)
         }
-        // Interleave observed controls, headings, document text, and navigation
+        // Interleave observed controls, headings, readable text, and navigation
         // within the same page budget. Post-input observations must show a
         // bounded sample of the new document, not only its heading and controls.
         // Preserve source order within each lane, then freeze the selection for
@@ -1810,6 +1810,7 @@ actor BrowserTabSessionBroker {
             + elements.filter { overviewCategory($0) == 3 }
         let groups = [controls, elements.filter { overviewCategory($0) == 1 },
                       elements.filter { overviewCategory($0) == 4 },
+                      elements.filter { overviewCategory($0) == 5 },
                       elements.filter { overviewCategory($0) == 2 }]
         var ordered = [BrowserTabElement]()
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
@@ -1830,9 +1831,16 @@ actor BrowserTabSessionBroker {
                 "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
                 "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"].contains(role) { return 0 }
         if element.supportsPress || element.isDOMClickable || element.isFocusablePointer { return 3 }
-        if element.contentKind == .readable, element.contentScope.isDocumentContent,
+        if element.contentKind == .readable,
            !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !(element.value ?? "").isEmpty { return 4 }
+            || !(element.value ?? "").isEmpty {
+            if element.contentScope.isDocumentContent { return 4 }
+            // Many small documents expose real body text without main/article
+            // landmarks. Include a bounded sample while retaining unknown
+            // provenance; this neither promotes it to document content nor
+            // admits navigation, sidebar, footer, metadata, or control echoes.
+            if element.contentScope == .unknown { return 5 }
+        }
         return nil
     }
 
@@ -2350,7 +2358,7 @@ actor BrowserTabSessionBroker {
             lines.insert("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true. Included options retain original actions; read view=overview or all for other controls and before absence/access claims.", at: 2)
         }
         if read.view == .overview {
-            lines.append("OVERVIEW selection=observed_controls_headings_document_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
+            lines.append("OVERVIEW selection=observed_controls_headings_body_text_navigation ordering=interleaved_categories document_content_exhaustive=false. Body text is a bounded sample with its observed or unknown scope; continue its cursor or read view=content for more. View=all retains full structural context for action planning.")
         }
         if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
