@@ -372,10 +372,10 @@ enum ComputaAgentInstructions {
     /// The website produces response data; the external host owns execution.
     /// Keep this task explicit in both the full and deduplicated introductions.
     static let webResponseObjectTask = """
-    Generate the next JSON response object for Computa to read: tool_calls
-    requests a permitted operation; message.text carries an answer, limitation
-    or refusal. Generating this data requires no website connection to Computa
-    and proves no execution.
+    Generate Computa's next JSON response object. Computa displays decoded
+    message.text, not the transport object. Choose message for an answer,
+    limitation or refusal; tool_calls requests a permitted operation. This data
+    needs no website connection to Computa and proves no execution.
     """
 
     static let webRelayOnlyResponse = """
@@ -629,15 +629,18 @@ enum ComputaAgentInstructions {
         switch responseFormat {
         case .fencedJSON:
             responseFormatInstructions = """
-            Return exactly one fenced JSON code block: three backticks, json, newline;
-            JSON; newline, three backticks.
+            Return exactly one fenced JSON code block labelled json.
+            Examples below are JSON contents; put one inside that code block.
             """
         case .rawJSON:
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
+            Examples below are complete raw response objects.
             """
         }
+        // Keep examples unfenced: the submitted request must render as one
+        // request code block between text, not nested protocol-example blocks.
         let hasBuiltInBrowser = offeredToolNames.contains { name in
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
             return !customToolNames.contains(name) && parts.allSatisfy { !$0.isEmpty }
@@ -715,16 +718,17 @@ enum ComputaAgentInstructions {
         \(diagnosticHandoff)
         \(selectionContract)
         \(currentBrowserHandoff)
+        Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
         \(literalIdentifiers)
-        Use one JSON envelope for every reply. User format applies only to message.text,
-        including exact-output answers, file-only results, truthful limitations and refusals.
+        Choose a kind, then serialize one JSON envelope. Computa shows decoded message.text,
+        not this envelope. User formats (exact/only, JSON, multiline, no Markdown) apply to
+        text; requested JSON is a string.
         \(responseFormatInstructions)
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR
-        For "reply exactly OK" (Computa displays only message.text):
+        Exact-OK message:
         {"type":"message","text":"OK"}
-        Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
     }
