@@ -20,12 +20,58 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
     let oversizedRoles: Int
     let clippedFields: Int
     let boxlessContents: Int
+    let scheduling: Scheduling?
+
+    /// Counts come from the existing bounded traversal, never page content.
+    /// Priority arrays use the fixed focus/dialog/form/ordinary order.
+    struct Scheduling: Codable, Equatable, Sendable {
+        let discoverySlots: Int
+        let panelProbes: Int
+        let partialPanels: Int
+        let controlsSeen: Int
+        let controlsVisible: Int
+        let controlsPrioritized: Int
+        let controlsEmitted: Int
+        let emittedByPriority: [Int]
+        let pendingByPriority: [Int]
+        let pendingClipped: Bool
+
+        static func valid(_ raw: Any, emitted: Int) -> Bool {
+            let counts = ["discoverySlots", "panelProbes", "partialPanels", "controlsSeen", "controlsVisible", "controlsPrioritized", "controlsEmitted"]
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == Set(counts + ["emittedByPriority", "pendingByPriority", "pendingClipped"]) else { return false }
+            func integer(_ raw: Any?, limit: Int) -> Int? {
+                guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                      (0...Double(limit)).contains(number.doubleValue) else { return nil }
+                return number.intValue
+            }
+            var values: [String: Int] = [:]
+            for key in counts {
+                guard let value = integer(fields[key], limit: key == "controlsEmitted" ? 3_000 : 4_096) else { return false }
+                values[key] = value
+            }
+            guard values["partialPanels"]! <= values["panelProbes"]!,
+                  values["controlsEmitted"]! <= values["controlsPrioritized"]!,
+                  values["controlsPrioritized"]! <= values["controlsVisible"]!,
+                  values["controlsVisible"]! <= values["controlsSeen"]!, values["controlsEmitted"]! <= emitted,
+                  let emittedRaw = fields["emittedByPriority"] as? [Any], emittedRaw.count == 4,
+                  let pendingRaw = fields["pendingByPriority"] as? [Any], pendingRaw.count == 4,
+                  let clipped = fields["pendingClipped"] as? NSNumber, CFGetTypeID(clipped) == CFBooleanGetTypeID() else { return false }
+            let emittedValues = emittedRaw.compactMap { integer($0, limit: 3_000) }
+            let pendingValues = pendingRaw.compactMap { integer($0, limit: 20_001) }
+            return emittedValues.count == 4 && emittedValues.reduce(0, +) == emitted && pendingValues.count == 4
+                && (!clipped.boolValue || pendingValues.contains(20_001))
+        }
+    }
 
     static func decode(_ raw: Any?, emitted: Int, sourceTruncated: Bool) throws -> Self {
+        let baseKeys: Set<String> = ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
+                                     "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"]
         guard let fields = raw as? [String: Any],
-              Set(fields.keys) == ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
-                                  "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"],
-              let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 512,
+              Set(fields.keys) == baseKeys || Set(fields.keys) == baseKeys.union(["scheduling"]),
+              fields["scheduling"].map({ Scheduling.valid($0, emitted: emitted) }) ?? true,
+              let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 768,
               let value = try? JSONDecoder().decode(Self.self, from: bytes),
               (0...20_001).contains(value.visited), (0...3_000).contains(value.emitted),
               value.emitted == emitted, value.emitted <= value.visited,
@@ -38,6 +84,20 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
         else { throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid capture diagnostics.") }
         return value
     }
+}
+
+struct BrowserCaptureLogRecord: Encodable {
+    let kind = "browser_capture_v1"
+    let tabID: UUID
+    let generation: UUID
+    let requestedReadiness: String
+    let readiness: String
+    let capture: BrowserCaptureDiagnostics
+    let viewAttached: Bool
+    let viewHasWindow: Bool
+    let viewHidden: Bool
+    let viewWidth: Int
+    let viewHeight: Int
 }
 
 /// Runtime integration depends on this narrow backend, rather than WebKit or
@@ -298,25 +358,12 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         #endif
         // Emit only the final returned capture, not each MutationObserver probe.
         // These opaque IDs are host-generated and permit exact-tab correlation.
-        struct Record: Encodable {
-            let kind = "browser_capture_v1"
-            let tabID: UUID
-            let generation: UUID
-            let requestedReadiness: String
-            let readiness: String
-            let capture: BrowserCaptureDiagnostics
-            let viewAttached: Bool
-            let viewHasWindow: Bool
-            let viewHidden: Bool
-            let viewWidth: Int
-            let viewHeight: Int
-        }
         let view = session.webView(for: id)
         func dimension(_ value: CGFloat?) -> Int {
             guard let value, value.isFinite, (0...1_000_000).contains(value) else { return 0 }
             return Int(value.rounded(.down))
         }
-        let record = Record(tabID: id, generation: generation,
+        let record = BrowserCaptureLogRecord(tabID: id, generation: generation,
             requestedReadiness: requestedReadiness?.rawValue ?? "immediate",
             readiness: readiness?.rawValue ?? "immediate", capture: diagnostics,
             viewAttached: view?.superview != nil, viewHasWindow: view?.window != nil,

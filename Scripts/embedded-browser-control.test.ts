@@ -400,6 +400,159 @@ describe('bounded capture of late forms and dialogs', () => {
     });
   }
 
+  function panelBeforeCompetingForm(dialog: boolean, panelFirst = true) {
+    const f = fixture(null), background = new f.Node('FORM');
+    for (let index = 0; index < 300; index++)
+      background.append(new f.Node('P', {}, `Synthetic record ${index}: ${'x'.repeat(1000)}`));
+    const panel = new f.Node('DIV', { 'aria-label': 'New message', ...(dialog ? { role: 'dialog' } : {}) });
+    const header = new f.Node('DIV'), actions = new f.Node('DIV');
+    const heading = new f.Node('H2', {}, 'New message'), fullscreen = new f.Node('BUTTON', {}, 'Full screen');
+    const close = new f.Node('BUTTON', {}, 'Save & close');
+    actions.append(fullscreen, close); header.append(heading, actions); panel.append(header);
+    f.document.body.append(...(panelFirst ? [panel, background] : [background, panel]));
+    f.document.elementFromPoint = () => fullscreen;
+    return { ...f, panel, header, actions, heading, fullscreen, close, background };
+  }
+
+  for (const dialog of [false, true]) for (const panelFirst of [false, true]) {
+    test(`nested ${dialog ? 'dialog' : 'named panel'} controls survive ${panelFirst ? 'later' : 'earlier'} competing FORM background`, async () => {
+      const f = panelBeforeCompetingForm(dialog, panelFirst), result = await f.run({ operation: 'observe' });
+      const panel = result.nodes.find((node: any) => node.name === 'New message' && node.role === (dialog ? 'dialog' : 'group'));
+      expect(panel).toBeDefined(); expect(panel.isDOMClickable).toBe(false); expect(panel.isEditable).toBe(false);
+      expect(panel.childNodeIDs.map((id: string) => result.nodes.find((node: any) => node.nodeID === id).name))
+        .toEqual(['New message', 'Full screen', 'Save & close']);
+      for (const name of ['Full screen', 'Save & close']) {
+        const control = result.nodes.find((node: any) => node.name === name);
+        expect(control.role).toBe('button'); expect(control.parentNodeID).toBe(panel.nodeID);
+      }
+      expect(result.nodes.some((node: any) => node.name.startsWith('Synthetic record '))).toBe(true);
+      expect(result.nodes.some((node: any) => node.isEditable || node.name === 'Send')).toBe(false);
+      expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+      expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+      expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20_001); expect(result.nodes.length).toBeLessThanOrEqual(3_000);
+      for (const [index, node] of result.nodes.entries())
+        if (node.parentNodeID) expect(result.nodes.findIndex((parent: any) => parent.nodeID === node.parentNodeID)).toBeLessThan(index);
+      expect(new Set(result.nodes.map((node: any) => node.nodeID)).size).toBe(result.nodes.length);
+      expect(f.fullscreen.clicks + f.close.clicks).toBe(0);
+    });
+  }
+
+  for (const dialog of [false, true]) {
+    test(`expanded ${dialog ? 'dialog' : 'named panel'} keeps fields and Send before later FORM background without input`, async () => {
+      const f = panelBeforeCompetingForm(dialog);
+      // Model the rendered result of expansion without dispatching an input.
+      for (let index = 0; index < 100; index++) f.panel.append(new f.Node('SPAN', {}, `Visible panel detail ${index}`));
+      const to = new f.Node('INPUT', { type: 'email', 'aria-label': 'Recipients' });
+      const subject = new f.Node('INPUT', { 'aria-label': 'Subject' });
+      const body = new f.Node('DIV', { contenteditable: 'true', 'aria-label': 'Message body' });
+      const send = new f.Node('BUTTON', {}, 'Send');
+      const footer = new f.Node('DIV'), footerInner = new f.Node('DIV'), footerControls = new f.Node('DIV');
+      footerControls.append(to, subject, body, send); footerInner.append(footerControls); footer.append(footerInner); f.panel.append(footer);
+      const result = await f.run({ operation: 'observe' });
+      expect(result.nodes.filter((node: any) => node.isEditable).map((node: any) => node.name))
+        .toEqual(['Recipients', 'Subject', 'Message body']);
+      expect(result.nodes.find((node: any) => node.name === 'Send')).toBeDefined();
+      expect(result.nodes.find((node: any) => node.name === 'Send').isDOMClickable).toBe(true);
+      expect(result.nodes.findIndex((node: any) => node.name === 'Send'))
+        .toBeLessThan(result.nodes.findIndex((node: any) => node.name.startsWith('Synthetic record ')));
+      expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+      expect(f.document.activeElement).toBeNull(); expect(f.fullscreen.clicks + f.close.clicks + send.clicks).toBe(0);
+      expect(to.valueWrites.concat(subject.valueWrites, body.valueWrites)).toEqual([]);
+    });
+  }
+
+  test('native form controls survive the ordinary descendants of a later form', async () => {
+    const f = panelBeforeCompetingForm(false), form = new f.Node('FORM', { 'aria-label': 'New message' });
+    const to = new f.Node('INPUT', { type: 'email', 'aria-label': 'Recipients' });
+    const subject = new f.Node('INPUT', { 'aria-label': 'Subject' });
+    const body = new f.Node('TEXTAREA', { 'aria-label': 'Message body' });
+    const send = new f.Node('BUTTON', {}, 'Send'); form.append(to, subject, body, send);
+    f.document.body.replaceChildren(form, f.background); f.background.connected = true;
+    const result = await f.run({ operation: 'observe' });
+    expect(result.nodes.filter((node: any) => node.isEditable).map((node: any) => node.name))
+      .toEqual(['Recipients', 'Subject', 'Message body']);
+    expect(result.nodes.find((node: any) => node.name === 'Send')).toBeDefined();
+      expect(result.nodes.find((node: any) => node.name === 'Send').isDOMClickable).toBe(true);
+    expect(result.nodes.find((node: any) => node.role === 'form' && node.name === 'New message')).toBeDefined();
+    expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+    expect(to.valueWrites.concat(subject.valueWrites, body.valueWrites)).toEqual([]); expect(send.clicks).toBe(0);
+  });
+
+  test('sampled panel priority preserves hidden, secure, disabled and stale-reference guards', async () => {
+    for (const dialog of [false, true]) for (const change of ['hidden', 'disabled', 'replaced', 'parent', 'obstructed']) {
+      const f = panelBeforeCompetingForm(dialog);
+      f.panel.append(new f.Node('INPUT', { type: 'password', value: 'PRIVATE_PANEL_SECRET' }));
+      if (change === 'hidden') f.panel.values['aria-hidden'] = 'true';
+      if (change === 'disabled') f.fullscreen.values.disabled = '';
+      const result = await f.run({ operation: 'observe' });
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_PANEL_SECRET');
+      const control = result.nodes.find((node: any) => node.name === 'Full screen');
+      if (change === 'hidden') expect(control).toBeUndefined();
+      else {
+        expect(control).toBeDefined();
+        if (change === 'disabled') { expect(control.isDisabled).toBe(true); }
+        if (change === 'replaced') f.actions.replaceChildren(new f.Node('BUTTON', {}, 'Full screen'));
+        if (change === 'parent') { f.actions.children = f.actions.children.filter(child => child !== f.fullscreen); f.document.body.append(f.fullscreen); }
+        if (change === 'obstructed') f.document.elementFromPoint = () => f.close;
+        await expect(f.press(control)).rejects.toThrow(change === 'obstructed' ? 'element_obstructed'
+          : change === 'disabled' ? 'stale_document' : 'element_changed');
+      }
+      expect(f.fullscreen.clicks + f.close.clicks).toBe(0);
+    }
+  });
+
+  test('large named applications retain sampled controls without promoting their ordinary inbox subtree', async () => {
+    const f = panelBeforeCompetingForm(false);
+    const application = new f.Node('DIV', { 'aria-label': 'Synthetic application' });
+    f.document.body.replaceChildren(application); application.append(f.background, f.panel);
+    f.background.connected = true; f.panel.connected = true;
+    const result = await f.run({ operation: 'observe' }), scheduling = result.captureDiagnostics.scheduling;
+    expect(result.nodes.some((node: any) => node.name === 'Full screen')).toBe(true);
+    expect(result.nodes.some((node: any) => node.name.startsWith('Synthetic record '))).toBe(true);
+    expect(scheduling.emittedByPriority.slice(0, 3).reduce((sum: number, count: number) => sum + count, 0)).toBeLessThan(20);
+    expect(scheduling.emittedByPriority[3]).toBeGreaterThan(20);
+    expect(scheduling.partialPanels).toBeGreaterThan(0); expect(scheduling.discoverySlots).toBeLessThanOrEqual(4096);
+    expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+    expect(f.fullscreen.clicks + f.close.clicks).toBe(0);
+  });
+
+  test('repeated large named candidates share the slot cap while a later observed panel stays discoverable', async () => {
+    const f = panelBeforeCompetingForm(false);
+    const candidates = new f.Node('DIV');
+    for (let index = 0; index < 100; index++) {
+      const candidate = new f.Node('DIV', { 'aria-label': 'Synthetic candidate' });
+      for (let child = 0; child < 80; child++) candidate.append(new f.Node('SPAN', {}, 'Background detail'));
+      candidate.append(new f.Node('BUTTON', {}, 'Background action')); candidates.append(candidate);
+    }
+    f.document.body.replaceChildren(candidates, f.background, f.panel);
+    f.background.connected = true; f.panel.connected = true;
+    const result = await f.run({ operation: 'observe' }), scheduling = result.captureDiagnostics.scheduling;
+    expect(result.nodes.some((node: any) => node.name === 'Full screen')).toBe(true);
+    expect(scheduling.panelProbes).toBeGreaterThan(2); expect(scheduling.partialPanels).toBeGreaterThan(1);
+    expect(scheduling.discoverySlots).toBe(4096);
+    expect(scheduling.partialPanels).toBeLessThanOrEqual(scheduling.panelProbes);
+    expect(scheduling.controlsEmitted).toBeLessThanOrEqual(scheduling.controlsPrioritized);
+    expect(scheduling.controlsPrioritized).toBeLessThanOrEqual(scheduling.controlsVisible);
+    expect(scheduling.controlsVisible).toBeLessThanOrEqual(scheduling.controlsSeen);
+    expect(scheduling.controlsSeen).toBeLessThanOrEqual(4096);
+    expect(scheduling.emittedByPriority.reduce((sum: number, count: number) => sum + count, 0)).toBe(result.nodes.length);
+    expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.estimatedBytes).toBeLessThan(230_000);
+    expect(f.fullscreen.clicks + f.close.clicks).toBe(0);
+    expect(JSON.stringify(scheduling)).not.toMatch(/Synthetic|Background|Full screen/);
+  });
+
+  test('capture scheduling diagnostics stay finite when pending fanout exceeds the visited budget', async () => {
+    const f = fixture(null), comments = Array.from({ length: 100_000 }, () => ({ nodeType: 8, parentElement: f.document.body }));
+    Object.defineProperty(f.document.body, 'childNodes', { get: () => comments });
+    const result = await f.run({ operation: 'observe', awaitSemanticReadiness: false }), scheduling = result.captureDiagnostics.scheduling;
+    expect(result.captureDiagnostics.stopReason).toBe('visited_limit'); expect(result.sourceTruncated).toBe(true);
+    expect(scheduling.discoverySlots).toBe(4096);
+    expect(scheduling.pendingByPriority).toEqual([0, 0, 0, 20001]); expect(scheduling.pendingClipped).toBe(true);
+    expect(scheduling.emittedByPriority).toEqual([0, 0, 0, 0]);
+    expect(Object.keys(scheduling).sort()).toEqual(['controlsEmitted', 'controlsPrioritized', 'controlsSeen', 'controlsVisible',
+      'discoverySlots', 'emittedByPriority', 'panelProbes', 'partialPanels', 'pendingByPriority', 'pendingClipped'].sort());
+  });
+
   test('cross-branch capture priority preserves hidden and changed-reference rejection without input', async () => {
     for (const change of ['hidden', 'replaced', 'parent', 'obstructed']) {
       const f = competingPriorityBranches('focus');
@@ -620,22 +773,22 @@ describe('bounded capture of late forms and dialogs', () => {
     f.document.body.append(dialog);
     const comments = Array.from({ length: 5000 }, () => ({ nodeType: 8, parentElement: f.document.body }));
     const children = [...comments, dialog];
-    let lists = 0, discoverySlots = 0;
+    let captureStarted = false, discoverySlots = 0, dialogSlots = 0;
+    await f.run({ operation: 'observe' });
+    const map = (f.state as any).__computaBrowserControlV1.nodes;
+    map.clear = () => { captureStarted = true; Map.prototype.clear.call(map); };
     Object.defineProperty(f.document.body, 'childNodes', { get() {
-      lists++;
-      return lists === 1 ? new Proxy(children, { get(target, property, receiver) {
-        if (typeof property === 'string' && /^\d+$/.test(property)) discoverySlots++;
+      return new Proxy(children, { get(target, property, receiver) {
+        if (!captureStarted && typeof property === 'string' && /^\d+$/.test(property)) discoverySlots++;
         return Reflect.get(target, property, receiver);
-      } }) : children;
+      } });
     } });
     const dialogChildren = dialog.childNodes;
-    let dialogLists = 0, dialogSlots = 0;
     Object.defineProperty(dialog, 'childNodes', { get() {
-      dialogLists++;
-      return dialogLists === 1 ? new Proxy(dialogChildren, { get(target, property, receiver) {
-        if (typeof property === 'string' && /^\d+$/.test(property)) dialogSlots++;
+      return new Proxy(dialogChildren, { get(target, property, receiver) {
+        if (!captureStarted && typeof property === 'string' && /^\d+$/.test(property)) dialogSlots++;
         return Reflect.get(target, property, receiver);
-      } }) : dialogChildren;
+      } });
     } });
     const result = await f.run({ operation: 'observe' });
     expect(discoverySlots + dialogSlots).toBe(4096);

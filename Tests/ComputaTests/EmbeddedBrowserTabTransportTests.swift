@@ -10,6 +10,127 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testOpposingPriorityDialogBeforeFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: true, panelFirst: true)
+    }
+
+    func testOpposingPriorityDialogAfterFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: true, panelFirst: false)
+    }
+
+    func testOpposingPriorityNamedPanelBeforeFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: false, panelFirst: true)
+    }
+
+    func testOpposingPriorityNamedPanelAfterFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: false, panelFirst: false)
+    }
+
+    private func verifyOpposingPriorityPanel(dialog: Bool, panelFirst: Bool) async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = attachRenderHost(to: session)
+        defer { session.shutdown(); window.close() }
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let paragraphs = (0..<300).map { "<p>Synthetic record \($0): \(String(repeating: "x", count: 1_000))</p>" }.joined()
+        let background = "<form aria-label='Background records'>\(paragraphs)</form>"
+        let panel = """
+        <div id="panel" aria-label="Synthetic panel"\(dialog ? " role='dialog'" : "")>
+          <h2>New message</h2><div><div>
+            <button type="button" id="action" onclick="window.expandPanel()">Full screen</button>
+            <button type="button" onclick="window.closes++">Save &amp; close</button>
+          </div></div>
+        </div>
+        """
+        view.loadHTMLString("""
+            <!doctype html><main aria-label="Fixture root">\(panelFirst ? panel + background : background + panel)</main>
+            <script>
+            window.actions=0;window.closes=0;window.sends=0;window.inputEvents=0;
+            document.addEventListener('input',()=>window.inputEvents++);
+            window.expandPanel=()=>{
+              window.actions++;
+              document.getElementById('panel').innerHTML='<h2>New message</h2>'
+                +Array.from({length:100},(_,i)=>'<span>Panel detail '+i+'</span>').join('')
+                +'<input type="email" aria-label="Recipients"><input aria-label="Subject">'
+                +'<div contenteditable="true" aria-label="Message body"></div>'
+                +'<button type="button" onclick="window.sends++">Send</button>';
+            };
+            </script>
+            """, baseURL: URL(string: "http://localhost:8123/opposing-\(dialog)-\(panelFirst)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let lifetime = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        let generation = session.documentGeneration(for: id)
+        let raw = try await transport.observe(target: target)
+        let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated)
+        XCTAssertEqual(diagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(diagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 224_096)
+        let root = try XCTUnwrap(raw.nodes.first { $0.name == "Fixture root" })
+        let capturedPanel = try XCTUnwrap(raw.nodes.first { $0.name == "Synthetic panel" })
+        let capturedBackground = try XCTUnwrap(raw.nodes.first { $0.name == "Background records" })
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Full screen" },
+            "Capturing the panel root alone must not let the competing form consume its controls' budget")
+        let close = try XCTUnwrap(raw.nodes.first { $0.name == "Save & close" })
+        let expectedOrder = panelFirst ? [capturedPanel, capturedBackground] : [capturedBackground, capturedPanel]
+        XCTAssertEqual(root.childNodeIDs, try expectedOrder.map { try XCTUnwrap($0.nodeID) })
+        XCTAssertEqual(capturedPanel.parentNodeID, root.nodeID)
+        XCTAssertEqual(action.parentNodeID, close.parentNodeID, "Nested control wrappers retain their real ancestry")
+        XCTAssertTrue(action.isDOMClickable)
+        XCTAssertTrue(close.isDOMClickable)
+        XCTAssertFalse(capturedPanel.isDOMClickable)
+        let untouched = try await script(view, "return {actions:window.actions,closes:window.closes,sends:window.sends,inputs:window.inputEvents};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+                       ["actions": 0, "closes": 0, "sends": 0, "inputs": 0])
+
+        let task = "opposing-\(dialog)-\(panelFirst)"
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: task, processIdentifier: 42, target: target)
+        let before = try await broker.snapshot(taskKey: task, binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let oldAction = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Full screen" })
+        _ = try await script(view, "const old=document.getElementById('action');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await broker.perform(taskKey: task, binding: before.binding, snapshot: before.snapshot,
+                                     elementIndex: oldAction.index, action: "AXPress")
+            XCTFail("Identical replacement controls must not inherit a previously observed action reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .elementNotFound) }
+        let fresh = try await broker.snapshot(taskKey: task, binding: before.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let currentAction = try XCTUnwrap(fresh.snapshot.elements.first { $0.label == "Full screen" })
+        try await broker.perform(taskKey: task, binding: fresh.binding, snapshot: fresh.snapshot,
+                                 elementIndex: currentAction.index, action: "AXPress")
+
+        let expanded = try await transport.observe(target: target)
+        let expandedDiagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(expanded.sourceTruncated)
+        XCTAssertEqual(expandedDiagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.estimatedBytes, 224_096)
+        XCTAssertEqual(expanded.nodes.filter(\.isEditable).map(\.name), ["Recipients", "Subject", "Message body"])
+        let send = try XCTUnwrap(expanded.nodes.first { $0.name == "Send" })
+        XCTAssertTrue(send.isDOMClickable)
+        let finalState = try await script(view, """
+            return {actions:window.actions,closes:window.closes,sends:window.sends,inputs:window.inputEvents,
+              expandedChildren:document.getElementById('panel').children.length,
+              fieldFocused:document.activeElement.matches('input,[contenteditable]')};
+            """)
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: finalState) as? [String: Any])
+        XCTAssertEqual(state["actions"] as? Int, 1, "Exactly one freshly observed Full screen control was pressed")
+        XCTAssertEqual(state["closes"] as? Int, 0)
+        XCTAssertEqual(state["sends"] as? Int, 0)
+        XCTAssertEqual(state["inputs"] as? Int, 0)
+        XCTAssertGreaterThan(try XCTUnwrap(state["expandedChildren"] as? Int), 64)
+        XCTAssertEqual(state["fieldFocused"] as? Bool, false, "Expanded fields must be discoverable without autofocus")
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        try await broker.revoke(taskKey: task, binding: fresh.binding)
+        lifetime.revoke(); await transport.releaseRendering(target: target, lifetime: lifetime)
+    }
+
     func testGlobalCaptureFrontierRetainsLaterDialogAfterFocusedInboxBranch() async throws {
         try await verifyGlobalCaptureFrontier(focused: true)
     }

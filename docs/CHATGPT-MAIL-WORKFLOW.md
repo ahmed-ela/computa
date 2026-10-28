@@ -14,13 +14,15 @@ nested, small control panel was visited. Such panels often have an accessible
 name but no dialog or form role. Pagination cannot recover nodes omitted from
 the original capture.
 
-Discovery now shares its existing 4,096 structural-slot budget across branches
-and compact-container checks. A completely inspected, explicitly named panel
-with controls receives form priority. Editable branches receive that priority
-without requiring autofocus or a form tag. Compact-container inspection is
-bounded to 64 slots; incomplete or large application containers do not qualify.
-Selection priority does not change the captured DOM order, action permission,
-hidden/password handling, reference validation or capture size limits.
+Discovery shares its existing 4,096 structural-slot budget across branches and
+bounded panel checks. Dialogs, forms and explicitly named panels retain observed
+control and heading paths, including their actual ancestors. Editable branches
+receive form priority without requiring autofocus or a form tag. Each panel probe
+is bounded to 64 slots and interleaves deeper branches with both ends of a wide
+container. An incomplete probe may retain controls it actually observed, but
+never promotes the entire subtree or claims complete coverage. Selection priority
+does not change captured DOM order, action permission, hidden/password handling,
+reference validation or capture size limits.
 
 A second live fixture proved the controls were exposed but still failed: the
 model repeatedly read the same partial page before selecting the already observed
@@ -343,6 +345,66 @@ spent read and failed cleanup. The immutable build-311 adapter fails the new
 detail assertions in the same final native binary, with the existing safety
 preconditions passing. Canonical-helper parity and unchanged Claude/Gemini
 provider-specific bodies are checked separately from these ChatGPT regressions.
+
+Installed build 312 completed sixteen verified Chat / Instant inference sessions
+and sixteen successful browser-tool calls, then reached the existing turn limit
+after 174.817 seconds. The only browser input was one Compose click with a current
+reference; no email fields were filled and no email was sent. All sixteen owned
+website sessions closed. Post-Compose captures were truncated at source, and
+queries across the retained source plus valid continuation reads still omitted
+the compose controls. The new model-pin diagnostic did not fire; this run does
+not establish that build 311's intermittent ownership failure is repaired.
+
+The first finite log collector omitted the browser-capture category's actual
+prefix. One targeted supplement recovered all seventeen exact-tab capture records
+in the original process/time window. Gmail remained attached, windowed and visible
+at 1,024 by 768 pixels throughout. Every capture stopped at the byte budget after
+235 to 242 emitted nodes. The rendering lease therefore worked in this run;
+discovery and priority admission still need separate evidence.
+
+After the task stopped, a narrow visible browser pane still hid the compose
+panel. Widening it exposed the minimized panel and its Full screen and Save & close
+controls. The empty panel was closed without text entry or Send, and the original
+pane width was restored. This observation changed presentation after the failure;
+it does not establish the hidden tab's geometry during the task.
+
+## Retaining controls within prioritized panels
+
+A further counterexample reproduced an omission after discovery had already
+admitted the panel. Its control descendants remained at ordinary priority. A
+later-prioritized form could place a long inbox above those descendants on the
+ordinary stack, exhausting the byte budget before Full screen or Save & close.
+Reversing two equal-priority branches changed the outcome. This is a capture
+scheduling defect, independently of rendering or continuation pagination.
+
+Build 313 prioritizes only observed control and heading paths within the same
+bounded discovery budget. The interleaved panel probe also reaches nested footer
+controls after expansion, without consuming every slot on a wide parent's direct
+children. The same handling applies to native forms and dialogs; large named
+applications do not gain priority for all their ordinary content. Action dispatch,
+reference validation, parent checks and capture limits remain unchanged.
+
+Finite scheduling diagnostics report discovery slots, panel probes, partial
+probes, unique probe controls seen/visible/prioritized/emitted, and fixed four-entry
+priority counts. They reuse existing traversal facts, include no labels, values
+or node IDs, and do not perform another DOM scan. Native decoding checks the
+closed schema and subset/count invariants. The full native log record retains
+its 1,024-byte cap; legacy captures without scheduling fields remain valid.
+
+All 56 browser-control JavaScript tests pass (1,126 assertions), including nested
+minimized controls, expanded fields and Send, native forms, large named
+applications, repeated probes, diagnostics bounds and unchanged action guards.
+The final seven discriminating regressions produce six missing-control failures
+and one reversed-order pass against the immutable build-312 resource.
+
+All 55 native transport and diagnostic tests pass. In the same compiled WebKit
+test binary, build 312 loses Full screen in three of four opposing-priority
+layouts; the reversed-order control passes. The candidate passes all four,
+reveals the expanded fields and Send, rejects a replaced control reference, and
+performs exactly one separately observed synthetic Full screen click per case.
+Capture itself performs no input. Maximum-schema encoding remains within the
+existing native log budget. These results qualify the bounded capture correction,
+not actual Gmail topology, external delivery or the intermittent model-pin issue.
 
 ## Diagnostics and limits
 

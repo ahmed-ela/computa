@@ -172,7 +172,7 @@ const capture = () => {
   // The source budget is independent of native result pagination. Traversing
   // a long inbox first can permanently omit its appended compose dialog from
   // every cursor page. Prefer the live focus branch, visible form/dialog
-  // branches and compact named control panels, keeping their real ancestors.
+  // branches and observed controls in named panels, keeping their real ancestors.
   // Discovery reads only bounded structure/attributes, never field values or
   // innerText. It grants no action capability and does not claim completeness.
   const priorities = new Map();
@@ -184,25 +184,45 @@ const capture = () => {
     for (const node of path) priorities.set(node, Math.min(priorities.get(node) ?? 3, priority));
   };
   prioritize(document.activeElement, 0);
-  let examinedChildren = 0;
-  const compactControlPanel = element => {
-    const pending = [element];
-    let slots = 0, control = false;
-    while (pending.length) {
-      const node = pending.pop();
-      if (['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || !allowedByAncestors(node)) continue;
-      if (['button','link','textbox','searchbox','combobox','checkbox','radio','switch','tab','menuitem','slider']
-        .includes(semanticRoleFor(node)) && visible(node)) control = true;
-      const children = node.childNodes;
-      // A large/incomplete named application is not a compact panel. These
-      // checks share the discovery budget; per-candidate walks cannot multiply
-      // its cap or read descendant text, field values or accessible labels.
-      if (children.length > 64 - slots || children.length > 4096 - examinedChildren) return false;
-      for (let index = 0; index < children.length; index++) {
-        slots++; examinedChildren++;
-        const child = children[index];
-        if (child.nodeType === Node.ELEMENT_NODE) pending.push(child);
+  let examinedChildren = 0, panelProbes = 0, partialPanels = 0;
+  const controlsSeen = new Set(), controlsVisible = new Set(), controlsPrioritized = new Set();
+  const prioritizePanelControls = (element, priority) => {
+    const pending = [{node:element}], targets = [];
+    let slots = 0, control = false, partial = false;
+    panelProbes++;
+    for (let index = 0; index < pending.length; index++) {
+      const cursor = pending[index], node = cursor.node;
+      if (!cursor.children) {
+        if (['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || !allowedByAncestors(node)) continue;
+        const semantic = semanticRoleFor(node);
+        const isControl = ['button','link','textbox','searchbox','combobox','checkbox','radio','switch','tab','menuitem','slider']
+          .includes(semantic);
+        if (isControl) controlsSeen.add(node);
+        if ((isControl || semantic === 'heading') && visible(node)) {
+          if (isControl) controlsVisible.add(node);
+          control ||= isControl; targets.push(node);
+        }
+        cursor.children = node.childNodes;
+        cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
       }
+      if (cursor.first > cursor.last) continue;
+      if (slots >= 64 || examinedChildren >= 4096) { partial = true; continue; }
+      // Interleave both ends and deeper branches within the same per-panel and
+      // shared caps, so a wide expanded panel cannot spend every slot before
+      // reaching the observed controls nested inside its header or footer.
+      const child = cursor.children[cursor.tail ? cursor.last-- : cursor.first++];
+      cursor.tail = !cursor.tail; slots++; examinedChildren++;
+      if (child.nodeType === Node.ELEMENT_NODE) pending.push({node:child});
+      if (cursor.first <= cursor.last) pending.push(cursor);
+    }
+    if (partial) partialPanels++;
+    // A discovered panel alone is insufficient: later prioritized branches
+    // can bury its ordinary descendants. Keep observed controls, heading
+    // context and their actual ancestors ahead of background text. Partial
+    // discovery does not imply missing controls are absent or grant input rights.
+    if (control) for (const target of targets) {
+      prioritize(target, priority);
+      if (controlsVisible.has(target) && priorities.has(target)) controlsPrioritized.add(target);
     }
     return control;
   };
@@ -215,9 +235,13 @@ const capture = () => {
       const rawRole = node.getAttribute('role') || '';
       const role = oversizedRole(rawRole) ? '' : trim(rawRole).split(' ')[0].toLowerCase();
       const semantic = semanticRoleFor(node);
-      if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') prioritize(node, 1);
-      else if (role === 'form' || node.tagName === 'FORM') prioritize(node, 2);
-      // Expanded panels may no longer be compact and need not use FORM or
+      if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') {
+        prioritize(node, 1); prioritizePanelControls(node, 1);
+      }
+      else if (role === 'form' || node.tagName === 'FORM') {
+        prioritize(node, 2); prioritizePanelControls(node, 2);
+      }
+      // Expanded panels need not use FORM or
       // dialog semantics. Preserve real text-entry branches without reading
       // their values or treating ARIA alone as editability.
       else if (['textbox','searchbox','combobox'].includes(semantic) && nativeEditable(node)) prioritize(node, 2);
@@ -225,7 +249,7 @@ const capture = () => {
         && ['aria-label','aria-labelledby'].some(name => {
           const value = node.getAttribute(name) || '';
           return value.length <= 4096 && !!trim(value);
-        }) && compactControlPanel(node)) prioritize(node, 2);
+        }) && prioritizePanelControls(node, 2)) prioritize(node, 2);
       cursor.children = node.childNodes;
       cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
     }
@@ -239,8 +263,8 @@ const capture = () => {
     if (cursor.first <= cursor.last) discovery.push(cursor);
   }
   const nodes = [], next = [[{node:root, parent:null, suppressText:false}], [], [], []];
-  const capturedDOMNodes = new Map();
-  let visited = 0, budget = 0, truncated = false;
+  const capturedDOMNodes = new Map(), emittedByPriority = [0, 0, 0, 0];
+  let visited = 0, budget = 0, truncated = false, omittedPriority = null;
   const diagnostics = {stopReason:'none',visited:0,emitted:0,estimatedBytes:0,
     visibilityState:['visible','hidden','prerender'].includes(document.visibilityState) ? document.visibilityState : 'unknown',
     viewportWidth:Number.isInteger(innerWidth) && innerWidth >= 0 && innerWidth <= 1000000 ? innerWidth : 0,
@@ -252,10 +276,11 @@ const capture = () => {
     // focused ancestor must not drain its ordinary inbox descendants before
     // another discovered dialog/form branch. Propagated ancestor priorities
     // retain parent-before-child capture; each frontier keeps DFS ordering.
-    const item = next.find(frontier => frontier.length).pop(), node = item.node;
+    const selectedPriority = next.findIndex(frontier => frontier.length);
+    const item = next[selectedPriority].pop(), node = item.node;
     if (++visited > 20000 || nodes.length >= 3000 || budget > 220000) {
       diagnostics.stopReason = visited > 20000 ? 'visited_limit' : nodes.length >= 3000 ? 'node_limit' : 'byte_budget';
-      truncated = true; break;
+      omittedPriority = selectedPriority; truncated = true; break;
     }
     if (node.nodeType === Node.TEXT_NODE) {
       const text = trim(node.textContent);
@@ -265,7 +290,7 @@ const capture = () => {
       if (text.length > 4096) diagnostics.clippedFields++;
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
         value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null});
-      capturedDOMNodes.set(String(id), node);
+      capturedDOMNodes.set(String(id), node); emittedByPriority[selectedPriority]++;
       budget += name.length * 3 + 200;
       continue;
     }
@@ -293,7 +318,7 @@ const capture = () => {
         meta.isDOMClickable = false; meta.isFocusablePointer = false; meta.isPressUnsupported = true;
       }
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:parent,childNodeIDs:[],...meta});
-      capturedDOMNodes.set(String(id), node);
+      capturedDOMNodes.set(String(id), node); emittedByPriority[selectedPriority]++;
       state.nodes.set(id,node);
       budget += JSON.stringify(meta).length * 3 + 200;
       parent = String(id);
@@ -314,6 +339,15 @@ const capture = () => {
     const position = capturedDOMNodes.get(left).compareDocumentPosition(capturedDOMNodes.get(right));
     return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : position & Node.DOCUMENT_POSITION_PRECEDING ? 1 : 0;
   });
+  let controlsEmitted = 0;
+  for (const node of capturedDOMNodes.values()) {
+    if (controlsPrioritized.has(node)) controlsEmitted++;
+  }
+  const queued = next.map((frontier, priority) => frontier.length + (omittedPriority === priority ? 1 : 0));
+  diagnostics.scheduling = {discoverySlots:examinedChildren,panelProbes,partialPanels,
+    controlsSeen:controlsSeen.size,controlsVisible:controlsVisible.size,controlsPrioritized:controlsPrioritized.size,
+    controlsEmitted,emittedByPriority,pendingByPriority:queued.map(count => Math.min(count,20001)),
+    pendingClipped:queued.some(count => count > 20001)};
   diagnostics.visited = visited; diagnostics.emitted = nodes.length; diagnostics.estimatedBytes = budget;
   return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes,
     sourceTruncated:truncated,captureDiagnostics:diagnostics};
