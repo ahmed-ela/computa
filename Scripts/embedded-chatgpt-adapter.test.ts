@@ -1570,7 +1570,8 @@ describe('ChatGPT per-round canonical submission ownership', () => {
           outcome: 'expanded', finalizationStage: 'returned', finalizationError: 'document_changed',
           urlWitness: true, urlDiscard: true, pendingMatches: true, lastVerifiedMatches: false,
           recordPhase: 'send_claimed', contextStateMatches: true, leaseCurrent: true, urlChanged: true });
-        expect(Object.keys(discarded.recoveryLifecycleDiagnostic)).toHaveLength(15);
+        expect(Object.keys(discarded.recoveryLifecycleDiagnostic)).toHaveLength(17);
+        expect(discarded.recoveryLifecycleDiagnostic).toMatchObject({ remount: true, provisional: false });
         expect(JSON.stringify(discarded.recoveryLifecycleDiagnostic)).not.toContain(first.marker);
         expect(JSON.stringify(discarded.recoveryLifecycleDiagnostic)).not.toContain(first.fingerprint);
         const state: any = x.f.world.__computaChatSubmissionState;
@@ -1990,6 +1991,158 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         expect(record.root).toBe(replacement?.root || oldRoot); expect(record.body).toBe(replacement?.body || oldBody);
         expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
         expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('same-node completed expansion retains a route crossed by the ordinary model read after its full hash', async () => {
+      for (const remountAtModelRead of [true, false]) {
+        const { x, first, record, root: oldRoot, body: oldBody, expand } = await stage();
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-action-read-recovery?temporary-chat=true';
+        let replacement: ReturnType<typeof replaceRoot> | null = null, hashed = false, crossed = false;
+        x.f.onDigest(() => { hashed = true; }, first.outbound);
+        const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          open();
+          if (crossed || !hashed) return;
+          const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+          expect(candidate).toMatchObject({ remount: false, provisional: false, outcome: 'expanded' });
+          expect(candidate.root).toBe(oldRoot); expect(candidate.body).toBe(oldBody);
+          crossed = true;
+          if (remountAtModelRead) { replacement = replaceRoot(x); replacement.body.text = first.outbound; }
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-action-read-recovery';
+        };
+        const discarded = await x.observe(first, allowance); denied(discarded);
+        expect(crossed).toBe(true);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: 'model_read' });
+        expect(discarded.recoveryLifecycleDiagnostic).toMatchObject({ remount: remountAtModelRead, provisional: false });
+        expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+        const before = x.f.digestInputs.length;
+        let result = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+        if (remountAtModelRead) {
+          expect(result.error).toBe('first_user_observation_replaced'); denied(result);
+          expect(record.replacement).toMatchObject({ root: replacement!.root, body: replacement!.body, oldRoot, oldBody });
+          expect(record.root).toBe(oldRoot); expect(candidate).not.toHaveProperty('verified', true);
+          result = await x.observe(first, fresh);
+        }
+        expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.root).toBe(replacement?.root || oldRoot); expect(record.body).toBe(replacement?.body || oldBody);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    const lateOrdinaryModelRoute = async (remount: boolean, mutation = 'none') => {
+      const staged = await stage(), { x, first, root: oldRoot, body: oldBody } = staged;
+      // No answer has arrived. This isolates the successful ordinary final
+      // model return from the separate completed-answer snapshot certificate.
+      for (const node of x.f.document.querySelectorAll('article[data-turn="assistant"]')) node.connected = false;
+      const owner = x.f.world.__computaModelOwner;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-late-action?temporary-chat=true';
+      let hashed = false, closes = 0, crossed = false, replacement: ReturnType<typeof replaceRoot> | null = null;
+      x.f.onDigest(() => { hashed = true; }, first.outbound);
+      const menu: any = x.picker!.menu, close = menu.onDispatch;
+      menu.onDispatch = (event: any) => {
+        close(event);
+        if (!hashed || (x.f.world.__computaModelBoundFirstExpansion as any)?.outcome !== 'expanded' || ++closes !== 2) return;
+        // The final picker closes before its successful promise reaches the
+        // outer snapshot. Schedule an ordinary DOM microtask in that interval.
+        const promote = (remaining: number) => queueMicrotask(() => {
+          if (remaining) { promote(remaining - 1); return; }
+          crossed = true;
+          if (remount) { replacement = replaceRoot(x); replacement.body.text = first.outbound; }
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-late-action';
+          if (mutation === 'body') (replacement?.body || oldBody).text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'deadline') x.f.advanceTime(2_000);
+        });
+        promote(5);
+      };
+      const result = await x.observe(first, allowance);
+      expect(hashed).toBe(true); expect(closes).toBe(2); expect(crossed).toBe(true);
+      return { ...staged, owner, fromURL, toURL, result, replacement: replacement as ReturnType<typeof replaceRoot> | null };
+    };
+
+    test('successful ordinary model return retains only the same bounded route witness before its snapshot', async () => {
+      for (const remount of [false, true]) {
+        const { x, first, record, root: oldRoot, body: oldBody, expand, result: discarded, replacement, fromURL, toURL }
+          = await lateOrdinaryModelRoute(remount);
+        denied(discarded);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: 'model_read' });
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+        const before = x.f.digestInputs.length;
+        let result = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+        if (remount) {
+          expect(result.error).toBe('first_user_observation_replaced'); denied(result);
+          expect(record.replacement).toMatchObject({ root: replacement!.root, body: replacement!.body, oldRoot, oldBody });
+          expect(record.root).toBe(oldRoot); expect(candidate).not.toHaveProperty('verified', true);
+          result = await x.observe(first, fresh);
+        }
+        expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.root).toBe(replacement?.root || oldRoot); expect(record.body).toBe(replacement?.body || oldBody);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('successful ordinary model return cannot carry changed content model owner mode or expired recovery', async () => {
+      for (const mutation of ['body', 'model', 'owner', 'temporary', 'deadline']) {
+        const { x, first, record, root: oldRoot, expand, result, replacement, fromURL, toURL, owner }
+          = await lateOrdinaryModelRoute(true, mutation);
+        denied(result);
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBe(oldRoot); expect(record.replacement).toBeUndefined();
+        replacement!.body.text = first.outbound; x.picker!.selected('Medium'); x.f.temporary.connected = true;
+        x.f.world.__computaModelOwner = owner;
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBeUndefined();
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('ordinary model read route handoff rejects changed bytes authority and ambiguous physical lineage', async () => {
+      for (const mutation of ['body', 'model', 'temporary', 'old_root_connected', 'old_body_connected', 'duplicate', 'owner', 'deadline']) {
+        const { x, first, record, root: oldRoot, body: oldBody, expand } = await stage();
+        const owner = x.f.world.__computaModelOwner;
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-action-read-negative?temporary-chat=true';
+        let replacement: ReturnType<typeof replaceRoot>, duplicate: Element | undefined, hashed = false, crossed = false;
+        x.f.onDigest(() => { hashed = true; }, first.outbound);
+        const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          open(); if (crossed || !hashed) return; crossed = true;
+          replacement = replaceRoot(x); replacement.body.text = first.outbound;
+          x.f.document.URL = toURL; x.f.location.pathname = '/c/public-action-read-negative';
+          if (mutation === 'body') replacement.body.text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'old_root_connected') oldRoot.connected = true;
+          if (mutation === 'old_body_connected') x.f.body.append(oldBody);
+          if (mutation === 'duplicate') { duplicate = new Element('ARTICLE', { 'data-turn': 'user' });
+            duplicate.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, first.outbound)); x.f.messages.append(duplicate); }
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'deadline') x.f.advanceTime(2_000);
+        };
+        denied(await x.observe(first, allowance)); expect(crossed).toBe(true);
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate).not.toHaveProperty('verified', true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+        replacement!.body.text = first.outbound; x.picker!.selected('Medium'); x.f.temporary.connected = true;
+        x.f.world.__computaModelOwner = owner; oldRoot.connected = false; oldBody.connected = false;
+        if (duplicate) duplicate.connected = false;
+        denied(await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBeUndefined();
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
       }
     });
 

@@ -5440,14 +5440,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                              crossing: "same_node_then_remount")
     }
 
+    func testBoundSameNodeOrdinaryModelAwaitPromotionRequiresFreshCompleteProof() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["unchanged"], crossing: "ordinary_model")
+    }
+
+    func testBoundSameNodeOrdinaryModelAwaitPromotionRejectsChangedOwnership() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["changed_body", "second_local", "wrong_model", "normal_chat"],
+                                             crossing: "ordinary_model")
+    }
+
     private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest") async throws {
         for condition in conditions {
             let hasTwoRoutes = ["two_routes", "receipt_then_refresh"].contains(crossing)
-            let sameNodeStart = crossing == "same_node_then_remount"
+            let sameNodeStart = ["same_node_then_remount", "ordinary_model"].contains(crossing)
             let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
             defer {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
                 fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+                fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
                 fixture.shutdown()
             }
             let choice = Self.fixtureChoice(.chatgpt)
@@ -5480,6 +5490,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 globalThis.__fixtureBoundFinalRouteHashes = 0;
                 globalThis.__fixtureBoundRoutePromotions = 0;
                 let modelPromotionQueued = false;
+                let firstExpandedHashCompleted = false;
                 const promote = stage => {
                   const recovery = globalThis.__computaModelBoundFirstExpansion;
                   const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
@@ -5516,10 +5527,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   }
                 };
                 globalThis.__fixturePromoteBoundReceipt = () => promote('receipt');
+                if ('\(crossing)' === 'ordinary_model') {
+                  document.getElementById('fixture-model-trigger').addEventListener('click', () => {
+                    if (firstExpandedHashCompleted) promote('ordinary_model');
+                  }, true);
+                }
                 crypto.subtle.digest = async (...arguments_) => {
                   const result = await original(...arguments_);
                   const recovery = globalThis.__computaModelBoundFirstExpansion;
                   const exact = recovery && new TextDecoder().decode(arguments_[1]) === recovery.canonical;
+                  if (exact && recovery.outcome === 'expanded') firstExpandedHashCompleted = true;
                   if (exact && location.pathname === '/c/public-bound-digest-promotion')
                     globalThis.__fixtureBoundFinalRouteHashes++;
                   if (exact && ['digest', 'two_routes', 'same_node_then_remount'].includes('\(crossing)')) promote('digest');
@@ -5561,8 +5578,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                         """)
                 }
             }
+            var routeDiagnostics: [String] = []
+            fixture.transport.setRouteDiscardDiagnosticsObserverForTesting { routeDiagnostics += $0 }
             var recovered: [String: Any]?, failure: EmbeddedWebModelTransport.Failure?
-            do { recovered = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            do {
+                recovered = crossing == "ordinary_model"
+                    ? try await fixture.transport.inspectWithFullModelForTesting(sessionToken: token)
+                    : try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            }
             catch { failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure) }
             let witness = try await evaluate(view, """
                 const recovery = globalThis.__computaModelBoundFirstExpansion;
@@ -5576,6 +5599,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   finalRootPinned: globalThis.__computaChatSubmissionState?.lastVerified?.root
                     === document.querySelector('[data-message-author-role="user"]') };
                 """, world: world) as? [String: Any]
+            for diagnostic in routeDiagnostics { print("BoundPromotionNativeRouteDiagnostic crossing=\(crossing) condition=\(condition) \(diagnostic)") }
             let encoded = try JSONSerialization.data(withJSONObject: try XCTUnwrap(witness), options: [.sortedKeys])
             print("BoundDigestPromotionWitness crossing=\(crossing) condition=\(condition) \(String(decoding: encoded, as: UTF8.self))")
             for key in ["nativePinned", "originalRootDetached", "originalBodyDetached"] {
@@ -5588,7 +5612,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(witness?["replacementAbsent"] as? Bool, !["receipt", "refresh", "receipt_then_refresh"].contains(crossing))
             XCTAssertEqual(witness?["recordPhase"] as? String, "verified")
             XCTAssertEqual(witness?["stage"] as? String,
-                           crossing == "two_routes" || sameNodeStart ? "digest" : crossing == "receipt_then_refresh" ? "receipt" : crossing)
+                           crossing == "two_routes" || crossing == "same_node_then_remount" ? "digest" : crossing == "receipt_then_refresh" ? "receipt" : crossing)
             XCTAssertEqual(witness?["outcome"] as? String, "expanded")
             XCTAssertEqual(witness?["recoveryVerified"] as? Bool, false)
             XCTAssertEqual(witness?["provisional"] as? Bool, false)
@@ -5611,12 +5635,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
                     XCTAssertEqual(witness?["finalVerified"] as? Bool, true)
                     if !["receipt", "refresh", "receipt_then_refresh"].contains(crossing) {
-                        XCTAssertEqual(witness?["routeDiscardStage"] as? String, crossing == "model" ? "model_read" : "body_hash")
+                        XCTAssertEqual(witness?["routeDiscardStage"] as? String, ["model", "ordinary_model"].contains(crossing) ? "model_read" : "body_hash")
                     }
                     XCTAssertEqual(witness?["finalRootPinned"] as? Bool, true)
                     XCTAssertGreaterThanOrEqual(witness?["finalRouteHashes"] as? Int ?? 0, 2,
                         "The promoted route requires fresh whole-body digest and independent submission proof")
-                    _ = try await evaluate(view, "document.getElementById('fixture-bound-stop').remove(); return true;")
+                    _ = try await evaluate(view, "document.getElementById('fixture-bound-stop')?.remove(); return true;")
                     let complete = try await waitForState("complete", fixture.transport, token: token)
                     XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
                     try assertChoiceEvidence(complete, choice: choice)
@@ -5628,7 +5652,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNotNil(failure)
                 XCTAssertNil(recovered, "Rejected ownership cannot expose any answer")
                 do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("A failed claim cannot revive") }
-                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, failure) }
+                catch {
+                    // The DEBUG read invokes page directly, without the public
+                    // request's failure latch. An invalid second-local route
+                    // is therefore rejected before the next real Poll starts.
+                    let expected: EmbeddedWebModelTransport.Failure? = crossing == "ordinary_model" && condition == "second_local"
+                        ? .ownershipFailure(.routeBefore) : failure
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected)
+                }
                 let after = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
                 XCTAssertEqual(after, 1, "Reinspection cannot grant another expansion")
                 try await assertHumanTabIntact(fixture, retaining: ownedID)
@@ -10559,7 +10590,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testRecoveryLifecycleDiagnosticsRejectIncompleteOrPrivateValuesAndSurviveRouteDiscard() throws {
-        let flags = ["present", "verified", "initialRoute", "urlWitness", "urlDiscard", "pendingMatches",
+        let flags = ["present", "verified", "initialRoute", "remount", "provisional", "urlWitness", "urlDiscard", "pendingMatches",
                      "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"]
         var lifecycle: [String: Any] = ["path": "spent_recovery", "outcome": "expanded",
             "finalizationStage": "returned", "finalizationError": "document_changed", "recordPhase": "send_claimed"]
@@ -10627,6 +10658,43 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let invalidRecords = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(invalid, provider: .chatgpt)
         XCTAssertEqual(invalidRecords.count, 1)
         XCTAssertFalse(invalidRecords[0].contains("private_canary"))
+    }
+
+    func testRouteDiscardFirstUserRejectionProjectsOnlyExistingFiniteCategories() throws {
+        var lifecycle: [String: Any] = ["path": "action_snapshot", "outcome": "expanded",
+            "finalizationStage": "not_reached", "finalizationError": "not_returned", "recordPhase": "verified"]
+        for key in ["present", "verified", "initialRoute", "remount", "provisional", "urlWitness", "urlDiscard",
+                    "pendingMatches", "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"] {
+            lifecycle[key] = false
+        }
+        let base: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
+            "reason": "snapshot_after_action", "scope": "action_final_guard", "recoveryLifecycle": lifecycle,
+            "url": "https://private_canary", "text": "private_canary", "rootID": "private_canary"]
+        func records(_ diagnostic: [String: Any]) throws -> [[String: Any]] {
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: diagnostic), as: UTF8.self)
+            let bytes = try JSONSerialization.data(withJSONObject: ["error": "conversation_changed",
+                "detail": "first_user_message", "debugStructure": raw])
+            let result = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(bytes, provider: .chatgpt)
+            XCTAssertTrue(result.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+            return try result.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        }
+        let projected = try XCTUnwrap(try records(base).first { $0["kind"] as? String == "route_discard_first_user" })
+        XCTAssertEqual(projected as NSDictionary, ["kind": "route_discard_first_user", "provider": "chatgpt",
+            "reason": "snapshot_after_action", "scope": "action_final_guard", "recoveryPath": "action_snapshot"] as NSDictionary)
+        for key in ["kind", "provider", "reason", "scope"] {
+            for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+                var changed = base; changed[key] = invalid
+                XCTAssertFalse(try records(changed).contains { $0["kind"] as? String == "route_discard_first_user" }, key)
+            }
+        }
+        for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+            var changed = base, invalidLifecycle = lifecycle; invalidLifecycle["path"] = invalid
+            changed["recoveryLifecycle"] = invalidLifecycle
+            let safe = try XCTUnwrap(try records(changed).first { $0["kind"] as? String == "route_discard_first_user" })
+            XCTAssertNil(safe["recoveryPath"], "An invalid lifecycle must not supply even an otherwise finite path")
+        }
+        var huge = base; huge["text"] = String(repeating: "x", count: 8_193)
+        XCTAssertFalse(try records(huge).contains { $0["kind"] as? String == "route_discard_first_user" })
     }
 
     func testInitialExpansionDiagnosticsRequireCompleteFiniteFlagsAndSeparateBoundedRecord() throws {

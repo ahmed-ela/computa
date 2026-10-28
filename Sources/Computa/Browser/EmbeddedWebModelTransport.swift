@@ -494,6 +494,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -595,6 +596,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setRouteDiscardDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
+        routeDiscardDiagnosticsObserverForTesting = observer
+    }
+
+    /// Exercise the ordinary full-model observation without the running-answer
+    /// optimization. This read cannot insert, submit, or select a model.
+    func inspectWithFullModelForTesting(sessionToken: String) async throws -> [String: Any] {
+        guard let session = sessions[sessionToken], session.state == "running", session.submitted else {
+            throw Failure.invalidRequest
+        }
+        _ = try await page(session, action: "inspect", allowPendingChatGPTModelVerification: false)
+        guard let state = try JSONSerialization.jsonObject(with: snapshot(session)) as? [String: Any] else {
+            throw Failure.invalidRequest
+        }
+        return state
     }
 
     func setFirstUserStructureEmissionObserverForTesting(_ observer: (@MainActor (Bool, String) -> Void)?) {
@@ -2585,7 +2603,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
         "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
         "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
-    private static let recoveryLifecycleFlags = ["present", "verified", "initialRoute", "urlWitness", "urlDiscard",
+    private static let firstUserDiagnosticScopes: Set<String> = ["marker_validation", "digest", "model_precheck", "binding", "action_final_guard", "first_insert", "first_submit", "first_missing"]
+    private static let firstUserDiagnosticReasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
+    private static let recoveryLifecycleFlags = ["present", "verified", "initialRoute", "remount", "provisional", "urlWitness", "urlDiscard",
         "pendingMatches", "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"]
     private static let recoveryLifecycleLabels: [String: Set<String>] = [
         "path": ["spent_recovery", "initial_claim", "expansion_rejected", "hash_snapshot", "action_snapshot", "other"],
@@ -2636,6 +2656,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if var recovery = sanitizedRecoveryLifecycle(value["recoveryLifecycleDiagnostic"]) {
             recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
             records.append(recovery)
+        }
+        if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
+           let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+           diagnostic["kind"] as? String == "first_user_structure", diagnostic["provider"] as? String == provider.rawValue,
+           let reason = diagnostic["reason"] as? String, firstUserDiagnosticReasons.contains(reason),
+           let scope = diagnostic["scope"] as? String, firstUserDiagnosticScopes.contains(scope) {
+            var rejection: [String: Any] = ["kind": "route_discard_first_user", "provider": provider.rawValue,
+                                            "reason": reason, "scope": scope]
+            if let recovery = sanitizedRecoveryLifecycle(diagnostic["recoveryLifecycle"]) {
+                rejection["recoveryPath"] = recovery["path"]
+            }
+            records.append(rejection)
         }
         return records.compactMap {
             guard let data = try? JSONSerialization.data(withJSONObject: $0, options: .sortedKeys), data.count <= 960 else { return nil }
@@ -2795,14 +2827,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["action"] = action
         }
         if let scope = value["scope"] {
-            let scopes: Set<String> = ["marker_validation", "digest", "model_precheck", "binding", "action_final_guard", "first_insert", "first_submit", "first_missing"]
-            guard let scope = scope as? String, scopes.contains(scope) else { return nil }
+            guard let scope = scope as? String, firstUserDiagnosticScopes.contains(scope) else { return nil }
             safe["scope"] = scope
         }
         if let rawReason = value["reason"] {
-            let reasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
             guard let reason = rawReason as? String,
-                  reasons.contains(reason) || provider == .gemini && reason == "submission_text" else { return nil }
+                  firstUserDiagnosticReasons.contains(reason) || provider == .gemini && reason == "submission_text" else { return nil }
             safe["reason"] = reason
         }
         if let rawScope = value["descendantScope"] {
@@ -4147,7 +4177,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     && refreshReadOnlyObservation
                     && crossedRead?["error"] as? String == "first_user_observation_replaced"
                     && crossedRead?["detail"] as? String == "readonly_model_observation"
-                for diagnostic in Self.routeDiscardDiagnosticRecords(bytes, provider: provider) {
+                let routeDiagnostics = Self.routeDiscardDiagnosticRecords(bytes, provider: provider)
+                #if DEBUG
+                routeDiscardDiagnosticsObserverForTesting?(routeDiagnostics)
+                #endif
+                for diagnostic in routeDiagnostics {
                     Self.inspectionLog.info("routeDiscardDiagnostic provider=\(provider.rawValue, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
                 }
                 return try await page(session, action: pendingSubmissionProductRecheck ? "verifyProductMode" : "inspect", enforceModel: enforceModel,

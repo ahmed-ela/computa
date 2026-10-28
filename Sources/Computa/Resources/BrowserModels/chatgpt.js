@@ -5954,7 +5954,8 @@ function chatGPTRecoveryLifecycle(path = 'other') {
     const candidate = globalThis.__computaModelBoundFirstExpansion;
     const paths = ['spent_recovery', 'initial_claim', 'expansion_rejected', 'hash_snapshot', 'action_snapshot', 'other'];
     return { path: paths.includes(path) ? path : 'other', present: !!candidate, verified: candidate?.verified === true,
-      initialRoute: candidate?.initialRoute === true, outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
+      initialRoute: candidate?.initialRoute === true, remount: candidate?.remount === true, provisional: candidate?.provisional === true,
+      outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
       ...(candidate?.finalizationDiagnostic || chatGPTRecoveryFinalizationFacts(candidate, 'not_reached')),
       ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash'].includes(candidate.routeDiscard.stage)
         ? candidate.routeDiscard.stage : 'other',
@@ -6222,6 +6223,17 @@ if (ownedUserCount > 0) {
   }
   // Pin only after this same document still confirms the owned temporary chat.
   const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
+  // A completed same-node display recovery uses the ordinary action's model
+  // read, rather than the remount certifier. Preserve the same strictly bounded
+  // route witness if that read crosses the URL after the full hash, including
+  // a successful result whose awaited return crossed before this snapshot.
+  // It returns no answer or ownership proof; native must certify the edge and
+  // request the existing fresh complete proof before any result is admitted.
+  if (boundRecovery && document.URL !== input.expectedURL
+    && (!observed.error || observed.error === 'document_changed')) {
+    const discarded = chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'model_read');
+    if (discarded) return discarded;
+  }
   if (!observed.error && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   const readContextFailure = finalReadContextFailure(observed);
   if (readContextFailure) return chatGPTWithRecoveryLifecycle(readContextFailure);

@@ -2236,12 +2236,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'expansionFirstMismatchClass', 'expansionFirstMismatchOffset', 'expansionAdmissionFailure']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
         const lifecycle = JSON.parse(result.debugStructure).recoveryLifecycle;
-        expect(Object.keys(lifecycle).sort()).toEqual(['path', 'present', 'verified', 'initialRoute', 'outcome',
+        expect(Object.keys(lifecycle).sort()).toEqual(['path', 'present', 'verified', 'initialRoute', 'remount', 'provisional', 'outcome',
           'finalizationStage', 'finalizationError', 'urlWitness', 'urlDiscard', 'pendingMatches', 'lastVerifiedMatches',
           'recordPhase', 'contextStateMatches', 'leaseCurrent', 'urlChanged'].sort());
-        expect(lifecycle).toMatchObject({ path: 'other', present: false, verified: false, initialRoute: false,
+        expect(lifecycle).toMatchObject({ path: 'other', present: false, verified: false, initialRoute: false, remount: false, provisional: false,
           outcome: 'none', finalizationStage: 'not_reached', finalizationError: 'not_returned', recordPhase: 'none' });
-        for (const key of ['present', 'verified', 'initialRoute', 'urlWitness', 'urlDiscard', 'pendingMatches',
+        for (const key of ['present', 'verified', 'initialRoute', 'remount', 'provisional', 'urlWitness', 'urlDiscard', 'pendingMatches',
           'lastVerifiedMatches', 'contextStateMatches', 'leaseCurrent', 'urlChanged']) expect(typeof lifecycle[key]).toBe('boolean');
         const admission = JSON.parse(result.debugStructure).expansionAdmissionFailure;
         if (admission !== undefined) expect(['suppressed', 'action', 'binding', 'native_pin', 'private_pin', 'claim_spent',
