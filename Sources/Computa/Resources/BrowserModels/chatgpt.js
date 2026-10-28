@@ -6038,7 +6038,7 @@ function chatGPTRecoveryLifecycle(path = 'other') {
       initialRoute: candidate?.initialRoute === true, remount: candidate?.remount === true, provisional: candidate?.provisional === true,
       outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
       ...(candidate?.finalizationDiagnostic || chatGPTRecoveryFinalizationFacts(candidate, 'not_reached')),
-      ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash'].includes(candidate.routeDiscard.stage)
+      ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash', 'finalization_hash'].includes(candidate.routeDiscard.stage)
         ? candidate.routeDiscard.stage : 'other',
         boundRouteEdges: Math.min(candidate.routeContinuationEdges?.length || 0, 2),
         boundRoutePending: candidate.routeDiscardConsumed !== candidate.routeDiscard } : {}) };
@@ -6402,6 +6402,13 @@ if (ownedUserCount > 0) {
   if (boundRecovery && globalThis.__computaModelBoundFirstExpansion === boundRecovery
     && (!finalized.error || discardedURLRead)) boundRecovery.verified = true;
   chatGPTLatchRecoveryFinalization(boundRecovery, 'returned', finalized, discardedURLRead);
+  // The granted remount refresh can cross the route during its final full
+  // submission hash too. Keep only the existing certificate and bounded native
+  // route handoff; no result, verified flag, fresh click or renewed deadline.
+  if (boundRecovery && finalized.error === 'document_changed' && finalized.detail === 'model_read_context') {
+    const discarded = chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'finalization_hash');
+    if (discarded) return discarded;
+  }
   return chatGPTWithRecoveryLifecycle(finalized);
 }
 if (input.expectedFirstUserFingerprint != null)

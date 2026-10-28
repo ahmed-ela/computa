@@ -1,6 +1,6 @@
 # ChatGPT mail workflow investigation
 
-An authorized short email task in the built-in browser exposed two distinct
+An authorized short email task in the built-in browser exposed distinct
 problems. The first run stopped after the provider became idle without returning
 an assistant response. A later instrumented run received valid provider responses
 but could not reach Gmail's minimized compose controls. No email was sent in
@@ -44,6 +44,48 @@ ambiguous, actionable or navigation containers retain the ordinary ordering.
 A readable sample remains near the front; the rest of the immutable selection
 continues without dropping rows. This ordering is neither focus nor completeness
 evidence and grants no new input authority.
+
+## Ownership finalization
+
+Build 304 completed the minimized-compose draft in 127.269 seconds: ten tools,
+zero tool errors, one exact unsent draft, and eleven freshly verified and closed
+ChatGPT Chat / Instant inference sessions. The receipt was read in full and the
+task-created fixture tab closed while preserving the normal browser tab. This
+is local draft evidence, not external email delivery or a controlled latency
+comparison with earlier failed runs.
+
+The subsequent real-mail task stopped after tab inventory, before any mail input.
+Its second inference failed `website_ownership_unverified` with reason
+`first_user_message`; cleanup remained unconfirmed. The native task UI showed
+this typed error. A generic engine `internal_server_error` did not identify its
+cause.
+
+Finite diagnostics and a deterministic adapter reproduction isolated a URL
+transition during finalization of an already granted replacement read. The
+complete prompt and model had passed their checks. After the second permitted
+route transition, the finalization path discarded the read without retaining
+the existing recovery record; the next read rejected the spent claim. This is
+separate from changed prompt bytes or an empty provider response.
+
+Finalization now uses the existing bounded route-discard handoff for this case.
+It retains the same replacement certificate and deadline, returns no response or
+verified state from the discarded read, and requires the next native-certified
+route read to repeat the complete prompt/model/temporary-session proof. It does
+not create another certificate, click again, resend a prompt, or expand the
+two-edge route budget.
+
+The adapter regression fails on the immutable build-304 script and passes with
+the handoff fix. All 512 adapter tests (24,181 assertions) pass, including exact
+timing, invalidation during finalization, invalid continuation/certificate, and
+no-resurrection cases after invalid state is restored. The failing real prompt
+had matched its full canonical bytes; comparison with the successful draft also
+rules out framing truncation as the cause of this reproduced case.
+
+Seventeen focused native ownership/diagnostic tests also pass. The same compiled
+native regression fails with the immutable build-304 adapter and passes with the
+candidate adapter. It verifies the exact finalization ordering, fresh complete
+proofs, the same certificate/deadline, and unchanged input counts. Wrong-model
+and ownership negatives remain rejected on both the first and subsequent reads.
 
 ## Diagnostics and limits
 

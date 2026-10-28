@@ -2678,7 +2678,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var safe: [String: Any] = [:]
         if value["boundRouteStage"] != nil {
             guard let stage = value["boundRouteStage"] as? String,
-                  ["body_hash", "model_read", "replacement_hash", "other"].contains(stage),
+                  ["body_hash", "model_read", "replacement_hash", "finalization_hash", "other"].contains(stage),
                   let count = value["boundRouteEdges"] as? NSNumber, CFGetTypeID(count) != CFBooleanGetTypeID(),
                   [0.0, 1.0, 2.0].contains(count.doubleValue),
                   let pending = firstUserDiagnosticBool(value["boundRoutePending"]) else { return nil }
