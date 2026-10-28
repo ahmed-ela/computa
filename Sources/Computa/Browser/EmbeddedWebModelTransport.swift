@@ -495,6 +495,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -602,6 +603,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setRouteDiscardDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         routeDiscardDiagnosticsObserverForTesting = observer
+    }
+
+    func setBoundCertificateDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        boundCertificateDiagnosticsObserverForTesting = observer
     }
 
     /// Exercise the ordinary full-model observation without the running-answer
@@ -2697,6 +2702,69 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+
+    private static let boundCertificateFlags = ["receiptPresent", "receiptNodesMatch", "receiptRetained",
+        "awaitingNativeRefresh", "refreshClaimed", "expectedModelPresent", "deferModelVerification"]
+    private static let boundCertificateRouteRules: Set<String> = [
+        "none", "not_attempted", "return_result", "return_remount", "return_awaiting",
+        "return_unclaimed", "return_grant", "return_receipt", "return_retained", "return_document",
+        "return_owner", "return_root", "return_body", "return_old_root", "return_old_body",
+        "body_count", "body_root_connected", "body_connected", "body_identity", "body_canonical",
+        "candidate_missing", "candidate_current", "bound", "provisional", "initial_route",
+        "pending_private", "recovery_shape", "unconsumed_route", "route_budget", "model_failure",
+        "context_failure", "outcome", "clicked", "deadline_finite", "deadline_expired",
+        "action", "bound_permission", "refresh_permission", "suppressed", "binding_permission",
+        "expansion_permission", "provisional_permission", "frame", "provider", "origin",
+        "document", "owner", "global_owner", "lease_missing", "lease_current",
+        "from_url", "url_unchanged", "state_missing", "state_current", "state_revoked",
+        "state_document", "state_owner", "state_marker", "pending", "last_verified",
+        "record_phase", "record_sequence", "record_document", "record_owner", "receipt_claim",
+        "receipt_identity", "receipt_missing", "receipt_unexpected", "old_root_pin", "old_body_pin",
+        "old_root_connected", "old_body_connected", "new_root_identity", "new_body_identity", "submitted",
+        "submission_count", "prompt", "marker", "expanded_text", "record_canonical",
+        "record_fingerprint", "candidate_fingerprint", "native_fingerprint", "private_fingerprint", "private_marker",
+        "native_marker", "submission_sequence", "submission_marker", "record_marker", "submission_pins",
+        "state_model", "expected_model", "expansion_model", "product", "temporary",
+        "model_pins", "conversation_identity", "conversation_route", "conversation_url"]
+    private static let boundCertificateLabels: [String: Set<String>] = [
+        "stage": ["model_read", "model_context", "replacement_observation", "receipt_context"],
+        "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
+                 "receipt_body", "receipt_old_root", "receipt_old_body"],
+        "contextFailure": ["not_checked", "none", "frame", "provider", "origin", "owner", "user_count", "submission",
+            "submission_count", "marker", "prompt", "private_pin", "product", "temporary", "root", "body",
+            "conversation_route", "conversation_identity", "url"],
+        "observedError": ["none", "document_changed", "conversation_changed", "first_user_observation_replaced",
+            "model_selection_unverified", "product_mode_unverified", "temporary_mode_unverified", "other"],
+        "phase": ["absent", "prepared", "send_claimed", "verified", "other"]]
+
+    /// Closed finite first-failure facts, never model or ownership authority.
+    static func sanitizedBoundCertificateDiagnostic(_ raw: Any?, provider: Provider) -> [String: Any]? {
+        guard provider == .chatgpt, let value = raw as? [String: Any],
+              value["kind"] as? String == "chatgpt_bound_certificate_v1",
+              Set(value.keys) == Set(boundCertificateFlags + Array(boundCertificateLabels.keys) + ["kind", "routeRule"]),
+              let routeRule = value["routeRule"] as? String, boundCertificateRouteRules.contains(routeRule) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_bound_certificate_v1", "routeRule": routeRule]
+        for key in boundCertificateFlags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, labels) in boundCertificateLabels {
+            guard let label = value[key] as? String, labels.contains(label) else { return nil }
+            safe[key] = label
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
+              bytes.count <= 960 else { return nil }
+        return safe
+    }
+
+    /// Remove even malformed/foreign diagnostics before observation processing.
+    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+        let raw = observed.removeValue(forKey: "boundCertificateDiagnostic")
+        guard let safe = sanitizedBoundCertificateDiagnostic(raw, provider: provider),
+              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys) else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     // A certified route transition discards the adapter result before ordinary
     // validation. Preserve only finite diagnostic categories from that result;
     // these records never participate in route or response acceptance.
@@ -2714,6 +2782,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if var recovery = sanitizedRecoveryLifecycle(value["recoveryLifecycleDiagnostic"]) {
             recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
             records.append(recovery)
+        }
+        if let certificate = sanitizedBoundCertificateDiagnostic(value["boundCertificateDiagnostic"], provider: provider) {
+            records.append(certificate)
         }
         if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
            let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
@@ -4272,6 +4343,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        if let certificate = Self.removeBoundCertificateDiagnostic(from: &observed, provider: provider) {
+            // This existing finite diagnostic channel also covers later spent
+            // reads and cleanup. The record cannot enter response validation.
+            Self.inspectionLog.error("firstUserRecoveryLifecycle sequence=\(session.sequence) \(certificate, privacy: .public)")
+            #if DEBUG
+            boundCertificateDiagnosticsObserverForTesting?(certificate)
+            #endif
+        }
         let rendererWork = observed.removeValue(forKey: "rendererWorkDiagnostic")
         if let rendererWorkExpiry, Date().timeIntervalSince1970 < rendererWorkExpiry {
             session.rendererWorkDiagnostic = Self.sanitizedRendererWorkDiagnostic(rendererWork).map {

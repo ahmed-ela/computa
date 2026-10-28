@@ -5648,7 +5648,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                              crossing: "certificate_return")
     }
 
-    private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest") async throws {
+    func testBoundCertificateFirstFailureSurvivesDiscardSpentReadAndCleanupWithoutAnotherAction() async throws {
+        try await verifyBoundRemountPromotion(conditions: ["changed_body"], crossing: "certificate_return", verifyCertificateDiagnostic: true)
+    }
+
+    private func verifyBoundRemountPromotion(conditions: [String], crossing: String = "digest", verifyCertificateDiagnostic: Bool = false) async throws {
         for condition in conditions {
             let hasTwoRoutes = ["two_routes", "receipt_then_refresh", "receipt_then_finalization", "certificate_return"].contains(crossing)
             let sameNodeStart = ["same_node_then_remount", "ordinary_model"].contains(crossing)
@@ -5657,6 +5661,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
                 fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
                 fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
+                fixture.transport.setBoundCertificateDiagnosticsObserverForTesting(nil)
                 fixture.shutdown()
             }
             let choice = Self.fixtureChoice(.chatgpt)
@@ -5832,6 +5837,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
             var routeDiagnostics: [String] = []
             fixture.transport.setRouteDiscardDiagnosticsObserverForTesting { routeDiagnostics += $0 }
+            var certificateDiagnostics: [String] = []
+            fixture.transport.setBoundCertificateDiagnosticsObserverForTesting { certificateDiagnostics.append($0) }
             var recovered: [String: Any]?, failure: EmbeddedWebModelTransport.Failure?
             do {
                 recovered = crossing == "ordinary_model"
@@ -5946,6 +5953,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     XCTAssertEqual(receipts, 1)
                 }
                 try await assertHumanTabIntact(fixture, retaining: ownedID)
+                if verifyCertificateDiagnostic {
+                    let discarded = try XCTUnwrap(routeDiagnostics.first { $0.contains("chatgpt_bound_certificate_v1") })
+                    let first = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(discarded.utf8)) as? [String: Any])
+                    XCTAssertEqual(first["stage"] as? String, "receipt_context")
+                    XCTAssertEqual(first["rule"] as? String, "context")
+                    XCTAssertEqual(first["routeRule"] as? String, "body_canonical")
+                    XCTAssertEqual(first["receiptPresent"] as? Bool, true)
+                    XCTAssertEqual(first["receiptNodesMatch"] as? Bool, true)
+                    XCTAssertEqual(first["receiptRetained"] as? Bool, true)
+                    XCTAssertFalse(certificateDiagnostics.isEmpty, "The next spent read must retain the original rejected guard")
+                    let priorCount = certificateDiagnostics.count
+                    let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                    XCTAssertEqual(finished["cleanup"] as? String, "failed", "Changed body still cannot authorize cleanup")
+                    XCTAssertGreaterThan(certificateDiagnostics.count, priorCount, "Cleanup must retain the same finite first cause")
+                    for record in certificateDiagnostics {
+                        XCTAssertLessThanOrEqual(record.utf8.count, 960)
+                        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(record.utf8)) as? NSDictionary, first as NSDictionary)
+                    }
+                    let immutable = try await evaluate(view, "return Object.isFrozen(globalThis.__computaModelBoundFirstExpansion?.certificateDiagnostic);", world: world) as? Bool
+                    XCTAssertEqual(immutable, true)
+                    try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+                    let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+                    XCTAssertEqual(expansionClicks, 1)
+                    try await assertHumanTabIntact(fixture, retaining: ownedID)
+                }
             }
         }
     }
@@ -10911,6 +10943,83 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for invalid in ["private_canary", "none", 1, true, NSNull()] as [Any] {
             var forged = source; forged["productProofFailure"] = invalid
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+    }
+
+    private func boundCertificateDiagnosticFixture() -> [String: Any] {
+        ["kind": "chatgpt_bound_certificate_v1", "stage": "receipt_context", "rule": "context",
+         "routeRule": "expected_model", "contextFailure": "url", "observedError": "first_user_observation_replaced",
+         "phase": "verified", "receiptPresent": true, "receiptNodesMatch": true, "receiptRetained": true,
+         "awaitingNativeRefresh": true, "refreshClaimed": true, "expectedModelPresent": false, "deferModelVerification": false]
+    }
+
+    func testBoundCertificateDiagnosticRejectsPrivateUnknownIncompleteAndForeignShapes() throws {
+        let valid = boundCertificateDiagnosticFixture()
+        XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(valid, provider: .chatgpt) as NSDictionary?, valid as NSDictionary)
+        for provider in [EmbeddedWebModelTransport.Provider.gemini, .claude] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(valid, provider: provider))
+        }
+        let flags = ["receiptPresent", "receiptNodesMatch", "receiptRetained", "awaitingNativeRefresh", "refreshClaimed",
+                     "expectedModelPresent", "deferModelVerification"]
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(missing, provider: .chatgpt), key)
+            for invalid in [NSNull(), "PRIVATE_CANARY", ["url": "https://PRIVATE_CANARY"], 0, 1] as [Any] {
+                var forged = valid; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(forged, provider: .chatgpt), key)
+            }
+            if !flags.contains(key) {
+                var forged = valid; forged[key] = true
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(forged, provider: .chatgpt), key)
+            }
+        }
+        for key in ["text", "url", "owner", "fingerprint", "receipt", "record"] {
+            var forged = valid; forged[key] = "PRIVATE_CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(forged, provider: .chatgpt), key)
+        }
+        for rule in ["return_retained", "body_canonical", "receipt_identity", "old_root_connected", "state_model",
+                     "expected_model", "expansion_model", "model_pins", "conversation_identity"] {
+            var value = valid; value["routeRule"] = rule
+            XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(value, provider: .chatgpt)?["routeRule"] as? String, rule)
+        }
+    }
+
+    func testBoundCertificateDiagnosticSurvivesRouteDiscardWithoutLeakingPayloadOrGrowingLogBound() throws {
+        var diagnostic = boundCertificateDiagnosticFixture()
+        diagnostic["stage"] = "replacement_observation"; diagnostic["rule"] = "receipt_old_root"
+        diagnostic["contextFailure"] = "conversation_identity"; diagnostic["routeRule"] = "provisional_permission"
+        for key in ["receiptPresent", "receiptNodesMatch", "receiptRetained", "awaitingNativeRefresh", "refreshClaimed",
+                    "expectedModelPresent", "deferModelVerification"] { diagnostic[key] = false }
+        let value: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message",
+            "boundCertificateDiagnostic": diagnostic, "text": "PRIVATE_CANARY", "url": "https://PRIVATE_CANARY"]
+        let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(
+            try JSONSerialization.data(withJSONObject: value), provider: .chatgpt)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE_CANARY") })
+        let certificate = try XCTUnwrap(records.first { $0.contains("chatgpt_bound_certificate_v1") })
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(certificate.utf8)) as? NSDictionary, diagnostic as NSDictionary)
+        var invalid = diagnostic; invalid["routeRule"] = "PRIVATE_CANARY"
+        var changed = value; changed["boundCertificateDiagnostic"] = invalid
+        let rejected = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(
+            try JSONSerialization.data(withJSONObject: changed), provider: .chatgpt)
+        XCTAssertEqual(rejected.count, 1, "Malformed optional diagnostics cannot hide the existing route result")
+        XCTAssertFalse(rejected.joined().contains("PRIVATE_CANARY"))
+    }
+
+    func testBoundCertificateDiagnosticIsRemovedBeforeInferenceRegardlessOfValidity() throws {
+        let authority: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message",
+            "firstUserVerified": false, "temporary": false, "text": "Unchanged observation"]
+        var invalid = boundCertificateDiagnosticFixture(); invalid["owner"] = "PRIVATE_CANARY"
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .gemini, .claude] {
+            for raw in [boundCertificateDiagnosticFixture(), invalid, NSNull(), "PRIVATE_CANARY"] as [Any] {
+                var observation = authority; observation["boundCertificateDiagnostic"] = raw
+                let record = EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: provider)
+                XCTAssertEqual(observation as NSDictionary, authority as NSDictionary,
+                    "Diagnostic removal must preserve the original failure and every authority field")
+                XCTAssertFalse(record?.contains("PRIVATE_CANARY") == true)
+                let validShape = (raw as? [String: Any]).map { Set($0.keys) == Set(boundCertificateDiagnosticFixture().keys) } == true
+                XCTAssertEqual(record != nil, provider == .chatgpt && validShape)
+            }
         }
     }
 

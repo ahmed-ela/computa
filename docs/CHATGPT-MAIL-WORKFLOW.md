@@ -244,6 +244,25 @@ watchers and their exact unused arms were cleaned up, and the failed page and
 historical evidence were retained. The real-email workflow remains **failed**,
 with zero emails sent, and this PR remains draft pending a verified live result.
 
+Build 310 adds diagnostic-only provenance for the remount certificate boundary.
+It retains the first rejected stage and exact guard name, finite receipt-state
+facts, and whether the native expected-model/deferred-verification fields were
+present. Guard operands keep their original order and short-circuit behavior;
+diagnostics do not re-evaluate proof getters, grant recovery or change acceptance.
+The record persists across the same candidate's later failed reads and cleanup.
+Native validation accepts only the closed enum/boolean shape and removes it
+before ordinary inference processing. No page text, addresses, URLs or private
+ownership values are included. This instruments the remaining failure; it does
+not claim to fix it.
+
+The diagnostic-only build passes 520 adapter tests (25,175 assertions) and eight
+focused native tests. Real WebKit checks retain the identical first failure
+through route discard, the later spent-recovery read and failed cleanup, with
+one provider Send and one display expansion. Native tests reject malformed or
+private diagnostic fields and verify that stripping them preserves the original
+response/error fields. The existing certificate-return positive and concurrent
+change negatives continue to pass.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

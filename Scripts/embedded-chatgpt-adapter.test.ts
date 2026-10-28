@@ -2530,7 +2530,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       }
     });
 
-    const certificateReturnRoute = async (mutation = 'none') => {
+    const certificateReturnRoute = async (mutation = 'none', overrides: Record<string, unknown> = {}) => {
       const staged = await remounted(), { x, first, record, body } = staged;
       const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-certificate-return?temporary-chat=true';
       const owner = x.f.world.__computaModelOwner, originalDocument = record.document;
@@ -2558,7 +2558,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         queueMicrotask(check);
       };
       x.f.onDigest(watchCertificate, first.outbound);
-      const discarded = await x.observe(first, allowance);
+      const discarded = await x.observe(first, { ...allowance, ...overrides });
       expect(crossed).toBe(true); denied(discarded);
       const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
       expect(candidate).not.toHaveProperty('verified', true); expect(candidate.routeDiscard).toBeUndefined();
@@ -2614,6 +2614,43 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBe(receipt);
         expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
       }
+    });
+
+    test('certificate diagnostics retain the exact first rejected guard through spent reads and cleanup without text or proof values', async () => {
+      const cases = [['body', 'body_canonical'], ['model', 'model_pins'], ['owner', 'global_owner'],
+        ['document', 'document'], ['deadline', 'deadline_expired'], ['temporary', 'temporary'],
+        ['work', 'product'], ['lease', 'lease_current']] as const;
+      for (const [mutation, routeRule] of cases) {
+        const { x, first, body, candidate, owner, originalDocument, fromURL, toURL, discarded }
+          = await certificateReturnRoute(mutation);
+        const diagnostic = discarded.boundCertificateDiagnostic;
+        expect(diagnostic, mutation).toMatchObject({ kind: 'chatgpt_bound_certificate_v1', stage: 'receipt_context',
+          rule: 'context', routeRule, observedError: 'first_user_observation_replaced', phase: 'verified',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true, expectedModelPresent: true,
+          deferModelVerification: false, awaitingNativeRefresh: true, refreshClaimed: true });
+        expect(Object.isFrozen(candidate.certificateDiagnostic)).toBe(true);
+        const encoded = JSON.stringify(diagnostic);
+        expect(encoded.length).toBeLessThanOrEqual(768);
+        for (const value of [first.outbound, first.fingerprint, first.marker, fromURL, toURL, String(owner)])
+          expect(encoded).not.toContain(value);
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner;
+        candidate.document = originalDocument; x.f.temporary.connected = true; x.f.workMode.values['aria-pressed'] = 'false';
+        const continuation = { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] };
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...continuation, action }); denied(refused);
+          expect(JSON.stringify(refused.boundCertificateDiagnostic)).toBe(encoded);
+        }
+      }
+    });
+
+    test('certificate diagnostics distinguish a missing expected model from state and expansion model agreement', async () => {
+      const { x, first, expand, discarded, candidate } = await certificateReturnRoute('none', { expectedModelChoice: null });
+      expect(discarded).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
+        boundCertificateDiagnostic: { stage: 'receipt_context', rule: 'context', routeRule: 'expected_model',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true,
+          expectedModelPresent: false, deferModelVerification: false } });
+      expect(candidate).not.toHaveProperty('verified', true);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
     });
 
     test('certificate return and fresh hash can consume the two distinct native route edges in order', async () => {
