@@ -2585,6 +2585,53 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
         "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
         "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
+    private static let recoveryLifecycleFlags = ["present", "verified", "initialRoute", "urlWitness", "urlDiscard",
+        "pendingMatches", "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"]
+    private static let recoveryLifecycleLabels: [String: Set<String>] = [
+        "path": ["spent_recovery", "initial_claim", "expansion_rejected", "hash_snapshot", "action_snapshot", "other"],
+        "outcome": ["none", "expanded", "other"],
+        "finalizationStage": ["not_reached", "entered", "returned", "threw"],
+        "finalizationError": ["not_returned", "none", "document_changed", "first_user_message", "submission_message", "other"],
+        "recordPhase": ["none", "prepared", "send_claimed", "verified", "other"]]
+
+    static func sanitizedRecoveryLifecycle(_ raw: Any?) -> [String: Any]? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == Set(recoveryLifecycleFlags + Array(recoveryLifecycleLabels.keys)) else { return nil }
+        var safe: [String: Any] = [:]
+        for key in recoveryLifecycleFlags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, labels) in recoveryLifecycleLabels {
+            guard let label = value[key] as? String, labels.contains(label) else { return nil }
+            safe[key] = label
+        }
+        return safe
+    }
+
+    // A certified route transition discards the adapter result before ordinary
+    // validation. Preserve only finite diagnostic categories from that result;
+    // these records never participate in route or response acceptance.
+    static func routeDiscardDiagnosticRecords(_ bytes: Data, provider: Provider) -> [String] {
+        guard provider == .chatgpt, bytes.count <= 1_048_576,
+              let value = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return [] }
+        let errors: Set<String> = ["document_changed", "conversation_changed", "first_user_observation_replaced",
+            "product_mode_unverified", "temporary_mode_unverified", "model_mismatch"]
+        let details: Set<String> = ["model_read_context", "first_user_message", "submission_message", "response_changed"]
+        let error = value["error"] as? String
+        let detail = value["detail"] as? String
+        var records: [[String: Any]] = [["kind": "route_discard_result", "provider": provider.rawValue,
+            "error": error.map { errors.contains($0) ? $0 : "other" } ?? (value["error"] == nil ? "none" : "other"),
+            "detail": detail.map { details.contains($0) ? $0 : "other" } ?? (value["detail"] == nil ? "none" : "other")]]
+        if var recovery = sanitizedRecoveryLifecycle(value["recoveryLifecycleDiagnostic"]) {
+            recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
+            records.append(recovery)
+        }
+        return records.compactMap {
+            guard let data = try? JSONSerialization.data(withJSONObject: $0, options: .sortedKeys), data.count <= 960 else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+    }
     private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
@@ -2773,6 +2820,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
                 safe[key] = flag
             }
+        }
+        if let lifecycle = value["recoveryLifecycle"] {
+            guard provider == .chatgpt, let projected = sanitizedRecoveryLifecycle(lifecycle) else { return nil }
+            safe["recoveryLifecycle"] = projected
         }
         if let rawSelection = value["bodySelection"] {
             let selections: Set<String> = ["markdown_user_message", "whitespace_pre_wrap", "author_user", "root_fallback", "none", "unmatched"]
@@ -3089,6 +3140,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             initialExpansion["kind"] = "first_user_initial_expansion"; initialExpansion["provider"] = provider.rawValue
             for key in ["action", "scope"] { initialExpansion[key] = summary[key] }
         }
+        var recovery = summary.removeValue(forKey: "recoveryLifecycle") as? [String: Any] ?? [:]
+        if !recovery.isEmpty {
+            recovery["kind"] = "first_user_recovery_lifecycle"; recovery["provider"] = provider.rawValue
+            for key in ["action", "scope"] { recovery[key] = summary[key] }
+        }
         // Keep optional context separate if the full summary exceeds the same
         // existing log cap. Adding diagnostics must not discard the branch.
         var context: [String: Any] = [:]
@@ -3104,6 +3160,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
             + (initialExpansion.isEmpty ? [] : [initialExpansion])
+            + (recovery.isEmpty ? [] : [recovery])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
             + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
             + (queryObservation.isEmpty ? [] : [queryObservation]) + children {
@@ -3126,6 +3183,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_initial_expansion\"") {
                 event = "firstUserInitialExpansion"
+            }
+            else if safe.contains("\"kind\":\"first_user_recovery_lifecycle\"") {
+                event = "firstUserRecoveryLifecycle"
             }
             else if safe.contains("\"kind\":\"first_user_text\"") {
                 event = "firstUserText"
@@ -4068,6 +4128,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 #if DEBUG
                 if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
                 #endif
+                for diagnostic in Self.routeDiscardDiagnosticRecords(bytes, provider: provider) {
+                    Self.inspectionLog.info("routeDiscardDiagnostic provider=\(provider.rawValue, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
+                }
                 return try await page(session, action: pendingSubmissionProductRecheck ? "verifyProductMode" : "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,

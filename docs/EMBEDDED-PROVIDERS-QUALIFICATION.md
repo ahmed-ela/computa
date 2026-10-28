@@ -3530,3 +3530,34 @@ private-pin failures and restored invalid state cannot revive a spent claim.
 Receipts are `adoption289-tests/full-result.json` and
 `swift289-adoption-final-tests-result.json` in the retained capture directory.
 Live build289 qualification remains pending.
+
+### Build 289 live capture and build 290 diagnostic boundary
+
+The signed installed build289 (`314b4756a6e0460c6aa7b0025a2c7504dfbbce57`)
+failed its fresh no-tool seed in 5.685 seconds. The capture still shows a complete
+57,843-character reconstructed first body, a unique final marker, a private pin,
+and zero native confirmed users with submission pending. Native certified both
+root-to-local and local-to-server transitions, then rejected the fresh read about
+50.6 milliseconds after the latter. Its specific error persisted as Failed.
+No response reached the codec, no tools ran, and the unused reply arm was removed.
+Cleanup remains unconfirmed; the attempt was not replayed. Evidence is retained
+under `candidate289-plan/fresh-send/setup-failure-capture/`.
+
+The existing `snapshot_before_action` diagnostic covers multiple checks and does
+not identify the internal rejecting branch. Build289's deterministic lifecycle
+fix is therefore insufficient to qualify this live case. Native also discards
+a crossed-route adapter result before ordinary result parsing; the previous
+read's reason was not retained. Build290 adds finite recovery-lifecycle and
+route-discard categories at those boundaries. It changes no acceptance, action,
+retry, route or deadline policy. The diagnostics carry only complete validated
+booleans and enumerated labels, in separate records bounded to 960 bytes, with
+no page text, URLs, credentials or hashes exported.
+
+Build290 frozen validation passed 481 adapter tests / 19,099 assertions and
+23 focused native tests. The tests cover exact lifecycle-field types and enums,
+missing/extra/private values, record size limits, route-discard projection and
+unchanged failure/recovery behavior. The initial full adapter run's outdated
+allowed-key test is retained; its schema expectation was corrected and the full
+suite rerun passed. Source-hashed receipts are
+`recovery290-diagnostics-tests/full-final-result.json` and
+`swift290-recovery-diagnostic-tests-result.json`. Live capture remains pending.

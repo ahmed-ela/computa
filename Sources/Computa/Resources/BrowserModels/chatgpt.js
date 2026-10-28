@@ -5789,6 +5789,42 @@ function chatGPTInitialExpansionFacts(candidate, root = chatGPTMessageRoots('use
     initialExpansionDeadlineLive: Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline,
   };
 }
+function chatGPTRecoveryFinalizationFacts(candidate, stage, observed = null, urlDiscard = false) {
+  // Pure finite facts: never call a proof getter or expose page text/identifiers.
+  const state = globalThis.__computaChatSubmissionState, record = candidate?.record, context = chatGPTSubmissionContextFailure;
+  const error = !observed ? 'not_returned' : !observed.error ? 'none'
+    : observed.error === 'document_changed' ? 'document_changed'
+      : observed.error === 'conversation_changed' && ['first_user_message', 'submission_message'].includes(observed.detail)
+        ? observed.detail : 'other';
+  return { finalizationStage: stage, finalizationError: error,
+    urlWitness: !!state && context?.state === state && context.checks.urlMatches === false,
+    urlDiscard: urlDiscard === true, pendingMatches: !!record && state?.pending === record,
+    lastVerifiedMatches: !!record && state?.lastVerified === record,
+    recordPhase: !record ? 'none' : ['prepared', 'send_claimed', 'verified'].includes(record.phase) ? record.phase : 'other',
+    contextStateMatches: !!state && context?.state === state,
+    leaseCurrent: websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease,
+    urlChanged: document.URL !== input.expectedURL };
+}
+function chatGPTLatchRecoveryFinalization(candidate, stage, observed = null, urlDiscard = false) {
+  try {
+    if (!candidate || candidate.finalizationDiagnostic && candidate.finalizationDiagnostic.finalizationStage !== 'entered') return;
+    candidate.finalizationDiagnostic = chatGPTRecoveryFinalizationFacts(candidate, stage, observed, urlDiscard);
+  } catch { /* Diagnostics cannot change finalization or revive a claim. */ }
+}
+function chatGPTRecoveryLifecycle(path = 'other') {
+  try {
+    const candidate = globalThis.__computaModelBoundFirstExpansion;
+    const paths = ['spent_recovery', 'initial_claim', 'expansion_rejected', 'hash_snapshot', 'action_snapshot', 'other'];
+    return { path: paths.includes(path) ? path : 'other', present: !!candidate, verified: candidate?.verified === true,
+      initialRoute: candidate?.initialRoute === true, outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
+      ...(candidate?.finalizationDiagnostic || chatGPTRecoveryFinalizationFacts(candidate, 'not_reached')) };
+  } catch { return null; }
+}
+function chatGPTWithRecoveryLifecycle(observed, path = 'other') {
+  if (!globalThis.__computaModelBoundFirstExpansion) return observed;
+  const recoveryLifecycle = chatGPTRecoveryLifecycle(path);
+  return recoveryLifecycle ? { ...observed, recoveryLifecycleDiagnostic: recoveryLifecycle } : observed;
+}
 function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
   try {
     const reasons = ['first_bound', 'marker_invalid', 'submission_unclaimed', 'marker_mismatch', 'body_limit',
@@ -5833,6 +5869,8 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
     const initialExpansion = globalThis.__computaModelFirstExpansion;
     if (initialExpansion != null) Object.assign(diagnostic, initialExpansion.initialTransitionDiagnostic
       || chatGPTInitialExpansionFacts(initialExpansion, root, body));
+    const recoveryLifecycle = chatGPTRecoveryLifecycle(captured.recoveryPath);
+    if (recoveryLifecycle) diagnostic.recoveryLifecycle = recoveryLifecycle;
     if (scope === 'first_insert' || scope === 'first_submit') {
       diagnostic.firstPromptPresent = typeof globalThis.__computaModelFirstPrompt === 'string';
       diagnostic.firstPromptMatches = globalThis.__computaModelFirstPrompt === input.prompt;
@@ -5858,8 +5896,8 @@ function chatGPTFirstUserFailure(reason, scope, captured = {}, allowSubmittedUse
     || chatGPTFirstUserStructure(reason, scope, captured, allowSubmittedUser, fingerprint);
   if (debugStructure) firstUserRejectionDiagnostic = debugStructure;
   const modelDiagnostic = (globalThis.__computaModelBoundFirstExpansion || globalThis.__computaModelFirstExpansion)?.modelFailure?.modelDiagnostic;
-  return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
-    ...(modelDiagnostic ? { modelDiagnostic } : {}) };
+  return chatGPTWithRecoveryLifecycle({ error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
+    ...(modelDiagnostic ? { modelDiagnostic } : {}) }, captured.recoveryPath);
 }
 const snapshotUnchanged = (allowSubmittedUser = false) => {
   const current = chatGPTMessageRoots('user');
@@ -5949,7 +5987,7 @@ if (ownedUserCount > 0) {
     if (input.allowBoundFirstUserRemountRefresh !== true || !unused || candidate.remount !== true
       || candidate.awaitingNativeRefresh !== true || candidate.outcome !== 'expanded'
       || !chatGPTFirstUserExpansionContext(candidate) || rendered !== candidate.canonical)
-      return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+      return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'spent_recovery' });
     boundRefresh = candidate;
   }
   let expansionRejected = false;
@@ -5964,7 +6002,7 @@ if (ownedUserCount > 0) {
       || consumedExpansion.marker !== marker || rendered !== consumedExpansion.expandedText))
     // A consumed local claim cannot acquire first-message or cleanup authority
     // on a later read after failure, replacement, or a different full body.
-    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'initial_claim' });
   let expansion; const expansionStarted = chatGPTSyncWorkStart();
   try { expansion = chatGPTInitialRouteRecovery || (boundRefresh ? null : globalThis.__computaModelFirstProof != null
     && (input.allowBoundFirstUserExpansion === true || input.allowProvisionalFirstUserExpansion === true)
@@ -5991,7 +6029,7 @@ if (ownedUserCount > 0) {
             : renderedLines.filter(line => line === markerLine).length !== 1 ? 'marker_duplicate' : 'body_empty',
       'marker_validation', { roots: ownedMessages, body: first, rendered });
   if (expansionRejected)
-    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered, recoveryPath: 'expansion_rejected' });
   firstSnapshot = { root: ownedMessages[0], body: first, text: rendered };
   websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
@@ -6005,7 +6043,7 @@ if (ownedUserCount > 0) {
     || await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
-    || chatGPTFirstUserFailure('snapshot_before_action', 'digest', {}, false, fingerprint);
+    || chatGPTFirstUserFailure('snapshot_before_action', 'digest', { recoveryPath: 'hash_snapshot' }, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) return await chatGPTCertifyBoundFirstRemount(expansion)
@@ -6030,7 +6068,7 @@ if (ownedUserCount > 0) {
   const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
   if (!observed.error && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   const readContextFailure = finalReadContextFailure(observed);
-  if (readContextFailure) return readContextFailure;
+  if (readContextFailure) return chatGPTWithRecoveryLifecycle(readContextFailure);
   if (observed.error === 'first_user_observation_replaced') return observed;
   if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount) {
     const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
@@ -6041,8 +6079,8 @@ if (ownedUserCount > 0) {
     return await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
-      || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', {}, input.action === 'submit');
-  if (observed.error) return observed;
+      || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', { recoveryPath: 'action_snapshot' }, input.action === 'submit');
+  if (observed.error) return chatGPTWithRecoveryLifecycle(observed);
   if (boundRecovery && !chatGPTFirstUserExpansionContext(boundRecovery))
     return chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard');
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
@@ -6061,7 +6099,14 @@ if (ownedUserCount > 0) {
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
   const finalizationState = globalThis.__computaChatSubmissionState;
-  const finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(finalizationState != null ? await chatGPTSubmissionResult(input, result) : result));
+  chatGPTLatchRecoveryFinalization(boundRecovery, 'entered');
+  let finalized;
+  try {
+    finalized = chatGPTPreparationResult(chatGPTFinalizeResponseRead(finalizationState != null ? await chatGPTSubmissionResult(input, result) : result));
+  } catch (error) {
+    chatGPTLatchRecoveryFinalization(boundRecovery, 'threw');
+    throw error;
+  }
   const context = chatGPTSubmissionContextFailure;
   const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
     && input.action === 'inspect' && boundRecovery?.initialRoute === true
@@ -6089,7 +6134,8 @@ if (ownedUserCount > 0) {
   // spent claim unverified, without exposing temporary success across await.
   if (boundRecovery && globalThis.__computaModelBoundFirstExpansion === boundRecovery
     && (!finalized.error || discardedURLRead)) boundRecovery.verified = true;
-  return finalized;
+  chatGPTLatchRecoveryFinalization(boundRecovery, 'returned', finalized, discardedURLRead);
+  return chatGPTWithRecoveryLifecycle(finalized);
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');

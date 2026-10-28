@@ -10071,6 +10071,52 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testRecoveryLifecycleDiagnosticsRejectIncompleteOrPrivateValuesAndSurviveRouteDiscard() throws {
+        let flags = ["present", "verified", "initialRoute", "urlWitness", "urlDiscard", "pendingMatches",
+                     "lastVerifiedMatches", "contextStateMatches", "leaseCurrent", "urlChanged"]
+        var lifecycle: [String: Any] = ["path": "spent_recovery", "outcome": "expanded",
+            "finalizationStage": "returned", "finalizationError": "document_changed", "recordPhase": "send_claimed"]
+        for key in flags { lifecycle[key] = true }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(lifecycle))
+        for key in lifecycle.keys {
+            var missing = lifecycle; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(missing), key)
+            for invalid in ["private_canary", 0, 1, NSNull(), [true]] as [Any] {
+                var forged = lifecycle; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(forged), key)
+            }
+        }
+        var extra = lifecycle; extra["url"] = "https://private_canary"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedRecoveryLifecycle(extra))
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
+            "reason": "snapshot_before_action", "scope": "digest", "action": "inspect",
+            "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],
+            "userCount": 1, "textLength": 10_240, "lineCount": 82, "markerOccurrences": 0, "controlDescendants": 0,
+            "markerFinalLine": false, "submitted": true, "markerMatches": true, "recoveryLifecycle": lifecycle]
+        func encoded(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(
+            String(decoding: try encoded(source), as: UTF8.self), provider: .chatgpt))
+        let recovery = try XCTUnwrap(records.first { $0.contains("first_user_recovery_lifecycle") })
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 })
+        XCTAssertTrue(recovery.contains("spent_recovery"))
+        source["provider"] = "gemini"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(
+            String(decoding: try encoded(source), as: UTF8.self), provider: .gemini))
+        let discarded = try encoded(["error": "document_changed", "detail": "model_read_context",
+            "recoveryLifecycleDiagnostic": lifecycle, "text": "private_canary", "url": "https://private_canary"])
+        let routeRecords = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(discarded, provider: .chatgpt)
+        XCTAssertEqual(routeRecords.count, 2)
+        XCTAssertTrue(routeRecords.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        XCTAssertTrue(routeRecords[0].contains("model_read_context"))
+        XCTAssertTrue(routeRecords[1].contains("route_discard_recovery"))
+        XCTAssertTrue(EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(discarded, provider: .gemini).isEmpty)
+        XCTAssertTrue(EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(Data(repeating: 65, count: 1_048_577), provider: .chatgpt).isEmpty)
+        let invalid = try encoded(["error": "private_canary", "detail": "private_canary", "recoveryLifecycleDiagnostic": extra])
+        let invalidRecords = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(invalid, provider: .chatgpt)
+        XCTAssertEqual(invalidRecords.count, 1)
+        XCTAssertFalse(invalidRecords[0].contains("private_canary"))
+    }
+
     func testInitialExpansionDiagnosticsRequireCompleteFiniteFlagsAndSeparateBoundedRecord() throws {
         func encode(_ value: [String: Any]) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)

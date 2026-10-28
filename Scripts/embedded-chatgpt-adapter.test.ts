@@ -1566,6 +1566,13 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         x.f.onDigest(promote, first.outbound);
         const discarded = await x.observe(first, continuation); denied(discarded);
         expect(crossed).toBe(true); expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        expect(discarded.recoveryLifecycleDiagnostic).toMatchObject({ path: 'other', present: true, verified: true, initialRoute: true,
+          outcome: 'expanded', finalizationStage: 'returned', finalizationError: 'document_changed',
+          urlWitness: true, urlDiscard: true, pendingMatches: true, lastVerifiedMatches: false,
+          recordPhase: 'send_claimed', contextStateMatches: true, leaseCurrent: true, urlChanged: true });
+        expect(Object.keys(discarded.recoveryLifecycleDiagnostic)).toHaveLength(15);
+        expect(JSON.stringify(discarded.recoveryLifecycleDiagnostic)).not.toContain(first.marker);
+        expect(JSON.stringify(discarded.recoveryLifecycleDiagnostic)).not.toContain(first.fingerprint);
         const state: any = x.f.world.__computaChatSubmissionState;
         expect(state.revoked).toBe(false); expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull();
         expect(record.root).toBeNull(); expect(record.body).toBeNull();
@@ -1580,6 +1587,8 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
         expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
         expect(record.body).toBe(currentBody); expect(record.phase).toBe('verified'); expect(state.pending).toBeNull();
+        // A later read does not rewrite the original finalization witness.
+        expect(fresh.recoveryLifecycleDiagnostic).toEqual(discarded.recoveryLifecycleDiagnostic);
         expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
       }
     });
@@ -1632,9 +1641,29 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         if (['body', 'owner', 'record'].includes(mutation)) expect((x.f.world.__computaChatSubmissionState as any).revoked).toBe(true);
         body.text = first.outbound; record.fingerprint = first.fingerprint; x.f.world.__computaModelOwner = owner;
         (x.f.world.__computaModelFirstProof as any).fingerprint = first.fingerprint;
-        denied(await x.observe(first, continuation));
+        const later = await x.observe(first, continuation); denied(later);
+        const lifecycle = later.recoveryLifecycleDiagnostic;
+        expect(lifecycle).toMatchObject({ path: 'spent_recovery', present: true, verified: false, initialRoute: true,
+          finalizationStage: mutation === 'throw' ? 'threw' : 'returned', urlDiscard: false });
+        expect(lifecycle.finalizationError).toBe(mutation === 'throw' ? 'not_returned'
+          : mutation === 'stale' ? 'document_changed' : mutation === 'private_pin' ? 'first_user_message' : 'submission_message');
+        expect(JSON.parse(later.debugStructure).recoveryLifecycle).toEqual(lifecycle);
         expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
       }
+    });
+
+    test('finite recovery paths distinguish an initial claim from a changed snapshot without granting proof', async () => {
+      const staged = await initialRouteStage();
+      const initial = await staged.x.observe(staged.first, { ...staged.continuation, firstUserExpansionRouteContinuation: undefined });
+      denied(initial);
+      expect(JSON.parse(initial.debugStructure).recoveryLifecycle).toMatchObject({ path: 'initial_claim', present: false,
+        verified: false, finalizationStage: 'not_reached', finalizationError: 'not_returned' });
+      const x = await chatTurnFixture(choice), first = await x.dispatch('A fresh complete snapshot');
+      x.f.onDigest(() => { x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!'; }, first.outbound);
+      const changed = await x.observe(first); denied(changed);
+      expect(JSON.parse(changed.debugStructure).recoveryLifecycle).toMatchObject({ path: 'hash_snapshot', present: false,
+        verified: false, finalizationStage: 'not_reached', finalizationError: 'not_returned' });
+      expect(x.send.clicks).toBe(1);
     });
     const provisionalStage = async (initialExpansion = false) => {
       const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PROVISIONAL PROMPT\n' + 'x'.repeat(40_000));
