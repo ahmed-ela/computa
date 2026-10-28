@@ -207,6 +207,7 @@ final class EmbeddedBrowserSession {
         var responseCompletionObserver: ResponseCompletionObserver?
         var responseCompletion: ChatGPTResponseCompletion?
         var responseCompletionDiagnosticLogged = false
+        var responseCompletionPreparation: ResponseCompletionPreparation?
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
@@ -1015,6 +1016,44 @@ final class EmbeddedBrowserSession {
         entry.responseCompletionObserver = ResponseCompletionObserver(key: key, script: script, allowsDiagnostics: allowsDiagnostics)
     }
 
+    /// Content-free observation of one preparation attempt. It is retained after
+    /// revocation so cancellation diagnostics can distinguish a silent armed
+    /// observer from a missing/failed observer; it never participates in proof.
+    private final class ResponseCompletionPreparation {
+        enum Outcome: String {
+            case preparing, armed
+            case observerUnavailable = "observer_unavailable", bindingRejected = "binding_rejected"
+            case expired, pageRejected = "page_rejected", evaluationFailed = "evaluation_failed"
+            case timedOut = "timed_out", contextChanged = "context_changed", cancelled
+        }
+        enum Signal: String { case terminal, terminalFailure = "terminal_failure", invalidated }
+        let owner: String
+        let generation: UUID
+        let sequence: Int
+        var correlationID: UUID?
+        var outcome: Outcome = .preparing
+        var diagnostic: ChatGPTResponseCompletion.Diagnostic?
+        var signal: Signal?
+        init(owner: String, generation: UUID, sequence: Int) {
+            self.owner = owner; self.generation = generation; self.sequence = sequence
+        }
+    }
+
+    /// Does not evaluate the page or test receipt authority. Deliberately usable
+    /// after task cancellation/lease expiry, but never across owners or documents.
+    func chatGPTResponseObserverDiagnostic(tabID: UUID, view: WKWebView, ownerToken: String,
+                                          generation: UUID, sequence: Int) -> [String: Any]? {
+        guard !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.tab.documentGeneration == generation, let record = entry.responseCompletionPreparation,
+              record.owner == ownerToken, record.generation == generation, record.sequence == sequence else { return nil }
+        return ["outcome": record.outcome.rawValue,
+                "reason": record.diagnostic.map { $0.reason.rawValue as Any } ?? NSNull(),
+                "calls": record.diagnostic.map { $0.calls as Any } ?? NSNull(),
+                "instances": record.diagnostic.map { $0.instances as Any } ?? NSNull(),
+                "signal": record.signal.map { $0.rawValue as Any } ?? NSNull()]
+    }
+
     /// Arming is a bounded preparation, never a Send or a response proof. A
     /// missing/changed decoder simply leaves the ordinary completion fallback.
     func prepareChatGPTResponseCompletion(tabID: UUID, view: WKWebView, ownerToken: String, generation: UUID,
@@ -1023,16 +1062,22 @@ final class EmbeddedBrowserSession {
         guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
               entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
               entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == generation,
-              Self.responseCompletionURLAllowed(view.url), let expectedURL = view.url?.absoluteString,
-              let observer = entry.responseCompletionObserver else { return false }
+              Self.responseCompletionURLAllowed(view.url), let expectedURL = view.url?.absoluteString else { return false }
+        let preparation = ResponseCompletionPreparation(owner: ownerToken, generation: generation, sequence: sequence)
+        entry.responseCompletionPreparation = preparation
+        guard let observer = entry.responseCompletionObserver else { preparation.outcome = .observerUnavailable; return false }
         revokeResponseCompletion(entry)
         guard let lease = ChatGPTResponseCompletion(view: ObjectIdentifier(view), ownerToken: ownerToken,
             generation: generation, sequence: sequence, inputSHA256: outboundSHA256,
-            inputUTF8Bytes: outboundUTF8Bytes, deadline: deadline) else { return false }
+            inputUTF8Bytes: outboundUTF8Bytes, deadline: deadline) else {
+            preparation.outcome = ContinuousClock.now >= deadline ? .expired : .bindingRejected
+            return false
+        }
         let parts = (deadline - .now).components
         let duration = Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
-        guard duration > 0 else { return false }
+        guard duration > 0 else { preparation.outcome = .expired; return false }
         entry.responseCompletion = lease
+        preparation.correlationID = lease.correlationID
         entry.responseCompletionDiagnosticLogged = false
         let evaluationDeadline = min(deadline, ContinuousClock.now + .seconds(1))
         let result = EmbeddedScriptResult()
@@ -1073,10 +1118,13 @@ final class EmbeddedBrowserSession {
             && Self.responseCompletionURLAllowed(view.url)
             && lease.isCurrent(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation, sequence: sequence)
         guard current, reply == Data([1]) else {
+            preparation.outcome = Task.isCancelled ? .cancelled : ContinuousClock.now >= evaluationDeadline ? .timedOut
+                : !current ? .contextChanged : reply == nil ? .evaluationFailed : .pageRejected
             if entry.responseCompletion === lease { revokeResponseCompletion(entry) }
             else { lease.revoke() }
             return false
         }
+        preparation.outcome = .armed
         return true
     }
 
@@ -1131,6 +1179,11 @@ final class EmbeddedBrowserSession {
             // parser, even when malformed or foreign to the current lease.
             guard let diagnostic = lease.diagnostic(body), !entry.responseCompletionDiagnosticLogged else { return }
             entry.responseCompletionDiagnosticLogged = true
+            if let record = entry.responseCompletionPreparation, record.owner == lease.ownerToken,
+               record.generation == lease.generation, record.sequence == lease.sequence,
+               record.correlationID == lease.correlationID {
+                record.diagnostic = diagnostic
+            }
             Self.inferencePrewarmLog.notice("completionObserver version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(diagnostic.reason.rawValue, privacy: .public) calls=\(diagnostic.calls) instances=\(diagnostic.instances)")
             return
         }
@@ -1140,6 +1193,11 @@ final class EmbeddedBrowserSession {
             let failure = lease.failureReceipt(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
                 generation: entry.tab.documentGeneration, sequence: lease.sequence)
             let state = lease.invalidated ? "invalidated" : failure == nil ? "terminal" : "terminal_failure"
+            if let record = entry.responseCompletionPreparation, record.owner == lease.ownerToken,
+               record.generation == lease.generation, record.sequence == lease.sequence,
+               record.correlationID == lease.correlationID {
+                record.signal = .init(rawValue: state)
+            }
             Self.inferencePrewarmLog.notice("completionSignal version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) state=\(state, privacy: .public)")
             if let failure {
                 Self.inferencePrewarmLog.notice("completionFailure version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(failure.reason.rawValue, privacy: .public) calls=\(failure.calls) assistantMessages=\(failure.assistantMessages) messageTerminalCount=\(failure.messageTerminalCount) mainTerminalCount=\(failure.mainTerminalCount)")

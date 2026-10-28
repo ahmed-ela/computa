@@ -4012,6 +4012,27 @@ function chatGPTProductModeAction(request) {
     return { chatModeReady: false, chatModeActionAvailable: false };
   return reject();
 }
+// Shape-only evidence at the existing rejected branch. This must not change
+// admission, retry a read, or infer that a missing user was merely remounted.
+function chatGPTUserCountFailure(stage, entryCount, currentCount) {
+  const failure = { error: 'conversation_changed', detail: 'user_count' };
+  try {
+    if (!['action_precheck', 'repeated_submit', 'entry', 'preparation_final_read', 'outer_final_read'].includes(stage)
+      || !['inspect', 'prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'verifyProductMode',
+        'ensureChatMode', 'enableTemporary', 'selectModel', 'discoverModels', 'modelDiagnostic', 'stop', 'cleanup'].includes(input.action))
+      return failure;
+    const finiteCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 10_000 ? value : null;
+    const expected = Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length >= 1
+      && input.expectedUserCounts.length <= 2 && input.expectedUserCounts.every(value => finiteCount(value) !== null)
+      && new Set(input.expectedUserCounts).size === input.expectedUserCounts.length ? [...input.expectedUserCounts] : null;
+    failure.userCountDiagnostic = { kind: 'chatgpt_user_count_v1', stage, action: input.action,
+      entryUserCount: finiteCount(entryCount), currentUserCount: finiteCount(currentCount), expectedUserCounts: expected,
+      expectedCountMatches: expected !== null && finiteCount(currentCount) !== null && expected.includes(currentCount),
+      topFrame: window === window.top, urlMatches: document.URL === input.expectedURL,
+      originMatches: location.origin === 'https://chatgpt.com', ownerMatches: globalThis.__computaModelOwner === input.ownerToken };
+  } catch { /* Diagnostics never replace the original fail-closed result. */ }
+  return failure;
+}
 async function chatGPTGuardedPageAction(request, fingerprint = null) {
   const setupStarted = chatGPTPreparationNow();
   const product = chatGPTProductModeAction(request);
@@ -4703,7 +4724,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (window !== window.top || document.URL !== input.expectedURL || globalThis.__computaModelOwner !== input.ownerToken
       || currentCount !== ownedUserCount) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, currentCount,
         firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: readLineageFingerprint } : null, chatGPTTemporaryVerified())
-        || { error: 'conversation_changed', detail: 'user_count' };
+        || chatGPTUserCountFailure('action_precheck', ownedUserCount, currentCount);
     if (firstSnapshot && !snapshotUnchanged()) return await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
@@ -5007,7 +5028,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (!enabled(send)) return { error: "send_unavailable" };
     if (globalThis.__computaModelLastSubmissionCount !== undefined
       && userCount <= globalThis.__computaModelLastSubmissionCount)
-      return { error: 'conversation_changed', detail: 'user_count' };
+      return chatGPTUserCountFailure('repeated_submit', ownedUserCount, userCount);
     if (userCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -5085,7 +5106,7 @@ if (input.action === 'insert' && input.matchedObservationDiagnostic != null && i
 const ownedMessages = chatGPTMessageRoots('user');
 const ownedUserCount = ownedMessages.length;
 if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
-  return { error: "conversation_changed", detail: "user_count" };
+  return chatGPTUserCountFailure('entry', ownedUserCount, ownedUserCount);
 let firstUserVerified = false;
 let firstUserFingerprint = null;
 let firstSnapshot = null;
@@ -6121,8 +6142,10 @@ const finalReadContextFailure = observed => {
     return { error: 'document_changed', detail: 'model_read_context' };
   // Verification retains the explicit acknowledged-append branch below.
   // Preparation cannot acquire a new message while its final proof awaits.
-  if (input.action === 'prepare' && chatGPTMessageRoots('user').length !== ownedUserCount)
-    return { error: 'conversation_changed', detail: 'user_count' };
+  if (input.action === 'prepare') {
+    const currentCount = chatGPTMessageRoots('user').length;
+    if (currentCount !== ownedUserCount) return chatGPTUserCountFailure('preparation_final_read', ownedUserCount, currentCount);
+  }
   if (input.action === 'verifyProductMode') {
     const product = chatGPTProductModeProof();
     if (!product) return { error: 'product_mode_unverified' };
@@ -6389,9 +6412,12 @@ const outerFinalizationStarted = chatGPTPreparationNow();
 if (!observed.error && observed.chatModeReady && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
 const readContextFailure = finalReadContextFailure(observed);
 if (readContextFailure) return readContextFailure;
-if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount)
-  return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
-    || { error: 'conversation_changed', detail: 'user_count' };
+if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)) {
+  const currentCount = chatGPTMessageRoots('user').length;
+  if (currentCount !== ownedUserCount)
+    return websiteModelAcknowledgedUserAppend(input, ownedUserCount, currentCount, null, chatGPTTemporaryVerified())
+      || chatGPTUserCountFailure('outer_final_read', ownedUserCount, currentCount);
+}
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);

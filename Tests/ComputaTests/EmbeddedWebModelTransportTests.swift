@@ -1519,6 +1519,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testUserCountDiagnosticProjectionIsFiniteAndRejectsForeignOrMalformedFields() throws {
+        let valid: [String: Any] = ["kind": "chatgpt_user_count_v1", "stage": "action_precheck", "action": "inspect",
+            "entryUserCount": 1, "currentUserCount": 1, "expectedUserCounts": [1],
+            "topFrame": true, "urlMatches": false, "originMatches": true, "ownerMatches": true, "expectedCountMatches": true]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(valid, action: "inspect"))
+        XCTAssertLessThanOrEqual(safe.utf8.count, 512)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(decoded.keys), Set(valid.keys))
+        XCTAssertEqual(decoded["urlMatches"] as? Bool, false)
+        XCTAssertEqual(decoded["currentUserCount"] as? Int, 1, "URL and count failures remain distinguishable")
+        for (key, value): (String, Any) in [("kind", "PRIVATE"), ("stage", "PRIVATE"), ("action", "submit"),
+            ("entryUserCount", true), ("currentUserCount", 1.5), ("currentUserCount", -1), ("currentUserCount", 10_001),
+            ("expectedUserCounts", []), ("expectedUserCounts", [1, 1]), ("expectedUserCounts", [1, 2, 3]),
+            ("expectedUserCounts", [true]), ("expectedUserCounts", [10_001]),
+            ("topFrame", 1), ("urlMatches", "false"), ("ownerMatches", NSNull()), ("text", "PRIVATE")] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(bad, action: "inspect"), key)
+        }
+        for key in valid.keys {
+            var bad = valid; bad.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(bad, action: "inspect"), key)
+        }
+        var unknown = valid
+        for key in ["entryUserCount", "currentUserCount", "expectedUserCounts"] { unknown[key] = NSNull() }
+        let preserved = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(unknown, action: "inspect"))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(preserved.utf8)) as? [String: Any])
+        for key in ["entryUserCount", "currentUserCount", "expectedUserCounts"] { XCTAssertTrue(fields[key] is NSNull) }
+    }
+
     func testResponseProgressProjectionPreservesUnknownsAndOmitsPrivateContent() throws {
         let privateText = "PRIVATE_RESPONSE_CANARY😀é"
         let input: [String: Any] = ["responseCount": 1, "userCount": 2, "busy": true,
@@ -1561,7 +1590,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, holdSecondReply: true))
             defer { fixture.shutdown() }
             var diagnostics: [String] = []
+            var observerDiagnostics: [String] = []
             fixture.transport.setResponseProgressDiagnosticObserverForTesting { diagnostics.append($0) }
+            fixture.transport.setCompletionObserverDiagnosticObserverForTesting { observerDiagnostics.append($0) }
             let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
             let token = try XCTUnwrap(started["sessionToken"] as? String)
             let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
@@ -1583,6 +1614,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
             }
             XCTAssertEqual(diagnostics.count, 1)
+            XCTAssertEqual(observerDiagnostics.count, 1)
+            let observerText = try XCTUnwrap(observerDiagnostics.first)
+            let observerRecord = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(observerText.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(observerRecord.keys), ["kind", "sequence", "armed", "observation"])
+            XCTAssertEqual(observerRecord["kind"] as? String, "chatgpt_completion_observer_v1")
+            XCTAssertEqual(observerRecord["sequence"] as? Int, 2)
+            XCTAssertEqual(observerRecord["armed"] as? Bool, false,
+                           "An empty turn must retain whether the optional observer armed")
+            XCTAssertLessThanOrEqual(observerText.utf8.count, 512)
+            for secret in ["PRIVATE", token, "inputSHA256", "https:"] { XCTAssertFalse(observerText.contains(secret)) }
             let safe = try XCTUnwrap(diagnostics.first)
             let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
             XCTAssertEqual(record["kind"] as? String, "chatgpt_response_progress_v1")
@@ -8801,6 +8842,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testChatGPTPrewarmedRootWithExistingUserHistoryCannotBecomeReady() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
         defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setUserCountDiagnosticObserverForTesting { diagnostics.append($0) }
         fixture.browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
         let preparedID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
         let warmID = try XCTUnwrap(preparedID)
@@ -8822,6 +8865,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount))
         }
+        XCTAssertEqual(diagnostics.count, 1, "Diagnostics cannot retry or admit the rejected page")
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(diagnostics.first).utf8)) as? [String: Any])
+        XCTAssertEqual(fields["stage"] as? String, "entry")
+        XCTAssertEqual(fields["action"] as? String, "inspect")
+        XCTAssertEqual(fields["entryUserCount"] as? Int, 1)
+        XCTAssertEqual(fields["currentUserCount"] as? Int, 1)
+        XCTAssertEqual(fields["expectedUserCounts"] as? [Int], [0])
+        XCTAssertEqual(fields["urlMatches"] as? Bool, true)
+        XCTAssertEqual(fields["expectedCountMatches"] as? Bool, false)
         XCTAssertEqual(fixture.isolatedViews.count, 1, "Do not silently replace a rejected claimed page")
         try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])

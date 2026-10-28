@@ -12,6 +12,74 @@ const disabledWorkDiagnostic = 'const chatGPTSyncWorkStart = () => null; const c
 const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
+describe('ChatGPT rejected user-count diagnostics', () => {
+  test('a missing or duplicated user stays rejected and reports only its current finite cardinality', async () => {
+    for (const count of [0, 2]) {
+      const f = fixture({ userPrompt: 'Keep this owned request', response: false });
+      expect((await f.inspect()).firstUserVerified).toBe(true);
+      const users = f.document.querySelectorAll('article[data-turn="user"]');
+      if (count === 0) { users[0].connected = false; f.messages.children = f.messages.children.filter(node => node !== users[0]); }
+      else f.appendUser('Another request that is not authorized');
+      const observed = await f.inspect();
+      expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count',
+        userCountDiagnostic: { kind: 'chatgpt_user_count_v1', stage: 'entry', action: 'inspect',
+          entryUserCount: count, currentUserCount: count, expectedUserCounts: [1], expectedCountMatches: false,
+          topFrame: true, urlMatches: true, originMatches: true, ownerMatches: true } });
+      expect(observed).not.toHaveProperty('text'); expect(observed).not.toHaveProperty('submissionProof');
+      expect(observed).not.toHaveProperty('firstUserVerified', true);
+      expect(f.composer.events).toEqual([]);
+      const diagnostic = JSON.stringify(observed.userCountDiagnostic);
+      expect(diagnostic.length).toBeLessThanOrEqual(512);
+      for (const secret of ['Keep this owned request', 'Another request', firstMarker, 'https://', 'f33c8869'])
+        expect(diagnostic).not.toContain(secret);
+    }
+  });
+
+  test('a valid unchanged user does not acquire a rejection diagnostic', async () => {
+    const f = fixture({ userPrompt: 'Keep this owned request' });
+    for (let pass = 0; pass < 2; pass++) {
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed).not.toHaveProperty('userCountDiagnostic');
+    }
+  });
+
+  test('malformed expected-count metadata is never copied into a diagnostic or treated as authority', async () => {
+    for (const expected of [[], [0, 0], [0, 2, 3], [1.5], [Infinity], [10_001], ['PRIVATE-NATIVE-VALUE']]) {
+      const f = fixture({ userPrompt: 'Keep this owned request', response: false }); await f.inspect();
+      const observed = await f.inspect({ expectedUserCounts: expected });
+      expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+        stage: 'entry', entryUserCount: 1, currentUserCount: 1, expectedUserCounts: null, expectedCountMatches: false } });
+      expect(JSON.stringify(observed.userCountDiagnostic)).not.toContain('PRIVATE-NATIVE-VALUE');
+      expect(observed).not.toHaveProperty('submissionProof'); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('an already claimed Send remains rejected without another click', async () => {
+    const x = await chatTurnFixture(); x.addBody(false);
+    const record = await x.dispatch('Only one Send is authorized');
+    x.f.composer.text = record.outbound;
+    const observed = await x.f.rawRun({ action: 'submit', prompt: record.outbound, expectedUserCounts: [0], ...x.values(record) });
+    expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'repeated_submit', action: 'submit', entryUserCount: 0, currentUserCount: 0,
+      expectedUserCounts: [0], expectedCountMatches: true } });
+    expect(x.send.clicks).toBe(1); expect(observed).not.toHaveProperty('submissionProof');
+    expect(observed).not.toHaveProperty('text');
+  });
+
+  test('a new unacknowledged user during an empty product read stays rejected at its final count check', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const pending = f.rawRun({ action: 'verifyProductMode', expectedUserCounts: [0] });
+    f.appendUser('Unacknowledged user added while the read yields');
+    const observed = await pending;
+    expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'outer_final_read', action: 'verifyProductMode', entryUserCount: 0, currentUserCount: 1,
+      expectedUserCounts: [0], expectedCountMatches: false } });
+    expect(observed).not.toHaveProperty('submissionProof'); expect(observed).not.toHaveProperty('text');
+    expect(f.composer.events).toEqual([]);
+  });
+});
+
 class Element {
   private static nextRect = 0;
   private readonly rect = Element.nextRect++;

@@ -502,6 +502,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var completionObserverDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var userCountDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var rendererGuardDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
@@ -637,6 +639,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setResponseProgressDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         responseProgressDiagnosticObserverForTesting = observer
+    }
+
+    func setCompletionObserverDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        completionObserverDiagnosticObserverForTesting = observer
+    }
+
+    func setUserCountDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        userCountDiagnosticObserverForTesting = observer
     }
 
     func setRendererGuardDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -2308,6 +2318,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         responseProgressDiagnosticObserverForTesting?(safe)
         #endif
         Self.inspectionLog.error("responseProgressDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
+        let observer: Any
+        if documentCurrent, let generation {
+            observer = browser.chatGPTResponseObserverDiagnostic(tabID: session.tabID, view: session.view,
+                ownerToken: session.token, generation: generation, sequence: session.sequence).map { $0 as Any } ?? NSNull()
+        } else { observer = NSNull() }
+        let completionRecord: [String: Any] = ["kind": "chatgpt_completion_observer_v1",
+            "sequence": session.sequence, "armed": session.completionObserverArmed, "observation": observer]
+        if let bytes = try? JSONSerialization.data(withJSONObject: completionRecord, options: .sortedKeys), bytes.count <= 512 {
+            let safe = String(decoding: bytes, as: UTF8.self)
+            #if DEBUG
+            completionObserverDiagnosticObserverForTesting?(safe)
+            #endif
+            Self.inspectionLog.error("completionObserverDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
+        }
         // Same admitted read and exact current generation as the progress cache.
         // Separate metadata keeps response-progress-v1 and error policy unchanged.
         if inspectionCurrent, let notice = cached?.responseNotice {
@@ -2591,6 +2615,38 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && safe["trimmedKnownLabel"] as? Bool == true && !(safe["bodyIsRoot"] is NSNull)) else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 768 else { return nil }
         return safe
+    }
+
+    static func sanitizedUserCountDiagnostic(_ raw: Any?, action: String) -> String? {
+        let flags = ["topFrame", "urlMatches", "originMatches", "ownerMatches", "expectedCountMatches"]
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == Set(flags + ["kind", "stage", "action", "entryUserCount", "currentUserCount", "expectedUserCounts"]),
+              value["kind"] as? String == "chatgpt_user_count_v1",
+              value["action"] as? String == action, firstUserDiagnosticActions.contains(action),
+              let stage = value["stage"] as? String,
+              ["action_precheck", "repeated_submit", "entry", "preparation_final_read", "outer_final_read"].contains(stage) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_user_count_v1", "stage": stage, "action": action]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for key in ["entryUserCount", "currentUserCount"] {
+            if value[key] is NSNull { safe[key] = NSNull() }
+            else {
+                guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...10_000).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        if value["expectedUserCounts"] is NSNull { safe["expectedUserCounts"] = NSNull() }
+        else {
+            guard let rawCounts = value["expectedUserCounts"] as? [Any], (1...2).contains(rawCounts.count) else { return nil }
+            let counts = rawCounts.compactMap { ComputerToolArgumentContract.exactInt64($0) }
+            guard counts.count == rawCounts.count, Set(counts).count == counts.count,
+                  counts.allSatisfy({ (0...10_000).contains($0) }) else { return nil }
+            safe["expectedUserCounts"] = counts
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
@@ -4213,6 +4269,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Strip this content-free diagnostic before any observation can contribute
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
+        let userCountDiagnostic = Self.sanitizedUserCountDiagnostic(observed.removeValue(forKey: "userCountDiagnostic"), action: action)
         if provider == .chatgpt, action == "inspect" {
             session.completionMatchDiagnostic = completionDiagnostic
         }
@@ -4327,6 +4384,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
+                if provider == .chatgpt, observed["detail"] as? String == "user_count", let userCountDiagnostic {
+                    #if DEBUG
+                    userCountDiagnosticObserverForTesting?(userCountDiagnostic)
+                    #endif
+                    Self.inspectionLog.error("userCountDiagnostic provider=chatgpt action=\(action, privacy: .public) sequence=\(session.sequence) \(userCountDiagnostic, privacy: .public)")
+                }
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
                     // Freeze only the original returned read after the existing
                     // callback ownership/generation/route checks, before throw.
