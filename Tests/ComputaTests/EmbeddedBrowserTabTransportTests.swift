@@ -10,6 +10,17 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    private func attachRenderHost(to session: EmbeddedBrowserSession) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_024, height: 768),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+        window.contentView = host
+        session.installModelRenderHost(host)
+        return window
+    }
+
     func testDocumentChangeWaitIgnoresLoadedChooserThenSettlesOneDelayedClickNavigation() async throws {
         let destination = try HeldBrowserNavigationFixture(body: "<!doctype html><main><h1>Mailbox ready</h1></main>")
         let destinationURL = try await destination.start()
@@ -224,6 +235,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let nextServer = try HeldBrowserNavigationFixture(body: body), nextURL = try await nextServer.start()
         defer { firstServer.stop(); nextServer.stop() }
         let session = EmbeddedBrowserSession(persistent: false), transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         func page(_ result: EmbeddedBrowserToolExecution) throws -> String {
@@ -373,6 +386,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
 
     func testRealWebKitReadScopeUsesCommittedDocumentAndIgnoresSameDocumentURLChanges() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -412,6 +427,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         });</script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -467,6 +484,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         \(controls)</main><script>window.first=0;window.other=0;</script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -524,6 +543,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         """
         let session = EmbeddedBrowserSession(persistent: false)
         let transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -572,6 +593,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         </script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -722,19 +745,21 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {
         let html = """
         <!doctype html><html><body><main>
-        <div role="gridcell"><span role="link" tabindex="0" id="link"
+        <div role="gridcell" aria-label="Shared fixture title"><span role="link" tabindex="0" id="link"
           onclick="window.clicks=(window.clicks||0)+1;document.getElementById('result').textContent='Opened fixture';">Shared fixture title</span></div>
         <p id="result">Unopened fixture</p></main></body></html>
         """
         func reference(_ read: String, role: String) throws -> [String: Any] {
             let row = try XCTUnwrap(read.split(separator: "\n").first {
                 $0.hasPrefix("#") && $0.contains("semantic_role=\"\(role)\"")
-            })
+            }, read)
             return self.reference(in: row)
         }
         for change in ["unchanged", "disabled", "replaced"] {
             let session = EmbeddedBrowserSession(persistent: false)
             let transport = EmbeddedBrowserTabTransport(session: session)
+            let renderWindow = attachRenderHost(to: session)
+            defer { renderWindow.close() }
             let controller = EmbeddedBrowserToolController(transport: transport)
             defer { session.shutdown() }
             let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -748,6 +773,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 arguments: Data(#"{"view":"content"}"#.utf8))
             let container = try reference(content, role: "gridcell")
             let row = try XCTUnwrap(content.split(separator: "\n").first { $0.contains("semantic_role=\"gridcell\"") })
+            XCTAssertTrue(row.contains("label=\"Shared fixture title\""), "The passive wrapper and actionable child deliberately share a label")
             XCTAssertTrue(content.contains("Defaults enabled=true settable=false actions=[]"))
             XCTAssertFalse(row.contains("click_ref=")); XCTAssertFalse(row.contains("fill_ref="))
             XCTAssertFalse(row.contains("enabled=false"))
@@ -1017,8 +1043,15 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let available=try await transport.target(id:id.uuidString)
         let target=try XCTUnwrap(available), observation=try await transport.observe(target:target)
         XCTAssertTrue(observation.sourceTruncated)
-        let limited=try XCTUnwrap(observation.nodes.first { $0.name=="Unicode role" })
+        let text=try XCTUnwrap(observation.nodes.first { $0.name=="Unicode role" })
+        XCTAssertEqual(text.role,"statictext")
+        let parentID=try XCTUnwrap(text.parentNodeID)
+        let limited=try XCTUnwrap(observation.nodes.first { $0.nodeID==parentID })
         XCTAssertEqual(limited.role,"generic")
+        XCTAssertEqual(limited.name,"")
+        XCTAssertTrue(limited.childNodeIDs.contains(try XCTUnwrap(text.nodeID)))
+        XCTAssertFalse(text.isEditable)
+        XCTAssertFalse(text.isDOMClickable)
         XCTAssertFalse(limited.isEditable)
         XCTAssertFalse(limited.isDOMClickable)
         XCTAssertTrue(observation.nodes.contains { $0.role=="button" && $0.name=="Continue" })
@@ -1038,8 +1071,15 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let available=try await transport.target(id:id.uuidString)
         let target=try XCTUnwrap(available), observation=try await transport.observe(target:target)
         XCTAssertTrue(observation.sourceTruncated)
-        let limited=try XCTUnwrap(observation.nodes.first { $0.name=="Expanded role" })
+        let text=try XCTUnwrap(observation.nodes.first { $0.name=="Expanded role" })
+        XCTAssertEqual(text.role,"statictext")
+        let parentID=try XCTUnwrap(text.parentNodeID)
+        let limited=try XCTUnwrap(observation.nodes.first { $0.nodeID==parentID })
         XCTAssertEqual(limited.role,"generic")
+        XCTAssertEqual(limited.name,"")
+        XCTAssertTrue(limited.childNodeIDs.contains(try XCTUnwrap(text.nodeID)))
+        XCTAssertFalse(text.isEditable)
+        XCTAssertFalse(text.isDOMClickable)
         XCTAssertFalse(limited.isEditable)
         XCTAssertFalse(limited.isDOMClickable)
         let normal=try XCTUnwrap(observation.nodes.first { $0.role=="button" && $0.name=="Continue" })
@@ -1053,6 +1093,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     func testRealWebKitPopupLinkIsReadableWithoutOfferingAnUndispatchablePress() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))

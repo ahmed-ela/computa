@@ -44,6 +44,8 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
 /// native window focus. Fixtures can implement it without launching a browser.
 protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
     func humanTargets() async throws -> [BrowserTarget]
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws
     func wait(target: BrowserTarget, text: String?, timeoutMS: Int) async throws -> Bool
     func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
@@ -53,6 +55,8 @@ protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
 }
 
 extension EmbeddedBrowserControlBackend {
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws {}
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async {}
     /// Backends must implement the native predicate or explicitly reject it;
     /// an ordinary readiness check cannot stand in for document change.
     func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
@@ -69,6 +73,12 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private let session: EmbeddedBrowserSession
     private let world = WKContentWorld.world(name: "Computa.BrowserControl.\(UUID().uuidString)")
     private var owned = [UUID: String]()
+    private struct RenderingLease {
+        let target: BrowserTarget
+        let lifetime: BrowserTabLifetime
+        let token: UUID
+    }
+    private var renderingLeases: [ObjectIdentifier: RenderingLease] = [:]
     private let script: String?
     private static let captureLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserCapture")
     #if DEBUG
@@ -82,6 +92,34 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
 
     func humanTargets() async throws -> [BrowserTarget] {
         session.humanTabs.compactMap { target(for: $0.id) }
+    }
+
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws {
+        try Task.checkCancellation()
+        try lifetime.check()
+        let id = try exactID(target), key = ObjectIdentifier(lifetime)
+        if let existing = renderingLeases[key] {
+            guard existing.target.targetID == target.targetID,
+                  existing.target.instanceToken == target.instanceToken else {
+                throw BrowserTabBrokerError.targetReplaced
+            }
+            return
+        }
+        let token = try session.acquireToolRendering(tabID: id)
+        // Revocation is synchronous and can race the actor hop. No cancelled
+        // binding may retain its host, even if acquisition just completed.
+        do { try lifetime.check(); try Task.checkCancellation() }
+        catch { session.releaseToolRendering(tabID: id, lease: token); throw error }
+        renderingLeases[key] = RenderingLease(target: target, lifetime: lifetime, token: token)
+    }
+
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async {
+        let key = ObjectIdentifier(lifetime)
+        guard let lease = renderingLeases[key], lease.target.targetID == target.targetID,
+              lease.target.instanceToken == target.instanceToken,
+              let id = UUID(uuidString: target.targetID) else { return }
+        renderingLeases.removeValue(forKey: key)
+        session.releaseToolRendering(tabID: id, lease: lease.token)
     }
 
     func createTarget(url: URL) async throws -> BrowserTarget {
@@ -136,6 +174,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     func closeOwnedTargets() async -> [String] {
+        for lease in renderingLeases.values {
+            if let id = UUID(uuidString: lease.target.targetID) { session.releaseToolRendering(tabID: id, lease: lease.token) }
+        }
+        renderingLeases.removeAll()
         for (id, token) in owned where target(for: id)?.instanceToken == token { session.closeTab(id) }
         owned.removeAll()
         return []

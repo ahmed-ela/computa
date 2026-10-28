@@ -716,6 +716,7 @@ actor EmbeddedBrowserToolController {
                 target = selected
             }
             let completedBinding: BrowserTabBinding
+            let bindingLifetime = BrowserTabLifetime()
             do {
                 try check(taskKey, contextID)
                 try requireScope(scope, url: target.url, title: target.title)
@@ -728,8 +729,13 @@ actor EmbeddedBrowserToolController {
                 leases[target.targetID] = taskKey
                 contexts[taskKey]?.leasedTarget = target
                 if owned { contexts[taskKey]?.ownedTarget = target }
-                let bindingLifetime = BrowserTabLifetime()
                 contexts[taskKey]?.bindingLifetime = bindingLifetime
+                // Rendering is a lease on this exact binding, not ownership,
+                // selection or input authority. Acquire before the broker's
+                // initial capture so a borrowed background tab has layout.
+                try await transport.acquireRendering(target: target, lifetime: bindingLifetime)
+                try check(taskKey, contextID)
+                try bindingLifetime.check()
                 let binding = try await broker.bindBorrowed(
                     taskKey: taskKey, processIdentifier: Int32(ProcessInfo.processInfo.processIdentifier),
                     target: target, lifetime: bindingLifetime)
@@ -745,6 +751,8 @@ actor EmbeddedBrowserToolController {
                 if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
                 completedBinding = binding
             } catch {
+                bindingLifetime.revoke()
+                await transport.releaseRendering(target: target, lifetime: bindingLifetime)
                 // Failed binding never retains read/input authority. Keep a
                 // created target reserved for cleanup until close is confirmed.
                 if contexts[taskKey]?.id == contextID {
@@ -1036,6 +1044,9 @@ actor EmbeddedBrowserToolController {
         }
         if let target = context.leasedTarget, leases[target.targetID] == taskKey {
             leases.removeValue(forKey: target.targetID)
+        }
+        if let target = context.leasedTarget, let lifetime = context.bindingLifetime {
+            await transport.releaseRendering(target: target, lifetime: lifetime)
         }
         if let binding = context.binding {
             do { try await broker.revoke(taskKey: taskKey, binding: binding) } catch {

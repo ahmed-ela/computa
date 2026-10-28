@@ -123,6 +123,52 @@ immutable build-305 adapter and passes with the correction, then completes one
 request and cleanup. Mixed transient Work and referenced-label changes remain
 rejected before Send. These tests do not establish external email delivery.
 
+## Rendering an existing browser tab in the background
+
+Build 306's real-mail attempt completed sixteen verified Chat / Instant inference
+sessions, but reached the turn limit after one Compose click and no field fills
+or Send. The next inference was rejected before opening a provider session. All
+completed sessions closed. Current-reference checks passed; repeated searches and
+valid pagination could not find compose controls absent from the retained capture.
+
+Every Gmail capture used a detached existing user view with no window, a hidden
+document, and a 360-by-665 viewport. Capture stopped at its byte budget after 241
+nodes. The passing local draft fixtures had opened tool-owned pages in the attached
+1,024-by-768 background host; they did not exercise a borrowed, narrow user tab.
+Binding an existing tab had not acquired equivalent rendering support.
+
+After the task stopped, selecting that same Gmail page in the narrow visible pane
+still showed no compose controls. Widening the pane to approximately 480 pixels
+immediately exposed the minimized compose panel and its Full screen control,
+without navigation or website input. The empty panel was closed without filling
+or sending anything. This confirms viewport sensitivity separately from the
+bounded-discovery and overview-ordering defects covered by the earlier fixtures.
+
+An active browser binding now leases rendering before its first capture. A hidden
+borrowed tab attaches to the existing 1,024-by-768 background host; it remains a
+user-owned tab with the same document and selection. Visible human presentation
+takes precedence. Releasing the last render lease detaches the borrowed view and
+restores its prior frame. The exact revocable binding lifetime prevents a late
+acquisition or release from affecting a newer task. Native focus protection is
+enabled only while a human tab is hosted in the background, then normal foreground
+behavior resumes. Missing render hosts fail before page input. No discovery,
+capture, permission or inference limit is increased.
+
+The real WebKit regression captures the same document at 360 pixels without its
+responsive fields, then acquires the binding and sees those fields on the very
+first capture at 1,024 pixels, without a sleep or layout polling. Values, loader,
+URL, selection and the user's unsent native text remain unchanged. Release restores
+the original frame. Additional cases cover presentation, host replacement, missing
+hosts, closed tabs, shutdown, Stop during acquisition and stale releases.
+
+The browser session, transport and controller cohort passed 251 of 252 tests.
+The remaining test used an unnamed passive gridcell that the existing content
+view omits. Giving that synthetic wrapper the explicit same label preserves its
+passive-wrapper versus actionable-child checks; the corrected test and the three
+new lifecycle tests then passed. Thus all 252 unique checks have passing results,
+without claiming a single 252-test zero-failure run. Older native controller
+fixtures also now attach a real render host, matching the production requirement.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
@@ -131,6 +177,14 @@ observations before inference-state processing and cannot authorize acceptance,
 retry or input. The original provider's empty-response cause remains unproven;
 later fixture success cannot reconstruct its closed response stream. A separate
 user-count rejection also remains causally unresolved.
+
+Build 306's exact-response control returned the requested 27-byte synthetic marker
+as plain text, outside the mandatory JSON envelope. Full submission verification
+and cleanup passed, and no tools ran. The strict parser correctly rejected the
+format; this is a retained model-format limitation, not a passing control. No
+deterministic instruction omission was found, and no permissive parser fallback
+or speculative prompt change was made. It is separate from the real-mail browser
+workflow and its independently verified lack of Send.
 
 The website transport still stops at its complete-prompt byte limit and existing
 inference limit. Website responses do not report token usage, so the engine's

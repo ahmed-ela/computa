@@ -24,7 +24,8 @@ final class EmbeddedBrowserTab: Identifiable {
 }
 
 /// Browser views are independent of the privileged Octane UI WebView.
-/// Human views may detach when hidden; inference views return to a render host.
+/// Hidden human views detach unless an active tool binding leases rendering.
+/// Rendering leases never transfer tab ownership or presentation authority.
 /// Only close/shutdown destroys either session.
 @MainActor @Observable
 final class EmbeddedBrowserSession {
@@ -184,6 +185,9 @@ final class EmbeddedBrowserSession {
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         weak var presentationHost: NSView?
+        var toolRenderLeases: Set<UUID> = []
+        var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
+        var needsBackgroundRendering: Bool { isModelOwned || isToolOwned || !toolRenderLeases.isEmpty }
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
@@ -583,13 +587,14 @@ final class EmbeddedBrowserSession {
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
         else {
-            view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
-                : WKWebView(frame: .zero, configuration: configuration)
+            view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+                                        configuration: configuration)
         }
         #else
-        view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
-            : WKWebView(frame: .zero, configuration: configuration)
+        view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+                                    configuration: configuration)
         #endif
+        (view as? EmbeddedModelWebView)?.protectsNativeFocus = modelOwned || toolOwned
         // Inspection is an explicit, ephemeral choice for each human tab.
         // An inspectable opener must not grant it to a new popup.
         view.isInspectable = false
@@ -652,6 +657,8 @@ final class EmbeddedBrowserSession {
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        entry.toolRenderLeases.removeAll()
+        entry.frameBeforeToolRendering = nil
         removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
@@ -1440,7 +1447,7 @@ final class EmbeddedBrowserSession {
         // WindowGroup shares this session. Updating another window must not
         // move live pages away from a surviving designated render host.
         if modelRenderHost == nil { modelRenderHost = modelRenderHosts.first?.view }
-        for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
+        for entry in entries.values where entry.needsBackgroundRendering && entry.presentationHost == nil {
             mountModelView(entry)
         }
     }
@@ -1449,7 +1456,7 @@ final class EmbeddedBrowserSession {
         modelRenderHosts.removeAll { $0.view == nil || $0.view === host }
         if modelRenderHost === host {
             modelRenderHost = modelRenderHosts.first?.view
-            for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
+            for entry in entries.values where entry.needsBackgroundRendering && entry.presentationHost == nil {
                 if modelRenderHost != nil { mountModelView(entry) }
                 else if entry.view.superview === host {
                     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -1466,6 +1473,8 @@ final class EmbeddedBrowserSession {
         guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
         entry.presentationHost = host
         entry.view.removeFromSuperview()
+        entry.frameBeforeToolRendering = nil
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = entry.isModelOwned || entry.isToolOwned
         entry.view.frame = host.bounds
         entry.view.autoresizingMask = [.width, .height]
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
@@ -1476,11 +1485,41 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[id], entry.presentationHost === host else { return }
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
-        if entry.isModelOwned || entry.isToolOwned { mountModelView(entry) }
+        if entry.needsBackgroundRendering { mountModelView(entry) }
+    }
+
+    /// A revocable render lease borrows the exact human view. It cannot select,
+    /// navigate, close, or change the ownership of that tab. Visible UI wins.
+    func acquireToolRendering(tabID: UUID) throws -> UUID {
+        let entry = try entry(tabID)
+        guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
+        guard (entry.presentationHost ?? modelRenderHost)?.window != nil else {
+            throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
+        }
+        let lease = UUID()
+        entry.toolRenderLeases.insert(lease)
+        if entry.presentationHost == nil { mountModelView(entry) }
+        return lease
+    }
+
+    func releaseToolRendering(tabID: UUID, lease: UUID) {
+        guard let entry = entries[tabID], entry.toolRenderLeases.remove(lease) != nil,
+              !entry.needsBackgroundRendering, entry.presentationHost == nil else { return }
+        entry.view.removeFromSuperview()
+        if let saved = entry.frameBeforeToolRendering {
+            entry.view.frame = saved.frame
+            entry.view.autoresizingMask = saved.autoresizing
+        }
+        entry.frameBeforeToolRendering = nil
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = false
     }
 
     private func mountModelView(_ entry: Entry) {
         guard let host = modelRenderHost else { return }
+        if !entry.isModelOwned, !entry.isToolOwned, entry.frameBeforeToolRendering == nil {
+            entry.frameBeforeToolRendering = (entry.view.frame, entry.view.autoresizingMask)
+        }
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = true
         if entry.view.superview !== host {
             #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
             endModelNativeFocusDiagnostic(entry)
@@ -2617,6 +2656,17 @@ final class EmbeddedBrowserSession {
 /// the application's native first responder, including during reparenting.
 @MainActor
 private final class EmbeddedModelWebView: WKWebView {
+    /// Human tabs use normal WebKit focus until an unpresented render lease
+    /// temporarily borrows the same view. Presentation restores that behavior.
+    var protectsNativeFocus = true {
+        didSet {
+            guard !protectsNativeFocus else { return }
+            NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: nil)
+            NotificationCenter.default.removeObserver(self, name: NSTextView.didChangeSelectionNotification, object: nil)
+            focusWindow = nil; focusResponder = nil; focusField = nil; focusFieldEditor = nil
+            focusFieldText = nil; focusFieldSelection = nil
+        }
+    }
     private weak var focusWindow: NSWindow?
     private weak var focusResponder: NSResponder?
     private weak var focusField: NSTextField?
@@ -2682,10 +2732,11 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     override var acceptsFirstResponder: Bool {
+        if !protectsNativeFocus { return super.acceptsFirstResponder }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
-        nativeFocusDiagnosticActive
+        return nativeFocusDiagnosticActive
         #else
-        false
+        return false
         #endif
     }
 
@@ -2697,6 +2748,7 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     func captureNativeFocus(in targetWindow: NSWindow? = nil) {
+        guard protectsNativeFocus else { return }
         guard let target = targetWindow ?? window, let responder = target.firstResponder,
               !ownsResponder(responder) else { return }
         focusWindow = target
@@ -2722,6 +2774,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     func restoreNativeFocus(allowWindowFallback: Bool = false) {
+        guard protectsNativeFocus else { return }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         guard !nativeFocusDiagnosticActive else { return }
         #endif
@@ -2801,6 +2854,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     override func becomeFirstResponder() -> Bool {
+        if !protectsNativeFocus { return super.becomeFirstResponder() }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         if nativeFocusDiagnosticActive { return super.becomeFirstResponder() }
         #endif
