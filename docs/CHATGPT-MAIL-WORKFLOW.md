@@ -775,6 +775,21 @@ the next field again. The full field identity, visibility, focus and center-hit
 checks still apply. This repairs the generic recovery path; actual email
 completion still requires a new Sent-message observation.
 
+The installed build 321 completed one authorized real-mail task on October 29.
+ChatGPT Chat / Instant used 15 browser calls without a tool error, including an
+observed popup choice, Subject and body fills, and one Send click. All 16 website
+inferences were model-verified and closed. A separate read of Gmail Sent then
+confirmed a new message with the exact authorized recipient and `Hi` subject
+and body; no additional Send was issued. The model's own final answer remained
+conservative because it did not observe Gmail's confirmation. Sending is
+qualified for this run; autonomous post-send confirmation is still a limitation.
+
+Build 321 validation includes 95 JavaScript tests (2,011 assertions), 115 native
+tests, and 88 unchanged diagnostic-collector checks. The same final native test
+binary reproduces the old footer and popup failures and passes the fixed cases.
+Local diagnostics are cleaned up after capture; earlier unsent drafts remain
+preserved rather than being discarded as part of verification.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
