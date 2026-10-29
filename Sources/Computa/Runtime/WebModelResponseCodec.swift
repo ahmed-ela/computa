@@ -285,7 +285,8 @@ enum WebModelResponseCodec {
         let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
-            currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability))
+            currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability),
+            allowedToolNames: policy.allowedNames)
         let prompt = """
         \(runtimeInstructions)
 

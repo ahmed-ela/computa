@@ -203,3 +203,26 @@ post-click state retain their rejection behavior. The cancelled-caller regressio
 fails before the shared cleanup-task change and passes after it. An initial test
 scaffolding compile error and prompt-budget failures were corrected; their logs
 are retained. These tests establish local behavior, not live model reliability.
+
+Installed build 324 matched the signed artifact and preserved the four original
+human browser tabs. Fresh Flash-Lite and Pro workflows then stopped with
+`invalid_model_output`: the custom tool proposal did not satisfy the required
+literal-string input / no-function-arguments shape. Flash-Lite had dispatched
+two read/test commands and Pro one read command; no calls from the invalid
+reply were dispatched. Both temporary website sessions closed successfully.
+These are failed workflows, not successful code-edit qualifications. The raw
+rejected proposals were not retained, so their exact malformed fields cannot
+be reconstructed from the error alone.
+
+Inspection found an inconsistency in the shared website response handoff: its
+last catalog called all tools functions, including custom tools, and its final
+tool-call example only demonstrated `arguments`. The earlier custom-tool
+instructions correctly required literal `input`. The next candidate separates
+function/custom catalogs and demonstrates their distinct wire shapes at the
+final serialization point, respecting the current tool-choice policy. Build 325
+passes 59 instruction and 103 response-codec tests for these changes, including
+function-only, custom-only, mixed, no-tool and restricted-tool cases across the
+website providers. Canonical request bytes, schemas, literal input and strict
+rejection remain unchanged. The unchanged adapter and cleanup code retain their
+155 JavaScript / 27 native transport checks. No automatic retry was added, and
+live qualification is still required before claiming reliable workflows.

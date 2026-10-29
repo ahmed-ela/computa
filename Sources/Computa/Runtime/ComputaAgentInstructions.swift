@@ -567,7 +567,7 @@ enum ComputaAgentInstructions {
             if !instructionAlreadyIncluded(codeEditing, in: includedInstructionText) { parts.append(codeEditing) }
             parts.append("Local file edits are offered as custom tools: " + patches.joined(separator: ", ") + ". Return their exact qualified name and a literal patch string in input; never put that patch in function arguments or execute it in the website.")
         }
-        parts.append("Exact currently offered local function names: " + (names.isEmpty ? "(none)" : names.joined(separator: ", ")))
+        parts.append("Exact currently offered local tool names: " + (names.isEmpty ? "(none)" : names.joined(separator: ", ")))
         parts.append("END_COMPUTA_CURRENT_RUNTIME_CONTRACT.")
         return parts.joined(separator: "\n\n")
     }
@@ -651,7 +651,30 @@ enum ComputaAgentInstructions {
                                     includedInstructionText: [String] = [],
                                     responseFormat: WebResponseFormat = .fencedJSON,
                                     singleActionRelay: Bool = false,
-                                    currentBrowserHandoff: String = "") -> String {
+                                    currentBrowserHandoff: String = "",
+                                    allowedToolNames: Set<String>? = nil) -> String {
+        let currentNames = Set(offeredToolNames)
+        let customNames = currentNames.intersection(customToolNames)
+        let functionNames = currentNames.subtracting(customNames)
+        let exampleNames = currentNames.intersection(allowedToolNames ?? currentNames)
+        // Examples describe the current catalog and policy, never retained
+        // history. The JSON encoder preserves literal names/input correctly.
+        func toolExample(_ name: String, custom: Bool) -> String {
+            let call: [String: Any] = custom
+                ? ["name": name, "input": "literal input\nwith \"quotes\" and \\backslash"]
+                : ["name": name, "arguments": [String: Any]()]
+            let value: [String: Any] = ["type": "tool_calls", "calls": [call]]
+            guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return "" }
+            return String(decoding: data, as: UTF8.self)
+        }
+        var callExamples: [String] = []
+        if let name = functionNames.intersection(exampleNames).sorted().first {
+            callExamples.append("Function call shape: replace {} with that tool's required argument fields.\n" + toolExample(name, custom: false))
+        }
+        if let name = customNames.intersection(exampleNames).sorted().first {
+            callExamples.append("Custom call shape: replace sample input with the requested literal text; no arguments.\n" + toolExample(name, custom: true))
+        }
+        let serializationExamples = callExamples.isEmpty ? "" : callExamples.joined(separator: "\nOR\n") + "\nOR\n"
         let responseFormatInstructions: String
         switch responseFormat {
         case .fencedJSON:
@@ -699,12 +722,10 @@ enum ComputaAgentInstructions {
         let browserAddressHandoff = hasBuiltInBrowser
             ? [browserAddressChecks, browserTurnLifecycle, browserSearchEvidence, browserFormSubmission].joined(separator: "\n") : ""
         let diagnosticHandoff = hasBuiltInBrowser || !commandHandoff.isEmpty ? diagnosticEvidence : ""
-        let customContract = customToolNames.isEmpty ? "" : """
+        let customContract = customNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
-        For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.
         Do not include arguments on a custom call. Escape patch newlines and
         quotes as valid JSON; the host passes the decoded string unchanged.
-        Exact currently offered custom names: \(customToolNames.sorted().joined(separator: ", "))
         """
         let hasCustomPatch = offeredToolNames.contains { name in
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
@@ -753,15 +774,15 @@ enum ComputaAgentInstructions {
         \(diagnosticHandoff)
         \(selectionContract)
         \(currentBrowserHandoff)
-        Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))
+        Exact currently offered local function names: \(functionNames.isEmpty ? "(none)" : functionNames.sorted().joined(separator: ", "))
+        Exact currently offered custom names: \(customNames.isEmpty ? "(none)" : customNames.sorted().joined(separator: ", "))
         \(literalIdentifiers)
         Choose a kind, then serialize one JSON envelope. Computa shows decoded message.text,
         not this envelope. User formats (exact/only, JSON, multiline, no Markdown) apply to
         text; requested JSON is a string.
         \(responseFormatInstructions)
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
-        {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
-        OR
+        \(serializationExamples)\
         Exact-OK message:
         {"type":"message","text":"OK"}
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.

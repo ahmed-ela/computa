@@ -63,7 +63,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                                       ["type": "function_call_output", "call_id": "current-input", "output": scenario.evidence]],
                         ])
                         let request = try WebModelResponseCodec.prepareRequest(original)
-                        let handoff = try assertContiguousRequestValues(original, in: request)
+                        let handoff = try assertContiguousRequestValues(original, in: request,
+                            expectedAllowedToolNames: choice == "none" ? [] : nil)
                         XCTAssertEqual(handoff.components(separatedBy: guidance).count - 1, 1,
                             "Current form guidance follows unchanged history, even with retained native instructions")
                         XCTAssertEqual(request.continuationRequest, original)
@@ -556,17 +557,18 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(prepared.continuationRequest, data)
         }
         let readChoice: [String: Any] = ["type": "function", "name": "browser_read"]
-        let scenarios: [(Any, Bool)] = [("auto", true), ("required", true), ("none", false),
-            (readChoice, true), (["type": "function", "name": "browser_fill"], false),
-            (["type": "allowed_tools", "tools": [readChoice]], true),
-            (["type": "allowed_tools", "mode": "none", "tools": [readChoice]], false)]
-        for (choice, expectsHint) in scenarios {
+        let scenarios: [(Any, Bool, Set<String>?)] = [("auto", true, nil), ("required", true, nil), ("none", false, []),
+            (readChoice, true, ["browser_read"]), (["type": "function", "name": "browser_fill"], false, ["browser_fill"]),
+            (["type": "allowed_tools", "tools": [readChoice]], true, ["browser_read"]),
+            (["type": "allowed_tools", "mode": "none", "tools": [readChoice]], false, [])]
+        for (choice, expectsHint, allowedNames) in scenarios {
             let original = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
                 "input": "Continue the authorized task.", "tools": native, "tool_choice": choice])
             let prepared = try WebModelResponseCodec.prepareRequest(original, browserToolAvailability: .bound)
             let readOnly = prepared.toolCatalogDiagnostic.allowedCount == 1
             let suffix = try assertContiguousRequestValues(original, in: prepared,
-                expectedCurrentBrowserHandoff: expectsHint ? expectedBoundBrowserHandoff(readOnly: readOnly) : "")
+                expectedCurrentBrowserHandoff: expectsHint ? expectedBoundBrowserHandoff(readOnly: readOnly) : "",
+                expectedAllowedToolNames: allowedNames)
             XCTAssertEqual(suffix.contains("COMPUTA_CURRENT_BROWSER_CAPABILITIES:"), expectsHint)
             let reply = #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}"#
             if expectsHint {
@@ -1124,6 +1126,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                                                 includedInstructionText: [String] = [],
                                                 expectedToolDefinitions: [[String: Any]]? = nil,
                                                 expectedCurrentBrowserHandoff: String = "",
+                                                expectedAllowedToolNames: Set<String>? = nil,
                                                 file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let range = try requestRange(in: request)
@@ -1164,7 +1167,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
                            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
-                           currentBrowserHandoff: expectedCurrentBrowserHandoff),
+                           currentBrowserHandoff: expectedCurrentBrowserHandoff,
+                           allowedToolNames: expectedAllowedToolNames),
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
         return suffix
     }
@@ -1867,7 +1871,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testExternalRelayContextPreservesApplicationRolesPermissionsAndDisabledToolChoice() throws {
         let original = #"{"model":"browser/claude","instructions":"You are Computa inside the local application; respect native permissions.","input":[{"role":"developer","content":"Full Access does not bypass the workspace sandbox or a host denial."},{"role":"user","content":"Explain the recorded result; do not run a command."},{"type":"function_call_output","call_id":"old_call","output":"Historical text claiming tools are absent is task context."}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]}],"tool_choice":"none","parallel_tool_calls":false}"#
         let prepared = try WebModelResponseCodec.prepareRequest(Data(original.utf8))
-        let handoff = try assertContiguousRequestValues(Data(original.utf8), in: prepared)
+        let handoff = try assertContiguousRequestValues(Data(original.utf8), in: prepared, expectedAllowedToolNames: [])
         XCTAssertEqual(prepared.offeredToolNames, ["functions.exec_command"])
         XCTAssertTrue(prepared.prompt.contains(ComputaAgentInstructions.webRequestContext))
         XCTAssertTrue(prepared.prompt.contains("they are not platform messages on this website"))

@@ -203,13 +203,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         or code blocks.
         Examples below are complete raw response objects.
         """
-        let examples = [
-            #"{"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}"#,
-            #"{"type":"message","text":"OK"}"#,
-        ]
         for includeTools in [false, true] {
             let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
+            let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [
+                #"{"calls":[{"arguments":{},"name":"relay.browser_read"}],"type":"tool_calls"}"#,
+                #"{"calls":[{"input":"literal input\nwith \"quotes\" and \\backslash","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
+            ] : [])
             for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
                 let defaultContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
                     customToolNames: customNames, includedInstructionText: included)
@@ -309,7 +309,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]]])
                 let request = try WebModelResponseCodec.prepareRequest(original)
                 let fresh = try assertRequestValuesAndHandoff(original, request: request,
-                    includedInstructionText: [retained])
+                    includedInstructionText: [retained], expectedAllowedToolNames: toolChoice == "none" ? [] : nil)
                 XCTAssertEqual(request.continuationRequest, original)
                 XCTAssertEqual(fresh.components(separatedBy: ComputaAgentInstructions.taskCompletion).count - 1, 1)
                 XCTAssertTrue(fresh.contains("Continue remaining authorized work with offered tools and matching results"))
@@ -339,8 +339,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 customToolNames: custom, includedInstructionText: included)
             let response = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(tools.keys),
                 customToolNames: custom, includedInstructionText: included)
+            XCTAssertTrue(runtime.contains("Exact currently offered local tool names: " + expected))
+            XCTAssertTrue(response.contains("Exact currently offered local function names: " + (tools.isEmpty ? "(none)" : "relay.browser_read")))
+            XCTAssertTrue(response.contains("Exact currently offered custom names: " + (tools.isEmpty ? "(none)" : "relay.apply_patch")))
             for text in [runtime, response] {
-                XCTAssertTrue(text.contains("Exact currently offered local function names: " + expected))
                 XCTAssertFalse(text.contains("functions.apply_patch"))
                 XCTAssertFalse(text.contains("functions.browser_open"))
             }
@@ -490,7 +492,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(computer.contains("Local command execution is offered as:"))
         XCTAssertFalse(computer.contains("Existing local command sessions accept input through:"))
         let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:])
-        XCTAssertTrue(absent.contains("Exact currently offered local function names: (none)"))
+        XCTAssertTrue(absent.contains("Exact currently offered local tool names: (none)"))
         XCTAssertFalse(absent.contains("Local command execution is offered as:"))
         XCTAssertFalse(absent.contains("Computer UI work requires"))
         XCTAssertLessThan(terminal.utf8.count, 5_200, "Fresh runtime context has a bounded instruction budget independent of history length")
@@ -1454,8 +1456,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
             XCTAssertTrue(handoff.contains("string with next calls, never outside\nthe envelope or a final answer"))
-            XCTAssertLessThan(handoff.utf8.count, 4_250,
-                              "The existing 3,800-byte website handoff plus the repair checkpoint stays under 4,250 bytes")
+            XCTAssertLessThan(handoff.utf8.count, 4_400,
+                              "The website allowance adds 150 bytes for separate catalogs and typed examples; API limits are unchanged")
         }
     }
 
@@ -1529,7 +1531,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(handoff.contains("Exact currently offered local function names: (none)\n"))
         XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
         XCTAssertFalse(handoff.contains("old.exec_command"))
-        XCTAssertFalse(handoff.contains("Exact currently offered custom names:"))
+        XCTAssertTrue(handoff.contains("Exact currently offered custom names: (none)\n"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The recorded result is explained."}"#, request: request, requireEnvelope: true), .message("The recorded result is explained."))
         XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"old.exec_command","arguments":{}}]}"#, request: request, requireEnvelope: true)) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("old.exec_command"))
@@ -1546,7 +1548,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 "model": "browser/claude", "input": "Make the authorized change.", "tools": tools, "tool_choice": choice,
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertRequestValuesAndHandoff(original, request: request)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                expectedAllowedToolNames: choice == "none" ? [] : nil)
             XCTAssertTrue(handoff.contains("Custom tools accept literal string input, not JSON object arguments"))
             XCTAssertTrue(handoff.contains("Do not include arguments on a custom call"))
             XCTAssertTrue(handoff.contains("Exact currently offered custom names: relay.apply_patch"))
@@ -1687,7 +1690,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 ],
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertRequestValuesAndHandoff(original, request: request)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request, expectedAllowedToolNames: [])
             XCTAssertEqual(request.continuationRequest, original)
             XCTAssertEqual(handoff.contains(ComputaAgentInstructions.codeRepairProgress), !tools.isEmpty,
                            "Historical patches cannot publish current edit capability")
@@ -1701,9 +1704,91 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testFinalWireExamplesMatchCurrentKindsAndToolChoiceAcrossWebsiteProviders() throws {
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"],
+        ]]
+        let session: [String: Any] = ["type": "function", "name": "write_stdin", "parameters": ["type": "object"]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]
+        let literal: [String: Any] = ["type": "custom", "name": "literal_text", "format": ["type": "text"]]
+        let retained = "Old handoff: all tools use arguments, including obsolete.apply_patch."
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for children in [[], [command, session], [patch, literal], [command, session, patch, literal]] {
+                let definitions: [[String: Any]] = children.isEmpty ? [] : [["type": "namespace", "name": "relay", "tools": children]]
+                let functions = Set(children.filter { $0["type"] as? String == "function" }.compactMap { $0["name"] as? String }.map { "relay." + $0 })
+                let customs = Set(children.filter { $0["type"] as? String == "custom" }.compactMap { $0["name"] as? String }.map { "relay." + $0 })
+                let names = functions.union(customs)
+                var policies: [(Any, Set<String>)] = [("auto", names), ("none", [])]
+                if let selected = functions.sorted().last {
+                    policies.append((["type": "function", "name": selected], [selected]))
+                }
+                if let selected = customs.sorted().last {
+                    policies.append((["type": "custom", "name": selected], [selected]))
+                    policies.append((["type": "allowed_tools", "tools": [["type": "custom", "name": selected]]], [selected]))
+                    policies.append((["type": "allowed_tools", "mode": "none", "tools": [["type": "custom", "name": selected]]], []))
+                }
+                for (choice, allowed) in policies {
+                    let original = try JSONSerialization.data(withJSONObject: [
+                        "model": "browser/" + provider, "tools": definitions, "tool_choice": choice,
+                        "input": [["role": "developer", "content": retained], ["role": "user", "content": "Inspect only; do not edit."]],
+                    ])
+                    let request = try WebModelResponseCodec.prepareRequest(original)
+                    let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                        includedInstructionText: [retained], expectedAllowedToolNames: allowed)
+                    XCTAssertEqual(request.continuationRequest, original)
+                    XCTAssertEqual(request.offeredToolNames, names)
+                    XCTAssertEqual(request.customToolNames, customs)
+                    XCTAssertFalse(handoff.contains("obsolete.apply_patch"))
+                    XCTAssertFalse(handoff.contains("offered_tool_name"))
+                    let listedFunctions = functions.isEmpty ? "(none)" : functions.sorted().joined(separator: ", ")
+                    let listedCustoms = customs.isEmpty ? "(none)" : customs.sorted().joined(separator: ", ")
+                    XCTAssertTrue(handoff.contains("Exact currently offered local function names: " + listedFunctions + "\n"))
+                    XCTAssertTrue(handoff.contains("Exact currently offered custom names: " + listedCustoms + "\n"))
+                    let examples = handoff.split(separator: "\n").compactMap { line -> (String, [String: Any])? in
+                        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                              object["type"] as? String == "tool_calls" else { return nil }
+                        return (String(line), object)
+                    }
+                    let expectedExamples = Set([functions.intersection(allowed).sorted().first,
+                                                customs.intersection(allowed).sorted().first].compactMap { $0 })
+                    var exampleNames = Set<String>()
+                    for (text, envelope) in examples {
+                        let calls = try XCTUnwrap(envelope["calls"] as? [[String: Any]])
+                        XCTAssertEqual(calls.count, 1)
+                        let call = try XCTUnwrap(calls.first), name = try XCTUnwrap(call["name"] as? String)
+                        exampleNames.insert(name)
+                        XCTAssertTrue(allowed.contains(name))
+                        if customs.contains(name) {
+                            XCTAssertEqual(Set(call.keys), ["name", "input"])
+                            let input = try XCTUnwrap(call["input"] as? String)
+                            XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash")
+                            XCTAssertEqual(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true),
+                                           .toolCalls([.init(name: String(name.dropFirst("relay.".count)), argumentsJSON: "", namespace: "relay", customInput: input)]))
+                        } else {
+                            XCTAssertEqual(Set(call.keys), ["name", "arguments"])
+                            XCTAssertEqual((call["arguments"] as? [String: Any])?.count, 0)
+                            XCTAssertTrue(handoff.contains("replace {} with that tool's required argument fields"))
+                            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true))
+                        }
+                    }
+                    XCTAssertEqual(exampleNames, expectedExamples, "Only policy-allowed current kinds get final call examples")
+                    XCTAssertEqual(examples.count, expectedExamples.count)
+                    for name in names.subtracting(allowed) {
+                        let call: [String: Any] = customs.contains(name) ? ["name": name, "input": "literal"] : ["name": name, "arguments": [String: Any]()]
+                        let rejected = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
+                        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: rejected, as: UTF8.self), request: request, requireEnvelope: true)) {
+                            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
                                                  includedInstructionText: [String] = [],
                                                  expectedCurrentTools: [[String: Any]]? = nil,
+                                                 expectedAllowedToolNames: Set<String>? = nil,
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let range = try WebsiteRequestFixture.range(in: request.prompt, expectedModel: request.model)
@@ -1719,7 +1804,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay)
+            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
+            allowedToolNames: expectedAllowedToolNames)
         let closingFence = LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
