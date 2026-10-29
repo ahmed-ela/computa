@@ -357,3 +357,33 @@ to observe the actual `inspect` read and its single fresh inspection. No
 production code changed between those native runs. The unchanged instruction
 and codec source retains its 162 passing checks. Live qualification of build328
 remains separate from these offline results.
+
+## Build 328 live qualification
+
+The signed installed artifact matched `e9a3dfe`; executable, resource and signature
+audits passed, and the four original user tabs were restored.
+
+| Model | Controlled result |
+| --- | --- |
+| 3.5 Flash-Lite | One composed workflow passed in 60.533 seconds: 9 verified inference rounds and 8 tool calls. |
+| 3.1 Pro | Verification blocked after 0.882 seconds, before a prompt or tool call; session cleanup confirmed. |
+| 3.8 Flash | Not yet rerun on this build. |
+| 4 Argon | Not yet run on this build. |
+
+The Flash-Lite run first reproduced the failing tests, read the source and README,
+applied one valid custom patch only to `summarize`, and passed all six tests. It
+opened the loopback page, filled the independently expected reference, submitted
+once, and returned the page's exact receipt. Independent audits confirmed the
+protected files, complete source diff, commands, ledger, observed receipt and
+reported answer. All nine responses retained the selected model, full current
+prompt proof and stable first-query/session lineage. Website cleanup was verified.
+The model omitted `browser_close`; Computa's automatic task cleanup closed the
+exact task tab, with a persisted receipt and original tabs preserved. This is
+app cleanup, not evidence that the model followed that final instruction.
+
+The next Pro attempt encountered a fresh verification block. One normal Gemini
+navigation also showed a new unchecked CAPTCHA, and testing stopped. The prior
+approval was used to complete the earlier challenge; fresh action-time approval
+is pending for this distinct challenge. No prompt was replayed. Fixture servers
+are stopped. These results establish one current-build Flash-Lite workflow, not
+repeated reliability, Pro/Argon qualification or prevention of Google's CAPTCHA.
