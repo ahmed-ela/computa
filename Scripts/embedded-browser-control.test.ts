@@ -7,6 +7,15 @@ const source = readFileSync(process.env.COMPUTA_BROWSER_CONTROL_SOURCE
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function fixture(target: string | null) {
+  const styles = new WeakMap<Element, { display?: string; visibility?: string }>();
+  const computedStyle = (element: Element) => {
+    let visibility = 'visible';
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      const declared = styles.get(node)?.visibility;
+      if (declared && declared !== 'inherit') { visibility = declared; break; }
+    }
+    return { display: styles.get(element)?.display || 'block', visibility };
+  };
   const documentPosition = (left: any, right: any) => {
     const path = (node: any) => {
       const result: number[] = [];
@@ -40,6 +49,12 @@ function fixture(target: string | null) {
         ? { ...node, compareDocumentPosition(other: any) { return documentPosition(this, other); } } : node);
     }
     scrollIntoView() {}
+    getClientRects() {
+      if (computedStyle(this).display === 'contents') return [];
+      for (let node: Element | null = this; node; node = node.parentElement)
+        if (computedStyle(node).display === 'none') return [];
+      return super.getClientRects();
+    }
     getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 20 }; }
     focus(options?: unknown) { this.focusOptions.push(options); document.activeElement = this; this.onFocus?.(); }
   }
@@ -58,6 +73,7 @@ function fixture(target: string | null) {
     disconnect() { this.active = false; }
   }
   const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', visibilityState: 'visible', activeElement: null as Element | null, elementFromPoint: () => link,
+    createRange: () => ({ selectNodeContents() {}, getClientRects: () => [{}] }),
     getElementById: (id: string) => document.body.descendants().find(node => node.values.id === id) || null,
     addEventListener(name: string, callback: Function) {
       if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
@@ -66,14 +82,14 @@ function fixture(target: string | null) {
   const execute = new AsyncFunction('input', 'globalThis', 'document', 'location', 'Node', 'getComputedStyle', 'TextEncoder',
     'MutationObserver', 'setTimeout', 'clearTimeout', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'Event', 'Element', 'innerWidth', 'innerHeight', source);
   const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
-    { TEXT_NODE: 3, ELEMENT_NODE: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 }, () => ({ display: 'block', visibility: 'visible' }), TextEncoder, Observer,
+    { TEXT_NODE: 3, ELEMENT_NODE: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 }, computedStyle, TextEncoder, Observer,
     (callback: Function, delay: number) => { timers.set(++timerID, { callback, delay }); return timerID; },
     (id: number) => timers.delete(id), Node, Node, Node, Event, Node, 1024, 768);
   const press = (row: any) => run({ operation: 'press', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href });
   const fill = (row: any, text: string) => run({ operation: 'fill', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href, text });
-  return { Node, link, run, press, fill, document, location, timers, observers, listeners, state,
+  return { Node, link, run, press, fill, document, location, timers, observers, listeners, state, styles,
     appendText: (text: string) => document.body.append(new Node('P', {}, text)),
     appendControl: () => document.body.append(new Node('BUTTON', {}, 'Continue')),
     appendMetadata: () => document.body.append(new Node('MAIN', { 'aria-label': 'Outlook' })),
@@ -83,6 +99,273 @@ function fixture(target: string | null) {
     replaceRoot: () => { document.body = new Node('BODY'); document.documentElement = document.body; },
   };
 }
+
+describe('CSS visibility overrides preserve rendered descendants', () => {
+  test('visible descendants of hidden or collapsed wrappers remain observable and actionable', async () => {
+    for (const visibility of ['hidden', 'collapse']) for (const display of ['block', 'contents']) {
+      const f = fixture(null), scope = new f.Node('DIV', {}, 'EXCLUDED_PARENT_TEXT');
+      const inherited = new f.Node('P', {}, 'EXCLUDED_INHERITED_TEXT');
+      const branch = new f.Node('DIV'), field = new f.Node('INPUT', { 'aria-label': 'Recipient' });
+      const button = new f.Node('BUTTON', {}, 'Apply');
+      f.styles.set(scope, { visibility, display }); f.styles.set(branch, { visibility: 'visible' });
+      branch.append(new f.Node('P', {}, 'Visible child body'), field, button);
+      scope.append(inherited, branch); f.document.body.append(scope);
+      const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+      expect(snapshot.nodes.some((node: any) => node.name === 'Visible child body')).toBe(true);
+      expect(snapshot.nodes.some((node: any) => node.name.includes('EXCLUDED_'))).toBe(false);
+      const fieldRow = snapshot.nodes.find((node: any) => node.name === 'Recipient');
+      const buttonRow = snapshot.nodes.find((node: any) => node.name === 'Apply');
+      expect(fieldRow?.isEditable).toBe(true); expect(buttonRow?.isDOMClickable).toBe(true);
+      f.document.elementFromPoint = () => field;
+      expect((await f.fill(fieldRow, 'Synthetic recipient')).dispatched).toBe(true);
+      f.document.elementFromPoint = () => button;
+      expect((await f.press(buttonRow)).dispatched).toBe(true);
+      expect(button.clicks).toBe(1); expect(field.valueWrites).toEqual(['Synthetic recipient']);
+    }
+  });
+
+  test('hidden semantic scopes retain only empty nonactionable ancestry for their visible children', async () => {
+    for (const role of ['toolbar', 'button', 'textbox', 'navigation', 'dialog', 'group']) {
+      const f = fixture(null), scope = new f.Node('DIV', { role, 'aria-label': 'EXCLUDED_SCOPE_NAME', contenteditable: 'true' }, 'EXCLUDED_SCOPE_VALUE');
+      const child = new f.Node('BUTTON', {}, 'Visible action');
+      f.styles.set(scope, { visibility: 'hidden' }); f.styles.set(child, { visibility: 'visible' });
+      scope.append(child); f.document.body.append(scope); f.document.elementFromPoint = () => child;
+      const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+      expect(snapshot.nodes.some((node: any) => node.name.includes('EXCLUDED_') || String(node.value || '').includes('EXCLUDED_'))).toBe(false);
+      const parent = snapshot.nodes.find((node: any) => node.role === role && node.name === '');
+      const row = snapshot.nodes.find((node: any) => node.name === 'Visible action');
+      expect(parent).toBeDefined(); expect(row?.parentNodeID).toBe(parent.nodeID);
+      expect(parent.isIgnored).toBe(true);
+      expect(parent.value).toBeNull(); expect(parent.isDisabled).toBe(true); expect(parent.isReadOnly).toBe(true);
+      expect(parent.isEditable).toBe(false); expect(parent.isDOMClickable).toBe(false); expect(parent.isPressUnsupported).toBe(true);
+      await expect(f.press(parent)).rejects.toThrow('element_changed');
+      expect((await f.press(row)).dispatched).toBe(true); expect(child.clicks).toBe(1); expect(scope.clicks).toBe(0);
+    }
+  });
+
+  test('visible overrides cannot bypass subtree exclusions or expose inherited hidden values', async () => {
+    for (const exclusion of ['hidden', 'inert', 'aria-hidden', 'display:none', 'visibility:hidden']) {
+      const f = fixture(null), scope = new f.Node('DIV');
+      const child = new f.Node('INPUT', { 'aria-label': 'EXCLUDED_FIELD', value: 'EXCLUDED_VALUE' });
+      if (exclusion === 'display:none') f.styles.set(scope, { display: 'none' });
+      else if (exclusion === 'visibility:hidden') f.styles.set(scope, { visibility: 'hidden' });
+      else scope.values[exclusion] = exclusion === 'aria-hidden' ? 'true' : '';
+      if (exclusion !== 'visibility:hidden') f.styles.set(child, { visibility: 'visible' });
+      scope.append(child); f.document.body.append(scope);
+      const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+      expect(snapshot.nodes.some((node: any) => node.name.includes('EXCLUDED_') || String(node.value || '').includes('EXCLUDED_'))).toBe(false);
+      expect(snapshot.nodes.some((node: any) => node.isEditable || node.isDOMClickable)).toBe(false);
+    }
+  });
+
+  test('hidden controls alone never release semantic readiness or expose their metadata', async () => {
+    const f = fixture(null), scope = new f.Node('DIV', { role: 'button', 'aria-label': 'EXCLUDED_ACTION' });
+    scope.append(new f.Node('INPUT', { 'aria-label': 'EXCLUDED_FIELD', value: 'EXCLUDED_VALUE' }));
+    f.styles.set(scope, { visibility: 'hidden' }); f.document.body.append(scope);
+    let settled = false;
+    const observation = f.run({ operation: 'observe' }).then((result: any) => { settled = true; return result; });
+    await Promise.resolve(); await Promise.resolve();
+    expect(settled).toBe(false); expect(f.timers.size).toBe(1);
+    f.expire();
+    const result = await observation;
+    expect(result.semanticReadiness).toBe('empty_at_deadline');
+    expect(result.nodes.every((node: any) => node.isIgnored && !node.name && node.value === null)).toBe(true);
+  });
+
+  test('a large hidden-only legacy branch consumes no capture rows ahead of a later visible control', async () => {
+    const f = fixture(null), hidden = new f.Node('DIV', { role: 'toolbar' });
+    f.styles.set(hidden, { visibility: 'hidden' });
+    for (let index = 0; index < 3500; index++)
+      hidden.append(new f.Node('BUTTON', { 'aria-label': 'EXCLUDED_LEGACY_' + index }));
+    const active = new f.Node('BUTTON', {}, 'Visible current action');
+    f.document.body.append(hidden, active); f.document.elementFromPoint = () => active;
+    const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    const row = snapshot.nodes.find((node: any) => node.name === 'Visible current action');
+    expect(row?.isDOMClickable).toBe(true);
+    expect(snapshot.nodes.some((node: any) => node.isIgnored)).toBe(false);
+    expect(snapshot.nodes).toHaveLength(1);
+    expect(snapshot.sourceTruncated).toBe(false);
+    expect(snapshot.captureDiagnostics.visited).toBeGreaterThan(3500);
+    expect(snapshot.captureDiagnostics.estimatedBytes).toBeLessThan(2000);
+    expect((await f.press(row)).dispatched).toBe(true); expect(active.clicks).toBe(1);
+  });
+
+  test('shared hidden ancestry flushes once across priority paths and retains visible text descendants', async () => {
+    const f = fixture(null), scope = new f.Node('DIV', { role: 'toolbar' });
+    const field = new f.Node('INPUT', { 'aria-label': 'Prioritized field' });
+    const text = new f.Node('SPAN', {}, 'Visible text'), button = new f.Node('BUTTON', {}, 'Visible action');
+    f.styles.set(scope, { visibility: 'hidden' });
+    for (const child of [field, text, button]) f.styles.set(child, { visibility: 'visible' });
+    scope.append(text, button, field); f.document.body.append(scope);
+    const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    const hiddenRows = snapshot.nodes.filter((node: any) => node.isIgnored);
+    expect(hiddenRows).toHaveLength(1);
+    const parent = hiddenRows[0], children = snapshot.nodes.filter((node: any) => node.parentNodeID === parent.nodeID);
+    expect(children.map((node: any) => node.name).sort()).toEqual(['Prioritized field', 'Visible action', 'Visible text']);
+    expect(parent.childNodeIDs).toHaveLength(3); expect(new Set(parent.childNodeIDs).size).toBe(3);
+    expect(snapshot.captureDiagnostics.scheduling.emittedByPriority.reduce((a: number, b: number) => a + b, 0)).toBe(snapshot.nodes.length);
+    expect(snapshot.captureDiagnostics.estimatedBytes).toBeLessThanOrEqual(220000);
+  });
+
+  test('a hidden ancestry chain that exceeds the byte budget cannot publish an orphaned child', async () => {
+    const f = fixture(null);
+    let parent = f.document.body;
+    for (let depth = 0; depth < 300; depth++) {
+      const scope = new f.Node('DIV', { role: 'toolbar' });
+      f.styles.set(scope, { visibility: 'hidden' }); parent.append(scope); parent = scope;
+    }
+    const child = new f.Node('BUTTON', {}, 'Unpublished child');
+    f.styles.set(child, { visibility: 'visible' }); parent.append(child);
+    const snapshot = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(snapshot.sourceTruncated).toBe(true); expect(snapshot.captureDiagnostics.stopReason).toBe('byte_budget');
+    expect(snapshot.nodes).toHaveLength(0); expect(snapshot.captureDiagnostics.estimatedBytes).toBe(0);
+    expect(snapshot.captureDiagnostics.scheduling.emittedByPriority).toEqual([0, 0, 0, 0]);
+    expect((f.state as any).__computaBrowserControlV1.nodes.size).toBe(0); expect(child.clicks).toBe(0);
+  });
+
+  test('visibility, hard exclusions, parent identity and hit-test drift still reject current descendant references', async () => {
+    for (const drift of ['inherited-hidden', 'own-hidden', 'display:none', 'hidden', 'inert', 'aria-hidden', 'parent', 'obstructed']) {
+      const f = fixture(null), scope = new f.Node('DIV', { role: 'toolbar' }), child = new f.Node('BUTTON', {}, 'Visible action');
+      f.styles.set(scope, { visibility: 'hidden' }); f.styles.set(child, { visibility: 'visible' });
+      scope.append(child); f.document.body.append(scope); f.document.elementFromPoint = () => child;
+      const row = (await f.run({ operation: 'observe', awaitSemanticReadiness: false })).nodes.find((node: any) => node.name === 'Visible action');
+      expect(row).toBeDefined();
+      if (drift === 'inherited-hidden') f.styles.delete(child);
+      else if (drift === 'own-hidden') f.styles.set(child, { visibility: 'hidden' });
+      else if (drift === 'display:none') f.styles.set(scope, { visibility: 'hidden', display: 'none' });
+      else if (['hidden', 'inert', 'aria-hidden'].includes(drift)) scope.values[drift] = drift === 'aria-hidden' ? 'true' : '';
+      else if (drift === 'parent') { scope.children = []; f.document.body.append(child); }
+      else f.document.elementFromPoint = () => scope;
+      await expect(f.press(row)).rejects.toThrow(drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(child.clicks).toBe(0);
+    }
+  });
+});
+
+describe('bounded panel discovery diagnostics', () => {
+  test('encountered panels distinguish rendered, subtree exclusion, visibility and missing own boxes', async () => {
+    const f = fixture(null);
+    const rendered = new f.Node('FORM'), displayNone = new f.Node('DIV', { role: 'dialog' });
+    const hiddenVisibility = new f.Node('DIALOG'), boxless = new f.Node('DIV', { role: 'alertdialog' });
+    f.styles.set(displayNone, { display: 'none' }); f.styles.set(hiddenVisibility, { visibility: 'hidden' });
+    f.styles.set(boxless, { display: 'contents' });
+    const hardHidden = ['hidden', 'inert', 'aria-hidden'].map(attribute =>
+      new f.Node('FORM', { [attribute]: attribute === 'aria-hidden' ? 'true' : '' }));
+    const prunedParent = new f.Node('DIV', { hidden: '' }); prunedParent.append(new f.Node('FORM'));
+    f.document.body.append(rendered, displayNone, hiddenVisibility, boxless, ...hardHidden, prunedParent);
+    const result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(result.captureDiagnostics.discovery).toEqual({ panelsByState: [1, 1, 3, 1, 1], prunedSubtrees: 5, limitReached: false });
+    expect(result.sourceTruncated).toBe(false);
+    expect(Object.keys(result.captureDiagnostics.discovery).sort()).toEqual(['limitReached', 'panelsByState', 'prunedSubtrees']);
+  });
+
+  test('a visible panel override is rendered but a panel below a pruned ancestor is unobserved', async () => {
+    const f = fixture(null), hiddenVisibility = new f.Node('DIV'), panel = new f.Node('FORM');
+    f.styles.set(hiddenVisibility, { visibility: 'hidden' }); f.styles.set(panel, { visibility: 'visible' });
+    hiddenVisibility.append(panel);
+    const displayNone = new f.Node('DIV'); f.styles.set(displayNone, { display: 'none' });
+    displayNone.append(new f.Node('DIV', { role: 'dialog' })); f.document.body.append(hiddenVisibility, displayNone);
+    const result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(result.captureDiagnostics.discovery).toEqual({ panelsByState: [1, 0, 0, 0, 0], prunedSubtrees: 1, limitReached: false });
+  });
+
+  test('discovery at its limit remains partial positive evidence even when normal capture completes', async () => {
+    const f = fixture(null);
+    for (let index = 0; index < 5000; index++) {
+      const node = index === 2500 ? new f.Node('FORM', { hidden: '' }) : new f.Node('SPAN');
+      f.document.body.append(node);
+    }
+    f.document.body.append(new f.Node('FORM'));
+    const result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(result.captureDiagnostics.discovery).toEqual({ panelsByState: [1, 0, 0, 0, 0], prunedSubtrees: 0, limitReached: true });
+    expect(result.captureDiagnostics.scheduling.discoverySlots).toBe(4096);
+    expect(result.sourceTruncated).toBe(false);
+    expect(result.nodes.filter((node: any) => node.role === 'form')).toHaveLength(1);
+  });
+
+  test('a pruned root is counted once without inventing charged child slots', async () => {
+    const f = fixture(null); f.document.body.values.role = 'form'; f.document.body.values.hidden = '';
+    const result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(result.captureDiagnostics.discovery).toEqual({ panelsByState: [0, 0, 1, 0, 0], prunedSubtrees: 1, limitReached: false });
+    expect(result.captureDiagnostics.scheduling.discoverySlots).toBe(0);
+    expect(result.nodes).toHaveLength(0);
+  });
+});
+
+describe('native field semantics inside contenteditable', () => {
+  const nestedField = (tag: string, attributes: Record<string, string> = {}) => {
+    const f = fixture(null), wrapper = new f.Node('DIV', { contenteditable: 'true' });
+    const field = new f.Node(tag, { 'aria-label': 'Native field', value: 'Before value', ...attributes }, 'Original child markup');
+    // Real WebKit supplies true here through the editable ancestor. Keep this
+    // focused fixture about native-kind precedence, not a new DOM emulator.
+    Object.defineProperty(field, 'isContentEditable', { get: () => true });
+    wrapper.append(field); f.document.body.append(wrapper); f.document.elementFromPoint = () => field;
+    return { ...f, field, wrapper };
+  };
+
+  test('INPUT, TEXTAREA and SELECT read native values and dispatch their native setter without replacing child markup', async () => {
+    for (const tag of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      const f = nestedField(tag), events: string[] = [];
+      f.field.onDispatch = (event: any) => events.push(event.type);
+      Object.assign(f.field, { required: true, willValidate: true, validity: { valid: true } });
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Native field');
+      expect(row.role).toBe(tag === 'SELECT' ? 'combobox' : 'textbox');
+      expect(row.value).toBe('Before value'); expect(row.isEditable).toBe(true);
+      expect(row.constraintValidation).toEqual({ required: true, candidate: true, valid: true, issues: [] });
+      expect(await f.fill(row, 'After value')).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
+      expect(f.field.value).toBe('After value'); expect(f.field.valueWrites).toEqual(['After value']);
+      expect(f.field.textContent).toBe('Original child markup'); expect(events).toEqual(['input', 'change']);
+      expect((await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Native field').value).toBe('After value');
+    }
+  });
+
+  test('inherited editing never expands the native INPUT type allowlist or reveals protected values', async () => {
+    for (const type of ['file', 'hidden', 'checkbox', 'radio', 'range', 'submit', 'button', 'reset', 'image', 'password']) {
+      const f = nestedField('INPUT', { type, role: 'textbox', value: 'EXCLUDED_PRIVATE_VALUE' });
+      const snapshot = await f.run({ operation: 'observe' });
+      const row = snapshot.nodes.find((node: any) => node.name === 'Native field');
+      expect(row.isEditable).toBe(false); expect(row.isReadOnly).toBe(true); expect(row.value).toBeNull();
+      expect(snapshot.nodes.some((node: any) => String(node.value || '').includes('EXCLUDED_PRIVATE_VALUE'))).toBe(false);
+      await expect(f.fill(row, 'Must not write')).rejects.toThrow(type === 'password' ? 'stale_document' : 'unsupported_action');
+      expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toHaveLength(0);
+    }
+  });
+
+  test('the supported native INPUT types retain their native-value capability under inherited editing', async () => {
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'number', 'date', 'datetime-local', 'month', 'week', 'time', 'color']) {
+      const f = nestedField('INPUT', { type });
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Native field');
+      expect(row.isEditable).toBe(true); expect(row.value).toBe('Before value');
+      expect((await f.fill(row, 'After value')).dispatched).toBe(true); expect(f.field.valueWrites).toEqual(['After value']);
+    }
+  });
+
+  test('ordinary contenteditable elements still use rendered text and the exact content setter', async () => {
+    const f = fixture(null), field = new f.Node('DIV', { contenteditable: 'true', 'aria-label': 'Editable body' }, 'Before text');
+    f.document.body.append(field); f.document.elementFromPoint = () => field;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Editable body');
+    expect(row.value).toBe('Before text'); expect(row.isEditable).toBe(true);
+    expect((await f.fill(row, 'After text')).dispatched).toBe(true);
+    expect(field.textContent).toBe('After text'); expect(field.valueWrites).toEqual([]);
+    expect(field.events.map((event: any) => event.type)).toEqual(['input', 'change']);
+  });
+
+  test('native value, readonly, disabled, visibility, parent, identity and obstruction changes still reject before writing', async () => {
+    for (const drift of ['value', 'readonly', 'disabled', 'hidden', 'parent', 'replaced', 'obstructed']) {
+      const f = nestedField('INPUT');
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'Native field');
+      if (drift === 'value') f.field.values.value = 'Changed native value';
+      else if (drift === 'readonly') f.field.values.readonly = '';
+      else if (drift === 'disabled') f.field.disabled = true;
+      else if (drift === 'hidden') f.wrapper.values.hidden = '';
+      else if (drift === 'parent') { f.wrapper.children = []; f.document.body.append(f.field); }
+      else if (drift === 'replaced') f.wrapper.replaceChildren(new f.Node('INPUT', { 'aria-label': 'Native field', value: 'Before value' }));
+      else f.document.elementFromPoint = () => f.wrapper;
+      await expect(f.fill(row, 'Must not write')).rejects.toThrow(drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toHaveLength(0);
+    }
+  });
+});
 
 describe('explicit ARIA selection item press capabilities', () => {
   test('each supported explicit item dispatches only its exact click and exposes the resulting selection', async () => {

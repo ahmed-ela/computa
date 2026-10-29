@@ -21,6 +21,40 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
     let clippedFields: Int
     let boxlessContents: Int
     let scheduling: Scheduling?
+    let discovery: Discovery?
+
+    /// Only the existing bounded priority-discovery walk contributes counts.
+    /// Panel states use rendered/display-none/hard-hidden/visibility-hidden/no-box
+    /// order; a limit-reached walk never establishes that missing controls are absent.
+    struct Discovery: Codable, Equatable, Sendable {
+        let panelsByState: [Int]
+        let prunedSubtrees: Int
+        let limitReached: Bool
+
+        static func valid(_ raw: Any, scheduling: Any?) -> Bool {
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == ["panelsByState", "prunedSubtrees", "limitReached"],
+                  let scheduling = scheduling as? [String: Any],
+                  let slots = integer(scheduling["discoverySlots"]),
+                  let counts = fields["panelsByState"] as? [Any], counts.count == 5,
+                  let pruned = integer(fields["prunedSubtrees"]),
+                  let limitReached = fields["limitReached"] as? NSNumber,
+                  CFGetTypeID(limitReached) == CFBooleanGetTypeID() else { return false }
+            let panels = counts.compactMap(integer)
+            // The root can be inspected without consuming a child-discovery
+            // slot. A limit-reached diagnostic must refer to the existing shared
+            // ceiling, never a reset clock or an added traversal.
+            return panels.count == 5 && panels.reduce(0, +) <= min(4_096, slots + 1)
+                && pruned <= slots + 1 && (!limitReached.boolValue || slots == 4_096)
+        }
+
+        private static func integer(_ raw: Any?) -> Int? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                  (0...4_096).contains(number.doubleValue) else { return nil }
+            return number.intValue
+        }
+    }
 
     /// Counts come from the existing bounded traversal, never page content.
     /// Priority arrays use the fixed focus/dialog/form/ordinary order.
@@ -69,8 +103,10 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
         let baseKeys: Set<String> = ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
                                      "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"]
         guard let fields = raw as? [String: Any],
-              Set(fields.keys) == baseKeys || Set(fields.keys) == baseKeys.union(["scheduling"]),
+              baseKeys.isSubset(of: Set(fields.keys)),
+              Set(fields.keys).isSubset(of: baseKeys.union(["scheduling", "discovery"])),
               fields["scheduling"].map({ Scheduling.valid($0, emitted: emitted) }) ?? true,
+              fields["discovery"].map({ Discovery.valid($0, scheduling: fields["scheduling"]) }) ?? true,
               let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 768,
               let value = try? JSONDecoder().decode(Self.self, from: bytes),
               (0...20_001).contains(value.visited), (0...3_000).contains(value.emitted),

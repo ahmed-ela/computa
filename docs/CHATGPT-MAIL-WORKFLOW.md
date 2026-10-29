@@ -570,6 +570,59 @@ not yet distinguish controls hidden/unmounted by Gmail from a capture discovery
 gap. The unchanged page at its compose URL and failed evidence are retained for
 bounded DOM inspection. Model-loop success is not email-action success.
 
+An authorized human comparison preserved that task document. Inspection of the
+original document remains unavailable after a tool mutation by design; no guard
+was bypassed. A separate ordinary inbox tab allowed temporary inspection after
+one Compose click, with no field edits or Send. At 360x529 and 423x529, its
+recipient, subject, body and layout controls existed but had no rendered boxes.
+The compose ancestry included `display:none`, so excluding those controls was
+correct in that comparison. This does not establish their state during the
+1024x768 task or explain the original failure. The comparison tab was closed,
+both Inspector settings disabled, and the original window mode and pane width
+restored. The original Gmail tab and the user's other tabs were preserved.
+
+## Visibility overrides and capture diagnostics
+
+The comparison prompted a separate capture review. CSS `visibility` is inherited
+and can be restored by a descendant, but capture treated a hidden ancestor as a
+reason to exclude its entire subtree. Build 317 checks the candidate's computed
+visibility while retaining ancestor exclusions for `display:none`, `hidden`,
+`inert` and `aria-hidden`. A visible descendant still needs a rendered box, a
+current reference and a successful hit test before input.
+
+Hidden semantic ancestors carry only empty, ignored structure when an emitted
+visible descendant needs their identity. Hidden-only branches consume no output
+rows. Capture reserves the complete required ancestor path and child against the
+original limits; a path that cannot fit is omitted with explicit truncation,
+without publishing an orphaned action reference. This correction is independently
+reproducible and is not a demonstrated cause of the Gmail failure above.
+
+An optional finite discovery summary classifies encountered form/dialog panels
+as rendered, display-none, hard-hidden, visibility-hidden or no-box. It also counts
+pruned subtrees and reports `limitReached` when discovery reaches its shared
+budget with work still pending. These counters
+reuse the existing 4,096-slot walk, without another DOM scan or page content in
+logs. They can establish a hidden panel that was encountered. Zero counts cannot
+establish that no panel exists beyond pruned branches or unvisited descendants.
+
+The native visibility fixture also exposed an independent field-editing defect:
+an input inside a `contenteditable` ancestor inherits `isContentEditable`. The
+driver consequently read its text content and wrote `textContent`, while the
+input's actual value stayed unchanged. Native input, textarea and select
+semantics now take precedence over inherited editability for capability checks,
+value reads and writes. Ordinary editable elements retain their text-content
+path; unsupported native input types cannot become fillable through ancestry.
+This is qualified separately from the visibility change and from real Gmail.
+
+The combined candidate passes 73 JavaScript tests and 41 relevant native tests.
+The same final native binary reproduces baseline 316's omitted visible child and
+the pre-setter-fix candidate's unchanged native input value, then passes both
+corrected behaviors. The cohort checks textarea defaults, select options,
+events, hidden-only capture pressure, exact ancestry, stale references and
+obstructions. Diagnostic encoding remains within the existing 768-byte capture
+and 1,024-byte native-log bounds. Earlier failing experiments remain retained;
+these results do not establish a successful real-email task.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

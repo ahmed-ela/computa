@@ -24,23 +24,27 @@ const idFor = node => {
   if (!id) { id = state.nextID++; state.ids.set(node, id); }
   return id;
 };
-const allowedByAncestors = element => {
+const subtreeExclusion = element => {
   for (let node = element; node; node = node.parentElement) {
     // Form named properties can shadow HTMLElement.hidden with a child input.
     // Only the actual attribute hides this ancestor.
     if (Element.prototype.hasAttribute.call(node, 'hidden')
-        || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert')) return false;
-    const style = getComputedStyle(node);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+        || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert')) return 'hard_hidden';
+    if (getComputedStyle(node).display === 'none') return 'display_none';
   }
-  return true;
+  return null;
 };
+const allowedByAncestors = element => subtreeExclusion(element) === null;
+// Visibility is inherited but a descendant can explicitly restore it. It
+// suppresses this node's rendered content, not traversal of its whole subtree.
+// Hard exclusions above still apply to every descendant without exception.
+const renderedVisibility = element => !['hidden','collapse'].includes(getComputedStyle(element).visibility);
 // Input targets still need their own rendered box. A display:contents wrapper
 // may be traversed below, but that does not make it an input target.
-const visible = element => allowedByAncestors(element) && element.getClientRects().length > 0;
+const visible = element => allowedByAncestors(element) && renderedVisibility(element) && element.getClientRects().length > 0;
 const visibleText = node => {
   const parent = node.parentElement;
-  if (!parent || !allowedByAncestors(parent)) return false;
+  if (!parent || !allowedByAncestors(parent) || !renderedVisibility(parent)) return false;
   if (parent.getClientRects().length > 0) return true;
   if (getComputedStyle(parent).display !== 'contents') return false;
   const range = document.createRange();
@@ -63,8 +67,11 @@ const semanticRoleFor = element => {
     if (['checkbox', 'radio', 'range'].includes(type)) return type === 'range' ? 'slider' : type;
     return type === 'search' ? 'searchbox' : type === 'hidden' ? null : 'textbox';
   }
+  // Native fields keep their own semantics even when WebKit reports inherited
+  // contenteditable=true from an enclosing editing host.
+  if (tag === 'textarea' || tag === 'select') return tag === 'select' ? 'combobox' : 'textbox';
   if (element.isContentEditable) return 'textbox';
-  return ({a: element.hasAttribute('href') ? 'link' : null, button:'button', textarea:'textbox', select:'combobox',
+  return ({a: element.hasAttribute('href') ? 'link' : null, button:'button',
     main:'main', article:'article', nav:'navigation', aside:'complementary', header:'banner', footer:'contentinfo', dialog:'dialog', form:'form',
     ul:'list', ol:'list', li:'listitem', p:'statictext', pre:'statictext', blockquote:'statictext', img:'image',
     section: element.getAttribute('aria-label') ? 'region' : null, output:'status'})[tag] || null;
@@ -138,15 +145,17 @@ const constraintsFor = (element, boxlessContents) => {
   return {required:element.required, candidate:element.willValidate, valid:validity.valid,
     issues:flags.filter(([property]) => validity[property] === true).map(([,name]) => name)};
 };
-const nativeEditable = element => element.isContentEditable || ['TEXTAREA','SELECT'].includes(element.tagName)
-  || (element.tagName === 'INPUT' && ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type));
+const nativeValueField = element => ['INPUT','TEXTAREA','SELECT'].includes(element.tagName);
+const nativeEditable = element => element.tagName === 'INPUT'
+  ? ['text','search','email','url','tel','number','date','datetime-local','month','week','time','color'].includes(element.type)
+  : ['TEXTAREA','SELECT'].includes(element.tagName) || element.isContentEditable;
 const metaFor = (element, role, boxlessContents = false) => {
   const name = nameFor(element, role, boxlessContents);
   const passiveContainer = role === 'group' && isPassiveContainer(element);
   const editableRole = ['textbox','searchbox','combobox'].includes(role);
   const editable = editableRole && nativeEditable(element);
   const password = element.tagName === 'INPUT' && element.type === 'password';
-  const value = editable && !password && !boxlessContents ? String(element.isContentEditable ? element.innerText : element.value ?? '') : null;
+  const value = editable && !password && !boxlessContents ? String(nativeValueField(element) ? element.value ?? '' : element.innerText) : null;
   const link = role === 'link' ? String(element.href || '') : null;
   // Keep the destination observable without offering an action this backend
   // must reject. Task input never creates or adopts an unowned popup.
@@ -184,7 +193,12 @@ const capture = () => {
     for (const node of path) priorities.set(node, Math.min(priorities.get(node) ?? 3, priority));
   };
   prioritize(document.activeElement, 0);
-  let examinedChildren = 0, panelProbes = 0, partialPanels = 0;
+  let examinedChildren = 0, panelProbes = 0, partialPanels = 0, discoveryLimitReached = false;
+  // Finite positive evidence from the existing structural discovery pass.
+  // Counts describe encountered panels only, never the whole DOM or a site.
+  // Order: rendered, display:none, hard-hidden, visibility-hidden, no own box.
+  const panelsByState = [0, 0, 0, 0, 0];
+  let prunedSubtrees = 0;
   const controlsSeen = new Set(), controlsVisible = new Set(), controlsPrioritized = new Set();
   const prioritizePanelControls = (element, priority) => {
     const pending = [{node:element}], targets = [];
@@ -206,7 +220,9 @@ const capture = () => {
         cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
       }
       if (cursor.first > cursor.last) continue;
-      if (slots >= 64 || examinedChildren >= 4096) { partial = true; continue; }
+      if (slots >= 64 || examinedChildren >= 4096) {
+        partial = true; discoveryLimitReached ||= examinedChildren >= 4096; continue;
+      }
       // Interleave both ends and deeper branches within the same per-panel and
       // shared caps, so a wide expanded panel cannot spend every slot before
       // reaching the observed controls nested inside its header or footer.
@@ -227,13 +243,20 @@ const capture = () => {
     return control;
   };
   const discovery = root ? [{node:root}] : [];
-  for (let index = 0; index < discovery.length && examinedChildren < 4096; index++) {
-    const cursor = discovery[index], node = cursor.node;
+  let discoveryIndex = 0;
+  for (; discoveryIndex < discovery.length && examinedChildren < 4096; discoveryIndex++) {
+    const cursor = discovery[discoveryIndex], node = cursor.node;
     if (!cursor.children) {
-      if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)
-          || !allowedByAncestors(node)) continue;
+      if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)) continue;
+      const exclusion = subtreeExclusion(node);
       const rawRole = node.getAttribute('role') || '';
       const role = oversizedRole(rawRole) ? '' : trim(rawRole).split(' ')[0].toLowerCase();
+      if (['dialog','alertdialog','form'].includes(role) || ['DIALOG','FORM'].includes(node.tagName)) {
+        const state = exclusion === 'display_none' ? 1 : exclusion === 'hard_hidden' ? 2
+          : !renderedVisibility(node) ? 3 : node.getClientRects().length === 0 ? 4 : 0;
+        panelsByState[state]++;
+      }
+      if (exclusion) { prunedSubtrees++; continue; }
       const semantic = semanticRoleFor(node);
       if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') {
         prioritize(node, 1); prioritizePanelControls(node, 1);
@@ -253,7 +276,8 @@ const capture = () => {
       cursor.children = node.childNodes;
       cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
     }
-    if (cursor.first > cursor.last || examinedChildren >= 4096) continue;
+    if (cursor.first > cursor.last) continue;
+    if (examinedChildren >= 4096) { discoveryLimitReached = true; continue; }
     // Interleave child cursors across branches instead of exhausting a wide
     // inbox before descending into a later panel. Sample both ends; normal
     // capture and its evidence graph still retain the actual DOM child order.
@@ -262,7 +286,8 @@ const capture = () => {
     if (child.nodeType === Node.ELEMENT_NODE) discovery.push({node:child});
     if (cursor.first <= cursor.last) discovery.push(cursor);
   }
-  const nodes = [], next = [[{node:root, parent:null, suppressText:false}], [], [], []];
+  discoveryLimitReached ||= examinedChildren >= 4096 && discoveryIndex < discovery.length;
+  const nodes = [], next = [[{node:root, parent:null, suppressText:false, hiddenAncestor:null}], [], [], []];
   const capturedDOMNodes = new Map(), emittedByPriority = [0, 0, 0, 0];
   let visited = 0, budget = 0, truncated = false, omittedPriority = null;
   const diagnostics = {stopReason:'none',visited:0,emitted:0,estimatedBytes:0,
@@ -270,6 +295,28 @@ const capture = () => {
     viewportWidth:Number.isInteger(innerWidth) && innerWidth >= 0 && innerWidth <= 1000000 ? innerWidth : 0,
     viewportHeight:Number.isInteger(innerHeight) && innerHeight >= 0 && innerHeight <= 1000000 ? innerHeight : 0,
     frames:0,shadowRoots:0,oversizedRoles:0,clippedFields:0,boxlessContents:0};
+  const appendCaptured = (row, node, bytes, hiddenAncestor, priority) => {
+    const ancestors = [];
+    for (let current = hiddenAncestor; current; current = current.previous) {
+      if (capturedDOMNodes.has(current.row.nodeID)) break;
+      ancestors.push(current);
+    }
+    ancestors.reverse();
+    const additions = [...ancestors, {row,node,bytes}];
+    const addedBytes = additions.reduce((sum, item) => sum + item.bytes, 0);
+    if (nodes.length + additions.length > 3000 || budget + addedBytes > 220000) {
+      diagnostics.stopReason = nodes.length + additions.length > 3000 ? 'node_limit' : 'byte_budget';
+      omittedPriority = priority; truncated = true; return false;
+    }
+    // Flush the required chain atomically: no public child can outlive omitted
+    // ancestry, and shared priority paths cannot emit the same ancestor twice.
+    for (const item of additions) {
+      nodes.push(item.row); capturedDOMNodes.set(item.row.nodeID, item.node);
+      if (item.node.nodeType === Node.ELEMENT_NODE) state.nodes.set(item.row.backendNodeID, item.node);
+      emittedByPriority[priority]++; budget += item.bytes;
+    }
+    return true;
+  };
   state.nodes.clear();
   while (next.some(frontier => frontier.length)) {
     // A priority applies across the capture, not just between siblings. A
@@ -288,10 +335,9 @@ const capture = () => {
       const id = idFor(node), name = text.slice(0,4096);
       truncated ||= text.length > 4096;
       if (text.length > 4096) diagnostics.clippedFields++;
-      nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
-        value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null});
-      capturedDOMNodes.set(String(id), node); emittedByPriority[selectedPriority]++;
-      budget += name.length * 3 + 200;
+      const row = {backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
+        value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null};
+      if (!appendCaptured(row, node, name.length * 3 + 200, item.hiddenAncestor, selectedPriority)) break;
       continue;
     }
     if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName)
@@ -305,9 +351,18 @@ const capture = () => {
     if (node.shadowRoot) { diagnostics.shadowRoots++; truncated = true; }
     if (oversizedRole(node.getAttribute('role') || '')) { diagnostics.oversizedRoles++; truncated = true; }
     const role = roleFor(node);
-    let parent = item.parent, suppressText = item.suppressText;
+    const visibilitySuppressed = !renderedVisibility(node);
+    let parent = item.parent, suppressText = item.suppressText, hiddenAncestor = item.hiddenAncestor;
     if (role) {
-      const id = idFor(node), meta = metaFor(node, role, boxlessContents);
+      // Keep only ignored structural ancestry for hidden nodes. In particular,
+      // do not publish their names, field values or constraints. Visible children
+      // retain their real semantic scope and exact parent identity, without
+      // making the hidden wrapper an observed control or outcome witness.
+      const id = idFor(node), meta = visibilitySuppressed
+        ? {role,name:'',value:null,linkURL:null,isDisabled:true,isReadOnly:true,isEditable:false,
+          isIgnored:true,isDOMClickable:false,isPressUnsupported:true,isFocusablePointer:false,
+          constraintValidation:null,fieldTruncated:false}
+        : metaFor(node, role, boxlessContents);
       truncated ||= meta.fieldTruncated;
       if (meta.fieldTruncated) diagnostics.clippedFields++;
       delete meta.fieldTruncated;
@@ -317,18 +372,24 @@ const capture = () => {
         meta.isDisabled = true; meta.isReadOnly = true; meta.isEditable = false;
         meta.isDOMClickable = false; meta.isFocusablePointer = false; meta.isPressUnsupported = true;
       }
-      nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:parent,childNodeIDs:[],...meta});
-      capturedDOMNodes.set(String(id), node); emittedByPriority[selectedPriority]++;
-      state.nodes.set(id,node);
-      budget += JSON.stringify(meta).length * 3 + 200;
+      const row = {backendNodeID:id,nodeID:String(id),parentNodeID:parent,childNodeIDs:[],...meta};
+      const bytes = JSON.stringify(meta).length * 3 + 200;
+      if (visibilitySuppressed) {
+        // Hidden-only legacy trees spend traversal slots, not snapshot rows.
+        // Retain this shared chain only if a rendered descendant is emitted.
+        hiddenAncestor = {row,node,bytes,previous:hiddenAncestor};
+      } else {
+        if (!appendCaptured(row, node, bytes, hiddenAncestor, selectedPriority)) break;
+        hiddenAncestor = null;
+      }
       parent = String(id);
-      suppressText = !boxlessContents && ['button','link','heading','statictext','textbox','searchbox','combobox','image'].includes(role);
+      suppressText = !visibilitySuppressed && !boxlessContents && ['button','link','heading','statictext','textbox','searchbox','combobox','image'].includes(role);
     }
     const children = [[], [], [], []];
     for (const child of Array.from(node.childNodes)) children[priorities.get(child) ?? 3].push(child);
     for (let priority = children.length - 1; priority >= 0; priority--)
       for (let index = children[priority].length - 1; index >= 0; index--)
-        next[priority].push({node:children[priority][index],parent,suppressText});
+        next[priority].push({node:children[priority][index],parent,suppressText,hiddenAncestor});
   }
   const byID = new Map(nodes.map(node => [node.nodeID,node]));
   for (const node of nodes) if (node.parentNodeID && byID.has(node.parentNodeID)) byID.get(node.parentNodeID).childNodeIDs.push(node.nodeID);
@@ -348,17 +409,18 @@ const capture = () => {
     controlsSeen:controlsSeen.size,controlsVisible:controlsVisible.size,controlsPrioritized:controlsPrioritized.size,
     controlsEmitted,emittedByPriority,pendingByPriority:queued.map(count => Math.min(count,20001)),
     pendingClipped:queued.some(count => count > 20001)};
+  diagnostics.discovery = {panelsByState,prunedSubtrees,limitReached:discoveryLimitReached};
   diagnostics.visited = visited; diagnostics.emitted = nodes.length; diagnostics.estimatedBytes = budget;
   return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes,
     sourceTruncated:truncated,captureDiagnostics:diagnostics};
 };
-const isSemanticNode = node =>
+const isSemanticNode = node => !node.isIgnored && (
   ['button','link','checkbox','combobox','searchbox','textbox','menu','menubar','menuitem',
     'menuitemcheckbox','menuitemradio','radio','radiogroup','switch','tab','tablist',
     'toolbar','slider','spinbutton','listbox','option','treeitem'].includes(node.role)
   || (['statictext','inlinetextbox','text','heading','paragraph','listitem','term','definition',
     'code','blockquote','cell','gridcell','rowheader','columnheader','caption','label'].includes(node.role)
-    && !!trim(node.name || node.value));
+    && !!trim(node.name || node.value)));
 const hasSemanticContent = snapshot => {
   // Footer text/links remain observable and actionable, but cannot by
   // themselves establish readiness of the page outside that footer.
@@ -393,7 +455,7 @@ const hasReadableContent = snapshot => {
   const optionExcluded = new Set([...controls].filter(role => !['listbox','option'].includes(role))
     .concat(['link','navigation','banner','contentinfo']));
   return snapshot.nodes.some(node => {
-    if (!(trim(node.name) || String(node.value ?? '')) || !(textRoles.has(node.role) || node.role === 'option')) return false;
+    if (node.isIgnored || !(trim(node.name) || String(node.value ?? '')) || !(textRoles.has(node.role) || node.role === 'option')) return false;
     const seen = new Set();
     let current = node, readable = textRoles.has(node.role), option = true;
     let optionSeen = false, listboxSeen = false;
@@ -515,13 +577,12 @@ if (input.operation === 'press') {
   revalidateElement();
   if (document.activeElement !== element) throw new Error('element_changed');
   requireUnobstructed();
-  if (element.isContentEditable) element.textContent = input.text;
-  else {
+  if (nativeValueField(element)) {
     const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : element.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype,'value')?.set;
     if (!setter) throw new Error('unsupported_action');
     setter.call(element,input.text);
-  }
+  } else element.textContent = input.text;
   element.dispatchEvent(new Event('input',{bubbles:true}));
   element.dispatchEvent(new Event('change',{bubbles:true}));
 }

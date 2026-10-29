@@ -1231,6 +1231,112 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         }
     }
 
+    func testNativeInputUnderContentEditableUsesItsValuePropertyAndPreservesItsChildren() async throws {
+        try await verifyNativeValueUnderContentEditable("input")
+    }
+
+    func testNativeTextareaUnderContentEditableUsesItsValuePropertyAndPreservesDefaultValue() async throws {
+        try await verifyNativeValueUnderContentEditable("textarea")
+    }
+
+    func testNativeSelectUnderContentEditableUsesItsValuePropertyAndPreservesOptions() async throws {
+        try await verifyNativeValueUnderContentEditable("select")
+    }
+
+    func testActualContentEditableStillUsesItsRenderedTextAndDispatchesOneEventPair() async throws {
+        try await verifyNativeValueUnderContentEditable("contenteditable")
+    }
+
+    private func verifyNativeValueUnderContentEditable(_ kind: String) async throws {
+        let (session, transport, view, target, window) = try await nativeValueFixture(kind)
+        defer { session.shutdown(); window.close() }
+        let beforeData = try await script(view, "return window.nativeValueAudit();")
+        let before = try XCTUnwrap(JSONSerialization.jsonObject(with: beforeData) as? [String: Any])
+        XCTAssertEqual(before["contentEditable"] as? Bool, true, "Real WebKit must exercise inherited editability: \(kind)")
+        XCTAssertEqual(before["value"] as? String, "prior-value", kind)
+        let observed = try await transport.observe(target: target)
+        let field = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture field" })
+        XCTAssertTrue(field.isEditable, kind)
+        XCTAssertEqual(field.value, "prior-value", "Observed native value must not be replaced by inherited contenteditable text: \(kind)")
+        try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "next-value",
+            document: observed, permit: BrowserMutationPermit())
+        let afterData = try await script(view, "return window.nativeValueAudit();")
+        let after = try XCTUnwrap(JSONSerialization.jsonObject(with: afterData) as? [String: Any])
+        XCTAssertEqual(after["value"] as? String, "next-value", "Successful fill must update the actual native value property: \(kind)")
+        if kind != "contenteditable" {
+            XCTAssertEqual(after["text"] as? String, before["text"] as? String, "Native fill must not replace input/textarea/select children: \(kind)")
+            XCTAssertEqual(after["defaultValue"] as? String, before["defaultValue"] as? String, kind)
+            XCTAssertEqual(after["options"] as? [String], before["options"] as? [String], kind)
+        } else {
+            XCTAssertEqual(after["text"] as? String, "next-value")
+        }
+        let events = try XCTUnwrap(after["events"] as? [[String: Any]])
+        XCTAssertEqual(events.compactMap { $0["type"] as? String }, ["input", "change"], kind)
+        XCTAssertEqual(events.compactMap { $0["value"] as? String }, ["next-value", "next-value"], kind)
+        XCTAssertTrue(events.allSatisfy { $0["focused"] as? Bool == true }, kind)
+        let fresh = try await transport.observe(target: target)
+        XCTAssertEqual(fresh.nodes.first { $0.name == "Fixture field" }?.value, "next-value", kind)
+    }
+
+    func testInheritedContentEditableCannotGrantNativeUnsupportedSecureOrReadOnlyFieldsInputAuthority() async throws {
+        for kind in ["file", "checkbox", "password", "readonly", "disabled"] {
+            let (session, transport, view, target, window) = try await nativeValueFixture(kind)
+            defer { session.shutdown(); window.close() }
+            let beforeData = try await script(view, "return window.nativeValueAudit();")
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: beforeData) as? [String: Any])
+            XCTAssertEqual(before["contentEditable"] as? Bool, true, kind)
+            let observed = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture field" })
+            XCTAssertTrue(field.isReadOnly || field.isDisabled || !field.isEditable, kind)
+            if ["file", "checkbox", "password"].contains(kind) { XCTAssertNil(field.value, kind) }
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "MUST_NOT_APPEAR",
+                    document: observed, permit: BrowserMutationPermit())
+                XCTFail("Inherited editability cannot authorize native \(kind) input")
+            } catch { }
+            let afterData = try await script(view, "return window.nativeValueAudit();")
+            let after = try XCTUnwrap(JSONSerialization.jsonObject(with: afterData) as? [String: Any])
+            XCTAssertEqual(after["value"] as? String, before["value"] as? String, kind)
+            XCTAssertEqual(after["text"] as? String, before["text"] as? String, kind)
+            XCTAssertTrue(try XCTUnwrap(after["events"] as? [Any]).isEmpty, kind)
+        }
+    }
+
+    private func nativeValueFixture(_ kind: String) async throws
+        -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget, NSWindow) {
+        let markup: String
+        switch kind {
+        case "textarea": markup = "<textarea id='field' aria-label='Fixture field'>default-value</textarea>"
+        case "select": markup = "<select id='field' aria-label='Fixture field'><option value='prior-value'>Prior option</option><option value='next-value'>Next option</option></select>"
+        case "contenteditable": markup = "<div id='field' aria-label='Fixture field' role='textbox' contenteditable='true'>prior-value</div>"
+        case "file", "checkbox", "password": markup = "<input id='field' aria-label='Fixture field' role='textbox' type='\(kind)'>"
+        case "readonly", "disabled": markup = "<input id='field' aria-label='Fixture field' type='text' \(kind)>"
+        default: markup = "<input id='field' aria-label='Fixture field' type='text' value='default-value'>"
+        }
+        let session = EmbeddedBrowserSession(persistent: false), window = attachRenderHost(to: session)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        let inherited = kind == "contenteditable" ? "" : "contenteditable='true'"
+        view.loadHTMLString("""
+            <!doctype html><main><div \(inherited)>\(markup)</div></main><script>
+            const field=document.getElementById('field'), native=field.tagName!=='DIV', events=[];
+            if(native && field.type!=='file') field.value='prior-value';
+            const value=()=>native ? field.value : field.innerText;
+            for(const type of ['input','change']) document.addEventListener(type,event=>{
+              if(event.target===field)events.push({type,value:value(),focused:document.activeElement===field});
+            });
+            window.nativeValueAudit=()=>({contentEditable:field.isContentEditable,value:value(),text:field.textContent,
+              defaultValue:field.defaultValue ?? null,options:field.options ? Array.from(field.options).map(option=>option.value) : [],events});
+            </script>
+            """, baseURL: URL(string: "http://localhost:8123/native-value-\(kind)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        try await transport.acquireRendering(target: target, lifetime: BrowserTabLifetime())
+        return (session, transport, view, target, window)
+    }
+
     func testUnicodeRoleOverByteLimitPreservesBoundedUsableObservation() async throws {
         let role=String(repeating:"界",count:40)
         XCTAssertLessThan(role.utf16.count,100)
@@ -1616,6 +1722,202 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         }
     }
 
+    func testCSSHiddenAncestorAllowsExplicitlyVisibleControlsWithoutExposingHiddenMetadata() async throws {
+        try await verifyCSSVisibilityOverride("hidden")
+    }
+
+    func testCSSCollapsedAncestorAllowsExplicitlyVisibleControlsWithoutExposingHiddenMetadata() async throws {
+        try await verifyCSSVisibilityOverride("collapse")
+    }
+
+    private func verifyCSSVisibilityOverride(_ visibility: String) async throws {
+        let (session, transport, view, target, window) = try await cssVisibilityFixture(visibility)
+        defer { session.shutdown(); window.close() }
+        let oracle = try await script(view, """
+            const parent=document.getElementById('toolbar'), action=document.getElementById('action');
+            return {parent:getComputedStyle(parent).visibility, child:getComputedStyle(action).visibility,
+              childHasBox:action.getClientRects().length>0,
+              inherited:getComputedStyle(document.getElementById('inherited')).visibility};
+            """)
+        let shape = try XCTUnwrap(JSONSerialization.jsonObject(with: oracle) as? [String: Any])
+        XCTAssertEqual(shape["parent"] as? String, visibility)
+        XCTAssertEqual(shape["child"] as? String, "visible")
+        XCTAssertEqual(shape["childHasBox"] as? Bool, true)
+        XCTAssertEqual(shape["inherited"] as? String, visibility)
+        let raw = try await transport.observe(target: target)
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Visible child action" },
+            "WebKit renders a visibility:visible descendant even while its ancestor remains \(visibility)")
+        let field = try XCTUnwrap(raw.nodes.first { $0.name == "Visible child field" })
+        XCTAssertTrue(action.isDOMClickable); XCTAssertTrue(field.isEditable)
+        let toolbar = try XCTUnwrap(raw.nodes.first { $0.nodeID == action.parentNodeID })
+        let fieldParent = try XCTUnwrap(raw.nodes.first { $0.nodeID == field.parentNodeID })
+        XCTAssertEqual(toolbar.role, "toolbar"); XCTAssertEqual(fieldParent.role, "textbox")
+        for row in [toolbar, fieldParent] {
+            XCTAssertTrue(row.isIgnored); XCTAssertTrue(row.isDisabled); XCTAssertTrue(row.isReadOnly)
+            XCTAssertFalse(row.isDOMClickable); XCTAssertFalse(row.isEditable)
+            XCTAssertEqual(row.name, ""); XCTAssertNil(row.value)
+        }
+        XCTAssertFalse(raw.nodes.contains { $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        let untouched = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,hiddenClicks:window.hiddenClicks};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+            ["clicks": 0, "inputs": 0, "hiddenClicks": 0])
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "css-\(visibility)", processIdentifier: 42, target: target)
+        let all = try await broker.snapshot(taskKey: "css-\(visibility)", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        XCTAssertFalse(all.snapshot.elements.contains { $0.label.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        let observedAction = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Visible child action" })
+        try await broker.perform(taskKey: "css-\(visibility)", binding: all.binding, snapshot: all.snapshot,
+            elementIndex: observedAction.index, action: "AXPress")
+        let fresh = try await broker.snapshot(taskKey: "css-\(visibility)", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let observedField = try XCTUnwrap(fresh.snapshot.elements.first { $0.label == "Visible child field" })
+        try await broker.setText(taskKey: "css-\(visibility)", binding: fresh.binding, snapshot: fresh.snapshot,
+            elementIndex: observedField.index, text: "synthetic@example.test")
+        let content = try await broker.snapshot(taskKey: "css-\(visibility)", binding: fresh.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content))
+        XCTAssertTrue(content.snapshot.elements.contains { $0.label == "Visible body" })
+        for excluded in ["Visible child action", "VISIBLE_CONTROL_TEXT", "synthetic@example.test"] {
+            XCTAssertFalse(content.snapshot.elements.contains { $0.label.contains(excluded) || ($0.value ?? "").contains(excluded) },
+                "Ignored semantic ancestors must retain body-versus-control scope: \(excluded)")
+        }
+        let effects = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,hiddenClicks:window.hiddenClicks,value:document.getElementById('field').value};")
+        let final = try XCTUnwrap(JSONSerialization.jsonObject(with: effects) as? [String: Any])
+        XCTAssertEqual(final["clicks"] as? Int, 1); XCTAssertEqual(final["inputs"] as? Int, 1)
+        XCTAssertEqual(final["hiddenClicks"] as? Int, 0)
+        XCTAssertEqual(final["value"] as? String, "synthetic@example.test")
+        try await broker.revoke(taskKey: "css-\(visibility)", binding: content.binding)
+    }
+
+    func testCSSVisibilityOverrideCannotBypassCurrentHideObstructionOrChangedParent() async throws {
+        let (session, transport, view, target, window) = try await cssVisibilityFixture("hidden")
+        defer { session.shutdown(); window.close() }
+        var observed = try await transport.observe(target: target)
+        var action = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child action" })
+        _ = try await script(view, "document.getElementById('action').style.visibility='hidden'; return true;")
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(action.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            XCTFail("A currently hidden child cannot use a formerly visible reference")
+        } catch { }
+        _ = try await script(view, "document.getElementById('action').style.visibility='visible'; return true;")
+        observed = try await transport.observe(target: target)
+        let field = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child field" })
+        _ = try await script(view, "const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;z-index:9999;background:white';document.body.append(cover);return true;")
+        do {
+            try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "MUST_NOT_APPEAR", document: observed, permit: BrowserMutationPermit())
+            XCTFail("The inherited visibility fix cannot bypass the real hit-test")
+        } catch { }
+        _ = try await script(view, "document.getElementById('cover').remove(); return true;")
+        observed = try await transport.observe(target: target)
+        action = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child action" })
+        _ = try await script(view, "const parent=document.getElementById('toolbar'), replacement=parent.cloneNode(false); parent.before(replacement); replacement.append(document.getElementById('action')); return true;")
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(action.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            XCTFail("A physical child moved to a new hidden semantic parent needs a fresh reference")
+        } catch { }
+        let effects = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,value:document.getElementById('field').value};")
+        let final = try XCTUnwrap(JSONSerialization.jsonObject(with: effects) as? [String: Any])
+        XCTAssertEqual(final["clicks"] as? Int, 0); XCTAssertEqual(final["inputs"] as? Int, 0)
+        XCTAssertEqual(final["value"] as? String, "")
+    }
+
+    func testCSSHiddenStructureAloneCannotEstablishSemanticReadiness() async throws {
+        let body = """
+        <div role="toolbar" aria-label="EXCLUDED_TOOLBAR" style="visibility:hidden">
+          <button>EXCLUDED_ACTION</button><span style="visibility:visible"></span>
+        </div>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let pending = Task { try await transport.observeForRead(target: target) }
+        try await waitForSemanticObserver(view)
+        let observed = try await pending.value
+        XCTAssertEqual(observed.semanticReadiness, .emptyAtDeadline)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        XCTAssertFalse(observed.nodes.contains { $0.isDOMClickable || $0.isEditable })
+        XCTAssertFalse(observed.sourceTruncated, "CSS suppression is not a source-budget limit")
+    }
+
+    func testCSSHiddenStructureWithoutVisibleDescendantsDoesNotConsumeCaptureOutputBudget() async throws {
+        let hidden = "<div role='button' aria-label='EXCLUDED_HIDDEN' style='visibility:hidden'>EXCLUDED_BODY</div>"
+        let body = "<main>" + String(repeating: hidden, count: 700)
+            + "<div role='toolbar' style='visibility:hidden'><button style='visibility:visible'>Later visible action</button></div></main>"
+        let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let observed = try await transport.observe(target: target)
+        let action = try XCTUnwrap(observed.nodes.first { $0.name == "Later visible action" })
+        let parent = try XCTUnwrap(observed.nodes.first { $0.nodeID == action.parentNodeID })
+        XCTAssertEqual(parent.role, "toolbar"); XCTAssertTrue(parent.isIgnored)
+        XCTAssertFalse(observed.sourceTruncated, "Unrendered leaves must not starve later visible content by spending output bytes")
+        XCTAssertLessThan(observed.nodes.count, 12)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") })
+        let diagnostic = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertEqual(diagnostic.stopReason, .none)
+        XCTAssertLessThan(diagnostic.estimatedBytes, 10_000)
+    }
+
+    func testDiscoveryDiagnosticsDistinguishBoundedPanelStatesWithoutReadingHiddenText() async throws {
+        let body = """
+        <main>
+          <form><button>Rendered fixture action</button></form>
+          <div role="dialog" style="display:none">EXCLUDED_DISPLAY<form></form></div>
+          <div role="dialog" hidden style="display:block">EXCLUDED_HARD<form></form></div>
+          <div role="dialog" style="visibility:hidden">EXCLUDED_VISIBILITY
+            <button style="visibility:visible">Visible override</button>
+          </div>
+          <div role="dialog" style="display:contents"><p>Boxless fixture text</p></div>
+        </main>
+        """
+        let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let observed = try await transport.observe(target: target)
+        let diagnostic = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        let discovery = try XCTUnwrap(diagnostic.discovery)
+        XCTAssertEqual(discovery.panelsByState, [1, 1, 1, 1, 1])
+        XCTAssertEqual(discovery.prunedSubtrees, 2, "Only outer-walk encountered hard exclusions are counted; their descendants remain unvisited")
+        XCTAssertFalse(discovery.limitReached)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") })
+        XCTAssertTrue(observed.nodes.contains { $0.name == "Visible override" && $0.isDOMClickable })
+        let encoded = try JSONEncoder().encode(diagnostic)
+        XCTAssertLessThanOrEqual(encoded.count, 768)
+        let text = String(decoding: encoded, as: UTF8.self)
+        for privateText in ["EXCLUDED_", "fixture", "Visible override", "localhost"] {
+            XCTAssertFalse(text.contains(privateText))
+        }
+    }
+
+    private func cssVisibilityFixture(_ visibility: String) async throws
+        -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget, NSWindow) {
+        let session = EmbeddedBrowserSession(persistent: false), window = attachRenderHost(to: session)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString("""
+            <!doctype html><main><p>Visible body</p>
+            <div id="toolbar" role="toolbar" aria-label="EXCLUDED_TOOLBAR_LABEL" style="visibility:\(visibility)">
+              EXCLUDED_HIDDEN_TEXT<button id="action" style="visibility:visible" onclick="window.clicks++">Visible child action</button>
+              <button id="inherited" onclick="window.hiddenClicks++">EXCLUDED_INHERITED_ACTION</button>
+            </div>
+            <div role="button" aria-label="EXCLUDED_CONTROL_LABEL" style="visibility:\(visibility)" onclick="window.hiddenClicks++">
+              <span style="visibility:visible">VISIBLE_CONTROL_TEXT</span>
+            </div>
+            <div role="textbox" aria-label="EXCLUDED_FIELD_LABEL" style="visibility:\(visibility)">
+              EXCLUDED_HIDDEN_VALUE<input id="field" aria-label="Visible child field" style="visibility:visible">
+            </div>
+            <div style="display:none"><button style="visibility:visible">EXCLUDED_DISPLAY_NONE_ACTION</button></div>
+            <div hidden style="display:block"><button style="visibility:visible">EXCLUDED_HIDDEN_ATTRIBUTE_ACTION</button></div>
+            <div inert><button style="visibility:visible">EXCLUDED_INERT_ACTION</button></div>
+            <div aria-hidden="true"><button style="visibility:visible">EXCLUDED_ARIA_HIDDEN_ACTION</button></div>
+            </main><script>window.clicks=0;window.inputs=0;window.hiddenClicks=0;
+            document.addEventListener('input',()=>window.inputs++);</script>
+            """, baseURL: URL(string: "http://localhost:8123/css-\(visibility)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        try await transport.acquireRendering(target: target, lifetime: BrowserTabLifetime())
+        return (session, transport, view, target, window)
+    }
+
     func testDisplayContentsTraversalDoesNotExposeHiddenAriaHiddenOrInertDescendants() async throws {
         let body = """
         <main><p>VISIBLE_CONTROL_BODY</p>
@@ -1706,14 +2008,16 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 1_000_000)
             XCTAssertGreaterThan(diagnostics.viewportWidth, 0); XCTAssertGreaterThan(diagnostics.viewportHeight, 0)
             if name == "byte-budget" {
-                XCTAssertGreaterThan(diagnostics.estimatedBytes, 220_000)
+                XCTAssertGreaterThan(diagnostics.estimatedBytes, 200_000)
+                XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 220_000,
+                    "Atomic visible-row and ancestry reservation stops before crossing the existing byte budget")
                 XCTAssertEqual(diagnostics.frames + diagnostics.shadowRoots + diagnostics.oversizedRoles + diagnostics.clippedFields, 0)
             } else {
                 XCTAssertEqual(diagnostics.frames, 1); XCTAssertEqual(diagnostics.shadowRoots, 1)
                 XCTAssertEqual(diagnostics.oversizedRoles, 1); XCTAssertEqual(diagnostics.clippedFields, 1)
             }
             let encoded = try JSONEncoder().encode(diagnostics)
-            XCTAssertLessThan(encoded.count, 512)
+            XCTAssertLessThanOrEqual(encoded.count, 768)
             let text = String(decoding: encoded, as: UTF8.self)
             XCTAssertFalse(text.contains("Fixture")); XCTAssertFalse(text.contains("http"))
             var invalid = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
