@@ -1141,7 +1141,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(normalized.contains("Read content/all for the available receipt/status"))
         XCTAssertTrue(normalized.contains("compare its destination and content with the task before claiming success"))
         XCTAssertTrue(normalized.contains("Never resubmit to obtain verification"))
-        XCTAssertLessThan(guidance.utf8.count, 800, "Keep input and outcome verification guidance bounded")
+        XCTAssertTrue(normalized.contains("Read current options and select only an unambiguous intended match via click_ref"))
+        XCTAssertTrue(normalized.contains("Resolve covering popups, then re-read the next field before filling"))
+        XCTAssertLessThan(guidance.utf8.count, 1_000,
+                          "Input, outcome and observed popup-selection guidance stays below one KB")
         for delivered in [ComputaAgentInstructions.builtInBrowser,
                           ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
                           ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_fill", "relay.browser_click"])] {

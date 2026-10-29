@@ -85,6 +85,9 @@ enum ComputaAgentInstructions {
     current submission state. If explicitly authorized, values match and submission
     is pending, request its distinct observed submit once, then verify a new receipt.
     Filling alone does not complete a requested submission.
+    Combobox fills can leave suggestions open. Read current options and select only
+    an unambiguous intended match via click_ref. Resolve covering popups, then re-read
+    the next field before filling.
     A heading-only overview can omit receipt details. Read content/all for the
     available receipt/status and compare its destination and content with the task
     before claiming success. Never resubmit to obtain verification.

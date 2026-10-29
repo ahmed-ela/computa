@@ -35,6 +35,124 @@ func compactMailboxFixtureNodes(message: String = "Please confirm Tuesday at 10:
 }
 
 final class BrowserTabSessionBrokerTests: XCTestCase {
+    func testOverviewChoicesKeepFirstActionAndReadableSampleWithinCompactBudgetWithoutLosingPagination() async throws {
+        for role in ["option", "menuitem", "menuitemcheckbox", "menuitemradio"] {
+            let fixture=try await BrowserBrokerTestFixture.make()
+            let scope=role == "option" ? "listbox" : "menu"
+            let choices=(100..<107).map {
+                semanticNode($0,role:role,name:"Choice \($0)" + ($0 == 100 ? "" : " " + String(repeating:"é",count:500)),parent:"n90",clickable:true)
+            }
+            let body=semanticNode(60,role:"StaticText",name:"Readable sample " + String(repeating:"x",count:1000),parent:"n80")
+            let nodes=[semanticNode(1,role:"textbox",name:"Current field",parent:"n50"),
+                       semanticNode(2,role:"button",name:"Commit",parent:"n50"),
+                       semanticNode(50,role:"form",name:"Observed form",children:["n1","n2"]),body,
+                       semanticNode(80,role:"main",name:"",children:["n60"]),
+                       semanticNode(90,role:scope,name:"Observed choices",children:choices.compactMap(\.nodeID))] + choices
+            try await fixture.transport.replaceNodes(targetID:fixture.observation.binding.targetID,nodes:nodes,sourceTruncated:true)
+            var page=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+                bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.overview),compact:true)
+            XCTAssertEqual(page.snapshot.elements.prefix(4).map(\.backendNodeID),[51,2,101,61],role)
+            XCTAssertTrue(page.snapshot.elements.contains { $0.backendNodeID == 101 && $0.supportsPress })
+            XCTAssertTrue(page.snapshot.elements.contains { $0.backendNodeID == 61 && $0.contentKind == .readable })
+            let source=try XCTUnwrap(page.snapshot.readReceipt?.sourceID)
+            var seen=[Int64](),fields=[String:Data](),fragments=Set<String>()
+            repeat {
+                XCTAssertEqual(page.snapshot.readReceipt?.sourceID,source)
+                XCTAssertLessThanOrEqual(page.snapshot.elements.count,18)
+                XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count,16_384)
+                for element in page.snapshot.elements where seen.last != element.backendNodeID { seen.append(element.backendNodeID) }
+                let receipt=try XCTUnwrap(page.snapshot.readReceipt),presentation=try XCTUnwrap(page.snapshot.presentation)
+                for exposure in receipt.exposures {
+                    let key="\(exposure.nodeID):\(exposure.field.rawValue)"
+                    XCTAssertTrue(fragments.insert("\(key):\(exposure.startUTF8):\(exposure.endUTF8)").inserted)
+                    XCTAssertEqual(exposure.startUTF8,fields[key,default:Data()].count)
+                    let element=try XCTUnwrap(page.snapshot.elements.first { "backend:\($0.backendNodeID)" == exposure.nodeID })
+                    let row=try XCTUnwrap(presentation.rows.first { $0.index == element.index })
+                    let fragment=try renderedJSONField(exposure.field.rawValue,in:row.text)
+                    fields[key,default:Data()].append(contentsOf:fragment.utf8)
+                }
+                guard let cursor=page.snapshot.nextCursor else { break }
+                page=try await fixture.broker.snapshot(taskKey:"task-a",binding:page.binding,bundleIdentifier:"com.ahmedelamin.LocalCodex",
+                    read:.init(cursor:cursor),compact:true)
+            } while true
+            let expected=nodes.filter { $0.role != "main" }.compactMap(\.backendNodeID)
+            XCTAssertEqual(Set(seen),Set(expected));XCTAssertEqual(seen.count,expected.count)
+            XCTAssertEqual(fields["backend:61:label"],Data(body.name.utf8))
+            for choice in choices {
+                XCTAssertEqual(fields["backend:\(try XCTUnwrap(choice.backendNodeID)):label"],Data(choice.name.utf8))
+            }
+            await fixture.assertNoInput()
+        }
+    }
+
+    func testOverviewChoicePromotionRejectsMalformedHiddenDisabledAndUnsupportedAncestry() async throws {
+        for scenario in ["missing", "cycle", "duplicate", "ignored", "ignored_option", "disabled_ancestor", "disabled_option", "unsupported",
+                         "wrong_scope", "navigation", "bare_option"] {
+            let fixture=try await BrowserBrokerTestFixture.make()
+            let choice=BrowserDocumentNode(backendNodeID:101,role:"option",name:"Choice",value:nil,
+                isDisabled:scenario == "disabled_option",isReadOnly:true,isIgnored:scenario == "ignored_option",nodeID:"n100",
+                parentNodeID:scenario == "bare_option" ? nil : "n90",isDOMClickable:true,isPressUnsupported:scenario == "unsupported")
+            let scope=BrowserDocumentNode(backendNodeID:91,role:scenario == "wrong_scope" ? "menu" : "listbox",name:"Choices",value:nil,
+                isDisabled:scenario == "disabled_ancestor",isReadOnly:true,isIgnored:scenario == "ignored",nodeID:"n90",
+                parentNodeID:scenario == "missing" ? "absent" : (scenario == "cycle" ? "n100" : "n80"),childNodeIDs:["n100"])
+            var nodes=[semanticNode(1,role:"textbox",name:"Field",parent:"n50"),semanticNode(2,role:"button",name:"Commit",parent:"n50"),
+                       semanticNode(50,role:"form",name:"Form",children:["n1","n2"]),
+                       semanticNode(60,role:"StaticText",name:"Readable sample"),choice,scope,
+                       semanticNode(80,role:scenario == "navigation" ? "navigation" : "main",name:"",children:["n90"])]
+            if scenario == "duplicate" { nodes.append(scope) }
+            try await fixture.transport.replaceNodes(targetID:fixture.observation.binding.targetID,nodes:nodes)
+            let page=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+                bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.overview))
+            XCTAssertEqual(page.snapshot.elements.prefix(3).map(\.backendNodeID),[51,2,61],scenario)
+            if scenario == "unsupported" { XCTAssertFalse(try XCTUnwrap(page.snapshot.elements.first { $0.backendNodeID == 101 }).supportsPress) }
+            if scenario == "disabled_option" { XCTAssertFalse(try XCTUnwrap(page.snapshot.elements.first { $0.backendNodeID == 101 }).isEnabled) }
+            if scenario == "ignored_option" { XCTAssertFalse(page.snapshot.elements.contains { $0.backendNodeID == 101 }) }
+            await fixture.assertNoInput()
+        }
+    }
+
+    func testOverviewChoicePromotionDoesNotNeedSmallFormAndLeavesExplicitViewsAndFiltersUnchanged() async throws {
+        let fixture=try await BrowserBrokerTestFixture.make()
+        let fields=(1...9).map { semanticNode($0,role:"textbox",name:"Field \($0)",parent:"n50") }
+        let nodes=fields + [semanticNode(50,role:"form",name:"Large form",children:fields.compactMap(\.nodeID)),
+                           semanticNode(60,role:"StaticText",name:"Current readable sample"),
+                           semanticNode(100,role:"option",name:"Observed choice",parent:"n90",clickable:true),
+                           semanticNode(90,role:"listbox",name:"Available choices",children:["n100"])]
+        try await fixture.transport.replaceNodes(targetID:fixture.observation.binding.targetID,nodes:nodes)
+        let overview=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+            bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.overview),compact:true)
+        XCTAssertEqual(overview.snapshot.elements.prefix(2).map(\.backendNodeID),[101,61])
+        let all=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+            bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.all))
+        XCTAssertEqual(all.snapshot.elements.first?.backendNodeID,2)
+        let filtered=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+            bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(query:"Field",view:.overview))
+        XCTAssertEqual(filtered.snapshot.elements.map(\.backendNodeID),Array(2...10).map(Int64.init))
+        await fixture.assertNoInput()
+    }
+
+    func testOverviewChoiceUsesEnabledLeafUnderNonactionablePassiveGroupWithoutGrantingWrapperInput() async throws {
+        for disabledLeaf in [false,true] {
+            let fixture=try await BrowserBrokerTestFixture.make()
+            let passive=BrowserDocumentNode(backendNodeID:81,role:"group",name:"Passive layout",value:nil,
+                isDisabled:true,isReadOnly:true,isIgnored:false,nodeID:"n80",parentNodeID:"n90",childNodeIDs:["n100"],
+                isPressUnsupported:true,isExplicitlyNamedContainer:true)
+            let nodes=[semanticNode(1,role:"textbox",name:"Field",parent:"n50"),semanticNode(2,role:"button",name:"Commit",parent:"n50"),
+                       semanticNode(50,role:"form",name:"Form",children:["n1","n2"]),semanticNode(60,role:"StaticText",name:"Readable sample"),
+                       semanticNode(100,role:"option",name:"Choice",parent:"n80",clickable:true,disabled:disabledLeaf),passive,
+                       semanticNode(90,role:"listbox",name:"Choices",children:["n80"])]
+            try await fixture.transport.replaceNodes(targetID:fixture.observation.binding.targetID,nodes:nodes)
+            let page=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+                bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.overview))
+            XCTAssertEqual(page.snapshot.elements.prefix(3).map(\.backendNodeID),disabledLeaf ? [51,2,61] : [51,2,101])
+            let all=try await fixture.broker.snapshot(taskKey:"task-a",binding:fixture.observation.binding,
+                bundleIdentifier:"com.ahmedelamin.LocalCodex",read:.init(view:.all))
+            let group=try XCTUnwrap(all.snapshot.elements.first { $0.backendNodeID == 81 })
+            XCTAssertFalse(group.isEnabled);XCTAssertFalse(group.supportsPress);XCTAssertFalse(group.supportsSetText)
+            await fixture.assertNoInput()
+        }
+    }
+
     func testOverviewShowsUnlandmarkedReceiptBodyWithoutPromotingItsProvenanceOrAuthority() async throws {
         for compact in [false, true] {
             let fixture = try await BrowserBrokerTestFixture.make()

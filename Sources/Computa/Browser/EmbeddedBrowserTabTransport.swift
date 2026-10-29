@@ -183,6 +183,21 @@ struct BrowserActionFailureDiagnostic: Encodable, Equatable, Sendable {
             return Self(reason: reason, centerX: x, centerY: y, hitTag: tag, hitRole: role, relation: relation)
         }
     }
+    static let genericActionFailureDetail = "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+
+    /// Guidance reports only the strictly decoded covering role. It does not
+    /// identify a recipient, infer popup membership, or prove zero dispatch.
+    var publicFailureDetail: String {
+        guard code == .elementObstructed, [.initialHitTest, .focusedHitTest].contains(stage),
+              let hitTest, hitTest.reason == .foreignHit,
+              hitTest.centerX == .inside, hitTest.centerY == .inside,
+              [.ancestor, .other].contains(hitTest.relation), hitTest.hitTag != .none,
+              [.option, .listbox].contains(hitTest.hitRole) else { return Self.genericActionFailureDetail }
+        let coveringRole = hitTest.hitRole == .option ? "An option" : "A listbox"
+        return "The built-in action could not be confirmed. \(coveringRole) covers the target at its hit-test point. "
+            + "No replay is allowed; read the current page controls and popups before choosing another action with a fresh observed reference."
+    }
+
     let version = 1
     let operation: Operation
     let stage: Stage
@@ -729,7 +744,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                                     .failure(
                                         BrowserTabBrokerError.browserUnavailable(
                                             mutation
-                                                ? "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+                                                ? actionFailure?.publicFailureDetail ?? BrowserActionFailureDiagnostic.genericActionFailureDetail
                                                 : "The built-in page could not be inspected. Its document may have changed."
                                         ))
                                 )

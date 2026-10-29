@@ -10,6 +10,241 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testCoveringOptionGuidanceRequiresStrictFiniteEvidenceAndPreservesFailureCategory() throws {
+        let valid: [String: Any] = ["reason":"foreign_hit", "centerX":"inside", "centerY":"inside", "hitTag":"div", "hitRole":"option", "relation":"other"]
+        func detail(_ hit: [String: Any]?, stage: String = "initial_hit_test", code: String = "element_obstructed") -> String {
+            var fields: [String: Any] = ["version":1, "operation":"fill", "stage":stage, "code":code]
+            if let hit { fields["hitTest"] = hit }
+            return BrowserActionFailureDiagnostic.decode(["browserActionFailure":fields], operation:"fill")?.publicFailureDetail
+                ?? BrowserActionFailureDiagnostic.genericActionFailureDetail
+        }
+        for role in ["option", "listbox"] {
+            for stage in ["initial_hit_test", "focused_hit_test"] {
+                var hit=valid; hit["hitRole"]=role
+                let output=ComputerToolFailureEvidence.text(for:BrowserTabBrokerError.browserUnavailable(detail(hit,stage:stage)),tool:"browser_fill")
+                XCTAssertTrue(output.hasPrefix("The browser tab broker is unavailable: "))
+                XCTAssertTrue(output.contains("\(role == "option" ? "An option" : "A listbox") covers the target at its hit-test point."))
+                XCTAssertTrue(output.contains("No replay is allowed; read the current page controls and popups"))
+                XCTAssertFalse(output.contains("not dispatched")); XCTAssertFalse(output.contains("recipient"))
+                XCTAssertFalse(output.contains("PRIVATE_CANARY"))
+            }
+        }
+        let generic=BrowserActionFailureDiagnostic.genericActionFailureDetail
+        XCTAssertEqual(detail(nil),generic)
+        for alteration: [String: Any] in [["hitRole":"tooltip"], ["hitRole":"PRIVATE_CANARY"], ["hitTag":"PRIVATE_CANARY"],
+                                         ["centerX":"before"], ["centerY":"unknown"], ["relation":"self"],
+                                         ["reason":"rect_nonfinite"], ["reason":"null_hit"], ["centerX":Double.nan],
+                                         ["centerY":Double.infinity], ["label":"PRIVATE_CANARY"]] {
+            var hit=valid;hit.merge(alteration){_,new in new}
+            XCTAssertEqual(detail(hit),generic)
+        }
+        XCTAssertEqual(detail(valid,stage:"value_write"),generic)
+        XCTAssertEqual(detail(valid,code:"unexpected"),generic)
+        let legacy=ComputerToolFailureEvidence.text(for:BrowserTabBrokerError.browserUnavailable(generic),tool:"browser_fill")
+        XCTAssertEqual(legacy,"The browser tab broker is unavailable: " + generic)
+    }
+
+    func testRealWebKitCompactPopupOptionSupportsFreshSelectionThenSubjectAndSyntheticSend() async throws {
+        let session=EmbeddedBrowserSession(persistent:false),window=attachRenderHost(to:session)
+        defer { session.shutdown();window.close() }
+        // The bundled driver permits a same-binary comparison with the prior
+        // capture implementation; fixture oracles never grant action refs.
+        let transport=EmbeddedBrowserTabTransport(session:session)
+        let controller=EmbeddedBrowserToolController(transport:transport)
+        let id=try session.createTab(),view=try XCTUnwrap(session.webView(for:id))
+        let rows=(0..<300).map { "<div role='row'><p>Synthetic background \($0) \(String(repeating:"x",count:1000))</p></div>" }.joined()
+        var popup="<div id='choice' role='option' tabindex='0' onclick='window.selectRecipient()'>Fixture Recipient</div>"
+        for depth in (0..<12).reversed() {
+            let head=(0..<5).map { "<span>Head\(depth)-\($0) </span>" }.joined()
+            let tail=(0..<5).map { "<span>Tail\(depth)-\($0) </span>" }.joined()
+            popup="<div>\(head)\(popup)\(tail)</div>"
+        }
+        popup="<div aria-label='Passive popup layout'>\(popup)</div>"
+        view.loadHTMLString("""
+            <!doctype html><style>
+            #compose{position:fixed;left:20px;top:20px;width:360px;height:230px;background:white;z-index:10}
+            #recipient,#subject,#send{position:fixed;left:30px;width:280px;height:28px}
+            #recipient{top:30px}#subject{top:100px}#send{top:170px}
+            #popup{position:fixed;left:30px;top:100px;width:300px;height:35px;background:white;z-index:20;font:1px sans-serif}
+            #choice{position:fixed;left:30px;top:100px;width:300px;height:35px;background:white;font:14px sans-serif}
+            </style><main aria-label='Inbox'><form><input type='search' aria-label='Site search'></form>\(rows)</main>
+            <form id='compose' aria-label='Synthetic compose' onsubmit='event.preventDefault()'>
+              <input id='recipient' role='combobox' aria-label='Recipients' aria-expanded='false'>
+              <input id='subject' aria-label='Subject'><button type='button' id='send' onclick='window.sendFixture()'>Send fixture</button>
+            </form><div id='popup' role='listbox' aria-label='Recipient choices' hidden>\(popup)</div>
+            <script>
+            window.selected=0;window.subjectInputs=0;window.subjectFocuses=0;window.sends=0;window.inputs=0;
+            const recipient=document.getElementById('recipient'),subject=document.getElementById('subject'),popup=document.getElementById('popup');
+            document.addEventListener('input',()=>window.inputs++);
+            subject.addEventListener('input',()=>window.subjectInputs++);subject.addEventListener('focus',()=>window.subjectFocuses++);
+            recipient.addEventListener('input',()=>{popup.hidden=false;recipient.setAttribute('aria-expanded','true');});
+            window.selectRecipient=()=>{window.selected++;recipient.value='synthetic@example.test';recipient.setAttribute('aria-expanded','false');popup.remove();};
+            window.sendFixture=()=>{if(window.selected===1&&recipient.value==='synthetic@example.test'&&subject.value==='Hi'){
+              window.sends++;document.getElementById('compose').innerHTML='<h1>Synthetic send recorded</h1><p>Fixture receipt only</p>';
+            }};</script>
+            """,baseURL:URL(string:"http://localhost:8123/popup-fixture"))
+        try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_tabs",arguments:Data("{}".utf8))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_bind",arguments:JSONSerialization.data(withJSONObject:["tab_id":id.uuidString]))
+        var read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        var recipientFill=try inputReference(read,label:"Recipients",fill:true);recipientFill["text"]="synthetic"
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:recipientFill))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        var subjectFill=try inputReference(read,label:"Subject",fill:true);subjectFill["text"]="Hi"
+        do {
+            _ = try await controller.executeResult(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:subjectFill))
+            XCTFail("A covering option must still reject Subject fill without an input receipt")
+        } catch {
+            XCTAssertTrue(error is BrowserTabBrokerError)
+            let text=ComputerToolFailureEvidence.text(for:error,tool:"browser_fill")
+            XCTAssertTrue(text.hasPrefix("The browser tab broker is unavailable: "))
+            XCTAssertTrue(text.contains("An option covers the target at its hit-test point."))
+            XCTAssertTrue(text.contains("No replay is allowed"));XCTAssertFalse(text.contains("not dispatched"))
+        }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.stage,.initialHitTest)
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.hitTest?.hitRole,.option)
+        let blocked=try await script(view,"return {selected:window.selected,subjectInputs:window.subjectInputs,subjectFocuses:window.subjectFocuses,sends:window.sends,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:blocked) as? [String:Int],
+            ["selected":0,"subjectInputs":0,"subjectFocuses":0,"sends":0,"inputs":1])
+
+        // A default compact first page, without a label query or cursor, must
+        // supply the option and its actual issued click reference to the model.
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let optionRow=try XCTUnwrap(read.split(separator:"\n").first { $0.hasPrefix("#") && $0.contains("label=\"Fixture Recipient\"") },
+            "The compact first page must publish the observed covering option without a guessed query or continuation")
+        XCTAssertTrue(optionRow.contains("actions=[\"AXPress\"]"));XCTAssertTrue(optionRow.contains("click_ref=\""))
+        XCTAssertTrue(read.contains("source_truncated=1"));XCTAssertLessThanOrEqual(read.utf8.count,16_384)
+        let capture=try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertEqual(capture.stopReason,.byteBudget);XCTAssertLessThanOrEqual(capture.estimatedBytes,220_000)
+        XCTAssertGreaterThan(try XCTUnwrap(capture.scheduling).partialPanels,0)
+        XCTAssertLessThan(try XCTUnwrap(capture.scheduling).discoverySlots,4_096)
+        let stale=reference(in:optionRow)
+        _ = try await script(view,"const old=document.getElementById('choice');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:stale))
+            XCTFail("Publication cannot authorize an identical replacement")
+        } catch { }
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let covered=try inputReference(read,label:"Fixture Recipient")
+        _ = try await script(view,"const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;background:white;z-index:999';document.body.append(cover);return true;")
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:covered))
+            XCTFail("An observed option cannot bypass the current hit-test")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementObstructed)
+        _ = try await script(view,"document.getElementById('cover').remove();return true;")
+        let noSelection=try await script(view,"return {selected:window.selected,sends:window.sends};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:noSelection) as? [String:Int],["selected":0,"sends":0])
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:inputReference(read,label:"Fixture Recipient")))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        subjectFill=try inputReference(read,label:"Subject",fill:true);subjectFill["text"]="Hi"
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:subjectFill))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let send=try JSONSerialization.data(withJSONObject:inputReference(read,label:"Send fixture"))
+        let result=try await controller.executeResult(taskKey:"popup",tool:"browser_click",arguments:send)
+        let reply=try XCTUnwrap(JSONSerialization.jsonObject(with:Data(result.response.utf8)) as? [String:Any])
+        XCTAssertEqual(reply["dispatched"] as? Bool,true);XCTAssertEqual(reply["no_replay"] as? Bool,true)
+        XCTAssertEqual(reply["result_verified"] as? Bool,false,"Displayed synthetic receipt is not external delivery proof")
+        XCTAssertTrue(result.response.contains("Synthetic send recorded"))
+        let finished=try await script(view,"return {selected:window.selected,subjectInputs:window.subjectInputs,subjectFocuses:window.subjectFocuses,sends:window.sends,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:finished) as? [String:Int],
+            ["selected":1,"subjectInputs":1,"subjectFocuses":1,"sends":1,"inputs":2])
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:send)
+            XCTFail("The consumed Send reference cannot replay")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError,.staleSnapshot) }
+        _ = await controller.shutdown()
+        XCTAssertNotNil(session.webView(for:id),"Borrowed human tab must be retained after release")
+    }
+
+    func testFooterDiscoveryRetainsDeepDialogControlBeyondCompactProbe() async throws {
+        try await verifyDeepFooterDiscovery(dialog:true)
+    }
+
+    func testFooterDiscoveryRetainsDeepFormControlBeyondCompactProbe() async throws {
+        try await verifyDeepFooterDiscovery(dialog:false)
+    }
+
+    private func verifyDeepFooterDiscovery(dialog:Bool) async throws {
+        let session=EmbeddedBrowserSession(persistent:false),window=attachRenderHost(to:session)
+        defer { session.shutdown();window.close() }
+        // Use the bundled resource so the exact same binary can qualify the
+        // immutable prior driver and candidate without replacing source files.
+        let transport=EmbeddedBrowserTabTransport(session:session)
+        let id=try session.createTab(),view=try XCTUnwrap(session.webView(for:id))
+        let rows=(0..<300).map { "<div role='row'><p>Synthetic background \($0) \(String(repeating:"x",count:1000))</p></div>" }.joined()
+        var footer="<div id='footer' role='toolbar'><button type='button' id='confirm' onclick='window.clicks++'>Confirm footer</button></div>"
+        for depth in (0..<12).reversed() {
+            let head=(0..<5).map { "<span>Head\(depth)-\($0) </span>" }.joined()
+            let tail=(0..<5).map { "<span>Tail\(depth)-\($0) </span>" }.joined()
+            footer="<div>\(head)\(footer)\(tail)</div>"
+        }
+        let tag=dialog ? "div" : "form",role=dialog ? " role='dialog'" : ""
+        view.loadHTMLString("""
+            <!doctype html><style>#panel{position:fixed;right:16px;top:16px;width:360px;max-height:700px;overflow:auto;background:white;z-index:10;font:12px sans-serif}#panel span{font-size:10px}</style>
+            <main aria-label='Inbox'><form><input type='search' aria-label='Site search'></form>\(rows)</main>
+            <\(tag) id='panel'\(role) aria-label='Synthetic panel'><input id='recipient' aria-label='Recipients'>\(footer)</\(tag)>
+            <script>window.clicks=0;window.inputs=0;document.addEventListener('input',()=>window.inputs++);</script>
+            """,baseURL:URL(string:"http://localhost:8123/deep-footer-\(dialog)"))
+        try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
+        let available=try await transport.target(id:id.uuidString),target=try XCTUnwrap(available)
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        _ = try await script(view,"document.getElementById('recipient').focus();return true;")
+        let generation=session.documentGeneration(for:id)
+        let raw=try await transport.observe(target:target)
+        let diagnostics=try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated);XCTAssertEqual(diagnostics.stopReason,.byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes,220_000);XCTAssertLessThanOrEqual(raw.nodes.count,3_000)
+        XCTAssertLessThanOrEqual(diagnostics.visited,20_001)
+        let scheduling=try XCTUnwrap(diagnostics.scheduling)
+        XCTAssertGreaterThan(scheduling.partialPanels,0,"The compact panel probe must exhaust its unchanged64 slots")
+        XCTAssertLessThan(scheduling.discoverySlots,4_096)
+        XCTAssertEqual(diagnostics.discovery?.limitReached,false)
+        let action=try XCTUnwrap(raw.nodes.first { $0.name=="Confirm footer" },
+            "An already-discovered visible footer control beyond64 panel slots must survive the220KB capture budget")
+        let toolbar=try XCTUnwrap(raw.nodes.first { $0.role=="toolbar" })
+        let panel=try XCTUnwrap(raw.nodes.first { $0.name=="Synthetic panel" })
+        XCTAssertEqual(panel.role,dialog ? "dialog" : "form")
+        XCTAssertEqual(action.parentNodeID,toolbar.nodeID)
+        XCTAssertEqual(toolbar.parentNodeID,panel.nodeID,"Unnamed layout wrappers do not invent semantic ancestors")
+        XCTAssertTrue(toolbar.childNodeIDs.contains(try XCTUnwrap(action.nodeID)))
+        XCTAssertTrue(panel.childNodeIDs.contains(try XCTUnwrap(toolbar.nodeID)))
+        XCTAssertTrue(action.isDOMClickable);XCTAssertFalse(action.isDisabled)
+        let oracle=try await script(view,"""
+            const action=document.getElementById('confirm'),rect=action.getBoundingClientRect();
+            return {nodes:document.getElementById('panel').querySelectorAll('*').length,
+              physicalParent:action.parentElement.id,rendered:rect.width>0&&rect.height>0&&getComputedStyle(action).visibility==='visible',
+              clicks:window.clicks,inputs:window.inputs};
+            """)
+        let independent=try XCTUnwrap(JSONSerialization.jsonObject(with:oracle) as? [String:Any])
+        XCTAssertGreaterThan(try XCTUnwrap(independent["nodes"] as? Int),128)
+        XCTAssertEqual(independent["physicalParent"] as? String,"footer");XCTAssertEqual(independent["rendered"] as? Bool,true)
+        XCTAssertEqual(independent["clicks"] as? Int,0);XCTAssertEqual(independent["inputs"] as? Int,0)
+        _ = try await script(view,"const old=document.getElementById('confirm');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await transport.press(target:target,backendNodeID:XCTUnwrap(action.backendNodeID),document:raw,permit:BrowserMutationPermit())
+            XCTFail("Discovery priority cannot grant an old reference to an identical replacement")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementChanged)
+        var fresh=try await transport.observe(target:target)
+        var current=try XCTUnwrap(fresh.nodes.first { $0.name=="Confirm footer" })
+        _ = try await script(view,"const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;background:white;z-index:9999';document.body.append(cover);return true;")
+        do {
+            try await transport.press(target:target,backendNodeID:XCTUnwrap(current.backendNodeID),document:fresh,permit:BrowserMutationPermit())
+            XCTFail("Discovery priority cannot bypass the current hit-test")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementObstructed)
+        _ = try await script(view,"document.getElementById('cover').remove();return true;")
+        fresh=try await transport.observe(target:target)
+        current=try XCTUnwrap(fresh.nodes.first { $0.name=="Confirm footer" })
+        try await transport.press(target:target,backendNodeID:XCTUnwrap(current.backendNodeID),document:fresh,permit:BrowserMutationPermit())
+        let effects=try await script(view,"return {clicks:window.clicks,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:effects) as? [String:Int],["clicks":1,"inputs":0])
+        XCTAssertEqual(session.documentGeneration(for:id),generation)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
     func testHitTestDiagnosticClosedSchemaRelationshipsAndLegacyCompatibility() throws {
         let valid: [String: Any] = ["reason":"foreign_hit", "centerX":"inside", "centerY":"inside", "hitTag":"div", "hitRole":"listbox", "relation":"other"]
         func envelope(_ hit: Any, stage: String = "initial_hit_test", code: String = "element_obstructed") -> [String: Any] {
@@ -140,7 +375,10 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             try await transport.setText(target:target,backendNodeID:XCTUnwrap(field.backendNodeID),text:"MUST_NOT_APPEAR",document:document,permit:BrowserMutationPermit())
             XCTFail("The hit-test guard must retain its original rejection",file:file,line:line)
         } catch {
-            XCTAssertEqual(error as? BrowserTabBrokerError,.browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."),file:file,line:line)
+            let detail = (role == .option || role == .listbox) && reason == .foreignHit && x == .inside && y == .inside
+                ? "The built-in action could not be confirmed. \(role == .option ? "An option" : "A listbox") covers the target at its hit-test point. No replay is allowed; read the current page controls and popups before choosing another action with a fresh observed reference."
+                : "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+            XCTAssertEqual(error as? BrowserTabBrokerError,.browserUnavailable(detail),file:file,line:line)
         }
         let diagnostic=try XCTUnwrap(transport.actionFailureDiagnosticForTesting,file:file,line:line)
         XCTAssertEqual(diagnostic.stage,stage,file:file,line:line);XCTAssertEqual(diagnostic.code,.elementObstructed,file:file,line:line)

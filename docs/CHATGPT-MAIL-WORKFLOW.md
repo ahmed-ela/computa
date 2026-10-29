@@ -744,6 +744,37 @@ place. A separate approved Inspector comparison at 360x527 hid compose controls;
 it does not establish the cause of the 1024x768 task failure. Inspector settings
 were restored and the comparison tab was closed.
 
+Installed build 320 reproduced two Subject failures with the center inside both
+viewport axes. Each hit a different `DIV` with role `option` before focus or
+value entry. This proves an option intercepted the intended field; its label
+and popup ancestry were not logged. Recipient text was present, but a committed
+recipient chip was not established. No body fill or Send occurred. All fourteen
+ChatGPT Instant sessions verified and closed. The final answer reported no send.
+
+The browser capture also had a reproducible independent priority defect:
+its outer discovery walk could encounter a visible footer control beyond a
+panel's compact probe and still leave it behind ordinary inbox text. The
+source byte budget could then omit that control even with discovery complete.
+The candidate retains the enclosing form/dialog priority on existing cursors;
+it does not increase the discovery, node or byte budgets, or grant input rights.
+The standalone fixture proves this generic omission, not the precise cause of
+Gmail's historical missing-Send reads.
+
+Build 321 also prioritizes observed options in listbox/menu scopes during the
+same bounded discovery. It does not associate popups by guessed selectors or
+choose an option automatically. Compact reads also put the first actionable
+choice ahead of long background text, retaining a readable sample and bounded,
+lossless pagination. Promotion requires complete, unique, nonignored physical
+ancestry to a listbox or menu; it does not grant input capabilities.
+Strictly decoded option/listbox hit failures
+now explain that a current popup control covers the field while preserving
+the unconfirmed outcome, original error category and no-replay requirement.
+Fresh form instructions tell both API and website models to inspect suggestions,
+select only an unambiguous intended match with its current reference, and read
+the next field again. The full field identity, visibility, focus and center-hit
+checks still apply. This repairs the generic recovery path; actual email
+completion still requires a new Sent-message observation.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

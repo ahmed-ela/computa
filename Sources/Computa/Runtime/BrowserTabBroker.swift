@@ -1816,27 +1816,74 @@ actor BrowserTabSessionBroker {
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
             for group in groups where offset < group.count { ordered.append(group[offset]) }
         }
-        if scopeNodeID == nil, trimmedQuery?.isEmpty != false,
-           let panel = overviewControlPanel(elements: elements, nodes: sourceNodes, captured: document.nodes) {
-            var context = panel.context
-            if let node = context.nodeID.flatMap({ sourceNodes[$0] }) {
-                context.contentScope = contentScope(of: node, nodes: sourceNodes)
-                context.contentKind = contentKind(of: node, nodes: sourceNodes)
-                context.recordPath = recordPath(of: node, nodes: sourceNodes, ordinals: recordOrdinals)
+        if scopeNodeID == nil, trimmedQuery?.isEmpty != false {
+            var prefix = [BrowserTabElement]()
+            let panel = overviewControlPanel(elements: elements, nodes: sourceNodes, captured: document.nodes)
+            if let panel {
+                var context = panel.context
+                if let node = context.nodeID.flatMap({ sourceNodes[$0] }) {
+                    context.contentScope = contentScope(of: node, nodes: sourceNodes)
+                    context.contentKind = contentKind(of: node, nodes: sourceNodes)
+                    context.recordPath = recordPath(of: node, nodes: sourceNodes, ordinals: recordOrdinals)
+                }
+                prefix = [context, panel.controls[0]]
             }
-            // Read order alone changes. Keep one readable sample ahead of the
-            // remaining controls so an outcome is not displaced by the panel.
-            var prefix = [context, panel.controls[0]]
-            if let sample = ordered.first(where: { [4, 5].contains(overviewCategory($0) ?? -1) }) {
+            // Observed listbox/menu choices can cover a field. Do not bury all
+            // of them behind long interleaved body text. This bounded prefix
+            // changes only read order; it infers no association or authority.
+            let choices = elements.filter { overviewChoice($0, nodes: sourceNodes) }.prefix(4)
+            if let choice = choices.first, !prefix.contains(choice) { prefix.append(choice) }
+            if !prefix.isEmpty,
+               let sample = ordered.first(where: { [4, 5].contains(overviewCategory($0) ?? -1) }) {
                 prefix.append(sample)
             }
-            prefix += panel.controls.dropFirst()
+            for choice in choices.dropFirst() where !prefix.contains(choice) { prefix.append(choice) }
+            if let panel {
+                for control in panel.controls.dropFirst() where !prefix.contains(control) { prefix.append(control) }
+            }
             for element in prefix {
                 if let index = ordered.firstIndex(of: element) { ordered.remove(at: index) }
             }
             ordered = prefix + ordered
         }
         return ElementSelection(elements: ordered, omittedInputNodeCount: omittedInputNodeCount)
+    }
+
+    /// Complete unique physical ancestry only. A role, label, or ARIA ownership
+    /// claim alone cannot promote an unrelated, hidden, or unsupported choice.
+    private func overviewChoice(_ element: BrowserTabElement, nodes: [String: BrowserDocumentNode]) -> Bool {
+        guard element.isEnabled, element.supportsPress, let id = element.nodeID, var current = nodes[id] else { return false }
+        let role = current.role.lowercased()
+        let scope: String
+        switch role {
+        case "option": scope = "listbox"
+        case "menuitem", "menuitemcheckbox", "menuitemradio": scope = "menu"
+        default: return false
+        }
+        var seen = Set<String>(), scopeSeen = false
+        for _ in 0..<128 {
+            guard !current.isIgnored, let currentID = current.nodeID,
+                  nodes[currentID] == current, seen.insert(currentID).inserted else { return false }
+            // The capture marks a passive named DIV group disabled to withhold
+            // wrapper input. That is not subtree disablement: actual disabled
+            // DOM ancestors also disable the leaf, already rejected above.
+            let passiveLayout = currentID != id && current.role.lowercased() == "group"
+                && current.isExplicitlyNamedContainer && current.isReadOnly && current.isPressUnsupported
+                && !current.isEditable && !current.isDOMClickable && !current.isFocusablePointer
+            guard !current.isDisabled || passiveLayout else { return false }
+            if currentID != id {
+                let ancestorRole = current.role.lowercased()
+                if ancestorRole == scope {
+                    guard !scopeSeen else { return false }
+                    scopeSeen = true
+                } else if ["option", "listbox", "menu", "menubar", "menuitem", "menuitemcheckbox", "menuitemradio",
+                           "navigation", "banner", "complementary", "contentinfo"].contains(ancestorRole) { return false }
+            }
+            guard let parentID = current.parentNodeID else { return scopeSeen }
+            guard let parent = nodes[parentID] else { return false }
+            current = parent
+        }
+        return false
     }
 
     /// Associate only a small observed semantic panel around the first

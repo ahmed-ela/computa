@@ -185,6 +185,8 @@ const capture = () => {
   // Discovery reads only bounded structure/attributes, never field values or
   // innerText. It grants no action capability and does not claim completeness.
   const priorities = new Map();
+  const priorityControlRoles = new Set(['button','link','textbox','searchbox','combobox','checkbox','radio','switch','tab','menuitem','slider',
+    'option','menuitemcheckbox','menuitemradio','treeitem']);
   const prioritize = (element, priority) => {
     if (!element || element === root || !visible(element)) return;
     const path = [];
@@ -209,8 +211,7 @@ const capture = () => {
       if (!cursor.children) {
         if (['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || !allowedByAncestors(node)) continue;
         const semantic = semanticRoleFor(node);
-        const isControl = ['button','link','textbox','searchbox','combobox','checkbox','radio','switch','tab','menuitem','slider']
-          .includes(semantic);
+        const isControl = priorityControlRoles.has(semantic);
         if (isControl) controlsSeen.add(node);
         if ((isControl || semantic === 'heading') && visible(node)) {
           if (isControl) controlsVisible.add(node);
@@ -242,7 +243,7 @@ const capture = () => {
     }
     return control;
   };
-  const discovery = root ? [{node:root}] : [];
+  const discovery = root ? [{node:root,panelPriority:null}] : [];
   let discoveryIndex = 0;
   for (; discoveryIndex < discovery.length && examinedChildren < 4096; discoveryIndex++) {
     const cursor = discovery[discoveryIndex], node = cursor.node;
@@ -258,10 +259,14 @@ const capture = () => {
       }
       if (exclusion) { prunedSubtrees++; continue; }
       const semantic = semanticRoleFor(node);
-      if (['dialog','alertdialog'].includes(role) || node.tagName === 'DIALOG') {
+      // Explicit selection overlays are observed scopes, not an inferred
+      // relationship to a field. Only their current rendered controls get refs.
+      if (['dialog','alertdialog','listbox','menu'].includes(role) || node.tagName === 'DIALOG') {
+        cursor.panelPriority = Math.min(cursor.panelPriority ?? 3, 1);
         prioritize(node, 1); prioritizePanelControls(node, 1);
       }
       else if (role === 'form' || node.tagName === 'FORM') {
+        cursor.panelPriority = Math.min(cursor.panelPriority ?? 3, 2);
         prioritize(node, 2); prioritizePanelControls(node, 2);
       }
       // Expanded panels need not use FORM or
@@ -273,6 +278,15 @@ const capture = () => {
           const value = node.getAttribute(name) || '';
           return value.length <= 4096 && !!trim(value);
         }) && prioritizePanelControls(node, 2)) prioritize(node, 2);
+      // Reuse this already-budgeted outer visit; do not strand observed panel
+      // controls behind background text after the compact probe is exhausted.
+      if (cursor.panelPriority != null && priorityControlRoles.has(semantic)) {
+        controlsSeen.add(node);
+        if (visible(node)) {
+          controlsVisible.add(node); prioritize(node, cursor.panelPriority);
+          if (priorities.has(node)) controlsPrioritized.add(node);
+        }
+      }
       cursor.children = node.childNodes;
       cursor.first = 0; cursor.last = cursor.children.length - 1; cursor.tail = false;
     }
@@ -283,7 +297,7 @@ const capture = () => {
     // capture and its evidence graph still retain the actual DOM child order.
     const child = cursor.children[cursor.tail ? cursor.last-- : cursor.first++];
     cursor.tail = !cursor.tail; examinedChildren++;
-    if (child.nodeType === Node.ELEMENT_NODE) discovery.push({node:child});
+    if (child.nodeType === Node.ELEMENT_NODE) discovery.push({node:child,panelPriority:cursor.panelPriority});
     if (cursor.first <= cursor.last) discovery.push(cursor);
   }
   discoveryLimitReached ||= examinedChildren >= 4096 && discoveryIndex < discovery.length;

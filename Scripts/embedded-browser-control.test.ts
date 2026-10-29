@@ -1389,3 +1389,188 @@ describe('bounded built-in semantic readiness', () => {
     expect(await pending).toEqual({ matched: true });
   });
 });
+
+describe('outer discovery retains form and dialog controls beyond compact probes', () => {
+  for (const kind of ['dialog', 'form']) test(`known ${kind} footer remains observable beyond compact probe`, async () => {
+    const f = fixture(null), inbox = new f.Node('MAIN'), search = new f.Node('FORM');
+    search.append(new f.Node('INPUT', { type: 'search', 'aria-label': 'Site search' })); inbox.append(search);
+    for (let i = 0; i < 300; i++) {
+      const row = new f.Node('DIV', { role: 'row' });
+      row.append(new f.Node('P', {}, `Synthetic background ${i} ` + 'x'.repeat(1000))); inbox.append(row);
+    }
+    const panel = new f.Node(kind === 'form' ? 'FORM' : 'DIV', kind === 'dialog' ? { role: 'dialog' } : {});
+    const to = new f.Node('INPUT', { 'aria-label': 'Recipients' }); panel.append(to);
+    let footer = new f.Node('DIV'); panel.append(footer);
+    for (let depth = 0; depth < 12; depth++) {
+      for (let i = 0; i < 5; i++) footer.append(new f.Node('SPAN', {}, `Synthetic decoration ${depth}-${i}`));
+      const next = new f.Node('DIV'); footer.append(next);
+      for (let i = 0; i < 5; i++) footer.append(new f.Node('SPAN', {}, `Synthetic tail ${depth}-${i}`));
+      footer = next;
+    }
+    const send = new f.Node('BUTTON', {}, 'Synthetic Send'); footer.append(send);
+    f.document.body.append(inbox,panel); f.document.activeElement = to;
+    const result = await f.run({ operation: 'observe' });
+    const found = result.nodes.find((n: any) => n.name === 'Synthetic Send');
+    expect(result.captureDiagnostics.scheduling.discoverySlots).toBeLessThan(4096);
+    expect(result.captureDiagnostics.discovery.limitReached).toBe(false);
+    expect(result.captureDiagnostics.scheduling.partialPanels).toBeGreaterThan(0);
+    expect(result.sourceTruncated).toBe(true); expect(result.captureDiagnostics.stopReason).toBe('byte_budget');
+    expect(result.captureDiagnostics.estimatedBytes).toBeLessThanOrEqual(220000);
+    expect(result.nodes.length).toBeLessThanOrEqual(3000); expect(result.captureDiagnostics.visited).toBeLessThanOrEqual(20001);
+    expect(found?.isDOMClickable).toBe(true);
+    f.document.elementFromPoint = () => send;
+    expect(await f.press(found)).toEqual({dispatched:true,noReplay:true,constraintFeedback:null}); expect(send.clicks).toBe(1);
+    const fresh = await f.run({operation:'observe'}), freshSend = fresh.nodes.find((n:any)=>n.name==='Synthetic Send');
+    f.document.elementFromPoint = () => to;
+    await expect(f.press(freshSend)).rejects.toThrow('element_obstructed'); expect(send.clicks).toBe(1);
+  });
+});
+
+async function deepInheritedPanelScope(kind: 'dialog' | 'form') {
+  const f = fixture(null), inbox = new f.Node('MAIN'), search = new f.Node('FORM');
+  search.append(new f.Node('INPUT', { type: 'search', 'aria-label': 'Site search' })); inbox.append(search);
+  for (let index = 0; index < 300; index++) inbox.append(new f.Node('P', {}, 'Synthetic background ' + 'x'.repeat(1000)));
+  const panel = new f.Node(kind === 'form' ? 'FORM' : 'DIV', kind === 'dialog' ? { role: 'dialog' } : {});
+  const focused = new f.Node('INPUT', { 'aria-label': 'Recipients' }); panel.append(focused);
+  let current = new f.Node('DIV'); panel.append(current);
+  for (let depth = 0; depth < 12; depth++) {
+    for (let i = 0; i < 5; i++) current.append(new f.Node('SPAN', {}, 'Synthetic decoration'));
+    const next = new f.Node('DIV'); current.append(next);
+    for (let i = 0; i < 5; i++) current.append(new f.Node('SPAN', {}, 'Synthetic decoration'));
+    current = next;
+  }
+  const scope = new f.Node('DIV', { role: 'navigation', 'aria-label': 'PRIVATE_SCOPE_LABEL' }, 'PRIVATE_SCOPE_TEXT');
+  const button = new f.Node('BUTTON', {}, 'Synthetic late control'); scope.append(button); current.append(scope);
+  f.document.body.append(inbox,panel); f.document.activeElement = focused;
+  return { ...f,panel,focused,scope,button };
+}
+describe('inherited form and dialog priority preserves scope guards', () => {
+  for (const kind of ['dialog','form'] as const) {
+    test(`${kind}: visible override retains ignored hidden ancestry and exact public parent identity`, async () => {
+      const f = await deepInheritedPanelScope(kind); f.styles.set(f.scope,{visibility:'hidden'}); f.styles.set(f.button,{visibility:'visible'});
+      const snapshot = await f.run({operation:'observe'});
+      const row = snapshot.nodes.find((n:any)=>n.name==='Synthetic late control');
+      expect(row?.isDOMClickable).toBe(true);
+      expect(snapshot.captureDiagnostics.scheduling.partialPanels).toBeGreaterThan(0);
+      const parent = snapshot.nodes.find((n:any)=>n.nodeID===row.parentNodeID);
+      expect(parent).toMatchObject({role:'navigation',name:'',value:null,isIgnored:true,isDisabled:true,isReadOnly:true,isEditable:false,isDOMClickable:false});
+      expect(parent.childNodeIDs).toContain(row.nodeID);
+      const nativeState = (f.state as any).__computaBrowserControlV1;
+      expect(nativeState.nodes.get(parent.backendNodeID)).toBe(f.scope); expect(nativeState.nodes.get(row.backendNodeID)).toBe(f.button);
+      expect(JSON.stringify(snapshot.nodes)).not.toContain('PRIVATE_SCOPE');
+      f.document.elementFromPoint=()=>f.button;
+      expect((await f.press(row)).dispatched).toBe(true); expect(f.button.clicks).toBe(1);
+      // Same target and same semantics cannot inherit authority after its exact
+      // semantic parent changes, even to an equivalent hidden navigation container.
+      const newScope=new f.Node('DIV',{role:'navigation','aria-label':'PRIVATE_NEW_SCOPE'});
+      f.styles.set(newScope,{visibility:'hidden'}); f.scope.children=[]; newScope.append(f.button); f.panel.append(newScope);
+      await expect(f.press(row)).rejects.toThrow('element_changed'); expect(f.button.clicks).toBe(1);
+      const fresh=await f.run({operation:'observe'}), freshRow=fresh.nodes.find((n:any)=>n.name==='Synthetic late control');
+      expect(freshRow.parentNodeID).not.toBe(row.parentNodeID);
+      const replacement=new f.Node('BUTTON',{},'Synthetic late control'); f.styles.set(replacement,{visibility:'visible'});
+      newScope.replaceChildren(replacement); f.document.elementFromPoint=()=>replacement;
+      await expect(f.press(freshRow)).rejects.toThrow('element_changed'); expect(replacement.clicks).toBe(0);
+    });
+    test(`${kind}: hard-hidden, inert, aria-hidden and display-none descendants cannot gain priority or input`,async()=>{
+      for(const exclusion of ['hidden','inert','aria-hidden','display:none','visibility:hidden']) {
+        const f=await deepInheritedPanelScope(kind); f.styles.set(f.button,{visibility:'visible'});
+        if(exclusion==='display:none')f.styles.set(f.scope,{display:'none'});
+        else if(exclusion==='visibility:hidden'){f.styles.set(f.scope,{visibility:'hidden'});f.styles.delete(f.button);}
+        else f.scope.values[exclusion]=exclusion==='aria-hidden'?'true':'';
+        const snapshot=await f.run({operation:'observe'});
+        expect(snapshot.nodes.some((n:any)=>n.name==='Synthetic late control')).toBe(false);
+        expect(JSON.stringify(snapshot.nodes)).not.toContain('PRIVATE_SCOPE');expect(f.button.clicks).toBe(0);
+        expect(snapshot.captureDiagnostics.scheduling.discoverySlots).toBeLessThanOrEqual(4096);
+        expect(snapshot.captureDiagnostics.estimatedBytes).toBeLessThanOrEqual(220000);
+      }
+    });
+  }
+});
+
+async function crowdedOptionPopup(scopeRole = 'listbox', itemRole = 'option', itemTag = 'DIV') {
+  const f = fixture(null), background = new f.Node('MAIN'), search = new f.Node('FORM');
+  search.append(new f.Node('INPUT', {type:'search','aria-label':'Site search'})); background.append(search);
+  for(let i=0;i<300;i++)background.append(new f.Node('P',{},'Synthetic background '+ 'x'.repeat(1000)));
+  const compose=new f.Node('DIV',{role:'dialog'}), recipient=new f.Node('INPUT',{role:'combobox','aria-label':'Recipients'});
+  const subject=new f.Node('INPUT',{'aria-label':'Subject'}), send=new f.Node('BUTTON',{},'Synthetic Send');
+  compose.append(recipient,subject,send);f.document.body.append(background,compose);f.document.activeElement=recipient;
+  const popup=new f.Node('DIV',{role:scopeRole});let scope=popup;
+  for(let depth=0;depth<12;depth++){
+    for(let i=0;i<5;i++)scope.append(new f.Node('SPAN',{},'Synthetic decoration'));
+    const next=new f.Node('DIV');scope.append(next);
+    for(let i=0;i<5;i++)scope.append(new f.Node('SPAN',{},'Synthetic decoration'));
+    scope=next;
+  }
+  let selected=false, sent=false;
+  const item=()=>{const node=new f.Node(itemTag,{role:itemRole},'fixture@example.invalid');
+    node.onClick=()=>{selected=true;popup.values.hidden='';f.document.elementFromPoint=()=>subject;};return node;};
+  const option=item();scope.append(option);
+  recipient.onDispatch=(event:any)=>{if(event.type==='input'){f.document.body.append(popup);f.document.elementFromPoint=()=>option;}};
+  send.onClick=()=>{sent=selected&&subject.value==='Hi';};f.document.elementFromPoint=()=>recipient;
+  return {...f,background,compose,recipient,subject,send,popup,scope,option,item,selected:()=>selected,sent:()=>sent};
+}
+describe('bounded discovery of observed popup options',()=>{
+  test('a covered field proceeds only after a fresh observed option is selected under unchanged action guards',async()=>{
+    const f=await crowdedOptionPopup();
+    let snapshot=await f.run({operation:'observe'});
+    const recipient=snapshot.nodes.find((n:any)=>n.name==='Recipients');
+    expect((await f.fill(recipient,'fixture@example.invalid')).dispatched).toBe(true);
+    expect(f.option.clicks).toBe(0);expect(f.selected()).toBe(false);
+    snapshot=await f.run({operation:'observe'});
+    const subject=snapshot.nodes.find((n:any)=>n.name==='Subject');
+    const blocked=await f.rawRun({operation:'fill',nodeID:subject.backendNodeID,expected:subject,expectedURL:f.location.href,text:'Hi'});
+    expect(blocked.browserActionFailure).toMatchObject({stage:'initial_hit_test',code:'element_obstructed',
+      hitTest:{reason:'foreign_hit',hitTag:'div',hitRole:'option',relation:'other'}});
+    expect(f.subject.focusOptions).toEqual([]);expect(f.subject.valueWrites).toEqual([]);
+    // Fresh observation, never a synthesized selector or guessed dismissal.
+    snapshot=await f.run({operation:'observe'});
+    let option=snapshot.nodes.find((n:any)=>n.role==='option');
+    expect(option?.name).toBe('fixture@example.invalid');expect(option?.isDOMClickable).toBe(true);
+    const listbox=snapshot.nodes.find((n:any)=>n.nodeID===option.parentNodeID);
+    expect(listbox.role).toBe('listbox');expect(listbox.childNodeIDs).toContain(option.nodeID);
+    expect(snapshot.captureDiagnostics.scheduling.partialPanels).toBeGreaterThan(0);
+    expect(snapshot.sourceTruncated).toBe(true);expect(snapshot.captureDiagnostics.estimatedBytes).toBeLessThanOrEqual(220000);
+    // Covered or physically replaced options never inherit the fresh click.
+    f.document.elementFromPoint=()=>f.subject;
+    await expect(f.press(option)).rejects.toThrow('element_obstructed');expect(f.option.clicks).toBe(0);
+    const replacement=f.item();f.scope.replaceChildren(replacement);f.document.elementFromPoint=()=>replacement;
+    await expect(f.press(option)).rejects.toThrow('element_changed');expect(replacement.clicks).toBe(0);
+    snapshot=await f.run({operation:'observe'});option=snapshot.nodes.find((n:any)=>n.role==='option');
+    expect((await f.press(option)).dispatched).toBe(true);expect(replacement.clicks).toBe(1);expect(f.selected()).toBe(true);
+    snapshot=await f.run({operation:'observe'});expect(snapshot.nodes.some((n:any)=>n.role==='option')).toBe(false);
+    const freshSubject=snapshot.nodes.find((n:any)=>n.name==='Subject');
+    expect((await f.fill(freshSubject,'Hi')).dispatched).toBe(true);expect(f.subject.value).toBe('Hi');
+    snapshot=await f.run({operation:'observe'});const send=snapshot.nodes.find((n:any)=>n.name==='Synthetic Send');
+    f.document.elementFromPoint=()=>f.send;expect((await f.press(send)).dispatched).toBe(true);
+    expect(f.sent()).toBe(true);expect(f.send.clicks).toBe(1);
+  });
+  test('listbox options and explicit menu selection controls retain real scope and current press capability',async()=>{
+    for(const [scopeRole,itemRole] of [['listbox','option'],['menu','menuitem'],['menu','menuitemcheckbox'],['menu','menuitemradio']]){
+      const f=await crowdedOptionPopup(scopeRole,itemRole);f.document.body.append(f.popup);
+      const snapshot=await f.run({operation:'observe'}),row=snapshot.nodes.find((n:any)=>n.role===itemRole);
+      expect(row?.isDOMClickable).toBe(true);const parent=snapshot.nodes.find((n:any)=>n.nodeID===row.parentNodeID);
+      expect(parent.role).toBe(scopeRole);expect(parent.childNodeIDs).toContain(row.nodeID);
+      expect(snapshot.captureDiagnostics.scheduling.discoverySlots).toBeLessThanOrEqual(4096);
+      expect(snapshot.captureDiagnostics.estimatedBytes).toBeLessThanOrEqual(220000);
+      f.document.elementFromPoint=()=>f.option;expect((await f.press(row)).dispatched).toBe(true);expect(f.option.clicks).toBe(1);
+    }
+  });
+  test('explicit tree items under an admitted form retain their actual tree parent and guards',async()=>{
+    const f=await crowdedOptionPopup('form','treeitem');
+    const tree=new f.Node('DIV',{role:'tree'});f.scope.children=[];tree.append(f.option);f.scope.append(tree);f.document.body.append(f.popup);
+    const snapshot=await f.run({operation:'observe'}),row=snapshot.nodes.find((n:any)=>n.role==='treeitem');
+    expect(row?.isDOMClickable).toBe(true);expect(snapshot.nodes.find((n:any)=>n.nodeID===row.parentNodeID).role).toBe('tree');
+    f.document.elementFromPoint=()=>f.option;expect((await f.press(row)).dispatched).toBe(true);expect(f.option.clicks).toBe(1);
+  });
+  test('hidden, inert and display-none popup contents remain excluded and native OPTION gains no click',async()=>{
+    for(const exclusion of ['hidden','inert','aria-hidden','display:none']){
+      const f=await crowdedOptionPopup();f.document.body.append(f.popup);
+      if(exclusion==='display:none')f.styles.set(f.popup,{display:'none'});else f.popup.values[exclusion]=exclusion==='aria-hidden'?'true':'';
+      const snapshot=await f.run({operation:'observe'});expect(snapshot.nodes.some((n:any)=>n.role==='option')).toBe(false);expect(f.option.clicks).toBe(0);
+    }
+    const f=await crowdedOptionPopup('listbox','option','OPTION');f.document.body.append(f.popup);
+    const snapshot=await f.run({operation:'observe'}),row=snapshot.nodes.find((n:any)=>n.role==='option');
+    expect(row).toBeDefined();expect(row.isDOMClickable).toBe(false);f.document.elementFromPoint=()=>f.option;
+    await expect(f.press(row)).rejects.toThrow('unsupported_action');expect(f.option.clicks).toBe(0);
+  });
+});
