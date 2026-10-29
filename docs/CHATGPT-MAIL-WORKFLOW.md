@@ -647,6 +647,55 @@ The guard correctly rejected the observation. The remaining investigations are
 the selected-tab rendering path and bounded handling of this transient gap
 without accepting partial ownership proof.
 
+## Selected-tab rendering lease
+
+The selected-tab geometry failure is independently reproduced in real WebKit.
+The previous lease left a presented human tab at 360x527; a later presentation
+update could shrink it again to 240x400. An active tool lease now holds the exact
+WebView on the existing attached 1024x768 background host. Presentation updates
+remember the latest human pane without moving the leased view. The final exact
+lease release restores that pane and its current bounds. No second page is
+created and no page styles or zoom are changed.
+
+Twenty-five focused native tests pass, including overlapping leases, stale
+release/detach, host replacement and loss, cancellation, draft/document identity,
+and native focus preservation. A lost render host rejects reads and actions
+before dispatch rather than using the narrow pane. This reproduces and repairs
+the geometry policy; it does not establish that widening alone reveals Gmail's
+compose controls or sends mail successfully.
+
+## Detached first-message inspection
+
+A real-WebKit reproduction verifies a complete first submission, detaches its
+message root and body, and observes the old adapter reject the next inspection
+before its existing remount recovery can run. This models the missing-root
+boundary; build 317 did not record connectivity at the zero-root instant, so
+the later cleanup observation cannot prove that this was its exact cause.
+
+An inspection may now claim one read-only wait when both native and private
+state already pin the exact first submission, the prior nodes are detached,
+and the expected count is exactly one. The wait retains the same owner,
+document, route, temporary Chat product and model. It is capped by both 1.8
+seconds and the original native evaluation deadline. Ordinary pending counts
+that already allow zero retain their previous behavior.
+
+Bounded mutation history rejects duplicate or ambiguous user roots even if
+they disappear before an observer callback. That history cannot establish
+ownership. A returned root must still pass the full original message hash,
+marker, model and context checks through the existing remount certifier.
+Any needed display expansion shares the wait's cutoff. A timeout, cancellation
+or changed identity cannot renew the wait or replay Send. Finite failure
+diagnostics now distinguish absent versus disconnected prior nodes and the
+wait's disposition without retaining message text.
+
+Build 318's final JavaScript cohort passes 566 tests with 28,575 assertions.
+Eighteen focused native tests also pass. The same final native binary
+reproduces the old adapter's `user_count` rejection and verifies the candidate's
+one-Send recovery with the complete original fingerprints, marker, Instant
+model and temporary Chat product. Deadline, cancellation, route drift and
+changed-body cases remain failures with no late expansion. These are fixture
+results; real-email qualification remains a separate required check.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

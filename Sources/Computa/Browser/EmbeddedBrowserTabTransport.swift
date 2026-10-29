@@ -199,6 +199,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                   existing.target.instanceToken == target.instanceToken else {
                 throw BrowserTabBrokerError.targetReplaced
             }
+            try session.requireToolRendering(tabID: id)
             return
         }
         let token = try session.acquireToolRendering(tabID: id)
@@ -478,7 +479,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws {
         let id = try exactID(target)
         try EmbeddedBrowserURLPolicy.validate(url)
-        try permit.commit { try session.navigate(tabID: id, to: url) }
+        try permit.commit {
+            try session.requireToolRendering(tabID: id)
+            try session.navigate(tabID: id, to: url)
+        }
         // A failed navigation is not resubmitted, even when its response times out.
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
     }
@@ -579,6 +583,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                     result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
                     let enqueue = {
                         try readAdmission?()
+                        try self.session.requireToolRendering(tabID: id)
                         let operationID: UUID?
                         if mutation {
                             operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)
@@ -646,6 +651,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         if !mutation {
             try Task.checkCancellation()
             try requireCurrentReadDocument(id: id, view: view, generation: generation)
+            try session.requireToolRendering(tabID: id)
         }
         return bytes
     }

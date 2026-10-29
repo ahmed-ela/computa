@@ -13,6 +13,50 @@ const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
 describe('ChatGPT rejected user-count diagnostics', () => {
+  test('reproduces a verified zero-root gap rejecting before the existing collapsed-remount recovery', async () => {
+    const choice = { key: 'chat/latest/instant', label: 'Instant' };
+    const x = await chatTurnFixture(choice, firstMarker, true);
+    const suffix = '\n\nComputa session marker: ' + firstMarker;
+    const first = await x.dispatch('PRIVATE VERIFIED GAP\n'.padEnd(115_088 - suffix.length, 'x'));
+    expect(first.outbound.length).toBe(115_088);
+    const before = await x.observe(first);
+    expect(before.error).toBeUndefined(); expect(before.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.lastVerified;
+    expect(state.pending).toBeNull(); expect(record.phase).toBe('verified');
+    // Native has adopted the returned fingerprint. The next invocation must
+    // still require that exact outbound proof; no zero/prefix body is proof.
+    const oldRoot = record.root, oldBody = record.body;
+    x.f.messages.children = x.f.messages.children.filter(node => node !== oldRoot); oldRoot.connected = false;
+    const hashes = x.f.digestInputs.length, timers = x.f.scheduledDelays.length;
+    const allowance = { allowBoundFirstUserExpansion: true, allowFirstUserBinding: false,
+      allowFirstUserExpansion: false, firstUserExpansionModelChoice: choice };
+    const gap = await x.observe(first, allowance);
+    expect(gap).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'entry', entryUserCount: 0, currentUserCount: 0, expectedUserCounts: [1],
+      ownerMatches: true, originMatches: true, urlMatches: true, topFrame: true } });
+    expect(gap).not.toHaveProperty('submissionProof'); expect(gap).not.toHaveProperty('text');
+    expect(gap).not.toHaveProperty('firstUserVerified', true); expect(gap).not.toHaveProperty('answerComplete', true);
+    expect(x.f.digestInputs.length).toBe(hashes); expect(x.f.scheduledDelays.length).toBe(timers);
+    expect(x.f.world.__computaModelBoundFirstExpansion).toBeUndefined(); expect(x.send.clicks).toBe(1);
+    expect(state.revoked).toBe(false); expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+
+    // Independent fixture comparison only: native would stop on the error
+    // above. Once a collapsed replacement exists, existing recovery can prove
+    // its complete bytes without replaying Send or accepting the prefix.
+    const root = new Element('ARTICLE', { 'data-turn': 'user' });
+    const body = new Element('DIV', { class: 'whitespace-pre-wrap' }, first.outbound.slice(0, 10_240));
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, expand);
+    expand.onClick = () => { body.text = first.outbound; }; x.f.messages.append(root); x.f.setHit(expand);
+    const discard = await x.observe(first, allowance);
+    expect(discard).toMatchObject({ error: 'first_user_observation_replaced' });
+    expect(discard).not.toHaveProperty('submissionProof'); expect(discard).not.toHaveProperty('text');
+    expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    const proven = await x.observe(first, { ...allowance, allowBoundFirstUserRemountRefresh: true });
+    expect(proven.error).toBeUndefined(); expect(proven.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.canonical).toBe(first.outbound);
+    expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+  });
+
   test('a missing or duplicated user stays rejected and reports only its current finite cardinality', async () => {
     for (const count of [0, 2]) {
       const f = fixture({ userPrompt: 'Keep this owned request', response: false });
@@ -77,6 +121,196 @@ describe('ChatGPT rejected user-count diagnostics', () => {
       expectedUserCounts: [0], expectedCountMatches: false } });
     expect(observed).not.toHaveProperty('submissionProof'); expect(observed).not.toHaveProperty('text');
     expect(f.composer.events).toEqual([]);
+  });
+});
+
+describe('ChatGPT native-pinned first-user root gap', () => {
+  const choice = { key: 'chat/latest/instant', label: 'Instant' };
+  const allowance = { allowBoundFirstUserExpansion: true, allowFirstUserBinding: false,
+    allowFirstUserExpansion: false, firstUserExpansionModelChoice: choice };
+  async function stage() {
+    const x = await chatTurnFixture(choice, firstMarker, true);
+    const first = await x.dispatch('PRIVATE VERIFIED GAP\n'.padEnd(40_000, 'x'));
+    expect((await x.observe(first)).submissionProof?.fingerprint).toBe(first.fingerprint);
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.lastVerified;
+    const oldRoot = record.root, oldBody = record.body;
+    x.f.messages.children = x.f.messages.children.filter(node => node !== oldRoot); oldRoot.connected = false;
+    const root = new Element('ARTICLE', { 'data-turn': 'user' });
+    const body = new Element('DIV', { class: 'whitespace-pre-wrap', 'data-user-message-bubble': '' }, first.outbound.slice(0, 10_240));
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, expand);
+    expand.onClick = () => { body.text = first.outbound; }; x.f.setHit(expand);
+    const observer = () => x.f.observers.findLast(o => (o.options?.attributeFilter as string[])?.length === 4)!;
+    const emit = (records: any[] = []) => observer().callback(records);
+    const mount = () => { x.f.messages.append(root); emit([{ type: 'childList', target: x.f.messages, addedNodes: [root], removedNodes: [] }]); };
+    const start = (overrides: Record<string, unknown> = {}) => x.observe(first, { ...allowance,
+      evaluationDeadlineEpochMilliseconds: Date.now() + 5_000, ...overrides });
+    const waiting = () => { expect(record.userRootGap?.outcome).toBe('waiting'); expect(expand.clicks).toBe(0); expect(x.send.clicks).toBe(1); };
+    return { ...x, first, state, record, oldRoot, oldBody, root, body, expand, observer, emit, mount, start, waiting };
+  }
+  const denied = (result: any) => {
+    expect(result.error).toBeDefined(); expect(result).not.toHaveProperty('submissionProof');
+    expect(result).not.toHaveProperty('firstUserVerified', true); expect(result).not.toHaveProperty('text');
+  };
+
+  test('waits without action, then proves one nested collapsed successor with the same deadline and one expansion', async () => {
+    const x = await stage(), beforeHashes = x.f.digestInputs.length;
+    const pending = x.start(); x.waiting();
+    const deadline = x.record.userRootGap.deadline;
+    expect(x.f.digestInputs.length).toBe(beforeHashes);
+    // Ordinary assistant selector hydration is not a user-message mutation.
+    const assistant = new Element('ARTICLE', { 'data-turn': 'assistant' }); x.f.messages.append(assistant);
+    x.emit([{ type: 'attributes', target: assistant, attributeName: 'data-turn', oldValue: null }]);
+    x.waiting(); x.mount();
+    const discarded = await pending;
+    expect(discarded.error).toBe('first_user_observation_replaced'); denied(discarded);
+    const recovery: any = x.f.world.__computaModelBoundFirstExpansion;
+    expect(recovery.deadline).toBe(deadline); expect(recovery.userRootGap).toBe(x.record.userRootGap);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    const proven = await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true });
+    expect(proven.error).toBeUndefined(); expect(proven.submissionProof?.fingerprint).toBe(x.first.fingerprint);
+    expect(x.record.root).toBe(x.root); expect(x.record.body).toBe(x.body);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    // The spent wait does not impose its old cutoff on later healthy reads.
+    x.f.advanceTime(2_000);
+    expect((await x.observe(x.first)).submissionProof?.fingerprint).toBe(x.first.fingerprint);
+  });
+
+  test('a full-body successor without an existing replacement certificate gains no new recovery authority', async () => {
+    const x = await stage(), pending = x.start(); x.waiting();
+    x.body.text = x.first.outbound; x.mount();
+    const result = await pending; denied(result);
+    expect(result.error).not.toBe('first_user_observation_replaced');
+    expect(x.expand.clicks).toBe(0); expect(x.record.root).toBe(x.oldRoot);
+    denied(await x.start()); expect(x.record.userRootGap.outcome).toBe('rejected');
+    expect(x.send.clicks).toBe(1);
+  });
+
+  test('zero roots never produce proof, and timeout cannot renew or recover after a late root', async () => {
+    const x = await stage(), pending = x.start(); x.waiting();
+    const deadline = x.record.userRootGap.deadline;
+    x.f.flush(); const result = await pending; denied(result);
+    expect(result.userCountDiagnostic).toMatchObject({ gapDisposition: 'expired', boundRootPresent: true,
+      boundBodyPresent: true, boundRootConnected: false, boundBodyConnected: false });
+    const timers = x.f.scheduledDelays.length; x.mount();
+    const retry = await x.start(); denied(retry);
+    expect(retry.userCountDiagnostic.gapDisposition).toBe('expired');
+    expect(x.record.userRootGap.deadline).toBe(deadline); expect(x.f.scheduledDelays.length).toBe(timers);
+    expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+  });
+
+  test('clips to the native remaining budget and refuses expiry before or during expansion/hash', async () => {
+    for (const boundary of ['before_return', 'before_click', 'during_hash', 'fresh_rebind']) {
+      const x = await stage(), pending = x.start({ evaluationDeadlineEpochMilliseconds: Date.now() + 500 }); x.waiting();
+      const deadline = x.record.userRootGap.deadline;
+      expect(deadline - Date.now()).toBeLessThanOrEqual(500);
+      if (boundary === 'before_return') x.f.advanceTime(600);
+      if (boundary === 'before_click') {
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { x.f.advanceTime(600); click(); };
+      }
+      if (boundary === 'during_hash') x.f.onDigest(() => x.f.advanceTime(600));
+      x.mount(); const result = await pending; denied(result);
+      expect(x.record.userRootGap.deadline).toBe(deadline); expect(x.send.clicks).toBe(1);
+      if (boundary === 'fresh_rebind') {
+        expect(result.error).toBe('first_user_observation_replaced'); x.f.advanceTime(600);
+        denied(await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true }));
+      } else expect(result.error).not.toBe('first_user_observation_replaced');
+      expect(x.expand.clicks).toBe(['during_hash', 'fresh_rebind'].includes(boundary) ? 1 : 0);
+    }
+  });
+
+  test('rejects missing native/private authority and connected prior pins without installing a wait', async () => {
+    for (const mutation of ['no_deadline', 'bad_deadline', 'long_deadline', 'no_native_pin', 'wrong_hash', 'private_only',
+      'missing_model_pin', 'old_root_connected', 'old_body_connected', 'no_grant', 'later_sequence']) {
+      const x = await stage(), overrides: Record<string, unknown> = {};
+      if (mutation === 'no_deadline') overrides.evaluationDeadlineEpochMilliseconds = undefined;
+      if (mutation === 'bad_deadline') overrides.evaluationDeadlineEpochMilliseconds = NaN;
+      if (mutation === 'long_deadline') overrides.evaluationDeadlineEpochMilliseconds = Date.now() + 40_000;
+      if (mutation === 'no_native_pin') overrides.expectedFirstUserFingerprint = undefined;
+      if (mutation === 'wrong_hash') overrides.expectedFirstUserFingerprint = 'f'.repeat(64);
+      if (mutation === 'private_only') { overrides.allowFirstUserBinding = true; overrides.expectedFirstUserFingerprint = undefined; }
+      if (mutation === 'missing_model_pin') delete x.f.world.__computaChatPresetPin;
+      if (mutation === 'old_root_connected') x.oldRoot.connected = true;
+      if (mutation === 'old_body_connected') { x.oldBody.parentElement = null; x.oldBody.connected = true; }
+      if (mutation === 'no_grant') overrides.allowBoundFirstUserExpansion = false;
+      if (mutation === 'later_sequence') overrides.submissionSequence = 2;
+      const timers = x.f.scheduledDelays.length;
+      denied(await x.start(overrides)); expect(x.record.userRootGap).toBeUndefined();
+      expect(x.f.scheduledDelays.length).toBe(timers); expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('retains zero as a valid count for the existing native pending [0,1] read', async () => {
+    const x = await chatTurnFixture(choice, firstMarker, true); x.addBody(false);
+    const first = await x.dispatch('Pending native message');
+    const observed = await x.observe(first, { expectedUserCounts: [0, 1] });
+    expect(observed.error).toBeUndefined(); expect(observed.submissionPending).toBe(true);
+    expect(observed).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+    expect((x.f.world.__computaChatSubmissionState as any).pending.userRootGap).toBeUndefined();
+  });
+
+  test('observed ownership/model/product drift rejects immediately and never revives', async () => {
+    for (const drift of ['owner', 'url', 'origin', 'frame', 'product', 'model', 'selection', 'invocation']) {
+      const x = await stage(), pending = x.start(); x.waiting();
+      if (drift === 'owner') x.f.world.__computaModelOwner = 'foreign';
+      if (drift === 'url') x.f.document.URL += '&changed=true';
+      if (drift === 'origin') x.f.location.origin = 'https://example.com';
+      if (drift === 'frame') x.f.window.top = {};
+      if (drift === 'product') (x.f.world.__computaChatProductMode as any).invalidated = true;
+      if (drift === 'model') (x.f.world.__computaChatPresetPin as any).invalidated = true;
+      if (drift === 'selection') (x.f.world.__computaChatPresetPin as any).selection = { ...(x.f.world.__computaChatPresetPin as any).selection };
+      if (drift === 'invocation') x.f.world.__computaChatActiveInvocation = {};
+      x.emit(); denied(await pending);
+      expect(x.record.userRootGap.outcome).toBe('rejected'); expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('negative ledger retains vanished duplicate/retired user selectors and bounds records/nodes', async () => {
+    for (const mutation of ['duplicates', 'retired_selector', 'records', 'nodes', 'old_readded']) {
+      const x = await stage(), pending = x.start(); x.waiting();
+      const foreign = new Element('ARTICLE', { 'data-turn': 'user' }); foreign.connected = false;
+      let records: any[];
+      if (mutation === 'duplicates') records = [{ type: 'childList', target: x.f.messages, addedNodes: [foreign, x.root], removedNodes: [foreign] }];
+      else if (mutation === 'retired_selector') {
+        delete foreign.values['data-turn']; records = [{ type: 'attributes', target: foreign, attributeName: 'data-turn', oldValue: 'user' }];
+      } else if (mutation === 'records') records = Array.from({ length: 65 }, () => ({ type: 'childList', target: x.f.messages, addedNodes: [], removedNodes: [] }));
+      else if (mutation === 'nodes') {
+        const subtree = new Element('DIV'); for (let i = 0; i < 257; i++) subtree.append(new Element('SPAN'));
+        records = [{ type: 'childList', target: x.f.messages, addedNodes: [subtree], removedNodes: [] }];
+      } else records = [{ type: 'childList', target: x.f.messages, addedNodes: [x.oldRoot], removedNodes: [] }];
+      x.emit(records); denied(await pending);
+      expect(x.record.userRootGap.outcome).toBe('rejected'); x.mount(); denied(await x.start());
+      expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('clock cancellation stays sticky before return and during a model await, but not after certified handoff', async () => {
+    for (const moment of ['waiting', 'model_await', 'expired_model_await', 'completed']) {
+      const x = await stage(); let rejectClock!: (error: Error) => void, resolveClock!: (value: unknown) => void;
+      (x.f.window.webkit as any).messageHandlers.computaModelClock = { postMessage: () => new Promise((resolve, reject) => { rejectClock = reject; resolveClock = resolve; }) };
+      const pending = x.start(); x.waiting();
+      if (moment === 'waiting') rejectClock(new Error('Cancelled'));
+      else {
+        if (['model_await', 'expired_model_await'].includes(moment)) {
+          const click = x.picker!.trigger.onClick!;
+          x.picker!.trigger.onClick = () => {
+            if (moment === 'expired_model_await') { x.f.advanceTime(-1_000); resolveClock(null); }
+            else rejectClock(new Error('Cancelled'));
+            click();
+          };
+        }
+        x.mount();
+      }
+      const result = await pending;
+      if (moment === 'completed') {
+        expect(result.error).toBe('first_user_observation_replaced'); rejectClock(new Error('Native call finished')); await Promise.resolve();
+        expect(x.record.userRootGap.outcome).toBe('returned');
+        expect((await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true })).error).toBeUndefined();
+      } else {
+        denied(result); expect(x.record.userRootGap.outcome).toBe(moment === 'expired_model_await' ? 'expired' : 'clock_failed'); expect(x.expand.clicks).toBe(0);
+      }
+      expect(x.send.clicks).toBe(1);
+    }
   });
 });
 

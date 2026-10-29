@@ -4277,8 +4277,179 @@ function chatGPTProductModeAction(request) {
     return { chatModeReady: false, chatModeActionAvailable: false };
   return reject();
 }
-// Shape-only evidence at the existing rejected branch. This must not change
-// admission, retry a read, or infer that a missing user was merely remounted.
+// A missing DOM root is never ownership proof. This one-shot, read-only wait
+// applies only after native and JS both adopted the exact first submission.
+// It retains negative mutation history and the original native call cutoff;
+// the ordinary full-body/model proof remains responsible for any successor.
+let chatGPTUserRootGapDisposition = 'not_attempted';
+let chatGPTInvocationUserRootGap = null;
+function chatGPTUserRootGapCurrent(claim, requireDetached = true) {
+  chatGPTDrainSignalRecords();
+  websiteChatDrainPinnedMutations(claim.pin);
+  const state = claim.state, record = claim.record, pin = globalThis.__computaChatPresetPin;
+  if (Date.now() >= claim.deadline) { claim.outcome = 'expired'; return false; }
+  if (!['waiting', 'returned'].includes(claim.outcome) || record.userRootGap !== claim
+    || claim.document !== document || claim.invocation !== websiteChatInvocationLease
+    || globalThis.__computaChatActiveInvocation !== claim.invocation
+    || !chatGPTSubmissionContext(state) || state.pending != null || state.lastVerified !== record
+    || record.phase !== 'verified' || record.sequence !== 1 || !chatGPTSubmissionPins(record)
+    || record.document !== document || record.owner !== input.ownerToken
+    || record.root !== claim.oldRoot || record.body !== claim.oldBody
+    || requireDetached && (claim.oldRoot.isConnected || claim.oldBody.isConnected)
+    || record.fingerprint !== input.expectedFirstUserFingerprint
+    || input.submissionSequence !== 1 || input.submissionMarker !== record.marker
+    || input.expectedFirstUserMarker !== record.marker || globalThis.__computaModelFirstMarker !== record.marker
+    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
+    || globalThis.__computaModelFirstProof !== claim.firstProof
+    || claim.firstProof?.fingerprint !== record.fingerprint || claim.firstProof.marker !== record.marker
+    || globalThis.__computaModelFirstPrompt !== claim.prompt || record.canonical !== claim.canonical
+    || !websiteModelChoiceEqual(input.expectedModelChoice, claim.modelChoice)
+    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, claim.modelChoice)
+    || !websiteModelChoiceEqual(state.modelChoice, claim.modelChoice)
+    || !pin || pin !== claim.pin || pin.invalidated === true || pin.owner !== input.ownerToken || pin.document !== document
+    || pin.selection !== claim.selection || pin.headerTrigger !== claim.header
+    || !websiteModelChoiceEqual(websiteChatPresetChoice(pin.selection?.family, pin.selection?.power), claim.modelChoice)) return false;
+  const picker = websiteChatPickerState();
+  return picker.trigger === claim.header && websiteChatClosedHeaderMatches(picker, pin.selection.power, pin)
+    && !picker.duplicate && !picker.conflicting && !picker.indicatorInvalid
+    && !picker.selectionAmbiguous && !picker.navigationAmbiguous;
+}
+async function chatGPTWaitForBoundUserRoot() {
+  chatGPTUserRootGapDisposition = 'not_eligible';
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  const now = Date.now(), expiry = input.evaluationDeadlineEpochMilliseconds;
+  if (input.action !== 'inspect' || input.submissionSequence !== 1
+    || !Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length !== 1 || input.expectedUserCounts[0] !== 1
+    || input.allowBoundFirstUserExpansion !== true || input.allowFirstUserBinding === true || input.allowFirstUserExpansion === true
+    || input.allowProvisionalFirstUserExpansion === true || input.allowBoundFirstUserRemountRefresh === true
+    || input.suppressFirstUserExpansionClaim === true || globalThis.__computaModelBoundFirstExpansion != null
+    || !Number.isSafeInteger(expiry) || expiry <= now || expiry > now + 30_000
+    || !record || record.userRootGap != null || record.replacement != null
+    || !record.root || !record.body || record.root.isConnected !== false || record.body.isConnected !== false
+    || !websiteModelChoiceValid(input.expectedModelChoice) || chatGPTMessageRoots('user').length !== 0) return false;
+  const claim = { state, record, oldRoot: record.root, oldBody: record.body, document,
+    invocation: websiteChatInvocationLease, firstProof: globalThis.__computaModelFirstProof,
+    prompt: globalThis.__computaModelFirstPrompt, canonical: record.canonical,
+    modelChoice: input.expectedModelChoice, pin: globalThis.__computaChatPresetPin,
+    selection: globalThis.__computaChatPresetPin?.selection, header: globalThis.__computaChatPresetPin?.headerTrigger,
+    deadline: Math.min(expiry, now + 1_800), outcome: 'waiting', records: 0, nodes: 0, successor: null };
+  // Admission itself creates no recoverable claim. Temporarily associate it
+  // only to evaluate the exact same predicates used on every awaited wake.
+  record.userRootGap = claim;
+  if (!chatGPTUserRootGapCurrent(claim)) { delete record.userRootGap; return false; }
+  chatGPTInvocationUserRootGap = claim;
+  chatGPTUserRootGapDisposition = 'waiting';
+  const selectorAttributes = ['data-message-author-role', 'data-markdown-text-style', 'data-turn', 'data-user-message-bubble'];
+  const isRoot = node => node?.nodeType === 1 && (node.getAttribute('data-message-author-role') === 'user'
+    || node.getAttribute('data-markdown-text-style') === 'user-message'
+    || node.tagName === 'ARTICLE' && node.getAttribute('data-turn') === 'user' || node.hasAttribute('data-user-message-bubble'));
+  const remember = node => {
+    let outer = node;
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      if (++claim.nodes > 256) return false;
+      if (isRoot(parent)) outer = parent;
+    }
+    if (outer === claim.oldRoot || outer === claim.oldBody || claim.successor && claim.successor !== outer) return false;
+    claim.successor = outer;
+    return true;
+  };
+  const ledger = records => {
+    for (const mutation of records) {
+      if (++claim.records > 64) return false;
+      // Attribute history is deliberately negative-only: a root that acquired
+      // and lost a selector in one batch cannot be erased by its final shape.
+      if (mutation.type === 'attributes') {
+        const name = mutation.attributeName, target = mutation.target;
+        if (!selectorAttributes.includes(name) || target?.nodeType !== 1) return false;
+        const valueIsUser = value => name === 'data-user-message-bubble' ? value != null
+          : name === 'data-markdown-text-style' ? value === 'user-message'
+            : name === 'data-turn' ? target.tagName === 'ARTICLE' && value === 'user' : value === 'user';
+        if (valueIsUser(mutation.oldValue) || valueIsUser(target.getAttribute(name))) return false;
+        for (let parent = target; parent; parent = parent.parentElement) {
+          if (++claim.nodes > 256 || isRoot(parent)) return false;
+        }
+        continue;
+      }
+      if (mutation.type !== 'childList') return false;
+      if (mutation.addedNodes.length + mutation.removedNodes.length + claim.nodes > 256) return false;
+      const pending = [...mutation.addedNodes, ...mutation.removedNodes];
+      while (pending.length) {
+        if (++claim.nodes > 256) return false;
+        const node = pending.pop();
+        if (isRoot(node)) { if (!remember(node)) return false; }
+        else if (node.nodeType === 1) {
+          // An added nested body may already belong to the one outer root.
+          let root = null;
+          for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+            if (++claim.nodes > 256) return false;
+            if (isRoot(parent)) root = parent;
+          }
+          if (root) { if (!remember(root)) return false; }
+          else {
+            if (pending.length + node.childNodes.length + claim.nodes > 256) return false;
+            pending.push(...node.childNodes);
+          }
+        }
+      }
+    }
+    return true;
+  };
+  await new Promise(resolve => {
+    let finished = false, observer;
+    const finish = outcome => {
+      if (finished) return;
+      finished = true; claim.outcome = outcome;
+      observer?.disconnect?.(); resolve(null);
+    };
+    const check = records => {
+      if (finished) return;
+      try {
+        if (!ledger(records || []) || !chatGPTUserRootGapCurrent(claim))
+          return finish(claim.outcome === 'expired' ? 'expired' : 'rejected');
+        const roots = chatGPTMessageRoots('user');
+        if (roots.length > 1) return finish('rejected');
+        if (roots.length === 1) {
+          if (!remember(roots[0]) || !roots[0].isConnected) return finish('rejected');
+          return finish('returned');
+        }
+      } catch { finish('rejected'); }
+    };
+    observer = new MutationObserver(check);
+    observer.observe(document, { subtree: true, childList: true, attributes: true, attributeOldValue: true,
+      attributeFilter: selectorAttributes });
+    check([]);
+    if (finished) return;
+    const milliseconds = Math.max(0, claim.deadline - Date.now());
+    const clockFinished = outcome => {
+      if (!finished) finish(outcome);
+      else if (!claim.readFinished && claim.outcome === 'returned') claim.outcome = outcome;
+    };
+    const clock = window.webkit?.messageHandlers?.computaModelClock;
+    if (clock && typeof clock.postMessage === 'function') {
+      try { Promise.resolve(clock.postMessage({ ownerToken: input.ownerToken, operationID: input.operationID, milliseconds }))
+        .then(() => clockFinished('expired'), () => clockFinished('clock_failed')); }
+      catch { clockFinished('clock_failed'); }
+    } else setTimeout(() => clockFinished('expired'), milliseconds);
+  });
+  if (claim.outcome === 'returned' && !chatGPTUserRootGapCurrent(claim) && claim.outcome === 'returned') claim.outcome = 'rejected';
+  chatGPTUserRootGapDisposition = claim.outcome;
+  return claim.outcome === 'returned';
+}
+function chatGPTUserRootGapReadFailure() {
+  const claim = chatGPTInvocationUserRootGap || (input.allowBoundFirstUserRemountRefresh === true
+    ? globalThis.__computaModelBoundFirstExpansion?.userRootGap : null);
+  if (!claim) return null;
+  // After the existing certifier rebinds the nodes, its own full guard governs
+  // identity. This invocation still cannot publish past its original cutoff.
+  if (claim.outcome !== 'returned' || Date.now() >= claim.deadline
+    || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease) {
+    if (Date.now() >= claim.deadline) claim.outcome = 'expired';
+    chatGPTUserRootGapDisposition = claim.outcome;
+    return chatGPTUserCountFailure('entry', 0, chatGPTMessageRoots('user').length);
+  }
+  return null;
+}
+// Shape-only evidence at rejected branches; no diagnostic grants authority.
 function chatGPTUserCountFailure(stage, entryCount, currentCount) {
   const failure = { error: 'conversation_changed', detail: 'user_count' };
   try {
@@ -4295,6 +4466,10 @@ function chatGPTUserCountFailure(stage, entryCount, currentCount) {
       expectedCountMatches: expected !== null && finiteCount(currentCount) !== null && expected.includes(currentCount),
       topFrame: window === window.top, urlMatches: document.URL === input.expectedURL,
       originMatches: location.origin === 'https://chatgpt.com', ownerMatches: globalThis.__computaModelOwner === input.ownerToken };
+    const record = globalThis.__computaChatSubmissionState?.lastVerified;
+    Object.assign(failure.userCountDiagnostic, { boundRootPresent: !!record?.root, boundBodyPresent: !!record?.body,
+      boundRootConnected: !!record?.root?.isConnected, boundBodyConnected: !!record?.body?.isConnected,
+      gapDisposition: chatGPTUserRootGapDisposition });
   } catch { /* Diagnostics never replace the original fail-closed result. */ }
   return failure;
 }
@@ -5369,7 +5544,23 @@ if (input.action === 'insert' && input.matchedObservationDiagnostic != null && i
       computaInstallObservationDiagnostic(input.matchedObservationDiagnostic);
   } catch { /* diagnostic failure leaves inference unchanged */ }
 }
-const ownedMessages = chatGPTMessageRoots('user');
+let ownedMessages = chatGPTMessageRoots('user');
+const priorGap = globalThis.__computaChatSubmissionState?.lastVerified?.userRootGap;
+if (priorGap?.outcome === 'returned' && priorGap.readFinished !== true) priorGap.outcome = 'rejected';
+if (priorGap && ['rejected', 'expired', 'clock_failed', 'waiting'].includes(priorGap.outcome)) {
+  chatGPTUserRootGapDisposition = priorGap.outcome;
+  return chatGPTUserCountFailure('entry', ownedMessages.length, ownedMessages.length);
+}
+if (ownedMessages.length === 0 && Array.isArray(input.expectedUserCounts)
+  && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1) {
+  if (await chatGPTWaitForBoundUserRoot()) ownedMessages = chatGPTMessageRoots('user');
+  else return chatGPTUserCountFailure('entry', 0, chatGPTMessageRoots('user').length);
+  // Awaited observation does not bypass the original entry guards.
+  if (window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+    || globalThis.__computaModelOwner !== input.ownerToken
+    || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease)
+    return { error: 'document_changed', detail: 'document_url' };
+}
 const ownedUserCount = ownedMessages.length;
 if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
   return chatGPTUserCountFailure('entry', ownedUserCount, ownedUserCount);
@@ -5512,7 +5703,8 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   // no physical pin yet. Only the successful initial display's detached nodes,
   // native-certified route and original live deadline can supply that witness.
   const candidate = { bound: true, provisional: input.allowProvisionalFirstUserExpansion === true,
-    state, record, pendingPrivate, predecessor, deadline: pendingPrivate ? predecessor?.deadline : undefined, fingerprint: record?.fingerprint,
+    state, record, pendingPrivate, predecessor, userRootGap: chatGPTInvocationUserRootGap,
+    deadline: chatGPTInvocationUserRootGap?.deadline ?? (pendingPrivate ? predecessor?.deadline : undefined), fingerprint: record?.fingerprint,
     remount: pendingPrivate || !!record && (record.root !== root || record.body !== body), oldRoot, oldBody,
     root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
     document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
@@ -5895,6 +6087,9 @@ function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   return contextFailure === null ? candidate : reject(contextFailure);
 }
 function chatGPTFirstUserExpansionContextFailure(candidate) {
+  if (candidate.userRootGap && (candidate.userRootGap.outcome !== 'returned'
+    || candidate.deadline !== candidate.userRootGap.deadline || Date.now() >= candidate.deadline
+    || candidate.userRootGap.record.userRootGap !== candidate.userRootGap)) return 'deadline';
   const roots = chatGPTMessageRoots('user');
   if (window !== window.top || candidate.document !== document) return 'frame';
   if (input.provider !== 'chatgpt') return 'provider';
@@ -6281,7 +6476,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
-    if (!candidate.initialRoute && !candidate.pendingPrivate) candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap) candidate.deadline = Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
@@ -6753,6 +6948,8 @@ if (ownedUserCount > 0) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const boundRecovery = expansion?.bound ? expansion : boundRefresh;
+  const gapHashFailure = chatGPTUserRootGapReadFailure();
+  if (gapHashFailure) return gapHashFailure;
   let boundHashFailure = 'none', boundHashContextFailure = null;
   const rejectBoundHash = (rule, value) => { if (value && boundHashFailure === 'none') boundHashFailure = rule; return value; };
   if (boundRecovery && (rejectBoundHash('context', (boundHashContextFailure = chatGPTFirstUserExpansionContextFailure(boundRecovery)) !== null)
@@ -6772,8 +6969,17 @@ if (ownedUserCount > 0) {
     || chatGPTFirstUserFailure('snapshot_before_action', 'digest', { recoveryPath: 'hash_snapshot' }, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
-  if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) return await chatGPTCertifyBoundFirstRemount(expansion, fingerprint)
-    || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
+  if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) {
+    const certified = await chatGPTCertifyBoundFirstRemount(expansion, fingerprint)
+      || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
+    const gapCertificateFailure = chatGPTUserRootGapReadFailure();
+    if (chatGPTInvocationUserRootGap) {
+      chatGPTInvocationUserRootGap.readFinished = true;
+      if (gapCertificateFailure || certified.error !== 'first_user_observation_replaced')
+        chatGPTInvocationUserRootGap.outcome = 'rejected';
+    }
+    return gapCertificateFailure || certified;
+  }
   firstUserFingerprint = fingerprint;
   const pinned = globalThis.__computaModelFirstProof;
   if (pinned) {
@@ -6890,6 +7096,12 @@ if (ownedUserCount > 0) {
   if (boundRecovery && finalized.error === 'document_changed' && finalized.detail === 'model_read_context') {
     const discarded = chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'finalization_hash');
     if (discarded) return discarded;
+  }
+  const gapFinalFailure = chatGPTUserRootGapReadFailure();
+  if (gapFinalFailure) return gapFinalFailure;
+  if (chatGPTInvocationUserRootGap) {
+    chatGPTInvocationUserRootGap.readFinished = true;
+    if (finalized.error) chatGPTInvocationUserRootGap.outcome = 'rejected';
   }
   return chatGPTWithRecoveryLifecycle(finalized);
 }

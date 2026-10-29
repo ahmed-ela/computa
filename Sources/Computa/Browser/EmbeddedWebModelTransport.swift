@@ -2638,8 +2638,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     static func sanitizedUserCountDiagnostic(_ raw: Any?, action: String) -> String? {
         let flags = ["topFrame", "urlMatches", "originMatches", "ownerMatches", "expectedCountMatches"]
+        let baseKeys = Set(flags + ["kind", "stage", "action", "entryUserCount", "currentUserCount", "expectedUserCounts"])
+        let gapFlags = ["boundRootPresent", "boundBodyPresent", "boundRootConnected", "boundBodyConnected"]
+        let gapKeys = Set(gapFlags + ["gapDisposition"])
         guard let value = raw as? [String: Any],
-              Set(value.keys) == Set(flags + ["kind", "stage", "action", "entryUserCount", "currentUserCount", "expectedUserCounts"]),
+              Set(value.keys) == baseKeys || Set(value.keys) == baseKeys.union(gapKeys),
               value["kind"] as? String == "chatgpt_user_count_v1",
               value["action"] as? String == action, firstUserDiagnosticActions.contains(action),
               let stage = value["stage"] as? String,
@@ -2663,6 +2666,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard counts.count == rawCounts.count, Set(counts).count == counts.count,
                   counts.allSatisfy({ (0...10_000).contains($0) }) else { return nil }
             safe["expectedUserCounts"] = counts
+        }
+        if value["gapDisposition"] != nil {
+            guard let disposition = value["gapDisposition"] as? String,
+                  ["not_attempted", "not_eligible", "waiting", "returned", "rejected", "expired", "clock_failed"].contains(disposition) else { return nil }
+            for key in gapFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+                safe[key] = flag
+            }
+            guard safe["boundRootConnected"] as? Bool != true || safe["boundRootPresent"] as? Bool == true,
+                  safe["boundBodyConnected"] as? Bool != true || safe["boundBodyPresent"] as? Bool == true else { return nil }
+            safe["gapDisposition"] = disposition
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
         return String(decoding: bytes, as: UTF8.self)
@@ -4317,8 +4331,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     result.setTimeout(timeout)
                     guard result.isPending else { return }
+                    var pageInput = input
+                    if provider == .chatgpt, action == "inspect" {
+                        // A negative-only wall-clock fence for an adapter wait.
+                        // Sample wall time first and round down so dispatch
+                        // overhead cannot extend the existing native deadline.
+                        // ContinuousClock timeout/cancellation remain authoritative.
+                        let epochMilliseconds = Date().timeIntervalSince1970 * 1_000
+                        let remaining = (evaluationDeadline - .now).components
+                        let remainingMilliseconds = max(0, min(30_000,
+                            Double(remaining.seconds) * 1_000 + Double(remaining.attoseconds) / 1e15))
+                        pageInput["evaluationDeadlineEpochMilliseconds"] = Int64((epochMilliseconds + remainingMilliseconds).rounded(.down))
+                    }
                     session.providerAdapterEverDispatched = true
-                    session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
+                    session.view.callAsyncJavaScript(script, arguments: ["input": pageInput], in: nil, in: world) { reply in
                         switch reply {
                         case .success(let value):
                             do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }

@@ -1548,6 +1548,56 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for key in ["entryUserCount", "currentUserCount", "expectedUserCounts"] { XCTAssertTrue(fields[key] is NSNull) }
     }
 
+    func testUserCountGapDiagnosticRequiresCompleteFiniteConnectivityAndDisposition() throws {
+        let gapFlags = ["boundRootPresent", "boundBodyPresent", "boundRootConnected", "boundBodyConnected"]
+        let gapKeys = gapFlags + ["gapDisposition"]
+        let valid: [String: Any] = ["kind": "chatgpt_user_count_v1", "stage": "entry", "action": "inspect",
+            "entryUserCount": 0, "currentUserCount": 0, "expectedUserCounts": [1], "expectedCountMatches": false,
+            "topFrame": true, "urlMatches": true, "originMatches": true, "ownerMatches": true,
+            "boundRootPresent": true, "boundBodyPresent": true, "boundRootConnected": false, "boundBodyConnected": false,
+            "gapDisposition": "expired"]
+        for disposition in ["not_attempted", "not_eligible", "waiting", "returned", "rejected", "expired", "clock_failed"] {
+            var input = valid; input["gapDisposition"] = disposition
+            let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(input, action: "inspect"))
+            XCTAssertLessThanOrEqual(safe.utf8.count, 512)
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(decoded.keys), Set(valid.keys))
+            XCTAssertEqual(decoded["gapDisposition"] as? String, disposition)
+            XCTAssertEqual(decoded["boundRootPresent"] as? Bool, true)
+            XCTAssertEqual(decoded["boundRootConnected"] as? Bool, false)
+        }
+        for key in gapKeys {
+            var partial = valid; partial.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(partial, action: "inspect"), key)
+        }
+        for key in gapFlags {
+            for bad in [0, 1, "false", NSNull()] as [Any] {
+                var input = valid; input[key] = bad
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(input, action: "inspect"), key)
+            }
+        }
+        for (key, value) in [("gapDisposition", "PRIVATE_CANARY" as Any), ("gapDisposition", NSNull() as Any),
+                             ("gapDeadline", 1 as Any), ("boundRootText", "PRIVATE_CANARY" as Any)] {
+            var input = valid; input[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(input, action: "inspect"), key)
+        }
+        for node in ["Root", "Body"] {
+            var impossible = valid; impossible["bound\(node)Present"] = false; impossible["bound\(node)Connected"] = true
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(impossible, action: "inspect"), node)
+        }
+        var legacy = valid
+        for key in gapKeys { legacy.removeValue(forKey: key) }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(legacy, action: "inspect"))
+        var maximum = valid
+        maximum["stage"] = "preparation_final_read"; maximum["action"] = "verifyProductMode"
+        maximum["entryUserCount"] = 10_000; maximum["currentUserCount"] = 10_000
+        maximum["expectedUserCounts"] = [10_000, 9_999]; maximum["gapDisposition"] = "not_attempted"
+        for key in ["topFrame", "urlMatches", "originMatches", "ownerMatches", "expectedCountMatches"] + gapFlags { maximum[key] = false }
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedUserCountDiagnostic(maximum, action: "verifyProductMode"))
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 512)
+        print("userCountGapMaximumEncoding bytes=\(encoded.utf8.count)")
+    }
+
     func testResponseProgressProjectionPreservesUnknownsAndOmitsPrivateContent() throws {
         let privateText = "PRIVATE_RESPONSE_CANARY😀é"
         let input: [String: Any] = ["responseCount": 1, "userCount": 2, "busy": true,
@@ -5757,6 +5807,217 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testDetachedFirstUserGapWaitsReadOnlyThenRebindsThroughFullProof() async throws {
+        let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        try await installDetachedFirstUserGap(view)
+        var finished = false
+        var observed: [String: Any]?
+        var failure: (any Error)?
+        let polling = Task { @MainActor in
+            defer { finished = true }
+            do { observed = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            catch { failure = error }
+        }
+        let waiting = try await waitForDetachedFirstUserGap(view, finished: { finished })
+        guard let waiting else {
+            await polling.value
+            XCTFail("A detached zero-root gap must wait read-only instead of failing at entry: \(String(describing: failure))")
+            return
+        }
+        XCTAssertFalse(finished, "Missing DOM cannot release a response")
+        XCTAssertNil(observed)
+        XCTAssertEqual(waiting["users"] as? Int, 0)
+        XCTAssertEqual(waiting["oldRootDetached"] as? Bool, true)
+        XCTAssertEqual(waiting["oldBodyDetached"] as? Bool, true)
+        XCTAssertEqual(waiting["replacementAdopted"] as? Bool, false)
+        XCTAssertEqual(waiting["expansionClaimed"] as? Bool, false)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await evaluate(view, "return window.fixtureRestoreGap();")
+        await polling.value
+        if let failure { throw failure }
+        XCTAssertEqual(observed?["state"] as? String, "running")
+        let proof = (observed?["modelProofContext"] ?? observed?["pendingSubmissionContext"]) as? [String: Any]
+        XCTAssertEqual(proof?["firstUserFingerprint"] as? String, fingerprint)
+        XCTAssertEqual((proof?["submittedPromptFingerprint"] as? String)?.count, 64)
+        let rebind = try await evaluate(view, """
+            const record = globalThis.__computaChatSubmissionState?.lastVerified;
+            const root = document.querySelector('[data-message-author-role="user"]');
+            return {rootBound:record?.root===root, bodyBound:record?.body===root?.querySelector('[data-markdown-text-style="user-message"]'),
+              replacementVerified:globalThis.__computaModelBoundFirstExpansion?.verified===true,
+              markerMatches:!!record?.marker && record.marker===globalThis.__computaModelFirstMarker};
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        for key in ["rootBound", "bodyBound", "replacementVerified", "markerMatches"] { XCTAssertEqual(rebind?[key] as? Bool, true, key) }
+        let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+        XCTAssertEqual(expansionClicks, 1)
+        _ = try await evaluate(view, "document.getElementById('fixture-bound-stop').remove(); return true;")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        XCTAssertEqual((complete["modelProofContext"] as? [String: Any])?["firstUserFingerprint"] as? String, fingerprint)
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let cleanup = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(cleanup["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testDetachedFirstUserGapExpiresWithoutRenewalOrLateExpansion() async throws {
+        let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        try await installDetachedFirstUserGap(view)
+        var diagnostics: [String] = []
+        fixture.transport.setUserCountDiagnosticObserverForTesting { diagnostics.append($0) }
+        let started = ContinuousClock.now
+        for attempt in 0..<2 {
+            let attemptStarted = ContinuousClock.now
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("An absent user root cannot complete ownership")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
+            if attempt == 1 { XCTAssertLessThan(ContinuousClock.now - attemptStarted, .milliseconds(600), "A second read cannot renew the gap deadline") }
+        }
+        XCTAssertGreaterThan(ContinuousClock.now - started, .milliseconds(1_500))
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(4))
+        let first = try XCTUnwrap(diagnostics.first)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(first.utf8)) as? [String: Any])
+        XCTAssertEqual(fields["boundRootPresent"] as? Bool, true)
+        XCTAssertEqual(fields["boundBodyPresent"] as? Bool, true)
+        XCTAssertEqual(fields["boundRootConnected"] as? Bool, false)
+        XCTAssertEqual(fields["boundBodyConnected"] as? Bool, false)
+        XCTAssertEqual(fields["gapDisposition"] as? String, "expired")
+        _ = try await evaluate(view, "return window.fixtureRestoreGap();")
+        try await Task.sleep(for: .milliseconds(80))
+        let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+        XCTAssertEqual(expansionClicks, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+    }
+
+    func testDetachedFirstUserGapHonorsShorterNativeDeadlineWithoutLateEffects() async throws {
+        let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(350))
+        try await installDetachedFirstUserGap(view)
+        var finished = false
+        var failure: (any Error)?
+        let started = ContinuousClock.now
+        let polling = Task { @MainActor in
+            defer { finished = true }
+            do {
+                _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The native deadline cannot be extended by a DOM-gap wait")
+            } catch { failure = error }
+        }
+        let waitObservation = try await waitForDetachedFirstUserGap(view, finished: { finished })
+        let waiting = try XCTUnwrap(waitObservation)
+        let remaining = try XCTUnwrap(waiting["remainingMilliseconds"] as? Double)
+        XCTAssertGreaterThan(remaining, 0)
+        XCTAssertLessThanOrEqual(remaining, 350, "The JS deadline must receive the remaining native budget, not a new 1800ms")
+        await polling.value
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+        let typedFailure = try XCTUnwrap(failure as? EmbeddedWebModelTransport.Failure)
+        XCTAssertTrue([EmbeddedWebModelTransport.Failure.pageUnavailable, .ownershipFailure(.javaScriptUserCount)].contains(typedFailure))
+        _ = try await evaluate(view, "return window.fixtureRestoreGap();")
+        try await Task.sleep(for: .milliseconds(100))
+        let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+        XCTAssertEqual(expansionClicks, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+    }
+
+    func testDetachedFirstUserGapCancellationCannotExpandALateReplacement() async throws {
+        let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+        defer { fixture.shutdown() }
+        try await installDetachedFirstUserGap(view)
+        var finished = false
+        var failure: (any Error)?
+        let polling = Task { @MainActor in
+            defer { finished = true }
+            do {
+                _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("Cancellation must not publish a missing-root observation")
+            } catch { failure = error }
+        }
+        let waiting = try await waitForDetachedFirstUserGap(view, finished: { finished })
+        XCTAssertNotNil(waiting)
+        polling.cancel()
+        await polling.value
+        XCTAssertTrue(failure is CancellationError)
+        _ = try await evaluate(view, "return window.fixtureRestoreGap();")
+        try await Task.sleep(for: .milliseconds(100))
+        let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+        XCTAssertEqual(expansionClicks, 0, "Ending the native operation must revoke its pending clock before a late replacement can act")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+    }
+
+    func testDetachedFirstUserGapRejectsRouteDriftAndChangedReplacement() async throws {
+        for change in ["route", "changed_body"] {
+            let (fixture, view, token, _) = try await readyBoundFirstUserFixture()
+            defer { fixture.shutdown() }
+            try await installDetachedFirstUserGap(view, changedBody: change == "changed_body")
+            var finished = false
+            var failure: (any Error)?
+            let polling = Task { @MainActor in
+                defer { finished = true }
+                do {
+                    _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A changed route or full body cannot acquire ownership: \(change)")
+                } catch { failure = error }
+            }
+            let waiting = try await waitForDetachedFirstUserGap(view, finished: { finished })
+            XCTAssertNotNil(waiting, change)
+            _ = try await evaluate(view, change == "route"
+                ? "history.pushState({}, '', '/g/foreign-route'); return window.fixtureRestoreGap();"
+                : "return window.fixtureRestoreGap();")
+            await polling.value
+            guard let failure = failure as? EmbeddedWebModelTransport.Failure else {
+                XCTFail("Expected a bounded ownership or route failure: \(String(describing: failure))"); continue
+            }
+            switch failure {
+            case .ownershipFailure, .unexpectedPage(.chatgpt): break
+            default: XCTFail("Unexpected failure: \(failure)")
+            }
+            let expansionClicks = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
+            XCTAssertEqual(expansionClicks, change == "route" ? 0 : 1, change)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        }
+    }
+
+    private func installDetachedFirstUserGap(_ view: WKWebView, changedBody: Bool = false) async throws {
+        _ = try await evaluate(view, """
+            const old = document.querySelector('[data-message-author-role="user"]');
+            const parent = old.parentNode, next = old.nextSibling, replacement = old.cloneNode(true);
+            const body = replacement.querySelector('[data-markdown-text-style="user-message"]');
+            const full = window.fixturePrompts[0]; window.fixtureBoundExpansionClicks = 0;
+            body.textContent = full.slice(0, 10240);
+            const button = document.createElement('button'); button.type='button';
+            button.textContent='Show more'; button.setAttribute('aria-label','Show more');
+            button.addEventListener('click', () => {
+              window.fixtureBoundExpansionClicks++;
+              setTimeout(() => { body.textContent=\(changedBody ? "full.replace('Bound recovery', 'Wrong recovery')" : "full"); button.remove(); }, 25);
+            });
+            replacement.appendChild(button);
+            window.fixtureRestoreGap = () => { parent.insertBefore(replacement, next); return true; };
+            old.remove(); return true;
+            """)
+    }
+
+    private func waitForDetachedFirstUserGap(_ view: WKWebView, finished: () -> Bool) async throws -> [String: Any]? {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !finished(), ContinuousClock.now < deadline {
+            let state = try await evaluate(view, """
+                const record=globalThis.__computaChatSubmissionState?.lastVerified, claim=record?.userRootGap;
+                if (claim?.outcome !== 'waiting') return null;
+                return {users:document.querySelectorAll('[data-message-author-role="user"]').length,
+                  oldRootDetached:record.root?.isConnected===false, oldBodyDetached:record.body?.isConnected===false,
+                  replacementAdopted:!!record.replacement, expansionClaimed:!!globalThis.__computaModelBoundFirstExpansion,
+                  remainingMilliseconds:claim.deadline-Date.now()};
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            if let state { return state }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return nil
     }
 
     func testBoundFirstMessageRemountRecoveryRejectsConnectedOldChangedAndIgnoredBodies() async throws {

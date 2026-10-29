@@ -188,6 +188,7 @@ final class EmbeddedBrowserSession {
         var toolRenderLeases: Set<UUID> = []
         var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
         var needsBackgroundRendering: Bool { isModelOwned || isToolOwned || !toolRenderLeases.isEmpty }
+        var shouldMountInBackground: Bool { needsBackgroundRendering && (presentationHost == nil || !toolRenderLeases.isEmpty) }
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
@@ -1447,7 +1448,7 @@ final class EmbeddedBrowserSession {
         // WindowGroup shares this session. Updating another window must not
         // move live pages away from a surviving designated render host.
         if modelRenderHost == nil { modelRenderHost = modelRenderHosts.first?.view }
-        for entry in entries.values where entry.needsBackgroundRendering && entry.presentationHost == nil {
+        for entry in entries.values where entry.shouldMountInBackground {
             mountModelView(entry)
         }
     }
@@ -1456,7 +1457,7 @@ final class EmbeddedBrowserSession {
         modelRenderHosts.removeAll { $0.view == nil || $0.view === host }
         if modelRenderHost === host {
             modelRenderHost = modelRenderHosts.first?.view
-            for entry in entries.values where entry.needsBackgroundRendering && entry.presentationHost == nil {
+            for entry in entries.values where entry.shouldMountInBackground {
                 if modelRenderHost != nil { mountModelView(entry) }
                 else if entry.view.superview === host {
                     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -1472,6 +1473,18 @@ final class EmbeddedBrowserSession {
         let entry = try entry(id)
         guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
         entry.presentationHost = host
+        if !entry.toolRenderLeases.isEmpty {
+            // The workspace may update or replace its selected pane while a
+            // task borrows this exact page. Remember the latest human host,
+            // but keep the task's viewport stable until its final lease ends.
+            rememberPresentedFrame(entry, host: host)
+            mountModelView(entry)
+            return
+        }
+        mountPresentedView(entry, in: host)
+    }
+
+    private func mountPresentedView(_ entry: Entry, in host: NSView) {
         entry.view.removeFromSuperview()
         entry.frameBeforeToolRendering = nil
         (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = entry.isModelOwned || entry.isToolOwned
@@ -1483,28 +1496,35 @@ final class EmbeddedBrowserSession {
 
     func detachPresentedTab(_ id: UUID, from host: NSView) {
         guard let entry = entries[id], entry.presentationHost === host else { return }
+        if !entry.toolRenderLeases.isEmpty { rememberPresentedFrame(entry, host: host) }
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
         if entry.needsBackgroundRendering { mountModelView(entry) }
     }
 
     /// A revocable render lease borrows the exact human view. It cannot select,
-    /// navigate, close, or change the ownership of that tab. Visible UI wins.
+    /// navigate, close, or change the ownership of that tab. A selected narrow
+    /// human pane cannot shrink the task viewport; final release restores it.
     func acquireToolRendering(tabID: UUID) throws -> UUID {
         let entry = try entry(tabID)
         guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
-        guard (entry.presentationHost ?? modelRenderHost)?.window != nil else {
+        guard modelRenderHost?.window != nil else {
             throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
         }
         let lease = UUID()
         entry.toolRenderLeases.insert(lease)
-        if entry.presentationHost == nil { mountModelView(entry) }
+        mountModelView(entry)
         return lease
     }
 
     func releaseToolRendering(tabID: UUID, lease: UUID) {
         guard let entry = entries[tabID], entry.toolRenderLeases.remove(lease) != nil,
-              !entry.needsBackgroundRendering, entry.presentationHost == nil else { return }
+              entry.toolRenderLeases.isEmpty else { return }
+        if let host = entry.presentationHost {
+            mountPresentedView(entry, in: host)
+            return
+        }
+        guard !entry.needsBackgroundRendering else { return }
         entry.view.removeFromSuperview()
         if let saved = entry.frameBeforeToolRendering {
             entry.view.frame = saved.frame
@@ -1512,6 +1532,23 @@ final class EmbeddedBrowserSession {
         }
         entry.frameBeforeToolRendering = nil
         (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = false
+    }
+
+    /// A retained lease is not evidence that its render surface still exists.
+    /// Check immediately before tool dispatch, without moving or replaying it.
+    func requireToolRendering(tabID: UUID) throws {
+        let entry = try entry(tabID)
+        guard !entry.toolRenderLeases.isEmpty else { return }
+        guard let host = modelRenderHost, let window = host.window,
+              entry.view.superview === host, entry.view.window === window,
+              entry.view.bounds.width >= 1_024, entry.view.bounds.height >= 768 else {
+            throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
+        }
+    }
+
+    private func rememberPresentedFrame(_ entry: Entry, host: NSView) {
+        guard !entry.isModelOwned, !entry.isToolOwned else { return }
+        entry.frameBeforeToolRendering = (host.bounds, [.width, .height])
     }
 
     private func mountModelView(_ entry: Entry) {
@@ -2656,8 +2693,8 @@ final class EmbeddedBrowserSession {
 /// the application's native first responder, including during reparenting.
 @MainActor
 private final class EmbeddedModelWebView: WKWebView {
-    /// Human tabs use normal WebKit focus until an unpresented render lease
-    /// temporarily borrows the same view. Presentation restores that behavior.
+    /// Human tabs use normal WebKit focus until a render lease temporarily
+    /// borrows the same view. Final release restores ordinary presentation.
     var protectsNativeFocus = true {
         didSet {
             guard !protectsNativeFocus else { return }
