@@ -304,3 +304,13 @@ instruction size limits, response parser, tool policy and ownership checks are
 unchanged. All 162 instruction/response-codec tests passed; the unchanged transport
 and adapter retain their 31 native and 155 JavaScript checks. Fresh live model
 qualification remains necessary.
+
+The signed installed build327 matched commit `84681dd`. Its first fresh
+Flash-Lite attempt stopped after 0.885 seconds with website verification required,
+before prompt submission or tools. The fixture remained pristine and its server
+was stopped. One normal Gemini navigation then displayed Google's `/sorry`
+checkbox challenge at 20:16:52 UTC. This is a new challenge after the earlier
+approved CAPTCHA was completed; it does not qualify the patch guidance or show
+that CAPTCHA prevention is solved. Fresh action-time approval is pending for the
+displayed challenge. The separately observed higher-model usage limits also still
+require a new availability check after the advertised reset.
