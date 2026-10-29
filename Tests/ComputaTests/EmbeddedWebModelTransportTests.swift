@@ -12820,6 +12820,133 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testGeminiFirstQueryRemountDuringSubmissionDigestRequiresOneFreshInspectAndToolContinuation() async throws {
+        try await assertGeminiFirstQueryDigestRemount(changeText: false)
+    }
+
+    func testGeminiFirstQueryRemountDuringSubmissionDigestRejectsChangedReplacementWithoutReplay() async throws {
+        try await assertGeminiFirstQueryDigestRemount(changeText: true)
+    }
+
+    private func assertGeminiFirstQueryDigestRemount(changeText: Bool) async throws {
+        let choice = Self.fixtureChoice(.gemini)
+        let page = Self.geminiQueryParagraphPage(.framed).replacingOccurrences(
+            of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
+            with: "body.textContent = window.fixturePrompts.length === 1 ? '\(Self.fixtureToolReply)' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini, initiallySelectTarget: true,
+            unmountClosedMenu: true, basePage: page))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: tabID)
+        var armed = false
+        var followingActions: [String] = []
+        var observations: [[String: Any]] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            do {
+                if armed {
+                    followingActions.append(action)
+                    observations.append(try await self.geminiVerifiedQueryState(view, sequence: 1))
+                    if observations.count == (changeText ? 1 : 2) { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+                } else if action == "inspect" {
+                    let value = try await self.evaluate(view, """
+                        const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified;
+                        if (!record || record.sequence !== 1 || record.phase !== 'verified' || state.revoked || state.pending
+                          || !record.root.isConnected || !record.body.isConnected) return false;
+                        const original = crypto.subtle.digest.bind(crypto.subtle), canonical = record.canonical;
+                        const oldRoot = record.root, oldBody = record.body;
+                        const stats = globalThis.__fixtureFirstSubmissionDigestRemount = {
+                          hashes: 0, replacements: 0, oldRootDisconnected: false, oldBodyDisconnected: false };
+                        crypto.subtle.digest = async (...args) => {
+                          const digest = await original(...args);
+                          if (new TextDecoder().decode(args[1]) === canonical && ++stats.hashes === 2) {
+                            if (state.lastVerified !== record || state.pending || record.phase !== 'verified'
+                              || record.root !== oldRoot || record.body !== oldBody)
+                              throw new Error('Expected the unchanged verified first submission before remount');
+                            const replacement = oldRoot.cloneNode(true);
+                            if (\(changeText ? "true" : "false")) {
+                              const row = replacement.querySelector('.query-text-line');
+                              row.textContent = row.textContent.replace('Preserve', 'Changed');
+                            }
+                            oldRoot.replaceWith(replacement); stats.replacements++;
+                            stats.oldRootDisconnected = !oldRoot.isConnected;
+                            stats.oldBodyDisconnected = !oldBody.isConnected;
+                          }
+                          return digest;
+                        };
+                        return true;
+                        """, world: privateWorld)
+                    armed = value as? Bool == true
+                }
+            } catch { XCTFail("Could not arm or observe first submission digest remount: \(error)") }
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        let prompt = "Preserve the exact first query\n\nReturn a terminal fixture tool call"
+        if changeText {
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                XCTFail("A changed replacement cannot obtain a discard certificate or publish a response")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+            XCTAssertTrue(armed)
+            XCTAssertEqual(followingActions, ["inspect"], "A changed full payload must not spend the fresh-inspect budget")
+            XCTAssertEqual(observations.first?["revoked"] as? Bool, true)
+            XCTAssertEqual(observations.first?["certificateLinksOldAndCurrent"] as? Bool, false)
+            let stats = try await evaluate(view, "return globalThis.__fixtureFirstSubmissionDigestRemount;", world: privateWorld) as? [String: Any]
+            XCTAssertEqual(stats?["replacements"] as? Int, 1)
+            XCTAssertEqual(stats?["oldRootDisconnected"] as? Bool, true)
+            XCTAssertEqual(stats?["oldBodyDisconnected"] as? Bool, true)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay the failed turn"])
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            XCTAssertTrue((finished["text"] as? String ?? "").isEmpty)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        } else {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            let first = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertTrue(armed)
+            XCTAssertEqual(followingActions, ["inspect", "inspect"], "The native current-submission pin must permit only one fresh inspect after discard")
+            XCTAssertEqual(observations.count, 2)
+            XCTAssertEqual(observations.first?["currentPointers"] as? Bool, false)
+            XCTAssertEqual(observations.first?["certificateLinksOldAndCurrent"] as? Bool, true)
+            XCTAssertEqual(observations.first?["revoked"] as? Bool, false)
+            XCTAssertEqual(observations.last?["currentPointers"] as? Bool, true)
+            XCTAssertEqual(observations.last?["receiptConsumed"] as? Bool, true)
+            XCTAssertEqual(first["text"] as? String, Self.fixtureToolReply)
+            let firstProof = try XCTUnwrap(first["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(firstProof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+            let continuation = #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": continuation])
+            let final = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertEqual(final["sequence"] as? Int, 2)
+            XCTAssertEqual(final["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+            try assertChoiceEvidence(final, choice: choice)
+            let finalProof = try XCTUnwrap(final["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(finalProof["firstUserFingerprint"] as? String, firstProof["firstUserFingerprint"] as? String)
+            XCTAssertEqual(finalProof["documentGeneration"] as? String, firstProof["documentGeneration"] as? String)
+            XCTAssertEqual(finalProof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(continuation))
+            XCTAssertEqual(fixture.browser.documentGeneration(for: tabID), generation)
+            let captured = try await capturedUserPrompts(view)
+            XCTAssertEqual(captured, [prompt, continuation])
+            try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 0)
+            let stats = try await evaluate(view, "return globalThis.__fixtureFirstSubmissionDigestRemount;", world: privateWorld) as? [String: Any]
+            XCTAssertEqual(stats?["replacements"] as? Int, 1)
+            XCTAssertEqual(stats?["oldRootDisconnected"] as? Bool, true)
+            XCTAssertEqual(stats?["oldBodyDisconnected"] as? Bool, true)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertNil(fixture.browser.webView(for: tabID))
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testGeminiVerifiedFirstQueryReplacementBetweenInvocationsRequiresOneFreshInspect() async throws {
         let choice = Self.fixtureChoice(.gemini)
         let fixture = try Fixture(page: Self.modelChoicePage(.gemini, initiallySelectTarget: true,

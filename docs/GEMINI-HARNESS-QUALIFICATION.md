@@ -314,3 +314,46 @@ approved CAPTCHA was completed; it does not qualify the patch guidance or show
 that CAPTCHA prevention is solved. Fresh action-time approval is pending for the
 displayed challenge. The separately observed higher-model usage limits also still
 require a new availability check after the advertised reset.
+
+## Resumed build 327: first-query digest race
+
+The user approved the displayed challenge, and one checkbox action cleared it at
+approximately 23:10:46 UTC. The normal Gemini composer returned, and its picker
+showed all four concrete models enabled. Computa's provider-scoped refresh then
+exposed the same choices. This establishes recovery for that challenge, not
+prevention of future challenges.
+
+The next fresh Flash-Lite task failed after 4.607 seconds with
+`website_ownership_unverified` / `submission_message`, after submission proof but
+before any tools. The retained first failure came from `verifyModel` while
+hashing the first submitted query. The digest matched, but the old query root and
+body disconnected during the await; the count remained one and the current root
+changed. The replacement's text was not retained, so equality cannot be assumed.
+The adapter's post-digest recovery covered later queries but omitted the first.
+It revoked the session, and automatic cleanup plus one explicit cleanup retry
+remained unconfirmed. No prompt was replayed, no fixture submission occurred, and
+the fixture files remained unchanged. The original failure and cleanup receipts
+are retained separately from any subsequent fixed-build qualification.
+
+Build328 extends the existing first-query replacement proof to a replacement
+during the verified submission's digest. Only a read-only inspection with both
+native prompt pins may request it. The helper checks the full replacement text,
+marker, hash, owner, route and temporary mode again, while a stable invocation
+guard prevents a superseded read from installing a certificate. The interrupted
+read supplies no answer or submission proof; the existing native budget allows
+one fresh full inspection. A current-submission rejection now retains its
+original cause instead of being masked by a later first-message recovery check.
+Nothing replays a prompt or relaxes the action, response or cleanup requirements.
+
+Both new timing regressions failed against the previous adapter. The final
+JavaScript suite passed 182 tests and 6,046 assertions, including 27 new cases.
+The retained failed test attempts include three legacy expectations of the old
+error masking; their assertions now require the original rejection and finite
+diagnostic evidence, with the rejection and no-replay checks preserved.
+
+All 33 relevant native checks passed: 31 existing cases passed in the first run,
+and both new real-WebKit cases passed after correcting their callback recorder
+to observe the actual `inspect` read and its single fresh inspection. No
+production code changed between those native runs. The unchanged instruction
+and codec source retains its 162 passing checks. Live qualification of build328
+remains separate from these offline results.

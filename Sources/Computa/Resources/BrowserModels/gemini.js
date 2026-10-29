@@ -2637,6 +2637,24 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     // Already verified current queries can remount while SHA-256 yields.
     // Discard only after the existing helper proves the entire replacement;
     // the native single fresh-inspect budget still owns any later rebinding.
+    const firstRemountCurrent = () => sequence === 1 && ['inspect', 'verifyModel'].includes(input.action)
+      && !submissionRecoveryAttempted && submissionReadCurrent() && input.allowFirstUserBinding === false
+      && globalThis.__computaGeminiSubmissionState === state && !state.revoked
+      && state.lastVerified === record && state.pending === null && !pendingParent
+      && record.sequence === 1 && record.phase === 'verified' && record.document === document && record.owner === input.ownerToken
+      && record.root === root && record.body === body && record.remount === null
+      && firstSnapshot?.root === root && firstSnapshot.body === body && firstSnapshot.text === text
+      && !root.isConnected && !body.isConnected && modelUserRoots().length === 1 && modelUserRoots()[0] !== root
+      && record.canonical === text && record.marker === input.submissionMarker && record.marker === input.expectedFirstUserMarker
+      && fingerprint === record.fingerprint && modelExpectedSubmissionProof(1)?.fingerprint === fingerprint
+      && input.expectedFirstUserFingerprint === fingerprint && firstUserFingerprint === fingerprint;
+    if (firstRemountCurrent()) {
+      // The old first snapshot is necessarily detached, so its context check
+      // cannot pass. The existing helper proves owner/route/mode and all new
+      // bytes instead; the guard also prevents a crossed await certifying state.
+      const discarded = await modelFirstUserReplacementObservation(firstSnapshot, firstRemountCurrent);
+      if (discarded) return discarded;
+    }
     if (sequence > 1 && !submissionRecoveryAttempted && submissionReadCurrent()
       && globalThis.__computaGeminiSubmissionState === state && !state.revoked
       && state.lastVerified === record && state.pending === null && !pendingParent
@@ -2775,11 +2793,13 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false, submission 
   while (JSON.stringify(diagnostic).length > 8_192 && diagnostic.descendants.length) diagnostic.descendants.pop();
   return JSON.stringify(diagnostic);
 }
-async function modelFirstUserReplacementObservation(snapshot) {
+async function modelFirstUserReplacementObservation(snapshot, submissionGuard = null) {
   // Only the existing exact first-lineage discard proof can propose a remount.
   // It still admits no result: native must request one fresh full inspect.
+  if (submissionGuard && !submissionGuard()) return null;
   const result = await websiteModelReplacementObservation(input, ownedUserCount, snapshot,
     { roots: modelUserRoots, body: modelUserBody, text: normalizedBody, identity: () => firstUserIdentity, temporary: modelTemporaryVerified });
+  if (submissionGuard && !submissionGuard()) return null;
   if (result?.error === 'first_user_observation_replaced' && submissionOwnershipEnabled) {
     const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified;
     const roots = modelUserRoots(), root = roots[0], body = root && modelUserBody(root);
@@ -3024,6 +3044,9 @@ async function providerPageAction() {
 }
 const observed = await websiteModelFinalGuard('gemini', input, await providerPageAction(), modelTemporaryVerified);
 if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
+// A rejected current-submission proof cannot become a first-lineage discard
+// merely because the first body still matches its separate pin.
+if (observed.error === 'conversation_changed' && observed.detail === 'submission_message') return observed;
 if (observed.error === 'first_user_observation_replaced') return observed;
 if (observed.error === 'submission_observation_replaced') {
   const record = globalThis.__computaGeminiSubmissionState?.lastVerified, certificate = record?.remount;
