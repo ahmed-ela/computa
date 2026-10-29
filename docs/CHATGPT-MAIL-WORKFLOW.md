@@ -551,6 +551,21 @@ binary rejects the immutable315 adapter and passes the candidate. Persistent
 disabling expires within the original deadline with no picker/editor action;
 identity, owner, route and header drift also reject without input.
 
+Installed316 completed the original task's model loop: all 16 ChatGPT Instant
+inferences retained product/model/submission verification and closed their
+website sessions. Its 15 browser tool calls returned without tool errors, but
+the requested email was not sent. The sole input was Compose; no recipient,
+message field or Send reference was exposed, and the final response accurately
+reported that limitation. Recipient and Send queries searched the retained
+242-node truncated capture and found no matching control.
+
+All 15 native page captures used an attached, visible 1024x768 view. The later
+360-pixel human pane is therefore not evidence of the task-time viewport. Those
+captures reached the byte budget, with a partially explored panel; this does
+not yet distinguish controls hidden/unmounted by Gmail from a capture discovery
+gap. The existing empty compose state and failed evidence are retained for
+bounded DOM inspection. Model-loop success is not email-action success.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
