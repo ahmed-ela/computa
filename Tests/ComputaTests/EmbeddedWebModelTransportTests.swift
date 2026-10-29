@@ -10257,11 +10257,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for provider in Self.choiceProviders {
             let fixture = try Fixture(page: Self.modelChoicePage(provider))
             defer { fixture.shutdown() }
+            var modelDiagnostics: [String] = []
+            fixture.transport.setModelDiagnosticsObserverForTesting { modelDiagnostics.append($0) }
             let started = try await startChoice(Self.fixtureChoice(provider), in: fixture)
             let token = try XCTUnwrap(started["sessionToken"] as? String)
             let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
             _ = try await waitForState("ready", fixture.transport, token: token)
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Reject a response after model drift"])
+            let initialLabel = try await evaluate(view, "return window.fixtureModelInitialLabel;")
+            let driftedLabel = try XCTUnwrap(initialLabel as? String)
+            if provider == .gemini { XCTAssertNotEqual(driftedLabel, Self.fixtureChoice(provider).label) }
             _ = try await evaluate(view, "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;")
             if provider == .chatgpt {
                 try await assertModelMismatchBeforePublication(fixture.transport, token: token, choice: Self.fixtureChoice(provider))
@@ -10275,7 +10280,65 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let finished = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
             try await assertHumanTabIntact(fixture)
+            let mismatches = modelDiagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                .filter { $0["kind"] as? String == "gemini_model_mismatch" }
+            XCTAssertEqual(mismatches.count, provider == .gemini ? 1 : 0)
+            if provider == .gemini {
+                let mismatch = try XCTUnwrap(mismatches.first)
+                XCTAssertEqual(mismatch["stage"] as? String, "adapter_error")
+                XCTAssertEqual(mismatch["sequence"] as? Int, 1)
+                XCTAssertTrue(["inspect", "verifyModel"].contains(mismatch["action"] as? String ?? ""))
+                XCTAssertEqual((mismatch["expected"] as? [String: String])?["key"], Self.fixtureChoice(provider).key)
+                XCTAssertEqual((mismatch["pinned"] as? [String: String])?["key"], Self.fixtureChoice(provider).key)
+                XCTAssertEqual((mismatch["observedSelected"] as? [String: String])?["key"], driftedLabel)
+            }
         }
+    }
+
+    func testGeminiModelMismatchDiagnosticKeepsOnlyBoundedRecognizedIdentities() throws {
+        let pro = ["key": "3.1 Pro", "label": "3.1 Pro"]
+        let flash = ["key": "3.8 Flash", "label": "3.8 Flash"]
+        for stage in ["adapter_error", "evidence_validation", "pinned_selection", "after_await"] {
+            let result = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedGeminiModelMismatchDiagnostic(
+                stage: stage, action: "verifyModel", sequence: 8, expected: pro, pinned: pro,
+                observed: ["selected": flash, "response": ["key": "3.5 Flash-Lite", "label": "3.5 Flash-Lite", "source": "response_attribute"],
+                           "text": "PRIVATE_REPLY", "url": "PRIVATE_URL", "prompt": "PRIVATE_PROMPT"]))
+            XCTAssertEqual(result["stage"] as? String, stage)
+            XCTAssertEqual(result["action"] as? String, "verifyModel")
+            XCTAssertEqual(result["sequence"] as? Int, 8)
+            XCTAssertEqual(result["expected"] as? [String: String], pro)
+            XCTAssertEqual(result["pinned"] as? [String: String], pro)
+            XCTAssertEqual(result["observedSelected"] as? [String: String], flash)
+            XCTAssertEqual((result["observedResponse"] as? [String: String])?["label"], "3.5 Flash-Lite")
+            let data = try JSONSerialization.data(withJSONObject: result)
+            XCTAssertLessThanOrEqual(data.count, 2_048)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("PRIVATE"))
+        }
+    }
+
+    func testGeminiModelMismatchDiagnosticDropsInvalidFieldsWithoutRepairingEvidence() throws {
+        let invalid: [Any] = [NSNull(), "PRIVATE", ["key": "PRIVATE", "label": "PRIVATE"],
+            ["key": "3.1 Pro", "label": "3.8 Flash"], ["key": "3.1 Pro", "label": "3.1 Pro", "extra": "PRIVATE"],
+            ["key": "3.1 Pro\n", "label": "3.1 Pro\n"], ["key": String(repeating: "1", count: 121) + " Pro", "label": "PRIVATE"],
+            ["key": "Sonnet 5", "label": "Sonnet 5"], ["key": "3.1 Pro PRIVATE", "label": "3.1 Pro PRIVATE"]]
+        for raw in invalid {
+            let result = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedGeminiModelMismatchDiagnostic(
+                stage: "evidence_validation", action: "PRIVATE_ACTION", sequence: 0, expected: raw, pinned: raw,
+                observed: ["selected": raw, "response": raw]))
+            XCTAssertEqual(result["action"] as? String, "other")
+            for field in ["expected", "pinned", "observedSelected"] { XCTAssertTrue(result[field] is NSNull) }
+            XCTAssertTrue(result["evidencePresent"] as? Bool == true)
+            XCTAssertTrue(result["selectedPresent"] as? Bool == true)
+            XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: result), as: UTF8.self).contains("PRIVATE"))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedGeminiModelMismatchDiagnostic(stage: "PRIVATE_STAGE", action: "inspect", sequence: 1, expected: nil, pinned: nil, observed: nil))
+        for sequence in [-1, 1_001] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedGeminiModelMismatchDiagnostic(stage: "adapter_error", action: "inspect", sequence: sequence, expected: nil, pinned: nil, observed: nil))
+        }
+        let missing = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedGeminiModelMismatchDiagnostic(stage: "adapter_error", action: "inspect", sequence: 1_000, expected: nil, pinned: nil, observed: nil))
+        XCTAssertEqual(missing["evidencePresent"] as? Bool, false)
+        XCTAssertEqual(missing["selectedPresent"] as? Bool, false)
+        XCTAssertTrue(missing["observedSelected"] is NSNull)
     }
 
     func testInitialConcreteReadinessRejectsModelDriftAcrossNativeAwaitWithoutClaimingReady() async throws {

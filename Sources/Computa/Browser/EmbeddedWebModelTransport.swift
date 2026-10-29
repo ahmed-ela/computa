@@ -388,6 +388,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedPendingModelVerification = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
+        var loggedModelMismatch = false
         var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
@@ -1948,7 +1949,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard session.temporary, session.modelChoice != nil else { throw Failure.modelUnverified }
                 let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                 if selected["pending"] as? Bool != true {
-                    session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                    session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
                     session.modelSelectionVerified = true
                     _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                     session.state = "ready"
@@ -1966,7 +1967,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             session.modelSelectionRequested = true
                             let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                             if selected["pending"] as? Bool != true {
-                                session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                                session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
                                 session.modelSelectionVerified = true
                                 _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                                 session.state = "ready"
@@ -1988,7 +1989,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                             guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
                         }
-                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session)
+                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session, action: "discoverModels")
                         session.modelSelectionVerified = true
                         _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                         session.state = "ready"
@@ -2013,7 +2014,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                count(observed, "userCount") == session.sequence,
                (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
                (observed["text"] as? String)?.isEmpty == true,
-               (try? validatedModelEvidence(observed, session: session)) != nil {
+               (try? validatedModelEvidence(observed, session: session, action: "inspect")) != nil {
                 throw Failure.responseStreamFailed(failureCandidate.reason)
             }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
@@ -2053,7 +2054,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if completedRendererFailure(proven), proven["modelVerificationPending"] == nil,
                        let original = observed["text"] as? String, let current = proven["text"] as? String,
                        original.utf8.elementsEqual(current.utf8),
-                       (try? validatedModelEvidence(proven, session: session)) != nil {
+                       (try? validatedModelEvidence(proven, session: session, action: "inspect")) != nil {
                         await captureArmedRendererFailureDiagnostic(session, deadline: deadline)
                         throw Failure.responseRenderingFailed
                     }
@@ -4540,7 +4541,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch error {
             case "product_mode_unverified": throw Failure.productModeUnverified
             case "model_unverified": throw Failure.modelUnverified
-            case "model_mismatch": throw Failure.modelMismatch
+            case "model_mismatch":
+                logModelMismatch(observed, session: session, action: action, stage: "adapter_error")
+                throw Failure.modelMismatch
             case "model_unavailable": throw Failure.modelUnavailable
             case "acknowledged_user_append":
                 // A read-only picker observation can cross the DOM append for
@@ -5047,7 +5050,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return
         }
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
-            let evidence = try validatedModelEvidence(observed, session: session)
+            let evidence = try validatedModelEvidence(observed, session: session, action: action)
             // A native await can cross a model change without navigation. Read
             // the fixed proof again, rather than accepting the earlier result.
             if recheck, action != "verifyModel" {
@@ -5066,20 +5069,71 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)
-                let currentEvidence = try validatedModelEvidence(fresh, session: session)
-                guard evidence.isSameResolvedSelection(as: currentEvidence) else { throw Failure.modelMismatch }
+                let currentEvidence = try validatedModelEvidence(fresh, session: session, action: freshAction)
+                guard evidence.isSameResolvedSelection(as: currentEvidence) else {
+                    logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
+                    throw Failure.modelMismatch
+                }
             }
             session.modelEvidence = evidence
         }
     }
 
-    private func validatedModelEvidence(_ observation: [String: Any], session: Session) throws -> WebsiteModelEvidence {
+    private func validatedModelEvidence(_ observation: [String: Any], session: Session, action: String = "other") throws -> WebsiteModelEvidence {
         let current: WebsiteModelEvidence
         do { current = try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
-        catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
+        catch WebsiteModelEvidence.Failure.mismatch {
+            logModelMismatch(observation, session: session, action: action, stage: "evidence_validation")
+            throw Failure.modelMismatch
+        }
         catch { throw Failure.modelUnverified }
-        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else { throw Failure.modelMismatch }
+        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
+            logModelMismatch(observation, session: session, action: action, stage: "pinned_selection")
+            throw Failure.modelMismatch
+        }
         return current
+    }
+
+    /// Diagnostic-only projection. Unknown strings never become log content;
+    /// these fields cannot supply model evidence or alter the rejection path.
+    static func sanitizedGeminiModelMismatchDiagnostic(stage: String, action: String, sequence: Int,
+                                                       expected: Any?, pinned: Any?, observed: Any?) -> [String: Any]? {
+        guard ["adapter_error", "evidence_validation", "pinned_selection", "after_await"].contains(stage),
+              (0...1_000).contains(sequence) else { return nil }
+        func identity(_ raw: Any?) -> [String: String]? {
+            guard let value = raw as? [String: Any], Set(value.keys) == ["key", "label"],
+                  let key = value["key"] as? String, let label = value["label"] as? String,
+                  key == label, key.utf8.count <= 120,
+                  key.range(of: #"^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$"#, options: .regularExpression) != nil,
+                  WebsiteModelChoice(provider: "gemini", key: key, label: label).isValid else { return nil }
+            return ["key": key, "label": label]
+        }
+        let value = observed as? [String: Any]
+        let rawSelected = value?["selected"]
+        let rawResponse = value?["response"] as? [String: Any]
+        let responseIdentity = rawResponse.map { ["key": $0["key"] ?? NSNull(), "label": $0["label"] ?? NSNull()] }
+        let actions = ["inspect", "verifyModel", "selectModel", "discoverModels", "enableTemporary", "prepare", "insert", "sendReady", "submit", "stop", "cleanup"]
+        let result: [String: Any] = [
+            "kind": "gemini_model_mismatch", "stage": stage, "action": actions.contains(action) ? action : "other",
+            "sequence": sequence, "expectedPresent": expected != nil, "pinnedPresent": pinned != nil,
+            "evidencePresent": observed != nil, "selectedPresent": rawSelected != nil,
+            "responsePresent": value?["response"] != nil,
+            "expected": identity(expected) as Any? ?? NSNull(), "pinned": identity(pinned) as Any? ?? NSNull(),
+            "observedSelected": identity(rawSelected) as Any? ?? NSNull(),
+            "observedResponse": identity(responseIdentity) as Any? ?? NSNull(),
+        ]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: result), bytes.count <= 2_048 else { return nil }
+        return result
+    }
+
+    private func logModelMismatch(_ observation: [String: Any], session: Session, action: String, stage: String) {
+        guard session.provider == .gemini, !session.loggedModelMismatch else { return }
+        let expected = session.modelChoice.map { ["key": $0.key, "label": $0.label] }
+        let pinned = session.modelEvidence.map { ["key": $0.selected.key, "label": $0.selected.label] }
+        guard let diagnostic = Self.sanitizedGeminiModelMismatchDiagnostic(stage: stage, action: action,
+            sequence: session.sequence, expected: expected, pinned: pinned, observed: observation["modelEvidence"]) else { return }
+        session.loggedModelMismatch = true
+        logModelDiagnostic(["modelDiagnostic": diagnostic], session: session)
     }
 
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {

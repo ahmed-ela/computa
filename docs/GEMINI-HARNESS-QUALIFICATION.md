@@ -226,3 +226,34 @@ website providers. Canonical request bytes, schemas, literal input and strict
 rejection remain unchanged. The unchanged adapter and cleanup code retain their
 155 JavaScript / 27 native transport checks. No automatic retry was added, and
 live qualification is still required before claiming reliable workflows.
+
+
+## Build 325 controlled workflows
+
+The installed, signed build matched commit `0103b68`. A fresh 3.5 Flash-Lite
+workflow passed in 65.389 seconds across nine verified inferences and eight tool
+calls. It repaired only the requested function, passed all six independent tests,
+printed the expected reference, and submitted it exactly once through the built-in
+browser. The page receipt matched the final answer. Persisted receipts separately
+confirmed physical task-tab closure and temporary website-session closure.
+
+A fresh 3.1 Pro workflow repaired the same bug, passed the tests, submitted the
+correct reference once, read the receipt and closed its task tab. Its eighth
+inference failed the model-selection check after the response finished rendering,
+so the overall workflow failed after 76.941 seconds and no final answer was
+accepted. All seven accepted tool rounds and the eighth submission carried
+3.1 Pro selection evidence. The failing observed identity was not retained; the
+existing logs cannot distinguish a real website model switch from a verification
+defect. The failure is retained without replay, and both cleanup receipts are
+closed. A bounded mismatch diagnostic is required before further controlled
+reproduction can establish the cause.
+
+Build 326 adds a Gemini-only, once-per-session mismatch diagnostic at the adapter,
+evidence-validation, pinned-selection and post-await rejection boundaries. It
+retains only recognized expected, pinned and observed model identities plus a
+finite action/stage/sequence; invalid values are reduced to presence flags. It
+does not log prompt/response text, relax verification, or retry a prompt. For a
+concrete Gemini model, both successful native validations must equal the same
+immutable selection; a post-await disagreement cannot arise after both pass.
+The diagnostic is scoped to investigating the captured concrete-model failure,
+not a claim that every future provider mismatch is fully explained.
