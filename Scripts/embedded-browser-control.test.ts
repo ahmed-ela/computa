@@ -81,15 +81,22 @@ function fixture(target: string | null) {
   const state = {}, location = { href: 'https://example.test/' };
   const execute = new AsyncFunction('input', 'globalThis', 'document', 'location', 'Node', 'getComputedStyle', 'TextEncoder',
     'MutationObserver', 'setTimeout', 'clearTimeout', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'Event', 'Element', 'innerWidth', 'innerHeight', source);
-  const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
+  const rawRun = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
     { TEXT_NODE: 3, ELEMENT_NODE: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 }, computedStyle, TextEncoder, Observer,
     (callback: Function, delay: number) => { timers.set(++timerID, { callback, delay }); return timerID; },
     (id: number) => timers.delete(id), Node, Node, Node, Event, Node, 1024, 768);
+  // Native rejects this private diagnostic envelope as the same unconfirmed
+  // action. Preserve direct guard assertions; dedicated tests inspect rawRun.
+  const run = async (input: Record<string, unknown>) => {
+    const result = await rawRun(input);
+    if (result.browserActionFailure) throw new Error(result.browserActionFailure.code);
+    return result;
+  };
   const press = (row: any) => run({ operation: 'press', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href });
   const fill = (row: any, text: string) => run({ operation: 'fill', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href, text });
-  return { Node, link, run, press, fill, document, location, timers, observers, listeners, state, styles,
+  return { Node, link, run, rawRun, press, fill, document, location, timers, observers, listeners, state, styles,
     appendText: (text: string) => document.body.append(new Node('P', {}, text)),
     appendControl: () => document.body.append(new Node('BUTTON', {}, 'Continue')),
     appendMetadata: () => document.body.append(new Node('MAIN', { 'aria-label': 'Outlook' })),
@@ -99,6 +106,87 @@ function fixture(target: string | null) {
     replaceRoot: () => { document.body = new Node('BODY'); document.documentElement = document.body; },
   };
 }
+
+describe('finite browser action failure diagnostics', () => {
+  async function setup() {
+    const f = fixture(null), field = new f.Node('INPUT', { 'aria-label': 'PRIVATE_FIELD_LABEL' });
+    f.document.body.append(field); f.document.elementFromPoint = () => field;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
+    const action = () => f.rawRun({ operation: 'fill', nodeID: row.backendNodeID, expected: row,
+      expectedURL: f.location.href, text: 'PRIVATE_TYPED_VALUE' });
+    return { ...f, field, row, action };
+  }
+  function finite(result: any, stage: string, code: string, operation = 'fill') {
+    expect(result).toEqual({ browserActionFailure: { version: 1, operation, stage, code } });
+    const serialized = JSON.stringify(result);
+    for (const secret of ['PRIVATE_', 'example.test', 'owned-document', 'selector', 'stack', 'message']) expect(serialized).not.toContain(secret);
+    expect(result).not.toHaveProperty('dispatched'); expect(result).not.toHaveProperty('noReplay');
+  }
+  test('pre-focus obstruction is finite and cannot focus or write a visible settable field', async () => {
+    const f = await setup(); expect(f.row.isEditable).toBe(true);
+    f.document.elementFromPoint = () => f.link;
+    finite(await f.action(), 'initial_hit_test', 'element_obstructed');
+    expect(f.field.focusOptions).toEqual([]); expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toEqual([]);
+  });
+  test('initial metadata and post-focus metadata, focus destination and hit tests remain distinct closed failures', async () => {
+    for (const kind of ['initial', 'metadata', 'focus', 'hit']) {
+      const f = await setup();
+      if (kind === 'initial') f.field.values['aria-label'] = 'PRIVATE_CHANGED_LABEL';
+      else f.field.onFocus = () => {
+        if (kind === 'metadata') f.field.values['aria-label'] = 'PRIVATE_CHANGED_LABEL';
+        if (kind === 'focus') f.document.activeElement = f.link;
+        if (kind === 'hit') f.document.elementFromPoint = () => f.link;
+      };
+      finite(await f.action(), kind === 'initial' ? 'initial_revalidation' : kind === 'metadata'
+        ? 'focused_revalidation' : kind === 'focus' ? 'focus_confirmation' : 'focused_hit_test',
+      kind === 'hit' ? 'element_obstructed' : 'element_changed');
+      expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toEqual([]);
+      expect(f.field.focusOptions).toHaveLength(kind === 'initial' ? 0 : 1);
+    }
+  });
+  test('unexpected scroll and focus throws never expose their text or impersonate a known rejection', async () => {
+    for (const stage of ['scroll', 'focus']) for (const thrown of [new Error('element_changed PRIVATE_EXCEPTION'), 'element_obstructed']) {
+      const f = await setup();
+      if (stage === 'scroll') f.field.scrollIntoView = () => { throw thrown; };
+      else f.field.onFocus = () => { throw thrown; };
+      finite(await f.action(), stage, 'unexpected'); expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toEqual([]);
+    }
+  });
+  test('setter, input and change exceptions retain dispatch ambiguity and do not roll back or retry', async () => {
+    for (const stage of ['value_write', 'input_event', 'change_event']) {
+      const f = await setup();
+      if (stage === 'value_write') {
+        const descriptor = Object.getOwnPropertyDescriptor(f.Node.prototype, 'value')!;
+        Object.defineProperty(f.Node.prototype, 'value', { ...descriptor, set(value: string) {
+          descriptor.set!.call(this, value); throw new Error('PRIVATE_SETTER_SECRET');
+        } });
+      } else {
+        f.field.dispatchEvent = (event: Event) => {
+          f.field.events.push(event);
+          if (event.type === (stage === 'input_event' ? 'input' : 'change')) throw new Error('PRIVATE_EVENT_SECRET');
+          return true;
+        };
+      }
+      finite(await f.action(), stage, 'unexpected');
+      expect(f.field.valueWrites).toEqual(['PRIVATE_TYPED_VALUE']); expect(f.field.value).toBe('PRIVATE_TYPED_VALUE');
+      expect(f.field.events.map(event => event.type)).toEqual(stage === 'value_write' ? [] : stage === 'input_event' ? ['input'] : ['input', 'change']);
+    }
+  });
+  test('press exceptions can follow a click effect without yielding a dispatch claim', async () => {
+    const f = fixture(null), button = new f.Node('BUTTON', {}, 'PRIVATE_BUTTON');
+    f.document.body.append(button); f.document.elementFromPoint = () => button;
+    const row = (await f.run({ operation: 'observe' })).nodes[0];
+    button.onClick = () => { throw new Error('PRIVATE_CLICK_SECRET'); };
+    finite(await f.rawRun({ operation: 'press', nodeID: row.backendNodeID, expected: row, expectedURL: f.location.href }),
+      'press_dispatch', 'unexpected', 'press');
+    expect(button.clicks).toBe(1);
+  });
+  test('successful action replies and values stay unchanged', async () => {
+    const f = await setup();
+    expect(await f.action()).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
+    expect(f.field.valueWrites).toEqual(['PRIVATE_TYPED_VALUE']); expect(f.field.events.map(event => event.type)).toEqual(['input', 'change']);
+  });
+});
 
 describe('CSS visibility overrides preserve rendered descendants', () => {
   test('visible descendants of hidden or collapsed wrappers remain observable and actionable', async () => {

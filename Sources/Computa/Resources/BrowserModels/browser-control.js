@@ -519,33 +519,47 @@ if (input.operation === 'wait') {
   return {matched:result.matched};
 }
 if (!['press','fill'].includes(input.operation)) throw new Error('unsupported_operation');
+// This private finite envelope diagnoses a failed action without claiming
+// whether input was dispatched. Native preserves its generic no-replay error.
+// Only rejection objects created here map to known codes; page/native throws
+// cannot smuggle messages, labels or values into the diagnostic.
+const actionRejections = new WeakMap();
+const rejectAction = code => {
+  const error = new Error('browser_action_rejected');
+  actionRejections.set(error, code); throw error;
+};
+let actionStage = 'initial_revalidation';
+try {
 const element = state.nodes.get(input.nodeID);
 const revalidateElement = () => {
-  if (globalThis[key] !== state || state.documentToken !== input.documentToken) throw new Error('stale_document');
-  if (state.nodes.get(input.nodeID) !== element || !element?.isConnected || !visible(element)) throw new Error('element_changed');
+  if (globalThis[key] !== state || state.documentToken !== input.documentToken) rejectAction('stale_document');
+  if (state.nodes.get(input.nodeID) !== element || !element?.isConnected || !visible(element)) rejectAction('element_changed');
   const current = metaFor(element, roleFor(element));
   delete current.fieldTruncated;
   let semanticParent = element.parentElement;
   while (semanticParent && !roleFor(semanticParent)) semanticParent = semanticParent.parentElement;
   const parentID = semanticParent ? String(idFor(semanticParent)) : null;
-  if (parentID !== input.expected.parentNodeID) throw new Error('element_changed');
+  if (parentID !== input.expected.parentNodeID) rejectAction('element_changed');
   for (const key of ['role','name','value','linkURL','isDisabled','isReadOnly','isEditable','isDOMClickable','isPressUnsupported'])
-    if (current[key] !== input.expected[key]) throw new Error('element_changed');
-  if (current.isDisabled || input.expectedURL !== location.href) throw new Error('stale_document');
+    if (current[key] !== input.expected[key]) rejectAction('element_changed');
+  if (current.isDisabled || input.expectedURL !== location.href) rejectAction('stale_document');
   return current;
 };
 const requireUnobstructed = () => {
   const rect = element.getBoundingClientRect();
   const hit = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2);
-  if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) throw new Error('element_obstructed');
+  if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) rejectAction('element_obstructed');
 };
 const current = revalidateElement();
+actionStage = 'scroll';
 element.scrollIntoView({block:'center',inline:'center'});
+actionStage = 'initial_hit_test';
 requireUnobstructed();
 let constraintFeedback = null;
 if (input.operation === 'press') {
-  if (!current.isDOMClickable || typeof element.click !== 'function') throw new Error('unsupported_action');
-  if (element.tagName === 'A' && element.target && !['_self','_top','_parent'].includes(element.target.toLowerCase())) throw new Error('popup_unsupported');
+  actionStage = 'press_precheck';
+  if (!current.isDOMClickable || typeof element.click !== 'function') rejectAction('unsupported_action');
+  if (element.tagName === 'A' && element.target && !['_self','_top','_parent'].includes(element.target.toLowerCase())) rejectAction('popup_unsupported');
   // Observe only native synchronous invalid events in this exact submit
   // control's form. This neither validates the form nor changes event delivery.
   // A click handler may still perform another action, including a request.
@@ -565,25 +579,39 @@ if (input.operation === 'press') {
     fields.push({backendNodeID:id, issues:constraints.issues});
   };
   if (form) window.addEventListener('invalid', invalid, true);
+  actionStage = 'press_dispatch';
   try { element.click(); }
   finally { if (form) window.removeEventListener('invalid', invalid, true); }
+  actionStage = 'constraint_feedback';
   if (fields.length) constraintFeedback = {fields, truncated};
 } else {
-  if (!current.isEditable || current.isReadOnly) throw new Error('unsupported_action');
-  if (typeof element.focus !== 'function') throw new Error('unsupported_action');
+  actionStage = 'focus';
+  if (!current.isEditable || current.isReadOnly) rejectAction('unsupported_action');
+  if (typeof element.focus !== 'function') rejectAction('unsupported_action');
   // Focus belongs to this admitted page field only; it never activates a native
   // window. Synchronous focus handlers may replace the field or change its scope.
   element.focus({preventScroll:true});
+  actionStage = 'focused_revalidation';
   revalidateElement();
-  if (document.activeElement !== element) throw new Error('element_changed');
+  actionStage = 'focus_confirmation';
+  if (document.activeElement !== element) rejectAction('element_changed');
+  actionStage = 'focused_hit_test';
   requireUnobstructed();
+  actionStage = 'value_write';
   if (nativeValueField(element)) {
     const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : element.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype,'value')?.set;
-    if (!setter) throw new Error('unsupported_action');
+    if (!setter) rejectAction('unsupported_action');
     setter.call(element,input.text);
   } else element.textContent = input.text;
+  actionStage = 'input_event';
   element.dispatchEvent(new Event('input',{bubbles:true}));
+  actionStage = 'change_event';
   element.dispatchEvent(new Event('change',{bubbles:true}));
 }
 return {dispatched:true, noReplay:true, constraintFeedback};
+
+} catch (error) {
+  return {browserActionFailure:{version:1,operation:input.operation,stage:actionStage,
+    code:actionRejections.get(error) || 'unexpected'}};
+}

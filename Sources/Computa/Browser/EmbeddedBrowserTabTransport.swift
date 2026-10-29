@@ -136,6 +136,48 @@ struct BrowserCaptureLogRecord: Encodable {
     let viewHeight: Int
 }
 
+/// Diagnostic-only driver failure. This never establishes whether browser input
+/// occurred and never grants retry authority. Page error text is not inspected.
+struct BrowserActionFailureDiagnostic: Encodable, Equatable, Sendable {
+    enum Operation: String, CaseIterable, Codable, Sendable { case press, fill }
+    enum Stage: String, CaseIterable, Codable, Sendable {
+        case initialRevalidation = "initial_revalidation", scroll, initialHitTest = "initial_hit_test"
+        case pressPrecheck = "press_precheck", pressDispatch = "press_dispatch", constraintFeedback = "constraint_feedback"
+        case focus, focusedRevalidation = "focused_revalidation", focusConfirmation = "focus_confirmation"
+        case focusedHitTest = "focused_hit_test", valueWrite = "value_write", inputEvent = "input_event", changeEvent = "change_event"
+        case unknown
+    }
+    enum Code: String, CaseIterable, Codable, Sendable {
+        case staleDocument = "stale_document", elementChanged = "element_changed", elementObstructed = "element_obstructed"
+        case unsupportedAction = "unsupported_action", popupUnsupported = "popup_unsupported", unexpected
+    }
+    let version = 1
+    let operation: Operation
+    let stage: Stage
+    let code: Code
+
+    static func decode(_ raw: Any?, operation: String) -> Self? {
+        guard let outer = raw as? [String: Any], Set(outer.keys) == ["browserActionFailure"],
+              let fields = outer["browserActionFailure"] as? [String: Any],
+              Set(fields.keys) == ["version", "operation", "stage", "code"],
+              let version = fields["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+              let requested = Operation(rawValue: operation), fields["operation"] as? String == operation,
+              let stageName = fields["stage"] as? String, let stage = Stage(rawValue: stageName), stage != .unknown,
+              let codeName = fields["code"] as? String, let code = Code(rawValue: codeName) else { return nil }
+        let pressStages: Set<Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
+        let fillStages: Set<Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]
+        guard requested == .press ? !fillStages.contains(stage) : !pressStages.contains(stage) else { return nil }
+        return Self(operation: requested, stage: stage, code: code)
+    }
+}
+
+struct BrowserActionFailureLogRecord: Encodable {
+    let kind = "browser_action_failure_v1"
+    let tabID: UUID
+    let generation: UUID
+    let failure: BrowserActionFailureDiagnostic
+}
+
 /// Runtime integration depends on this narrow backend, rather than WebKit or
 /// native window focus. Fixtures can implement it without launching a browser.
 protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
@@ -179,6 +221,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private static let captureLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserCapture")
     #if DEBUG
     private(set) var captureDiagnosticsForTesting: BrowserCaptureDiagnostics?
+    private(set) var actionFailureDiagnosticForTesting: BrowserActionFailureDiagnostic?
     #endif
 
     init(session: EmbeddedBrowserSession, script: String? = nil) {
@@ -571,6 +614,9 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         else { throw BrowserTabBrokerError.staleDocument }
         var input = input
         input["documentToken"] = generation.uuidString
+        #if DEBUG
+        if mutation { actionFailureDiagnosticForTesting = nil }
+        #endif
         let result = EmbeddedBrowserScriptResult()
         let bytes: Data
         do {
@@ -592,8 +638,16 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                         }
                         view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: self.world) {
                             reply in
+                            var actionFailure: BrowserActionFailureDiagnostic?
                             do {
                                 let value = try reply.get()
+                                if mutation, let object = value as? [String: Any], object["browserActionFailure"] != nil {
+                                    actionFailure = BrowserActionFailureDiagnostic.decode(object, operation: input["operation"] as? String ?? "")
+                                    // A driver failure can follow a setter or an
+                                    // event. Preserve the same unconfirmed error;
+                                    // never reinterpret this as no dispatch.
+                                    throw BrowserTabBrokerError.browserUnavailable("The built-in action could not be confirmed.")
+                                }
                                 guard JSONSerialization.isValidJSONObject(value) else {
                                     throw BrowserTabBrokerError.browserUnavailable(
                                         "The built-in script returned an invalid result.")
@@ -605,6 +659,16 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                                 }
                                 result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
                             } catch {
+                                if mutation, let operation = BrowserActionFailureDiagnostic.Operation(rawValue: input["operation"] as? String ?? "") {
+                                    let finite = actionFailure ?? BrowserActionFailureDiagnostic(operation: operation, stage: .unknown, code: .unexpected)
+                                    #if DEBUG
+                                    self.actionFailureDiagnosticForTesting = finite
+                                    #endif
+                                    let record = BrowserActionFailureLogRecord(tabID: id, generation: generation, failure: finite)
+                                    if let bytes = try? JSONEncoder().encode(record), bytes.count <= 512 {
+                                        Self.captureLog.notice("actionFailure \(String(decoding: bytes, as: UTF8.self), privacy: .public)")
+                                    }
+                                }
                                 // An empty-shell wait can span a real navigation,
                                 // which destroys its JS context before returning.
                                 // Only read-only operations may use the existing

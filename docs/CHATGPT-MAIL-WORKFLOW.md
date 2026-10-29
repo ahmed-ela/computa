@@ -696,6 +696,35 @@ model and temporary Chat product. Deadline, cancellation, route drift and
 changed-body cases remain failures with no late expansion. These are fixture
 results; real-email qualification remains a separate required check.
 
+Installed build 318's exact email task finished after 132.152 seconds without
+sending. All thirteen ChatGPT Instant inference sessions verified and closed.
+All fourteen browser captures used the intended 1024x768 viewport, and compose
+controls were exposed. The Compose click and recipient fill returned dispatch
+receipts; a later read confirmed the requested recipient.
+
+Two Subject fills returned the generic unconfirmed-action error. Each used a
+reference from the immediately preceding read, and subsequent reads showed an
+empty Subject. Neither failure returned a dispatch receipt, so text dispatch
+remains unknown; an empty field does not prove that no input occurred. No Send
+was attempted. The second fill repeated the requested Subject value after the
+first error and a fresh empty-field read. The failure collector initially
+missed both plain-text errors; independent review records two tool failures.
+
+The mutation callback currently maps JavaScript exceptions and invalid results
+to the same error. These observations cannot distinguish obstruction, changed
+metadata, focus loss or an unexpected script exception. Finite failure-stage
+diagnostics are needed before changing action behavior. The successful viewport
+and provider lifecycle checks are separate from this failed email outcome.
+
+Build 319 adds diagnostic-only action stages and fixed rejection codes. Private
+driver rejection objects are distinguished from unexpected page exceptions;
+raw exception messages are never logged. Native decoding accepts only the
+closed operation/stage/code schema and records native tab/document UUIDs within
+512 bytes. Both failures before input and failures after a real value write
+retain the same unconfirmed, no-replay public error. No action guard or event
+ordering changes. Seventy-nine JavaScript and fourteen focused native tests
+pass; the subject failure still requires a live diagnostic reproduction.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

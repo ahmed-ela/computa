@@ -10,6 +10,119 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testActionFailureDiagnosticStrictFiniteEnvelopeAndBoundedEncoding() throws {
+        let pressOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
+        let fillOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]
+        var maximum = 0
+        for operation in BrowserActionFailureDiagnostic.Operation.allCases {
+            for stage in BrowserActionFailureDiagnostic.Stage.allCases where stage != .unknown {
+                for code in BrowserActionFailureDiagnostic.Code.allCases {
+                    let fields: [String: Any] = ["version": 1, "operation": operation.rawValue, "stage": stage.rawValue, "code": code.rawValue]
+                    let decoded = BrowserActionFailureDiagnostic.decode(["browserActionFailure": fields], operation: operation.rawValue)
+                    if operation == .press ? fillOnly.contains(stage) : pressOnly.contains(stage) {
+                        XCTAssertNil(decoded); continue
+                    }
+                    let valid = try XCTUnwrap(decoded)
+                    XCTAssertEqual(valid.operation, operation); XCTAssertEqual(valid.stage, stage); XCTAssertEqual(valid.code, code)
+                    let record = BrowserActionFailureLogRecord(tabID: UUID(), generation: UUID(), failure: valid)
+                    let bytes = try JSONEncoder().encode(record); maximum = max(maximum, bytes.count)
+                    XCTAssertLessThanOrEqual(bytes.count, 512)
+                    let outer = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                    XCTAssertEqual(Set(outer.keys), ["kind", "tabID", "generation", "failure"])
+                    XCTAssertEqual(outer["kind"] as? String, "browser_action_failure_v1")
+                }
+            }
+        }
+        let valid: [String: Any] = ["version": 1, "operation": "fill", "stage": "focused_revalidation", "code": "element_changed"]
+        for (key, value) in [("version", true as Any), ("version", 1.5 as Any), ("version", "1" as Any),
+                             ("operation", "PRIVATE_CANARY" as Any), ("stage", "PRIVATE_CANARY" as Any),
+                             ("stage", "unknown" as Any), ("stage", "press_dispatch" as Any),
+                             ("code", "PRIVATE_CANARY" as Any), ("code", NSNull() as Any), ("text", "PRIVATE_CANARY" as Any)] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": bad], operation: "fill"), key)
+        }
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": missing], operation: "fill"), key)
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid, "dispatched": true], operation: "fill"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid], operation: "press"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid], operation: "PRIVATE_CANARY"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": NSNull()], operation: "fill"))
+        print("browserActionFailureMaximumEncoding bytes=\(maximum)")
+    }
+
+    func testActionFailureEnvelopeKeepsUnknownDispatchAndNeverLeaksPrivateErrors() async throws {
+        let known = "return {browserActionFailure:{version:1,operation:'fill',stage:'input_event',code:'unexpected'}};"
+        let cases = [
+            ("before", known, "", BrowserActionFailureDiagnostic.Stage.inputEvent),
+            ("after", "document.getElementById('field').value='PRIVATE_WRITTEN_VALUE';" + known, "PRIVATE_WRITTEN_VALUE", .inputEvent),
+            ("malformed", "return {browserActionFailure:{version:1,operation:'fill',stage:'PRIVATE_STAGE',code:'PRIVATE_ERROR',text:'PRIVATE_TEXT'}};", "", .unknown),
+            ("mixed_success", "return {dispatched:true,browserActionFailure:{version:1,operation:'fill',stage:'input_event',code:'unexpected'}};", "", .unknown),
+            ("exception", "throw new Error('PRIVATE_ERROR_WITH_EMAIL_AND_SECRET');", "", .unknown)
+        ]
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js"), encoding: .utf8)
+        for (name, statement, expectedValue, expectedStage) in cases {
+            let (session, _, view, target) = try await semanticReadinessFixture(body: "<input id='field' aria-label='Subject'>")
+            defer { session.shutdown() }
+            let transport = EmbeddedBrowserTabTransport(session: session, script: "if(input.operation==='fill'){\(statement)}\n" + source)
+            let observation = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observation.nodes.first { $0.name == "Subject" })
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "PRIVATE_REQUESTED_VALUE",
+                                         document: observation, permit: BrowserMutationPermit())
+                XCTFail("A driver failure must never return an input receipt: \(name)")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."), name)
+                XCTAssertFalse(error.localizedDescription.contains("PRIVATE_"), name)
+                XCTAssertFalse(error.localizedDescription.contains("not dispatched"), name)
+            }
+            let diagnostic = try XCTUnwrap(transport.actionFailureDiagnosticForTesting)
+            XCTAssertEqual(diagnostic.operation, .fill); XCTAssertEqual(diagnostic.stage, expectedStage)
+            XCTAssertEqual(diagnostic.code, .unexpected)
+            let log = try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID: UUID(), generation: UUID(), failure: diagnostic))
+            XCTAssertLessThanOrEqual(log.count, 512)
+            XCTAssertFalse(String(decoding: log, as: UTF8.self).contains("PRIVATE_"))
+            let value = try await script(view, "return document.getElementById('field').value;")
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: value, options: [.fragmentsAllowed]) as? String, expectedValue,
+                           "The same unconfirmed error applies both before and after an actual value write: \(name)")
+        }
+    }
+
+    func testActionFailureDiagnosticIdentifiesRevalidationBeforeAndAfterFocus() async throws {
+        for focused in [false, true] {
+            let body = """
+                <input id='field' aria-label='Subject'><script>
+                window.focusEvents=0;window.inputEvents=0;
+                document.getElementById('field').addEventListener('focus',()=>{
+                  window.focusEvents++;\(focused ? "document.getElementById('field').setAttribute('aria-label','Changed subject');" : "")
+                });
+                document.addEventListener('input',()=>window.inputEvents++);
+                </script>
+                """
+            let (session, transport, view, target) = try await semanticReadinessFixture(body: body)
+            defer { session.shutdown() }
+            let observed = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observed.nodes.first { $0.name == "Subject" })
+            if !focused { _ = try await script(view, "document.getElementById('field').setAttribute('aria-label','Changed subject');return true;") }
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "PRIVATE_REQUESTED_VALUE",
+                                         document: observed, permit: BrowserMutationPermit())
+                XCTFail("Changed field metadata must still reject")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."))
+            }
+            let diagnostic = try XCTUnwrap(transport.actionFailureDiagnosticForTesting)
+            XCTAssertEqual(diagnostic.stage, focused ? .focusedRevalidation : .initialRevalidation)
+            XCTAssertEqual(diagnostic.code, .elementChanged)
+            let state = try await script(view, "return {value:document.getElementById('field').value,focus:window.focusEvents,input:window.inputEvents};")
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: state) as? [String: Any])
+            XCTAssertEqual(fields["value"] as? String, ""); XCTAssertEqual(fields["input"] as? Int, 0)
+            XCTAssertEqual(fields["focus"] as? Int, focused ? 1 : 0)
+        }
+    }
+
     func testOpposingPriorityDialogBeforeFormRetainsControlsAndExpandedFields() async throws {
         try await verifyOpposingPriorityPanel(dialog: true, panelFirst: true)
     }
