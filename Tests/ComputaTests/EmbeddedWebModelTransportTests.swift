@@ -12486,6 +12486,83 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testGeminiZeroRectClippedNonPixelHeadingPreservesTwoOwnedSubmissions() async throws {
+        try await assertGeminiNonPixelHeadingPreservesTwoOwnedSubmissions(.nonPixelRectHeader)
+    }
+
+    func testGeminiInsetClippedNonPixelHeadingPreservesTwoOwnedSubmissions() async throws {
+        try await assertGeminiNonPixelHeadingPreservesTwoOwnedSubmissions(.nonPixelInsetHeader)
+    }
+
+    private func assertGeminiNonPixelHeadingPreservesTwoOwnedSubmissions(_ variant: GeminiQueryParagraphVariant) async throws {
+        let fixture = try Fixture(page: Self.geminiQueryParagraphPage(variant))
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: tabID)
+        let prompts = ["First exact payload\n\n  Keep user spaces, apostrophe's and NBSP\u{00a0}🚀",
+                       "Second tool result\n\n\tIndependent content and final line"]
+        var firstFingerprint: String?
+        for (index, prompt) in prompts.enumerated() {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["sequence"] as? Int, index + 1)
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+            XCTAssertEqual(proof["baselineResponseCount"] as? Int, index)
+            XCTAssertEqual(proof["responseCount"] as? Int, index + 1)
+            let shapeValue = try await evaluate(view, #"""
+                const root = [...document.querySelectorAll('user-query')].at(-1);
+                const heading = root.querySelector('.query-text > .cdk-visually-hidden');
+                const style = getComputedStyle(heading);
+                const rows = [...root.querySelectorAll('.query-text > p.query-text-line')];
+                const literal = rows.map(row => row.childNodes.length === 1 && row.firstChild.nodeName === 'BR' ? '' : row.textContent).join('\n');
+                return { width: style.width, height: style.height, position: style.position, overflow: style.overflow,
+                  clip: style.clip, clipPath: style.clipPath, onePixelBox: style.width === '1px' && style.height === '1px',
+                  literalMatchesOutbound: literal === window.fixturePrompts.at(-1),
+                  headerIsSeparate: !literal.includes(heading.textContent),
+                  sends: window.fixturePrompts.length, inputs: window.fixtureInputCount };
+                """#)
+            let shape = try XCTUnwrap(shapeValue as? [String: Any])
+            XCTAssertEqual(shape["onePixelBox"] as? Bool, false)
+            XCTAssertEqual(shape["width"] as? String, "37px")
+            XCTAssertEqual(shape["height"] as? String, "19px")
+            XCTAssertEqual(shape["position"] as? String, "absolute")
+            XCTAssertEqual(shape["overflow"] as? String, "hidden")
+            if variant == .nonPixelRectHeader {
+                XCTAssertEqual(shape["clip"] as? String, "rect(0px, 0px, 0px, 0px)")
+                XCTAssertEqual(shape["clipPath"] as? String, "none")
+            } else {
+                XCTAssertEqual(shape["clip"] as? String, "auto")
+                XCTAssertEqual(shape["clipPath"] as? String, "inset(50%)")
+            }
+            XCTAssertEqual(shape["literalMatchesOutbound"] as? Bool, true)
+            XCTAssertEqual(shape["headerIsSeparate"] as? Bool, true)
+            XCTAssertEqual(shape["sends"] as? Int, index + 1)
+            XCTAssertEqual(shape["inputs"] as? Int, index + 1)
+            if let firstFingerprint {
+                XCTAssertEqual(proof["firstUserFingerprint"] as? String, firstFingerprint)
+            } else {
+                let outboundValue = try await evaluate(view, "return window.fixturePrompts[0];")
+                let outbound = try XCTUnwrap(outboundValue as? String)
+                firstFingerprint = EmbeddedWebModelTransport.outboundFingerprint(outbound)
+                XCTAssertEqual(proof["firstUserFingerprint"] as? String, firstFingerprint)
+            }
+            XCTAssertEqual(fixture.browser.documentGeneration(for: tabID), generation)
+        }
+        let captured = try await capturedUserPrompts(view)
+        XCTAssertEqual(captured, prompts)
+        XCTAssertEqual(fixture.createdTabs, [tabID])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testGeminiUniformQueryRowFramesPreserveUserSpacesAcrossTwoOwnedSubmissions() async throws {
         let fixture = try Fixture(page: Self.geminiQueryParagraphPage(.framed))
         defer { fixture.shutdown() }
@@ -12843,7 +12920,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGeminiQueryParagraphsRejectUnrecognizedHeadersExtraRowsAndControlsWithoutReplay() async throws {
-        for variant in [GeminiQueryParagraphVariant.unclippedHeader, .forgedHeader, .extraRow, .rowControl, .mixedFrame] {
+        for variant in [GeminiQueryParagraphVariant.unclippedHeader, .forgedHeader, .extraRow, .rowControl, .mixedFrame, .partialHeaderClip, .headerControl, .alteredRow] {
             let fixture = try Fixture(page: Self.geminiQueryParagraphPage(variant))
             defer { fixture.shutdown() }
             let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
@@ -12873,7 +12950,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGeminiChangedPriorQueryParagraphRejectsSecondSubmissionWithoutInsertion() async throws {
-        for variant in [GeminiQueryParagraphVariant.literal, .framed] {
+        for variant in [GeminiQueryParagraphVariant.literal, .framed, .nonPixelRectHeader, .nonPixelInsetHeader] {
             let fixture = try Fixture(page: Self.geminiQueryParagraphPage(variant))
             defer { fixture.shutdown() }
             let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
@@ -15709,6 +15786,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     private enum GeminiQueryParagraphVariant {
         case literal, framed, mixedFrame, unclippedHeader, forgedHeader, extraRow, rowControl
+        case nonPixelRectHeader, nonPixelInsetHeader, partialHeaderClip, headerControl, alteredRow
     }
 
     private static func geminiQueryParagraphPage(_ variant: GeminiQueryParagraphVariant = .literal) -> String {
@@ -15722,12 +15800,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             of: "const literal = document.createElement('span'); literal.textContent = prompt; payload.appendChild(literal);",
             with: """
             const query = document.createElement('div'); query.className = 'query-text gds-body-l';
-            const heading = document.createElement('h2');
+            const heading = document.createElement('\([GeminiQueryParagraphVariant.nonPixelRectHeader, .nonPixelInsetHeader, .partialHeaderClip, .headerControl, .alteredRow].contains(variant) ? "h5" : "h2")');
             heading.className = 'cdk-visually-hidden';
             \(variant == .forgedHeader ? "heading.setAttribute('role', 'presentation');" : "")
             heading.style.cssText = '\(variant == .unclippedHeader ? "position:static;width:auto;height:auto;overflow:visible;clip:auto;" : "position:absolute;width:1px;height:1px;padding:0;margin:-1px;border:0;overflow:hidden;clip:rect(0px,0px,0px,0px);clip-path:inset(50%);white-space:nowrap;user-select:none;")';
+            \(variant == .nonPixelRectHeader || variant == .headerControl || variant == .alteredRow ? "heading.style.width='37px'; heading.style.height='19px'; heading.style.clipPath='none';" : "")
+            \(variant == .nonPixelInsetHeader ? "heading.style.width='37px'; heading.style.height='19px'; heading.style.clip='auto';" : "")
+            \(variant == .partialHeaderClip ? "heading.style.width='37px'; heading.style.height='19px'; heading.style.clip='rect(0px, 1px, 1px, 0px)'; heading.style.clipPath='inset(49%)';" : "")
             const headingText = document.createElement('span'); headingText.textContent = 'Synthetic accessibility heading '.repeat(4);
-            heading.appendChild(headingText); query.appendChild(heading);
+            heading.appendChild(headingText);
+            \(variant == .headerControl ? "const hiddenControl=document.createElement('button'); hiddenControl.textContent='Unknown hidden action'; heading.appendChild(hiddenControl);" : "")
+            query.appendChild(heading);
             prompt.split('\\n').forEach((line, index) => {
               const row = document.createElement('p'); row.className = 'query-text-line ng-star-inserted';
               const framed = \(variant == .framed ? "true" : variant == .mixedFrame ? "index === 0" : "false");
@@ -15739,6 +15822,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               }
               query.appendChild(row);
             });
+            \(variant == .alteredRow ? "query.querySelector('p').textContent='Changed first payload line';" : "")
             \(variant == .extraRow ? "const extra = document.createElement('p'); extra.className = 'query-text-line ng-star-inserted'; extra.textContent = 'Unowned extra line'; query.appendChild(extra);" : "")
             \(variant == .rowControl ? "const control = document.createElement('button'); control.textContent = 'Unowned control'; query.querySelector('p').appendChild(control);" : "")
             payload.appendChild(query);

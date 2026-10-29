@@ -2020,7 +2020,9 @@ function modelQueryPayload(body, recovery = null) {
     if (children.length < 2 || !heading.classList.contains('cdk-visually-hidden')) return { recognized, text: null };
     safeElement(heading);
     const facts = modelQueryHeadingFacts(heading);
-    if (!facts.headingSemantic || !facts.absolutePosition || !facts.onePixelBox || !facts.overflowHidden
+    // A zero-area clip hides the heading regardless of its CSS box dimensions.
+    // Keep onePixelBox as a diagnostic, not an ownership requirement.
+    if (!facts.headingSemantic || !facts.absolutePosition || !facts.overflowHidden
       || !facts.rectClipped && !facts.insetClipped) return { recognized, text: null };
     const literal = (node, depth, header = false) => {
       countNode(node, depth);

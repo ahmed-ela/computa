@@ -668,7 +668,7 @@ describe('Gemini per-submission ownership', () => {
   });
 
   test('query heading omission requires actual semantic and clipped CSS facts rather than its class', async () => {
-    for (const fault of ['class', 'role', 'position', 'box', 'overflow', 'clip', 'moved', 'duplicate']) {
+    for (const fault of ['class', 'role', 'position', 'overflow', 'clip', 'partialRect', 'partialInset', 'moved', 'duplicate']) {
       const { f, shapes, styles } = queryFixture(); const send = f.send.onClick!;
       const text = await stage(f, 1);
       f.send.onClick = () => {
@@ -678,8 +678,10 @@ describe('Gemini per-submission ownership', () => {
         else if (fault === 'moved') { query.children.splice(0, 1); query.children.splice(1, 0, heading); }
         else if (fault === 'duplicate') query.append(heading.cloneNode(true));
         else styles.set(heading, { ...clippedStyle,
-          ...(fault === 'position' ? { position: 'relative' } : {}), ...(fault === 'box' ? { width: '2px' } : {}),
-          ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}) });
+          ...(fault === 'position' ? { position: 'relative' } : {}),
+          ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}),
+          ...(fault === 'partialRect' ? { clip: 'rect(0px, 1px, 1px, 0px)', clipPath: 'none' } : {}),
+          ...(fault === 'partialInset' ? { clip: 'auto', clipPath: 'inset(49%)' } : {}) });
         expect(rows.length).toBeGreaterThan(0);
       };
       const result = await submitThenInspect(f, 1, text);
@@ -696,6 +698,51 @@ describe('Gemini per-submission ownership', () => {
       f.send.onClick = () => { send(); styles.set(shapes.at(-1)!.heading, { ...clippedStyle,
         ...(clipping === 'rect' ? { clip: 'rect(0px 0px 0px 0px)', clipPath: 'none' } : { clip: 'auto' }) }); };
       expect((await finishRound(f, 1)).submissionProof.fingerprint).toBe(await fingerprint(roundPrompt(1)));
+    }
+  });
+
+  for (const clipping of ['rect', 'inset']) {
+    test(`fully clipped non-one-pixel query headings retain exact payload proof with ${clipping} clipping`, async () => {
+      const { f, shapes, styles } = queryFixture(), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send();
+        // Synthetic dimensions exercise the guard; live diagnostics only established onePixelBox=false.
+        styles.set(shapes.at(-1)!.heading, { ...clippedStyle, width: '12px', height: '24px',
+          ...(clipping === 'rect' ? { clipPath: 'none' } : { clip: 'auto' }) });
+      };
+      const first = await finishRound(f, 1);
+      expect(first.firstUserFingerprint).toBe(await fingerprint(roundPrompt(1)));
+      const diagnostic = JSON.parse(first.debugStructure);
+      expect(diagnostic.descendants.find((node: any) => node.classes.includes('cdk-visually-hidden')))
+        .toMatchObject({ headingSemantic: true, absolutePosition: true, onePixelBox: false, overflowHidden: true,
+          rectClipped: clipping === 'rect', insetClipped: clipping === 'inset' });
+      const second = await finishRound(f, 2);
+      expect(second.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(second.submissionProof).toEqual({ sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) });
+      expect(f.send.clicks).toBe(2);
+    });
+  }
+
+  test('non-one-pixel headings cannot admit visible partial interactive or altered query payloads', async () => {
+    for (const fault of ['visible', 'partialRect', 'partialInset', 'tabindex', 'editable', 'button', 'payload']) {
+      const { f, shapes, styles, textNode } = queryFixture(), send = f.send.onClick!;
+      const text = await stage(f, 1);
+      f.send.onClick = () => {
+        send(); const { heading, rows } = shapes[0];
+        styles.set(heading, { ...clippedStyle, width: '12px', height: '24px', clipPath: 'none',
+          ...(fault === 'visible' ? { clip: 'auto' } : {}),
+          ...(fault === 'partialRect' ? { clip: 'rect(0px, 12px, 1px, 0px)' } : {}),
+          ...(fault === 'partialInset' ? { clip: 'auto', clipPath: 'inset(49%)' } : {}) });
+        if (fault === 'tabindex') heading.values.tabindex = '0';
+        else if (fault === 'editable') heading.values.contenteditable = 'true';
+        else if (fault === 'button') heading.append(new Element('BUTTON'));
+        else if (fault === 'payload') rows[0].replaceChildren(textNode('ALTERED'));
+        Object.defineProperty(f.userBody!, 'innerText', { configurable: true, get: () => text });
+      };
+      const result = await submitThenInspect(f, 1, text);
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      expect(result.firstUserVerified).not.toBe(true); expect(result.submissionProof).toBeUndefined();
+      expect(f.send.clicks).toBe(1);
     }
   });
 
@@ -737,7 +784,7 @@ describe('Gemini per-submission ownership', () => {
       const text = await stage(f, 2);
       const rejected = await withDigestMutation(f, 2, 'send_claimed', () => {
         const { heading, rows } = shapes[1];
-        if (fault === 'css') styles.set(heading, { ...clippedStyle, width: '2px' });
+        if (fault === 'css') styles.set(heading, { ...clippedStyle, clip: 'rect(0px, 1px, 1px, 0px)', clipPath: 'none' });
         else if (fault === 'replace') { const span = rows[0].children[0]; span.replaceChildren(textNode('ALTERED')); }
         else { const node = rows[0].children[0].children[0]; (node as any).data += fault === 'space' ? '\u00a0' : fault === 'format' ? '\u200b' : 'X'; node.text = (node as any).data; }
       }, () => submitThenInspect(f, 2, text));
