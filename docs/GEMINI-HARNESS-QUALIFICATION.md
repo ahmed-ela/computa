@@ -109,3 +109,27 @@ Both local fixture servers were stopped and their process/port shutdowns
 verified. The second Flash-Lite tool fixture was prepared but never dispatched.
 The installed app is signed Computa 0.7.0 (322), source `46da292`; its artifact
 audit passed. It is not a notarized or published release.
+
+## Provider-scoped selector refresh
+
+The task composer now names and refreshes only its selected website provider.
+A Gemini task's **Refresh Gemini models** action uses the existing guarded
+Gemini discovery path without probing ChatGPT or Claude. Settings retains the
+explicit all-provider action. Invalid provider payloads fail closed; they do not
+fall back to all providers. Successful discovery replaces only Gemini's catalog;
+failed or invalid discovery preserves the saved entries. A removed model stays
+unavailable in historical selections instead of being silently substituted.
+
+The last observed Gemini choices are 3.5 Flash-Lite, 3.8 Flash, 3.1 Pro and
+4 Argon. New supported versions are discovered from the website's enabled
+choices, not populated from marketing names or a guessed API catalog. The
+current CAPTCHA prevents a fresh account-specific catalog claim. This refresh
+change is not a CAPTCHA-prevention fix and does not replay stopped tasks.
+
+Build323 selector validation passed 128 WebUI tests (594 assertions), typecheck,
+the production UI build, and 39 native tests. The native run covers scoped
+replacement, malformed requests, retained unavailable selections, failure
+atomicity, idle rechecks and explicit recovery intent. Two stale test expectations
+were first reproduced in the preserved build322 binary, then corrected to assert
+the existing safeguards; production queue behavior was unchanged. These are
+local validation results, not a new Google catalog read or CAPTCHA clearance.

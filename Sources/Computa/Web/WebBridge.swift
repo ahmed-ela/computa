@@ -268,7 +268,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.setDefaultModel(modelID)
 
         case "refreshWebsiteModels":
-            Task { @MainActor [weak state] in await state?.refreshWebsiteModels() }
+            Task { @MainActor [weak self] in await self?.refreshWebsiteModels(body: body) }
 
         case "showAPIProviders":
             guard Set(body.keys) == ["action"] else { return }
@@ -309,6 +309,18 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         return await withCheckedContinuation { continuation in
             alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertSecondButtonReturn) }
         }
+    }
+
+    func refreshWebsiteModels(body: [String: Any]) async {
+        guard body["action"] as? String == "refreshWebsiteModels" else { return }
+        if Set(body.keys) == ["action"] {
+            await state?.refreshWebsiteModels()
+            return
+        }
+        guard Set(body.keys) == ["action", "provider"],
+              let provider = body["provider"] as? String,
+              WebsiteModelCatalog.providers.contains(provider) else { return }
+        await state?.refreshWebsiteModels(provider: provider)
     }
 
     /// Only the human-operated Settings action reaches this method. Opening

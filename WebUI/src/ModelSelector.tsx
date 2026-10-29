@@ -1,6 +1,6 @@
 import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
 import { Button } from '@octanejs/shadcn/Button';
-import type { ModelOption } from './types';
+import type { ModelOption, NativeAction, WebsiteModelProvider } from './types';
 
 export function modelOptionLabel(option: ModelOption): string {
   return option.label.split(' · ')[0];
@@ -21,10 +21,22 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   );
 }
 
-export function WebsiteModelsRefresh({ refreshing = false, canRefresh = false, onRefresh }: {
-  refreshing?: boolean; canRefresh?: boolean; onRefresh: () => void }) {
-  return <Button variant="ghost" size="sm" aria-label="Refresh website models"
-    title={canRefresh ? 'Read the model choices available in your signed-in websites'
+type WebsiteModelsRefreshAction = Extract<NativeAction, { action: 'refreshWebsiteModels' }>;
+
+export function websiteModelsRefreshAction(model?: string): WebsiteModelsRefreshAction | undefined {
+  if (model === undefined) return { action: 'refreshWebsiteModels' };
+  const match = /^browser\/(chatgpt|gemini|claude)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
+  return match && match[0] === model ? { action: 'refreshWebsiteModels', provider: match[1] as WebsiteModelProvider } : undefined;
+}
+
+export function WebsiteModelsRefresh({ model, refreshing = false, canRefresh = false, onRefresh }: {
+  model?: string; refreshing?: boolean; canRefresh?: boolean; onRefresh: (action: WebsiteModelsRefreshAction) => void }) {
+  const action = websiteModelsRefreshAction(model);
+  if (!action) return null;
+  const provider = action.provider && ({ chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude' })[action.provider];
+  const label = provider ? `Refresh ${provider} models` : 'Refresh models';
+  return <Button variant="ghost" size="sm" aria-label={provider ? label : 'Refresh website models'}
+    title={canRefresh ? `Read the model choices available in your signed-in ${provider ? `${provider} website` : 'websites'}`
       : 'Finish active tasks and approvals before refreshing website models'}
-    disabled={refreshing || !canRefresh} onClick={onRefresh}>{refreshing ? 'Refreshing…' : 'Refresh models'}</Button>;
+    disabled={refreshing || !canRefresh} onClick={() => onRefresh(action)}>{refreshing ? 'Refreshing…' : label}</Button>;
 }

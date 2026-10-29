@@ -1,6 +1,43 @@
 # Google verification recovery
 
-## Current diagnosis
+## October 29, 2026: recurrence before adapter dispatch
+
+Installed build322 completed a Flash-Lite marker and a Gemini 3.8 Flash
+code/terminal/browser workflow. A later Pro attempt reached a fresh Google
+`/sorry` redirect before the Gemini document committed, before the adapter
+ran, and before model selection or prompt submission. A single ordinary human
+tab reload then displayed Google's unusual-traffic CAPTCHA. No CAPTCHA was
+completed and no failed prompt was replayed. These are separate observations;
+the later human page does not supply missing content from the owned page.
+
+A source audit found one explicit initial model-page navigation and no
+transport reload loop on this path. Gemini retained one temporary conversation
+through the successful task's ten inferences. The next task started 468.6 seconds
+after that conversation's release. Those counts do not measure every HTTP
+request or establish a Google rate threshold.
+
+The installed system WebKit build `21624.2.5.11.4` matches Safari 26.5. The shared
+profile's saved cache identity matches the configured browser identity. JavaScript
+remains enabled. A passive network-configuration check found no enabled system
+proxy flags and default IPv4/IPv6 routes through `en0`; one VPN service was
+connected, but the previous Gemini connection's actual route was not captured.
+None of these observations establishes which signal caused Google's decision.
+
+The earlier recovery fixes removed stale local checkpoints after Google had
+already recovered. They did not establish permanent CAPTCHA prevention. The
+build322 query-heading repair runs only after Gemini loads; it cannot prevent
+this initial redirect. Startup discovery's ability to overlap inference is a
+separate unproven traffic hypothesis, with no evidence that it occurred during
+this cached-catalog attempt. Browser identity, cookies, profile, network settings
+and challenge protections were not changed to obtain a passing result.
+
+Google's [unusual-traffic guidance](https://support.google.com/websearch/answer/86640)
+identifies network traffic and shared VPN/network use as possible factors, but
+it does not diagnose this particular request. The external trigger remains
+unknown. See [the Gemini qualification](GEMINI-HARNESS-QUALIFICATION.md) for
+separate passing, failed and unqualified model results.
+
+## Earlier diagnosis (October 16)
 
 On October 16 at 11:58 UTC, installed138 completed a Gemini 3.8 Flash browser task
 with seven verified inferences, exact form/result evidence and confirmed website

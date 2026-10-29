@@ -318,6 +318,11 @@ final class AppState {
         await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
     }
 
+    func refreshWebsiteModels(provider: String) async {
+        guard WebsiteModelCatalog.providers.contains(provider), canRefreshWebsiteModels else { return }
+        await refreshWebsiteModels(providers: [provider], retryBlocked: true)
+    }
+
     private var humanWebsiteRecoveryIsIdle: Bool {
         !cookieMaintenanceOnlyLaunch && !isShuttingDown && !approvalGateBlocksInteraction && activeTurnTaskIDs.isEmpty
             && !tasks.contains(where: { $0.status == .running })
