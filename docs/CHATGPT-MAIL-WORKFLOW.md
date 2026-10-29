@@ -481,6 +481,47 @@ identify a WebKit defect; the selector and current product semantics must be
 inspected before adding another supported proof. No retry or verification
 relaxation was performed.
 
+An authorized read-only inspection identified the missing-control cause. The
+website enables its unified model picker and deliberately omits the older
+Chat/Work toggle. The actual committed composer still reported Chat mode, with
+mode switching available. Neither model names nor the `data-composer-mode`
+attributes on unrelated suggestion cards establish that fact. Computa does not
+force Work through its start URL, user-agent override or injected preference.
+
+The live editor's enclosing form provides a DOM alternative: an empty
+`data-chatgpt-composer` attribute, `data-thread-find-composer="true"` and
+`data-composer-placement="home"`. The public website implementation emits the
+Chat marker only when neither the conversation nor the effective home composer
+is Work. The unique active marked form contains the actual editor and model
+picker. A manual empty temporary-chat transition retained the old form hidden
+and mounted a new active marked form; its picker showed GPT-6 selected with
+Instant power. No provider prompt was sent or model selection changed. The
+normal empty page, tab inspection setting and Safari developer preference were
+all restored afterward.
+
+Build315 adds `chat_composer_marker` as a second explicit product-proof source.
+Admission requires one active marked form containing the actual editor and
+model picker on a fresh empty root. The owned temporary transition may replace
+that form while retaining its hidden predecessor. Marker removal/restoration,
+Work transitions, ambiguous active forms and unrelated/message content still
+invalidate the bounded proof history. Initial hydration may wait for disabled
+controls; an already acknowledged temporary session retains its product proof
+while otherwise intact controls disable during a response. Existing model,
+submission, route and cleanup checks remain independent and mandatory.
+
+The native evidence parser preserves the closed source value through its
+round-trip. Finite diagnostics report marker counts and boolean state without
+page content. Production code does not depend on React internals or infer Chat
+from missing controls. The adapter suite passes 541 tests, including 12 new
+marker regressions; the immutable314 adapter reproduces the missing-control
+failure on the same marked-composer fixture. The focused native cohort passes
+50 tests, including the real-WebKit Instant submission, hidden predecessor,
+hydration, disabled controls, marker-history and strict diagnostic cases. The
+same final test binary rejects the immutable314 adapter with
+`productModeUnverified` and completes with the candidate adapter. Installed
+workflow qualification remains separate; these checks do not establish a sent
+email.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only

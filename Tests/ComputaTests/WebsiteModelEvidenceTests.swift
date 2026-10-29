@@ -29,6 +29,32 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         for raw in invalid { XCTAssertThrowsError(try WebsiteProductModeEvidence.parse(raw, requireTemporary: true)) }
     }
 
+    func testChatComposerMarkerEvidenceRetainsItsSourceAndStrictTemporaryContract() throws {
+        let initial = ["product": "chatgpt", "mode": "chat", "source": "chat_composer_marker",
+                       "temporaryTransition": "not_requested"]
+        let acknowledged = initial.merging(["temporaryTransition": "acknowledged"]) { _, new in new }
+        for raw in [initial, acknowledged] {
+            let parsed = try WebsiteProductModeEvidence.parse(raw)
+            XCTAssertEqual(parsed.source, .chatComposerMarker)
+            XCTAssertEqual(parsed.dictionary, raw, "Native serialization cannot relabel the marker as a mode-control proof")
+            XCTAssertEqual(try JSONDecoder().decode(WebsiteProductModeEvidence.self,
+                from: JSONEncoder().encode(parsed)), parsed)
+        }
+        XCTAssertThrowsError(try WebsiteProductModeEvidence.parse(initial, requireTemporary: true))
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(acknowledged, requireTemporary: true))
+        var invalid: [Any] = [acknowledged.merging(["private": Self.privateCanary]) { _, new in new }]
+        for (key, replacement) in [("product", "chatgpt_work"), ("mode", "work"),
+                                   ("source", "chat_composer_marker "), ("source", "react_composer_mode"),
+                                   ("source", "model_picker_label"), ("temporaryTransition", "requested")] {
+            invalid.append(acknowledged.merging([key: replacement]) { _, new in new })
+            var missing = acknowledged; missing.removeValue(forKey: key); invalid.append(missing)
+        }
+        invalid.append(["product": "chatgpt", "mode": "chat", "source": "chat_composer_marker", "temporaryTransition": true])
+        for raw in invalid {
+            XCTAssertThrowsError(try WebsiteProductModeEvidence.parse(raw, requireTemporary: true))
+        }
+    }
+
     func testProductFailureKeepsFiniteNonRetryableRecoveryAtHTTPBoundary() throws {
         for failure: any Error in [WebModelServer.Failure.productModeUnverified, EmbeddedWebModelTransport.Failure.productModeUnverified] {
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: failure)) as? [String: Any])

@@ -3244,6 +3244,40 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testProductComposerMarkerDiagnosticsHaveClosedFiniteShape() throws {
+        let base: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 0,
+            "groupVisible": false, "recognized": false, "contradictory": false,
+            "chat": NSNull(), "work": NSNull(), "proofPresent": false,
+            "proofInvalidated": false, "chatClickClaimed": false]
+        let marker: [String: Any] = ["version": 1, "activeForms": 1, "candidateOverflow": false,
+            "recognized": true, "enabled": true, "proofSource": "chat_composer_marker"]
+        for source in [NSNull(), "chat_composer_marker", "composer_mode_control"] as [Any] {
+            var value = marker; value["proofSource"] = source
+            let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(
+                base.merging(["markerDiagnostic": value]) { _, new in new }))
+            XCTAssertLessThan(encoded.utf8.count, 2_048)
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            XCTAssertEqual((decoded["markerDiagnostic"] as? [String: Any])?["activeForms"] as? Int, 1)
+        }
+        var invalid: [[String: Any]] = []
+        for key in marker.keys { var value = marker; value.removeValue(forKey: key); invalid.append(value) }
+        for (key, bad) in [("version", true), ("version", 2), ("version", 1.5),
+                           ("activeForms", -1), ("activeForms", 17), ("activeForms", 0.5), ("activeForms", true),
+                           ("candidateOverflow", 1), ("recognized", "true"), ("enabled", NSNull()),
+                           ("proofSource", "PRIVATE_RAW_PAGE_CANARY"), ("proofSource", "chat_composer_marker "),
+                           ("proofSource", true), ("pageText", "PRIVATE_RAW_PAGE_CANARY")] as [(String, Any)] {
+            var value = marker; value[key] = bad; invalid.append(value)
+        }
+        for value in invalid {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(
+                base.merging(["markerDiagnostic": value]) { _, new in new }))
+        }
+        for bad in [NSNull(), true, "PRIVATE_RAW_PAGE_CANARY", []] as [Any] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(
+                base.merging(["markerDiagnostic": bad]) { _, new in new }))
+        }
+    }
+
     func testProductMutationHistogramIsFiniteAndSharedAcrossDiagnosticRoutes() throws {
         let histogram: [String: Any] = ["version": 1, "phase": "send_claimed", "capped": true,
             "types": ["attributes": 1_000, "childList": 1_000, "characterData": 1_000, "other": 1_000],
@@ -3574,6 +3608,220 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finish["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTUnifiedComposerMarkerProvesChatBeforeOneTemporarySubmissionAndCompletion() async throws {
+        let fixture = try Fixture(page: Self.chatComposerMarkerPage)
+        defer { fixture.shutdown() }
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let start = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let initial = try await evaluate(view, """
+            const editor = document.getElementById('fixture-editor'), form = editor.closest('form');
+            return {forms: document.querySelectorAll('form[data-chatgpt-composer]').length,
+              oldModeControls: document.querySelectorAll('[aria-label="Composer mode"]').length,
+              legacyEditorIDs: document.querySelectorAll('#prompt-textarea').length,
+              marker: form.getAttribute('data-chatgpt-composer'),
+              placement: form.getAttribute('data-composer-placement'),
+              threadFind: form.getAttribute('data-thread-find-composer'),
+              pickerInside: form.contains(document.getElementById('fixture-model-trigger'))};
+            """) as? [String: Any]
+        XCTAssertEqual(initial?["forms"] as? Int, 1)
+        XCTAssertEqual(initial?["oldModeControls"] as? Int, 0)
+        XCTAssertEqual(initial?["legacyEditorIDs"] as? Int, 0)
+        XCTAssertEqual(initial?["marker"] as? String, "")
+        XCTAssertEqual(initial?["placement"] as? String, "home")
+        XCTAssertEqual(initial?["threadFind"] as? String, "true")
+        XCTAssertEqual(initial?["pickerInside"] as? Bool, true)
+        let ready = try await fixturePhaseProbe("unified_marker_ready", trace: true) {
+            try await waitForState("ready", fixture.transport, token: token)
+        }
+        let readyProof = try WebsiteProductModeEvidence.parse(ready["productModeEvidence"], requireTemporary: true)
+        XCTAssertEqual(readyProof.source, .chatComposerMarker)
+        XCTAssertEqual(view.url?.absoluteString, "https://chatgpt.com/?temporary-chat=true")
+        let transition = try await evaluate(view, """
+            const forms = [...document.querySelectorAll('form[data-chatgpt-composer]')];
+            return {forms: forms.length, active: forms.filter(form => form.getClientRects().length > 0).length,
+              replacements: window.fixtureFormReplacements};
+            """) as? [String: Int]
+        XCTAssertEqual(transition, ["forms": 2, "active": 1, "replacements": 1],
+            "A connected ancestor-hidden old form is not a second active composer")
+        let prompt = "Read the exact synthetic Chat composer response"
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(try WebsiteProductModeEvidence.parse(sent["productModeEvidence"], requireTemporary: true).source, .chatComposerMarker)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true).source, .chatComposerMarker)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        let ledger = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(ledger, ["chat": 0, "temporary": 1, "inputs": 1, "sends": 1])
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTUnifiedComposerMarkerRejectsDuplicateUnrelatedAndDirectTemporaryFormsBeforeInput() async throws {
+        for variant in ["duplicate", "unrelated", "direct_temporary"] {
+            let fixture = try Fixture(page: Self.chatComposerMarkerPage,
+                initialURL: variant == "direct_temporary" ? URL(string: "https://chatgpt.com/?temporary-chat=true") : nil)
+            defer { fixture.shutdown() }
+            let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            if variant == "duplicate" {
+                _ = try await evaluate(view, "document.body.append(document.getElementById('fixture-chat-form').cloneNode(true)); return true;")
+            } else if variant == "unrelated" {
+                _ = try await evaluate(view, """
+                    const actual = document.getElementById('fixture-chat-form');
+                    actual.removeAttribute('data-chatgpt-composer');
+                    const unrelated = document.createElement('form');
+                    unrelated.setAttribute('data-chatgpt-composer', '');
+                    unrelated.setAttribute('data-thread-find-composer', 'true');
+                    unrelated.setAttribute('data-composer-placement', 'home');
+                    unrelated.textContent = 'Synthetic unrelated marked form'; document.body.append(unrelated); return true;
+                    """)
+            }
+            for _ in 0..<2 {
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Unbound markers cannot establish Chat provenance: \(variant)") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified, variant) }
+            }
+            let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(ledger, ["temporary": 0, "inputs": 0, "sends": 0], variant)
+            let cancel = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(cancel["cleanup"] as? String, "failed", variant)
+            try await assertHumanTabIntact(fixture, retaining: fixture.createdTabs.last)
+        }
+    }
+
+    func testChatGPTUnifiedComposerMarkerHydratesWithoutClaimingProductOrTemporaryUntilEnabled() async throws {
+        let fixture = try Fixture(page: Self.chatComposerMarkerPage)
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await evaluate(view, """
+            document.getElementById('fixture-editor').setAttribute('aria-disabled', 'true');
+            document.getElementById('fixture-model-trigger').disabled = true; return true;
+            """)
+        for _ in 0..<2 {
+            let waiting = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(waiting["state"] as? String, "loading")
+            XCTAssertNil(waiting["productModeEvidence"])
+        }
+        _ = try await evaluate(view, "document.getElementById('fixture-editor').removeAttribute('aria-disabled'); return true;")
+        let partial = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(partial["state"] as? String, "loading")
+        XCTAssertNil(partial["productModeEvidence"])
+        let untouched = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(untouched, ["temporary": 0, "inputs": 0, "sends": 0])
+        let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
+        let revision = try XCTUnwrap(observedRevision)
+        _ = try await evaluate(view, "document.getElementById('fixture-model-trigger').disabled = false; return true;")
+        let signaled = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: .now + .seconds(1))
+        XCTAssertGreaterThan(try XCTUnwrap(signaled), revision)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertEqual(try WebsiteProductModeEvidence.parse(ready["productModeEvidence"], requireTemporary: true).source,
+            .chatComposerMarker)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Send after the actual marked composer finishes hydrating"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTUnifiedComposerMarkerRetainsProductDuringTemporaryControlDisabling() async throws {
+        let fixture = try Fixture(page: Self.chatComposerMarkerPage)
+        defer { fixture.shutdown() }
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let start = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await evaluate(view, """
+            document.getElementById('fixture-editor').setAttribute('aria-disabled', 'true');
+            document.getElementById('fixture-model-trigger').disabled = true;
+            await new Promise(resolve => setTimeout(resolve, 0)); return true;
+            """)
+        let retained = try await evaluate(view, """
+            return {source: globalThis.__computaChatProductMode?.source,
+              invalidated: globalThis.__computaChatProductMode?.invalidated === true,
+              temporaryAcknowledged: globalThis.__computaChatProductMode?.temporaryAcknowledged === true};
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        XCTAssertEqual(retained?["source"] as? String, "chat_composer_marker")
+        XCTAssertEqual(retained?["invalidated"] as? Bool, false,
+            "A retained positive Chat marker remains product evidence while controls are temporarily disabled")
+        XCTAssertEqual(retained?["temporaryAcknowledged"] as? Bool, true)
+        let untouched = try await evaluate(view, "return {inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(untouched, ["inputs": 0, "sends": 0])
+        _ = try await evaluate(view, """
+            document.getElementById('fixture-editor').removeAttribute('aria-disabled');
+            document.getElementById('fixture-model-trigger').disabled = false; return true;
+            """)
+        var submittedWindow = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit", !submittedWindow else { return }
+            submittedWindow = true
+            _ = try? await self.evaluate(view, """
+                document.getElementById('fixture-editor').setAttribute('aria-disabled', 'true');
+                document.getElementById('fixture-model-trigger').disabled = true;
+                await new Promise(resolve => setTimeout(resolve, 0)); return true;
+                """)
+            let invalidated = try? await self.evaluate(view,
+                "return globalThis.__computaChatProductMode?.invalidated === true;",
+                world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            XCTAssertEqual(invalidated, false,
+                "The native response window must retain product provenance while its controls are disabled")
+            _ = try? await self.evaluate(view, """
+                document.getElementById('fixture-editor').removeAttribute('aria-disabled');
+                document.getElementById('fixture-model-trigger').disabled = false; return true;
+                """)
+        }
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Continue after controls become enabled again"])
+        XCTAssertTrue(submittedWindow)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true).source,
+            .chatComposerMarker)
+        try assertChoiceEvidence(complete, choice: choice)
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTUnifiedComposerMarkerWorkHistoryAcrossNativeAwaitCannotAdmitSend() async throws {
+        for restore in [false, true] {
+            let fixture = try Fixture(page: Self.chatComposerMarkerPage)
+            defer { fixture.shutdown() }
+            let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            var crossed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "insert", !crossed else { return }
+                crossed = true
+                _ = try? await self.evaluate(view, """
+                    const form = document.getElementById('fixture-chat-form');
+                    form.removeAttribute('data-chatgpt-composer');
+                    \(restore ? "form.setAttribute('data-chatgpt-composer', '');" : "")
+                    return true;
+                    """)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Reject a product marker that changed after insertion"])
+                XCTFail("Current or historical Work transition cannot authorize Send")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+            XCTAssertTrue(crossed)
+            let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(ledger, ["temporary": 1, "inputs": 1, "sends": 0])
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Restoring the attribute cannot revive invalidated product authority") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+        }
     }
 
     func testChatGPTClaimedWorkToChatSwitchIsAcknowledgedBeforeTemporaryClick() async throws {
@@ -15146,6 +15394,45 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         window.fixtureGeneration = 'initial'; window.fixtureReady = true;
         </script></body></html>
         """
+    }
+
+    /// The unified website home uses an explicit product marker on the actual
+    /// editor form and deliberately omits the old Chat/Work toggle. The owned
+    /// temporary transition leaves an ancestor-hidden old form in the DOM.
+    /// This fixture keeps real model/editor event listeners while replacing
+    /// their form container; no adapter evidence or private proof is injected.
+    private static var chatComposerMarkerPage: String {
+        modelChoicePage(.chatgpt, basePage: page.replacingOccurrences(
+            of: "document.getElementById('fixture-composer-mode').hidden = true;",
+            with: """
+            const oldForm = document.getElementById('fixture-chat-form');
+            const hiddenHost = document.createElement('div'); hiddenHost.style.display = 'none';
+            const oldContents = oldForm.cloneNode(true);
+            const successor = oldForm.cloneNode(false);
+            successor.replaceChildren(...oldForm.childNodes);
+            oldForm.replaceChildren(...oldContents.childNodes); oldForm.before(successor);
+            hiddenHost.append(oldForm);
+            document.body.append(hiddenHost);
+            window.fixtureFormReplacements++;
+            """))
+            .replacingOccurrences(of: "</body>", with: #"""
+            <script>
+            document.getElementById('fixture-composer-mode').remove();
+            const markedForm = document.createElement('form'); markedForm.id = 'fixture-chat-form';
+            markedForm.setAttribute('data-chatgpt-composer', '');
+            markedForm.setAttribute('data-thread-find-composer', 'true');
+            markedForm.setAttribute('data-composer-placement', 'home');
+            const editorWrapper = document.getElementById('prompt-textarea');
+            editorWrapper.removeAttribute('id');
+            document.getElementById('fixture-editor').setAttribute('role', 'textbox');
+            editorWrapper.before(markedForm);
+            markedForm.append(document.getElementById('fixture-model-trigger'),
+              document.getElementById('fixture-model-menu'), editorWrapper,
+              document.querySelector('[data-testid="send-button"]'));
+            markedForm.querySelectorAll('button').forEach(button => button.type = 'button');
+            window.fixtureFormReplacements = 0;
+            </script></body>
+            """#)
     }
 
     private static let page = #"""

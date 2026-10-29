@@ -119,26 +119,32 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
 }
 
 /// Product mode is separate from the model label: the same model can appear
-/// in both ChatGPT Chat and Work. The fixed adapter obtains this proof on the
-/// owned empty root page before it claims the temporary-chat transition.
+/// in both ChatGPT Chat and Work. The fixed adapter obtains this proof from
+/// current product controls or the explicit Chat composer marker on the owned
+/// empty root page before it claims the temporary-chat transition.
 struct WebsiteProductModeEvidence: Codable, Equatable, Sendable {
+    enum Source: String, Codable, Sendable {
+        case composerModeControl = "composer_mode_control"
+        case chatComposerMarker = "chat_composer_marker"
+    }
     enum TemporaryTransition: String, Codable, Sendable { case notRequested = "not_requested", acknowledged }
     enum Failure: Error { case unverified }
+    let source: Source
     let temporaryTransition: TemporaryTransition
 
     static func parse(_ raw: Any?, requireTemporary: Bool = false) throws -> Self {
         guard let value = raw as? [String: String],
               Set(value.keys) == ["product", "mode", "source", "temporaryTransition"],
               value["product"] == "chatgpt", value["mode"] == "chat",
-              value["source"] == "composer_mode_control",
+              let rawSource = value["source"], let source = Source(rawValue: rawSource),
               let rawTransition = value["temporaryTransition"],
               let transition = TemporaryTransition(rawValue: rawTransition),
               !requireTemporary || transition == .acknowledged else { throw Failure.unverified }
-        return Self(temporaryTransition: transition)
+        return Self(source: source, temporaryTransition: transition)
     }
 
     var dictionary: [String: String] {
-        ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
+        ["product": "chatgpt", "mode": "chat", "source": source.rawValue,
          "temporaryTransition": temporaryTransition.rawValue]
     }
 }

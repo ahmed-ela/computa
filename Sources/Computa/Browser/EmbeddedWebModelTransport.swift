@@ -5059,7 +5059,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
         let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
                                      "proofPresent", "proofInvalidated", "chatClickClaimed"]
-        let optional = Set(productProofDiagnosticKeys)
+        let optional = Set(productProofDiagnosticKeys).union(["markerDiagnostic"])
         guard let value = raw as? [String: Any],
               required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
@@ -5073,6 +5073,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var safe: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": count.intValue]
         for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
             guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
+        }
+        if let rawMarker = value["markerDiagnostic"] {
+            guard let marker = rawMarker as? [String: Any],
+                  Set(marker.keys) == ["version", "activeForms", "candidateOverflow", "recognized", "enabled", "proofSource"],
+                  let version = marker["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+                  version.doubleValue == 1,
+                  let active = marker["activeForms"] as? NSNumber, CFGetTypeID(active) != CFBooleanGetTypeID(),
+                  (0...16).contains(active.intValue), active.doubleValue == Double(active.intValue) else { return nil }
+            var projected: [String: Any] = ["version": 1, "activeForms": active.intValue]
+            for key in ["candidateOverflow", "recognized", "enabled"] {
+                guard let flag = boolean(marker[key]) else { return nil }; projected[key] = flag
+            }
+            if marker["proofSource"] is NSNull { projected["proofSource"] = NSNull() }
+            else {
+                guard let source = marker["proofSource"] as? String,
+                      WebsiteProductModeEvidence.Source(rawValue: source) != nil else { return nil }
+                projected["proofSource"] = source
+            }
+            safe["markerDiagnostic"] = projected
         }
         guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
         safe.merge(productDiagnostic) { _, projected in projected }

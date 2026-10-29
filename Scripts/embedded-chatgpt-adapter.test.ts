@@ -324,6 +324,231 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     flush: () => { const queued = timers.splice(0); queued.forEach(callback => callback()); } };
 }
 
+function markedChatComposerFixture() {
+  const f = fixture({ response: false, normalRoot: true });
+  f.modeGroup.connected = false;
+  f.body.children = f.body.children.filter(node => node !== f.modeGroup);
+  const picker = installObservedModelPicker(f, 'chatgpt', Element);
+  const form = new Element('FORM', { 'data-chatgpt-composer': '', 'data-thread-find-composer': 'true', 'data-composer-placement': 'home' });
+  f.composer.values.role = 'textbox'; f.composer.values['aria-label'] = 'Ask ChatGPT';
+  form.append(f.composer, picker.trigger); f.body.append(form);
+  return { ...f, form, picker };
+}
+
+describe('ChatGPT explicit Chat composer provenance', () => {
+  const successor = (f: ReturnType<typeof markedChatComposerFixture>, keepHidden = true) => {
+    const old = f.form, form = new Element('FORM', { ...old.values });
+    const editor = new Element('DIV', { ...f.composer.values });
+    const trigger = new Element('BUTTON', { ...f.picker.trigger.values }, f.picker.trigger.textContent);
+    form.append(editor, trigger);
+    if (keepHidden) { const hidden = new Element('DIV', { hidden: '' }); hidden.append(old); f.body.append(hidden); }
+    else { f.body.children = f.body.children.filter(node => node !== old); old.connected = false; }
+    f.body.append(form);
+    return { form, editor, trigger, records: [{ type: 'childList', target: f.body, addedNodes: [form], removedNodes: keepHidden ? [] : [old] }] };
+  };
+  const mutation = (f: ReturnType<typeof markedChatComposerFixture>, records: unknown[]) => f.observers[0].callback(records);
+  test('the unified picker admits its actual Chat-marked form before an owned temporary transition', async () => {
+    const f = markedChatComposerFixture();
+    expect(await f.inspect()).toMatchObject({ chatModeReady: true, temporary: false,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'not_requested' } });
+    expect(f.picker.trigger.clicks).toBe(0); expect(f.temporary.clicks).toBe(0);
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+    expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('owned temporary navigation can retain a hidden old Chat composer and admit one active successor', async () => {
+    for (const keepHidden of [true, false]) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      const enable = f.temporary.onClick!;
+      let replacement: ReturnType<typeof successor>;
+      f.temporary.onClick = () => { enable(); replacement = successor(f, keepHidden); mutation(f, replacement.records); };
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+        productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+      replacement!.form.values['data-composer-placement'] = 'thread';
+      mutation(f, [{ type: 'attributes', target: replacement!.form, attributeName: 'data-composer-placement', oldValue: 'home' }]);
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+        productModeEvidence: { source: 'chat_composer_marker' } });
+      expect(f.temporary.clicks).toBe(1); expect(replacement!.editor.events).toEqual([]); expect(replacement!.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('unrelated, ambiguous, hidden, disabled and malformed markers never establish Chat provenance', async () => {
+    const mutations = [
+      (f: ReturnType<typeof markedChatComposerFixture>) => { delete f.form.values['data-chatgpt-composer']; f.body.append(new Element('DIV', { 'data-composer-mode': 'chat' })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.tagName = 'DIV'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-chatgpt-composer'] = 'true'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-thread-find-composer'] = 'false'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-composer-placement'] = 'unknown'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values.inert = ''; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values.hidden = ''; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-message-author-role'] = 'assistant'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(new Element('FORM', { ...f.form.values })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.append(new Element('DIV', { ...f.composer.values })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(f.picker.trigger); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.picker.trigger.disabled = true; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.composer.values['aria-disabled'] = 'true'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.modeGroup.connected = true; f.body.append(f.modeGroup); f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(new Element('DIV', { 'aria-label': 'Composer mode' })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.document.URL = 'https://chatgpt.com/?temporary-chat=true'; f.temporary.values['aria-label'] = 'Turn off temporary chat'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.appendUser('Existing conversation'); },
+    ];
+    for (const change of mutations) {
+      const f = markedChatComposerFixture(); change(f);
+      const result = await f.inspect();
+      expect(result.productModeEvidence).toBeUndefined(); expect(result.chatModeReady).not.toBe(true);
+      expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('marker loss and restored values, including hidden predecessors, permanently revoke the original proof', async () => {
+    for (const attr of ['data-chatgpt-composer', 'data-thread-find-composer', 'data-composer-placement']) {
+      for (const hiddenOld of [false, true]) {
+        const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+        if (hiddenOld) { const next = successor(f); mutation(f, next.records); }
+        const prior = f.form.values[attr];
+        mutation(f, [{ type: 'attributes', target: f.form, attributeName: attr, oldValue: prior },
+          { type: 'attributes', target: f.form, attributeName: attr, oldValue: attr === 'data-composer-placement' ? 'work' : null }]);
+        expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+        expect((f.world.__computaChatProductMode as any).invalidated).toBe(true);
+        expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+        expect(f.temporary.clicks).toBe(1);
+      }
+    }
+  });
+
+  test('temporary successor admission cannot erase a transient Work composer or a Work switch and restoration', async () => {
+    for (const kind of ['work_form', 'work_control']) {
+      const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+      let records: unknown[];
+      if (kind === 'work_form') {
+        const work = new Element('FORM', { 'data-thread-find-composer': 'true', 'data-composer-placement': 'home' });
+        records = [{ type: 'childList', target: f.body, addedNodes: [work], removedNodes: [] },
+          { type: 'childList', target: f.body, addedNodes: [], removedNodes: [work] }];
+      } else {
+        f.modeGroup.connected = true;
+        records = [{ type: 'childList', target: f.body, addedNodes: [f.modeGroup], removedNodes: [] },
+          { type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' },
+          { type: 'childList', target: f.body, addedNodes: [], removedNodes: [f.modeGroup] }];
+      }
+      mutation(f, records);
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.temporary.clicks).toBe(1); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('pre-temporary replacement and ownership changes cannot reuse a Chat marker proof', async () => {
+    for (const kind of ['form', 'owner', 'frame', 'origin', 'route']) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      if (kind === 'form') { const next = successor(f); mutation(f, next.records); }
+      if (kind === 'owner') f.world.__computaModelOwner = 'foreign';
+      if (kind === 'frame') f.window.top = {};
+      if (kind === 'origin') f.location.origin = 'https://example.invalid';
+      if (kind === 'route') f.document.URL = 'https://chatgpt.com/work';
+      expect((await f.inspect({ action: 'enableTemporary' })).error).toBeDefined();
+      expect(f.temporary.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('marker loss across an awaited full-model read cannot publish model or product evidence', async () => {
+    const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+    const open = f.picker.trigger.onClick!;
+    f.picker.trigger.onClick = () => {
+      open();
+      mutation(f, [{ type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: '' },
+        { type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: null }]);
+    };
+    const result = await f.inspect({ action: 'verifyModel', expectedModelChoice: { key: 'chat/latest/medium', label: 'Medium' } });
+    expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined(); expect(result.productModeEvidence).toBeUndefined();
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('a disabled recognized initial composer waits without granting proof or action authority', async () => {
+    for (const control of ['editor', 'picker']) {
+      const f = markedChatComposerFixture();
+      const node = control === 'editor' ? f.composer : f.picker.trigger;
+      node.values['aria-disabled'] = 'true';
+      expect(await f.inspect()).toMatchObject({ chatModeReady: false, chatModeActionAvailable: false,
+        chatModeHydrating: true, pending: true });
+      expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.temporary.clicks).toBe(0);
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+      delete node.values['aria-disabled'];
+      expect(await f.inspect()).toMatchObject({ chatModeReady: true,
+        productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'not_requested' } });
+      expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('temporary streaming disabled controls preserve Chat provenance while marker loss still revokes it', async () => {
+    const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+    f.composer.values['aria-disabled'] = 'true'; f.picker.trigger.disabled = true;
+    mutation(f, [{ type: 'attributes', target: f.composer, attributeName: 'aria-disabled', oldValue: null },
+      { type: 'attributes', target: f.picker.trigger, attributeName: 'disabled', oldValue: null }]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+    delete f.form.values['data-chatgpt-composer'];
+    mutation(f, [{ type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: '' }]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('the exact marked editor retains presentation-only exclusion without ignoring marker or ancestor history', async () => {
+    for (const kind of ['presentation', 'marker_loss', 'ancestor', 'work', 'oversized']) {
+      const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+      const active = successor(f); mutation(f, active.records);
+      const records: any[] = Array.from({ length: kind === 'oversized' ? 4_097 : 1_100 }, (_, index) => ({
+        type: 'attributes', target: kind === 'ancestor' ? active.form : active.editor,
+        attributeName: index % 2 ? 'class' : 'style', oldValue: 'old presentation' }));
+      if (kind === 'marker_loss') records.push({ type: 'attributes', target: f.form,
+        attributeName: 'data-chatgpt-composer', oldValue: null });
+      if (kind === 'work') {
+        f.modeGroup.connected = true; f.body.append(f.modeGroup);
+        records.push({ type: 'childList', target: f.body, addedNodes: [f.modeGroup], removedNodes: [] },
+          { type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+      }
+      mutation(f, records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      if (kind === 'presentation' || kind === 'ancestor') {
+        // Ancestor mutations are fully counted; a bounded harmless batch may
+        // still pass, while presentation-only records use the narrow exclusion.
+        expect(result.productModeEvidence?.source).toBe('chat_composer_marker');
+      } else expect(result).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+    }
+  });
+
+  test('detaching and restoring the original editor or form before claiming temporary cannot erase history', async () => {
+    for (const kind of ['editor', 'form']) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      const node = kind === 'editor' ? f.composer : f.form;
+      const parent = node.parentElement!;
+      mutation(f, [{ type: 'childList', target: parent, addedNodes: [], removedNodes: [node] },
+        { type: 'childList', target: parent, addedNodes: [node], removedNodes: [] }]);
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.temporary.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('marker candidate bounds fail closed without reading layout of an unexamined tail', async () => {
+    for (const kind of ['forms', 'editors', 'triggers']) {
+      const f = markedChatComposerFixture(); let extraLayoutReads = 0;
+      for (let i = 0; i < 65; i++) {
+        const extra = kind === 'forms' ? new Element('FORM', { ...f.form.values })
+          : kind === 'editors' ? new Element('DIV', { ...f.composer.values })
+          : new Element('BUTTON', { ...f.picker.trigger.values });
+        extra.getClientRects = () => { extraLayoutReads++; return []; }; f.body.append(extra);
+      }
+      const result = await f.inspect();
+      expect(result.productModeEvidence).toBeUndefined();
+      expect(result.productModeDiagnostic.markerDiagnostic).toEqual({ version: 1,
+        activeForms: kind === 'forms' ? 0 : 1, candidateOverflow: true,
+        recognized: false, enabled: false, proofSource: null });
+      expect(extraLayoutReads).toBe(0); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+});
+
 function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean; measuredPRE?: boolean; renderedText?: () => string } = {}) {
   f.answer.text = ""; f.answer.children = [];
   const outer = new Element("DIV", { class: options.measuredPRE ? "CodeBlock-zu1QM3" : "CodeBlock-generated-class" });

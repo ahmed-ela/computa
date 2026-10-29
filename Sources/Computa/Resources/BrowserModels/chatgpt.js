@@ -3329,7 +3329,7 @@ function chatGPTPendingProductSubmission(state, record, roots, root, body, rende
       && chatGPTSubmissionContext(state) && chatGPTSubmissionPins(record)
       && parent?.sequence === record.sequence - 1 && chatGPTSubmissionPins(parent) && chatGPTSubmissionBodyIntact(parent, roots)
       && observed.temporary === true && product?.product === 'chatgpt' && product.mode === 'chat'
-      && product.source === 'composer_mode_control' && product.temporaryTransition === 'acknowledged'
+      && ['composer_mode_control', 'chat_composer_marker'].includes(product.source) && product.temporaryTransition === 'acknowledged'
       && typeof rendered === 'string' && rendered.length > 0 && rendered.length < record.canonical.length
       && record.canonical.startsWith(rendered) && !rendered.includes(`Computa session marker: ${record.marker}`)
       && chatGPTSubmissionBodyText(body, record.canonical) === rendered;
@@ -3617,12 +3617,31 @@ function chatGPTProductModeStateUnprofiled() {
   const pair = chat.length === 1 && work.length === 1;
   const chatSelected = pair ? state(chat[0]) : null, workSelected = pair ? state(work[0]) : null;
   const recognized = pair && chatSelected != null && workSelected != null && chatSelected !== workSelected;
+  // The unified picker deliberately removes the Chat/Work group. Its actual
+  // composer FORM emits this marker only for Chat (never a Work conversation
+  // or Work home composer). Suggestion-card mode attributes are not evidence.
+  const forms = [...document.querySelectorAll('form[data-chatgpt-composer], form[data-thread-find-composer]')];
+  const activeForms = forms.length <= 64 ? forms.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const markedForm = activeForms.length === 1 ? activeForms[0] : null;
+  const markerShape = node => !!node && node.tagName?.toLowerCase() === 'form'
+    && node.getAttribute('data-chatgpt-composer') === '' && node.getAttribute('data-thread-find-composer') === 'true'
+    && ['home', 'thread'].includes(node.getAttribute('data-composer-placement'));
+  const editorCandidates = markedForm ? [...document.querySelectorAll('[contenteditable="true"][role="textbox"][aria-label="Ask ChatGPT"]')] : [];
+  const triggerCandidates = markedForm ? [...document.querySelectorAll('button[aria-label="Select ChatGPT model"]')] : [];
+  const editors = editorCandidates.length <= 64 ? editorCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const triggers = triggerCandidates.length <= 64 ? triggerCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const markedEditor = editors.length === 1 && editors[0].closest('form') === markedForm ? editors[0] : null;
+  const markedTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
+  const markerRecognized = markerShape(markedForm) && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const markerReady = markerRecognized && enabled(markedEditor) && enabled(markedTrigger);
   return { group, groups, chat: chat[0] || null, work: work[0] || null, recognized, chatSelected, workSelected,
     ready: recognized && enabled(chat[0]) && enabled(work[0]),
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    labelledGroup,
+    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape,
+    markerActiveForms: Math.min(activeForms.length, 16),
+    markerCandidateOverflow: forms.length > 64 || editorCandidates.length > 64 || triggerCandidates.length > 64,
     modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
       && (node.tagName.toLowerCase() === 'button' || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role'))) };
 }
@@ -3636,6 +3655,10 @@ function chatGPTProductModeDiagnostic(state) {
   return { kind: 'chatgpt_product_mode_structure', groupCount: Math.min(state.groups.length, 16),
     groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
     chat: control(state.chat), work: control(state.work),
+    markerDiagnostic: { version: 1, activeForms: state.markerActiveForms, candidateOverflow: state.markerCandidateOverflow,
+      recognized: state.markerRecognized, enabled: state.markerReady,
+      proofSource: ['composer_mode_control', 'chat_composer_marker'].includes(globalThis.__computaChatProductMode?.source)
+        ? globalThis.__computaChatProductMode.source : null },
     proofPresent: !!globalThis.__computaChatProductMode, proofInvalidated: globalThis.__computaChatProductMode?.invalidated === true,
     chatClickClaimed: globalThis.__computaChatModeClickClaimed === true,
     ...chatGPTProductProofFailureDiagnostic() };
@@ -3813,7 +3836,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const messageBoundary = '[data-message-author-role="user"], [data-message-author-role="assistant"], '
     + '[data-markdown-text-style="user-message"], [data-markdown-text-style="assistant-message"], '
     + 'article[data-turn="user"], article[data-turn="assistant"], [data-user-message-bubble]';
-  const tracked = [...groups, ...works];
+  const tracked = [...groups, ...works, ...(proof.forms || []), ...(proof.editors || [])];
   const touchesTracked = node => !!node && tracked.some(control => control === node
     || contains(control, node) || contains(node, control));
   const containsGroup = node => {
@@ -3843,8 +3866,9 @@ function chatGPTObserveProductMutations(proof, state, records) {
       || editable && (node.parentElement?.closest('#prompt-textarea') || node.getAttribute('aria-label') === 'Ask ChatGPT')
       || textarea && node.getAttribute('data-testid') === 'prompt-textarea';
   });
-  const composer = composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
-    && composerCandidates[0].isConnected ? composerCandidates[0] : null;
+  const composer = proof.source === 'chat_composer_marker' && state.markerRecognized ? state.markedEditor
+    : composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
+      && composerCandidates[0].isConnected ? composerCandidates[0] : null;
   const productNodes = [...tracked, ...(state.groups || []), state.work].filter(Boolean);
   const intersects = (left, right) => !!left && !!right && (left === right || contains(left, right) || contains(right, left));
   const emptyNodes = value => value == null || Number.isInteger(value.length) && value.length === 0;
@@ -3884,8 +3908,13 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return false;
   };
   const presentationBatchSafe = () => {
+    // A Chat marker lives on the editor's enclosing form. That relationship
+    // does not make the exact editor's class/style presentation product state;
+    // all marker, ancestry and editor-identity mutations stay relevant below.
+    const presentationProductNodes = proof.source === 'chat_composer_marker' && state.markerRecognized
+      && composer === state.markedEditor ? productNodes.filter(node => node !== state.markedForm && node !== composer) : productNodes;
     if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
-      || productNodes.some(node => intersects(node, composer)) || containsGroup(composer)
+      || presentationProductNodes.some(node => intersects(node, composer)) || containsGroup(composer)
       || candidates(composer, 'controls').length
       || editorCanAffectReferencedLabel()) return false;
     for (const record of records) {
@@ -3941,6 +3970,54 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, { ...counts, failure: analysisFailureDiagnostic });
   if (analysisFailure) { invalidate(analysisFailure); return; }
   if (records.length > limits.records || relevant.length > limits.relevant) { invalidate('mutation_overflow'); return; }
+  if (proof.source === 'chat_composer_marker') {
+    // Keep the same bounded history scan for hidden/removed predecessors. A
+    // temporary-page transition may mount a new Chat composer while retaining
+    // its hidden predecessor; it cannot erase a Work/marker-loss transition.
+    const forms = proof.forms, editors = proof.editors;
+    const registerComposer = node => {
+      for (const candidate of elements(node)) {
+        if (!charge()) return;
+        if (candidate.tagName?.toLowerCase() !== 'form'
+          || candidate.getAttribute('data-chatgpt-composer') == null && candidate.getAttribute('data-thread-find-composer') == null
+          || !state.outside(candidate) && !forms.has(candidate)) continue;
+        if (!state.markerShape(candidate)) { unavailable('product_history_ambiguous'); return; }
+        forms.add(candidate);
+        if (forms.size > 64) { unavailable('mutation_scan_overflow'); return; }
+      }
+    };
+    for (const record of relevant) if (record.type === 'childList') {
+      if (!proof.temporaryRequested && [...record.removedNodes].some(node =>
+        contains(node, proof.form) || contains(node, proof.editor))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      for (const node of [...record.addedNodes, ...record.removedNodes]) registerComposer(node);
+      if (analysisFailure) break;
+    }
+    if (analysisFailure) { invalidate(analysisFailure); return; }
+    for (const record of relevant) if (record.type === 'attributes') {
+      const node = record.target, name = record.attributeName;
+      const markerAttribute = ['data-chatgpt-composer', 'data-thread-find-composer'].includes(name);
+      if (markerAttribute && (forms.has(node) || node.tagName?.toLowerCase() === 'form'
+        && state.outside(node) && (record.oldValue != null || node.getAttribute(name) != null))) {
+        if (record.oldValue !== node.getAttribute(name) || !state.markerShape(node)) {
+          invalidate('product_history_ambiguous'); return;
+        }
+      }
+      if (forms.has(node) && name === 'data-composer-placement'
+        && (!['home', 'thread'].includes(record.oldValue) || !state.markerShape(node))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      if (editors.has(node) && ['contenteditable', 'role', 'aria-label'].includes(name)
+        && record.oldValue !== node.getAttribute(name)) { invalidate('product_history_ambiguous'); return; }
+    }
+    if (!state.markerRecognized || !proof.temporaryRequested
+      && (!state.markerReady || state.markedForm !== proof.form || state.markedEditor !== proof.editor)) {
+      invalidate('not_ready'); return;
+    }
+    forms.add(state.markedForm); editors.add(state.markedEditor);
+    if (forms.size > 64 || editors.size > 64) { invalidate('mutation_scan_overflow'); return; }
+  }
   const ownedControls = new Set(works);
   const historicallyOwnedNodes = new Set(works);
   const ownControl = node => { ownedControls.add(node); if (ownedControls.size > 128) unavailable('mutation_scan_overflow'); };
@@ -4072,7 +4149,12 @@ function chatGPTProductModeProofUnprofiled() {
   if (!/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(new URL(document.URL).pathname))
     return chatGPTInvalidateProductProof(proof, 'route');
   if (state.contradictory) return chatGPTInvalidateProductProof(proof, 'contradictory_controls');
-  if (!proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
+  if (proof.source === 'chat_composer_marker' && (!state.markerRecognized
+    || state.groups.length > 0 && (!state.recognized || state.chatSelected !== true)
+    || !proof.temporaryRequested && (!state.markerReady || state.markedForm !== proof.form || state.markedEditor !== proof.editor))) {
+    return chatGPTInvalidateProductProof(proof, 'not_ready');
+  }
+  if (proof.source !== 'chat_composer_marker' && !proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
     return chatGPTInvalidateProductProof(proof, 'not_ready');
   }
   // Only the private acknowledgement changes between these consecutive
@@ -4080,7 +4162,7 @@ function chatGPTProductModeProofUnprofiled() {
   const renderedTemporary = chatGPTRenderedTemporary();
   if (proof.temporaryRequested && renderedTemporary) proof.temporaryAcknowledged = true;
   if (renderedTemporary && !proof.temporaryAcknowledged) return null;
-  return { product: 'chatgpt', mode: 'chat', source: 'composer_mode_control',
+  return { product: 'chatgpt', mode: 'chat', source: proof.source || 'composer_mode_control',
     temporaryTransition: proof.temporaryAcknowledged ? 'acknowledged' : 'not_requested' };
 }
 function chatGPTTemporaryVerified() {
@@ -4099,12 +4181,17 @@ function chatGPTProductModeAction(request) {
   const root = new URL(document.URL).pathname === '/' && !chatGPTRenderedTemporary()
     && new URL(document.URL).searchParams.get('temporary-chat') !== 'true';
   let proof = chatGPTProductModeProof();
-  if (!proof && !globalThis.__computaChatProductMode && fresh && root && state.ready && state.chatSelected === true) {
+  const markerAdmission = state.groups.length === 0 && state.markerReady;
+  if (!proof && !globalThis.__computaChatProductMode && fresh && root
+    && (state.ready && state.chatSelected === true || markerAdmission)) {
     // Pending mode mutations belong to the pre-proof phase. The next observed
     // mutation can revoke this proof even if Work immediately switches back.
     globalThis.__computaModelSignal?.observer?.takeRecords?.();
     globalThis.__computaChatProductMode = { owner: globalThis.__computaModelOwner, document,
-      groups: new Set([state.group]), works: new Set([state.work]), invalidated: false,
+      source: markerAdmission ? 'chat_composer_marker' : 'composer_mode_control',
+      ...(markerAdmission ? { form: state.markedForm, editor: state.markedEditor,
+        forms: new Set([state.markedForm]), editors: new Set([state.markedEditor]) } : {}),
+      groups: new Set(state.group ? [state.group] : []), works: new Set(state.work ? [state.work] : []), invalidated: false,
       temporaryRequested: false, temporaryAcknowledged: false };
     proof = chatGPTProductModeProof();
   }
@@ -4125,11 +4212,13 @@ function chatGPTProductModeAction(request) {
   const disabledControl = node => node.disabled === true || node.getAttribute('aria-disabled') === 'true';
   if (request.action === 'inspect' && fresh && root && !globalThis.__computaChatProductMode
     && globalThis.__computaChatModeClickClaimed !== true && globalThis.__computaModelTemporaryRequested !== true
-    && state.recognized && state.visible(state.group) && state.visible(state.chat) && state.visible(state.work)
-    && (disabledControl(state.chat) || disabledControl(state.work))) {
-    // The signed-in page briefly disables its already recognized Chat/Work
-    // pair while hydrating. This is only a bounded native readiness wait;
-    // neither provenance nor any click is authorized until both enable.
+    && (state.recognized && state.visible(state.group) && state.visible(state.chat) && state.visible(state.work)
+        && (disabledControl(state.chat) || disabledControl(state.work))
+      || state.groups.length === 0 && state.markerRecognized
+        && (disabledControl(state.markedEditor) || disabledControl(state.markedTrigger)))) {
+    // The signed-in page briefly disables recognized mode controls or the
+    // marked Chat composer while hydrating. This is only a bounded native
+    // readiness wait; neither provenance nor any click is authorized yet.
     return { chatModeReady: false, chatModeActionAvailable: false, chatModeHydrating: true, pending: true };
   }
   if (request.action === 'inspect' && fresh && root && !state.group && !document.querySelectorAll('#prompt-textarea, [contenteditable="true"]').length)
@@ -5204,6 +5293,7 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
     attributeNames: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style", "id",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
+      "data-chatgpt-composer", "data-thread-find-composer", "data-composer-placement",
       "data-user-message-bubble", "data-talvt-turn-state", "data-content-search-turn-key",
       "data-chatgpt-selection-message-id", "data-tool-call-id", "role"] };
   signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
