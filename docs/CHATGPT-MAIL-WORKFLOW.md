@@ -554,16 +554,20 @@ identity, owner, route and header drift also reject without input.
 Installed316 completed the original task's model loop: all 16 ChatGPT Instant
 inferences retained product/model/submission verification and closed their
 website sessions. Its 15 browser tool calls returned without tool errors, but
-the requested email was not sent. The sole input was Compose; no recipient,
-message field or Send reference was exposed, and the final response accurately
-reported that limitation. Recipient and Send queries searched the retained
-242-node truncated capture and found no matching control.
+the requested email was not sent. The sole input was a Compose click with a
+fresh reference; its outcome remained unverified. No recipient, message field
+or Send reference was exposed. The final response correctly reported no email
+sent, but its claim that the compose window opened was not established by the
+tool evidence. Recipient and Send queries searched the retained 242-node
+truncated capture and found no matching control. The last content read still
+offered a continuation, so these observations do not establish an exhaustive
+search or the absence of compose controls on the page.
 
 All 15 native page captures used an attached, visible 1024x768 view. The later
 360-pixel human pane is therefore not evidence of the task-time viewport. Those
 captures reached the byte budget, with a partially explored panel; this does
 not yet distinguish controls hidden/unmounted by Gmail from a capture discovery
-gap. The existing empty compose state and failed evidence are retained for
+gap. The unchanged page at its compose URL and failed evidence are retained for
 bounded DOM inspection. Model-loop success is not email-action success.
 
 ## Diagnostics and limits
