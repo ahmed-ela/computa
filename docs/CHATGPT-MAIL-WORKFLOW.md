@@ -623,6 +623,30 @@ obstructions. Diagnostic encoding remains within the existing 768-byte capture
 and 1,024-byte native-log bounds. Earlier failing experiments remain retained;
 these results do not establish a successful real-email task.
 
+Installed build 317's controlled task failed after 97.308 seconds. Nine browser
+calls returned successfully, with one Compose click and no field fill or Send.
+Nine ChatGPT Instant inferences verified and closed. The tenth failed
+`website_ownership_unverified(user_count)`; its website cleanup remains
+unconfirmed. No prompt or browser input was replayed.
+
+This attempt's ten native Gmail captures measured 360x527 in both the actual
+view and WebKit viewport, with the human tab selected. They are not comparable
+to build 316's 1024x768 background captures. Capture stopped at the byte budget
+with 237–239 rows. The bounded discovery summary found one rendered panel and
+401–409 pruned subtrees; it cannot identify a compose panel beneath a pruned
+branch. No compose field or layout-control reference was published, so neither
+the native-field correction nor successful compose recovery was exercised.
+
+The failed inference first bound a full 115,088-character user body. At the next
+ownership entry check, the recognized user count was zero rather than one while
+owner, origin, URL and top frame still matched. During later cleanup the old
+message elements were disconnected and a collapsed 10,240-character replacement
+appeared without the final ownership marker. This establishes a missing/replaced
+message at the verification boundary, not the cause of the site's DOM change.
+The guard correctly rejected the observation. The remaining investigations are
+the selected-tab rendering path and bounded handling of this transient gap
+without accepting partial ownership proof.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
