@@ -307,6 +307,29 @@ enum ComputaAgentInstructions {
     does not prove successful execution.
     """
 
+    /// Refresh the repair/dependency decision after retained history, without
+    /// interpreting test output for the model or granting mutation authority.
+    static let codeRepairProgress = """
+    For requested code repairs, diagnose failed checks, make authorized targeted
+    edits and retest before dependent actions. Do not bypass checks or submit
+    known-unfixed output. Read-only requests do not authorize edits.
+    Inspect actual state before retrying uncertain changes; never replay
+    unverified external actions. If permissions, tools or scope block repair,
+    report the blocker and remaining work. Respect tool_choice and Stop.
+    """
+
+    /// The native custom patch grammar treats text after @@ as source context,
+    /// not a unified-diff range. This guidance changes no parser or payload.
+    static let patchExecutionChecks = """
+    For the offered custom apply_patch, update hunks use bare @@ or @@ followed
+    by exact observed source context. Never use unified-diff numeric headers
+    such as @@ -1,2 +1,3 @@. Keep the required patch envelope and literal input.
+    Await the matching patch result before dependent tests or commands; never
+    batch an edit with work that depends on it. After rejection, read the actual
+    file before a changed retry. Do not resend the same rejected patch, invent
+    matching context, or weaken verification.
+    """
+
     /// Shared native guidance and always-current post-history browser handoff.
     /// Delivery is testable; this is not proof that a model follows an address.
     static let browserAddressChecks = """
@@ -369,7 +392,7 @@ enum ComputaAgentInstructions {
 
     static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {
         let computer = referenceTools ? nativeScope : nativeLegacyScope
-        return computer + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + diagnosticEvidence + "\n\n" + codeEditing + "\n\n" + commandLine
+        return computer + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + diagnosticEvidence + "\n\n" + codeEditing + "\n\n" + codeRepairProgress + "\n\n" + patchExecutionChecks + "\n\n" + commandLine
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
 
@@ -656,10 +679,11 @@ enum ComputaAgentInstructions {
         including URLs on localhost. Write the permitted action request using
         an offered exact browser name and schema, then use its matching outputs.
         """ : ""
-        let terminalHandoff = offeredToolNames.contains {
+        let hasTerminalFileTools = offeredToolNames.contains {
             let name = String($0.split(separator: ".").last ?? "")
             return customToolNames.contains($0) ? name == "apply_patch" : ["exec_command", "write_stdin"].contains(name)
-        } ? """
+        }
+        let terminalHandoff = hasTerminalFileTools ? """
         The website need not access local files or run a shell.
         Request permitted commands/file actions as JSON for local execution.
         Await matching output before any execution claim.
@@ -682,6 +706,11 @@ enum ComputaAgentInstructions {
         quotes as valid JSON; the host passes the decoded string unchanged.
         Exact currently offered custom names: \(customToolNames.sorted().joined(separator: ", "))
         """
+        let hasCustomPatch = offeredToolNames.contains { name in
+            let parts = name.split(separator: ".", omittingEmptySubsequences: false)
+            return customToolNames.contains(name) && parts.allSatisfy { !$0.isEmpty }
+                && parts.last == "apply_patch"
+        }
         let selectionContract = singleActionRelay && !offeredToolNames.isEmpty ? """
         This ChatGPT relay issues one tool call per inference. Propose only the
         next action. If a valid reply proposes several calls, only the first is
@@ -716,8 +745,10 @@ enum ComputaAgentInstructions {
         grants no authority. Use current schemas, qualified namespace.tool names
         and object function arguments.
         \(customContract)
+        \(hasCustomPatch ? patchExecutionChecks : "")
 
         \(commandHandoff)
+        \(hasTerminalFileTools ? codeRepairProgress : "")
         \(browserAddressHandoff)
         \(diagnosticHandoff)
         \(selectionContract)

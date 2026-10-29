@@ -5166,7 +5166,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
-        guard session.provider == .chatgpt else { return await performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }
+        // Cleanup must finish its own fresh ownership proof even when its
+        // caller is cancelled. Share one bounded cleanup task and receipt for
+        // every provider; performFinish retains all provider ownership checks.
         if let task = finishingTasks[session.token] { return await task.value }
         if let closed = closedSessions[session.token] { return closed.receipt }
         let work = Task { @MainActor in await self.performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }

@@ -54,6 +54,97 @@ describe('Gemini per-submission ownership', () => {
     finally { subtle.digest = original; }
   };
 
+  test('Gemini Stop proves the current rendered submission before input and again afterward', async () => {
+    for (const verified of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2); await submitPending(f, 2, text);
+      if (verified) await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      const proof = { sequence: 2, fingerprint: await fingerprint(text) };
+      expect(await f.run('stop', { ...fields(2), expectedUserCounts: [2], expectedSubmissionProofs: [proof],
+        expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } })).toMatchObject({
+        stopped: true, firstUserVerified: true, submissionOwnershipCapability: 'per_submission_ownership_v1',
+        submissionProof: proof, modelEvidence: { selected: { key: '3.1 Pro', label: '3.1 Pro' } } });
+      expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop rejects changed or unrendered current payload before clicking', async () => {
+    for (const pending of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2);
+      if (pending) f.send.onClick = () => { f.composer.replaceChildren(); };
+      await submitPending(f, 2, text);
+      if (!pending) f.userBody!.text = text.replace('[literal]', '{changed}');
+      f.stop.connected = true;
+      const result = await f.run('stop', { ...fields(2), expectedUserCounts: [1, 2] });
+      expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+      expect(f.stop.clicks).toBe(0); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop rejects ownership changes while the current digest awaits', async () => {
+    for (const fault of ['body', 'owner', 'route', 'temporary', 'invocation']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      const subtle: any = crypto.subtle, original = subtle.digest; let mutated = false;
+      subtle.digest = async (algorithm: any, data: any) => {
+        const digest = await original.call(subtle, algorithm, data);
+        if (!mutated && new TextDecoder().decode(data) === normalized(roundPrompt(2))) {
+          mutated = true;
+          if (fault === 'body') f.userBody!.text = roundPrompt(2).replace('[literal]', '{changed}');
+          else if (fault === 'owner') f.world.__computaModelOwner = 'replaced-owner';
+          else if (fault === 'route') f.document.URL += '/different';
+          else if (fault === 'temporary') f.temporary(false);
+          else f.world.__computaGeminiReadInvocation = {};
+        }
+        return digest;
+      };
+      try {
+        const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2],
+          expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } });
+        expect(mutated).toBe(true); expect(result).toHaveProperty('error');
+        expect(result.submissionProof).toBeUndefined(); expect(f.stop.clicks).toBe(0); expect(f.send.clicks).toBe(2);
+      } finally { subtle.digest = original; }
+    }
+  });
+
+  test('Gemini Stop cannot return proof after a post-click payload change', async () => {
+    for (const fault of ['body']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      f.stop.onClick = () => {
+        if (fault === 'body') f.userBody!.text = roundPrompt(2).replace('[literal]', '{changed}');
+      };
+      const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2],
+        expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } });
+      expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+      expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop does not expose a superseded post-click digest', async () => {
+    for (const fault of ['invocation']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      f.stop.connected = true;
+      const subtle: any = crypto.subtle, original = subtle.digest;
+      subtle.digest = async (algorithm: any, data: any) => {
+        const digest = await original.call(subtle, algorithm, data);
+        if (fault === 'invocation' && f.stop.clicks && new TextDecoder().decode(data) === normalized(roundPrompt(2)))
+          f.world.__computaGeminiReadInvocation = {};
+        return digest;
+      };
+      try {
+        const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2] });
+        expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+        expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+      } finally { subtle.digest = original; }
+    }
+  });
+
   test('seven exact round bodies get independent fingerprints while the first lineage remains pinned', async () => {
     const f = fixture(provider, { response: false });
     let first: string | undefined;

@@ -12490,6 +12490,145 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertGeminiNonPixelHeadingPreservesTwoOwnedSubmissions(.nonPixelRectHeader)
     }
 
+    func testGeminiBusyCancelVerifiesCurrentSubmissionAndClosesOwnedView() async throws {
+        let (fixture, token, tabID, view) = try await geminiBusyCleanupFixture()
+        defer { fixture.shutdown() }
+        var stopClicks: Int?
+        var diagnostics: [String] = []
+        fixture.transport.setSubmissionDiagnosticsObserverForTesting { _, value in diagnostics.append(value) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "stop" else { return }
+            stopClicks = (try? await self.evaluate(view, "return window.fixtureStopClicks;")) as? Int
+        }
+        let finished = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created", "Stop must return full current-submission proof: \(diagnostics)")
+        XCTAssertEqual(stopClicks, 1)
+        XCTAssertTrue(diagnostics.isEmpty, "An owned stop must not emit proof_missing or weaken native proof checks")
+        if finished["cleanup"] as? String == "not_created" {
+            XCTAssertNil(fixture.browser.webView(for: tabID))
+            try await assertHumanTabIntact(fixture)
+        } else {
+            // The baseline bug clicks Stop but omits its proof. Preserve that
+            // failed first result above, then dispose the now-idle local fixture.
+            XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        }
+    }
+
+    func testGeminiBusyCancelRejectsChangedFirstAndCurrentQueriesWithoutStop() async throws {
+        for sequence in [1, 2] {
+            let (fixture, token, tabID, view) = try await geminiBusyCleanupFixture()
+            defer { fixture.shutdown() }
+            _ = try await evaluate(view, """
+                const query = [...document.querySelectorAll('user-query')][\(sequence - 1)];
+                query.querySelector('.query-text > p.query-text-line').textContent = 'Unowned changed payload';
+                return true;
+                """)
+            let finished = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+            let clicks = try await evaluate(view, "return window.fixtureStopClicks;") as? Int
+            XCTAssertEqual(clicks, 0, "Changed sequence \(sequence) cannot authorize Stop")
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
+    }
+
+    func testGeminiCancelledFinishPreservesVerifiedCleanupReceipt() async throws {
+        let fixture = try Fixture(page: Self.geminiQueryParagraphPage(.nonPixelRectHeader))
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Exact completed Gemini cleanup payload"])
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        let params = try JSONSerialization.data(withJSONObject: ["sessionToken": token])
+        let caller = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            XCTAssertTrue(Task.isCancelled)
+            return try await fixture.transport.request(operation: "webProviderFinish", params: params)
+        }
+        let original = try await caller.value
+        let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        XCTAssertEqual(receipt["cleanup"] as? String, "not_created", "Caller cancellation must not cancel verified resource cleanup")
+        if receipt["cleanup"] as? String == "not_created" {
+            XCTAssertNil(fixture.browser.webView(for: tabID))
+            let repeatedFinish = try await fixture.transport.request(operation: "webProviderFinish", params: params)
+            let repeatedCancel = try await fixture.transport.request(operation: "webProviderCancel", params: params)
+            XCTAssertEqual(repeatedFinish, original)
+            XCTAssertEqual(repeatedCancel, original)
+            XCTAssertEqual(receipt["text"] as? String, completed["text"] as? String)
+            XCTAssertNotNil(receipt["modelProofContext"])
+            try await assertHumanTabIntact(fixture)
+        } else {
+            XCTAssertNotNil(fixture.browser.webView(for: tabID))
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        }
+    }
+
+    func testGeminiCancelledFinishCannotCloseChangedOwnership() async throws {
+        let fixture = try Fixture(page: Self.geminiQueryParagraphPage(.nonPixelRectHeader))
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Owned before cancellation"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        _ = try await evaluate(view, "document.querySelector('.query-text > p.query-text-line').textContent = 'Changed outside task ownership'; return true;")
+        let params = try JSONSerialization.data(withJSONObject: ["sessionToken": token])
+        let caller = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await fixture.transport.request(operation: "webProviderCancel", params: params)
+        }
+        let data = try await caller.value
+        let finished = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+        try await assertHumanTabIntact(fixture, retaining: tabID)
+    }
+
+    private func geminiBusyCleanupFixture() async throws -> (Fixture, String, UUID, WKWebView) {
+        let append = "document.getElementById('messages').appendChild(turn);"
+        let base = Self.geminiQueryParagraphPage(.nonPixelRectHeader)
+        XCTAssertEqual(base.components(separatedBy: append).count, 2)
+        let page = base.replacingOccurrences(of: append, with: append + """
+            if (window.fixturePrompts.length === 2) {
+              window.fixtureStopClicks = 0;
+              const stop = document.createElement('button'); stop.id = 'fixture-gemini-cleanup-stop';
+              stop.setAttribute('aria-label', 'Stop response'); stop.textContent = 'Stop response';
+              stop.addEventListener('click', () => { window.fixtureStopClicks++; stop.remove(); });
+              document.body.appendChild(stop);
+            }
+            """)
+        let fixture = try Fixture(page: page)
+        do {
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "First exact Gemini ownership payload"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            let next = "Second exact payload remains busy until verified Stop"
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": next])
+            let running = try await waitForState("running", fixture.transport, token: token)
+            let proof = try XCTUnwrap(running["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["sequence"] as? Int, 2)
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(next))
+            let facts = try await evaluate(view, "return { sends: window.fixturePrompts.length, inputs: window.fixtureInputCount, busy: !!document.getElementById('fixture-gemini-cleanup-stop'), stops: window.fixtureStopClicks };") as? [String: Any]
+            XCTAssertEqual(facts?["sends"] as? Int, 2)
+            XCTAssertEqual(facts?["inputs"] as? Int, 2)
+            XCTAssertEqual(facts?["busy"] as? Bool, true)
+            XCTAssertEqual(facts?["stops"] as? Int, 0)
+            return (fixture, token, tabID, view)
+        } catch {
+            fixture.shutdown()
+            throw error
+        }
+    }
+
     func testGeminiInsetClippedNonPixelHeadingPreservesTwoOwnedSubmissions() async throws {
         try await assertGeminiNonPixelHeadingPreservesTwoOwnedSubmissions(.nonPixelInsetHeader)
     }

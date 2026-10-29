@@ -2234,6 +2234,9 @@ if (submissionOwnershipEnabled && (typeof input.submissionMarker !== 'string' ||
   || !Number.isInteger(input.submissionSequence) || input.submissionSequence < 0 || input.submissionSequence > 10_000))
   return modelSubmissionFailure(null, 'invalid_input');
 const submissionEditorActions = ['insert', 'sendReady', 'submit'];
+// Stop is an owned input too: prove the latest rendered body before clicking,
+// then return a freshly checked proof for native cleanup to validate.
+const submissionObservedActions = ['inspect', 'prepare', 'verifyModel', 'stop', ...submissionEditorActions];
 
 function modelSubmissionDiagnostic(record, stage) {
   // Diagnostic predicates cannot grant proof, change state, or expose values.
@@ -2694,7 +2697,7 @@ function modelClaimSubmission(prompt) {
 async function modelSubmissionResult(observed) {
   if (!submissionOwnershipEnabled || observed.error) return observed;
   const capability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
-  if (!['inspect', 'prepare', 'verifyModel', ...submissionEditorActions].includes(input.action)) return { ...observed, ...capability };
+  if (!submissionObservedActions.includes(input.action)) return { ...observed, ...capability };
   // The claimed click acknowledges dispatch only. Rendering can append or
   // remount messages after it; a fresh read must prove every submitted body.
   // Never hash, rebind or revoke a body from the post-Send mutation result.
@@ -2703,6 +2706,7 @@ async function modelSubmissionResult(observed) {
   const sequence = input.submissionSequence - (['insert', 'sendReady'].includes(input.action) ? 1 : 0);
   const proof = await modelObserveSubmission(sequence, ['inspect', 'verifyModel', 'submit'].includes(input.action));
   if (proof.error) return proof;
+  if (input.action === 'stop' && !submissionReadCurrent()) return { error: 'conversation_changed', detail: 'submission_message' };
   return { ...observed, ...capability, ...(proof.submissionProof ? { submissionProof: proof.submissionProof } : {}),
     ...(proof.pending ? { submissionPending: true } : {}),
     ...(proof.pending && ['inspect', 'verifyModel'].includes(input.action) ? { text: '', answerComplete: false, pending: true } : {}) };
@@ -2861,10 +2865,12 @@ if (ownedUserCount > 0) {
 
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
-  if (submissionOwnershipEnabled && ['inspect', 'prepare', 'verifyModel', ...submissionEditorActions].includes(input.action)) {
+  if (submissionOwnershipEnabled && submissionObservedActions.includes(input.action)) {
     const sequence = input.submissionSequence - (submissionEditorActions.includes(input.action) ? 1 : 0);
     const prior = await modelObserveSubmission(sequence, ['inspect', 'verifyModel'].includes(input.action));
     if (prior.error) return prior;
+    // No later await precedes Stop. A superseded digest must not authorize it.
+    if (input.action === 'stop' && !submissionReadCurrent()) return { error: 'conversation_changed', detail: 'submission_message' };
   }
   const modelState = websiteModelPickerState('gemini');
   if (['discoverModels', 'selectModel', 'modelDiagnostic'].includes(input.action))

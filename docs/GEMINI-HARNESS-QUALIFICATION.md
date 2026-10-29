@@ -82,7 +82,7 @@ can have an empty prompt fingerprint while pending; the completed-response
 records contain the required proof. The final website release and cleanup
 receipt were verified, separately from closing the task's local-browser tab.
 
-## Remaining provider blocker
+## Build 322 provider blocker
 
 The later Pro attempt stopped after 1.299 seconds with
 `website_verification_required` and zero tool calls. Its first native
@@ -100,7 +100,7 @@ evidence does not attribute it to WebKit version, request rate, IP reputation,
 model choice or the heading repair. The task failed before the Gemini adapter
 could submit a prompt or verify Pro selection.
 
-Further Gemini live attempts remain paused at the verification boundary.
+At this point Gemini live attempts paused at the verification boundary.
 Resolving a displayed challenge and completing a fresh controlled qualification
 are separate steps. The successful Flash-Lite and Flash runs do not establish
 that the Google checkpoint is fixed, nor that Pro, Argon or Claude is qualified.
@@ -123,7 +123,7 @@ unavailable in historical selections instead of being silently substituted.
 The last observed Gemini choices are 3.5 Flash-Lite, 3.8 Flash, 3.1 Pro and
 4 Argon. New supported versions are discovered from the website's enabled
 choices, not populated from marketing names or a guessed API catalog. The
-current CAPTCHA prevents a fresh account-specific catalog claim. This refresh
+then-current CAPTCHA prevented a fresh account-specific catalog claim. This refresh
 change is not a CAPTCHA-prevention fix and does not replay stopped tasks.
 
 Build323 selector validation passed 128 WebUI tests (594 assertions), typecheck,
@@ -133,3 +133,73 @@ atomicity, idle rechecks and explicit recovery intent. Two stale test expectatio
 were first reproduced in the preserved build322 binary, then corrected to assert
 the existing safeguards; production queue behavior was unchanged. These are
 local validation results, not a new Google catalog read or CAPTCHA clearance.
+
+## Build 323 resumed qualification
+
+An ordinary human Gemini navigation initially loaded a healthy composer and
+triggered verified, provider-scoped recovery. The enabled website choices were
+again 3.5 Flash-Lite, 3.8 Flash, 3.1 Pro and 4 Argon. A subsequent Pro task reached
+a fresh Google verification redirect before model selection or prompt submission.
+After the user authorized the displayed CAPTCHA, one checkbox action returned
+the normal Gemini composer and completed verified recovery. No browser identity,
+profile, cookie or network configuration was changed. Neither recovery establishes
+CAPTCHA prevention or identifies Google's triggering signal.
+
+The first composed Flash-Lite workflow failed despite ten verified inference
+rounds. The model read the complete source, README and tests but never requested
+an edit. It ran the unchanged helper and submitted its incorrect reference; the
+fixture rejected it. The source remained byte-identical to baseline and independent
+tests failed. Browser-tab closure and website cleanup were separately confirmed.
+The UI's completed turn therefore did not establish completion of the user's work.
+
+A fresh Pro workflow after CAPTCHA completion attempted seven patches, all with
+numeric unified-diff hunk headers that the custom patch grammar interpreted as
+nonexistent source context. Two replies also batched the patch with dependent
+tests. Later proposals changed, including assumptions that rejected edits had
+already applied; this was not one identical response replayed throughout. The
+controlled task was stopped after 129.651 seconds. No repair or browser submission
+completed. Its original cleanup failed; one explicit cleanup retry later verified
+closure of the same temporary session.
+
+The cleanup diagnostic identified `action=stop`, `stage=proof_missing` with the
+current submitted body already verified. The Gemini adapter excluded Stop from
+its submission-proof result paths, while native cleanup required that proof.
+The repair must prove the current prompt before Stop and return fresh proof
+afterward; changed ownership must still prevent cleanup. Separately, shared
+instruction changes clarify authorized repair/retest dependencies and the custom
+patch grammar. Instruction delivery tests alone cannot establish model adherence.
+
+All build 323 failures are retained as failures. Fresh tasks are required to
+qualify the candidate; no stopped prompt or uncertain submission is replayed.
+
+## Build 324 local repairs and validation
+
+Gemini Stop now uses the existing full current-submission observer before input
+and again for its returned proof. Both awaited reads reject a superseded
+invocation. No model-picker interaction, prompt replay, parser relaxation or
+ownership exemption was added. The old adapter reproduces the live
+`stop/proof_missing` failure in the same native test binary; replacing only its
+resource passes that case.
+
+A separate native regression reproduced failure of valid Gemini cleanup when
+its caller was already cancelled. All providers now use the existing bounded
+cleanup task and receipt cache previously used for ChatGPT. Actual cleanup still
+performs all route, temporary-mode and prompt-ownership checks. This separate
+reproduction does not replace the Stop-proof explanation for the captured live
+failure.
+
+Fresh website handoffs clarify that authorized repairs require edits and retests
+before dependent actions, and that custom patches use bare/contextual `@@`, not
+numeric unified-diff headers. Edits and dependent checks must await matching
+results; rejected patches require reading actual state before a changed retry.
+The full native instruction contract shares these rules. The existing API
+checkpoint and its hard size limits remain unchanged.
+
+Local validation passed 155 Gemini JavaScript tests (5,648 assertions) and
+188 relevant native tests: 27 transport/ownership cases plus 161 instruction and
+response-codec cases. New JavaScript Stop cases fail against the old resource.
+Changed first/current prompts, changed ownership, superseded reads and uncertain
+post-click state retain their rejection behavior. The cancelled-caller regression
+fails before the shared cleanup-task change and passes after it. An initial test
+scaffolding compile error and prompt-budget failures were corrected; their logs
+are retained. These tests establish local behavior, not live model reliability.
