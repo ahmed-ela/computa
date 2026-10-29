@@ -224,6 +224,78 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
     }
 
+    func testPostDiscoveryFreshnessRequiresAbsentCheckpointWithoutChangingPreDiscoveryAuthority() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let url = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        try await loadLocalFixture(view, at: url)
+        try await waitForRecovery { candidates.count == 1 }
+        let candidate = try XCTUnwrap(candidates.first)
+        let generation = session.documentGeneration(for: id)
+
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(candidate))
+        XCTAssertFalse(session.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate))
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
+                       "A freshness query must not clear the checkpoint")
+        session.clearHumanVerificationRequired(provider: "gemini")
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(candidate),
+                       "Post-discovery freshness must not renew the old probe authorization")
+        XCTAssertTrue(session.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate))
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        XCTAssertEqual(session.tabs.map(\.id), [id])
+        XCTAssertEqual(candidates.count, 1, "Neither predicate emits another recovery intent")
+
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let replacement = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertNotEqual(replacement, checkpoint)
+        XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(candidate))
+        XCTAssertFalse(session.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate),
+                       "A new checkpoint must prevent consuming queued manual recovery")
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], replacement)
+    }
+
+    func testPostDiscoveryFreshnessRejectsRevokedHumanSourceWithNoCheckpoint() async throws {
+        for fault in ["newDocument", "untrustedRoute", "provisional", "failed", "toolUsed", "closed", "shutdown"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            session.recordHumanVerificationRequired(provider: "gemini")
+            var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+            session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            let url = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+            try await loadLocalFixture(view, at: url)
+            try await waitForRecovery { candidates.count == 1 }
+            let candidate = try XCTUnwrap(candidates.first)
+            session.clearHumanVerificationRequired(provider: "gemini")
+            XCTAssertTrue(session.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate), fault)
+
+            switch fault {
+            case "newDocument": try await loadLocalFixture(view, at: url)
+            case "untrustedRoute":
+                try await loadLocalFixture(view, at: XCTUnwrap(URL(string: "https://example.invalid/local-fixture")))
+            case "provisional": view.navigationDelegate?.webView?(view, didStartProvisionalNavigation: nil)
+            case "failed":
+                view.navigationDelegate?.webView?(view, didStartProvisionalNavigation: nil)
+                view.navigationDelegate?.webView?(view, didFailProvisionalNavigation: nil,
+                    withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+            case "toolUsed":
+                _ = try session.prepareToolMutation(tabID: id, generation: XCTUnwrap(session.documentGeneration(for: id)))
+            case "closed": session.closeTab(id)
+            case "shutdown": session.shutdown()
+            default: XCTFail("Unknown freshness fixture")
+            }
+            XCTAssertFalse(session.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate), fault)
+            XCTAssertFalse(session.isHumanVerificationRecoveryCandidateCurrent(candidate), fault)
+            XCTAssertNil(session.savedHumanVerificationCheckpointIDs["gemini"], "Freshness checks do not manufacture a checkpoint: \(fault)")
+            XCTAssertEqual(candidates.count, 1, "No checkpoint means no automatic recovery probe intent: \(fault)")
+        }
+    }
+
     func testRealBackendBorrowAndReobserveRevokeRecoveryEvenAfterLeaseRelease() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

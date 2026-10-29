@@ -326,6 +326,18 @@ final class EmbeddedBrowserSession {
     }
 
     func isHumanVerificationRecoveryCandidateCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
+        isHumanVerificationRecoverySourceCurrent(candidate)
+            && savedHumanVerificationCheckpointIDs[candidate.provider] == candidate.checkpointID
+    }
+
+    /// Freshness only after a separately verified discovery and cleanup. This
+    /// does not clear a checkpoint, authorize a probe or establish recovery.
+    func isHumanVerificationRecoverySourceCurrentAfterDiscovery(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
+        isHumanVerificationRecoverySourceCurrent(candidate)
+            && savedHumanVerificationCheckpointIDs[candidate.provider] == nil
+    }
+
+    private func isHumanVerificationRecoverySourceCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
         guard !isShutdown, let entry = entries[candidate.tabID], !entry.isModelOwned, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
@@ -333,8 +345,7 @@ final class EmbeddedBrowserSession {
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
-              EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider,
-              savedHumanVerificationCheckpointIDs[candidate.provider] == candidate.checkpointID else { return false }
+              EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider else { return false }
         return true
     }
 

@@ -452,6 +452,15 @@ final class AppState {
                     self.retireWebsiteModelSelections()
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .verified, reason: .healthyHumanDocument)
+                        // A verified recovery can satisfy an overlapping manual
+                        // refresh without creating another provider page. Keep
+                        // the request if its human source or idle state changed.
+                        if intent.retryBlocked, self.canRefreshWebsiteModels,
+                           self.browserSession.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate) {
+                            self.websiteModelRefreshIntents.removeAll {
+                                $0.provider == provider && $0.retryBlocked && $0.candidate == nil
+                            }
+                        }
                     }
                 } catch is CancellationError {
                     if let candidate = intent.candidate {

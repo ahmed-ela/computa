@@ -387,3 +387,42 @@ approval was used to complete the earlier challenge; fresh action-time approval
 is pending for this distinct challenge. No prompt was replayed. Fixture servers
 are stopped. These results establish one current-build Flash-Lite workflow, not
 repeated reliability, Pro/Argon qualification or prevention of Google's CAPTCHA.
+
+## CAPTCHA recurrence audit and overlapping model refreshes
+
+The earlier October 8 recovery removed stale local admission state after Google
+was already healthy. It did not establish CAPTCHA prevention. The build328
+incident is a new server verification redirect, also visible in the normal
+Gemini tab. The exact signal that triggered Google's decision remains unknown;
+neither the WebKit version nor a lost verification cookie has been established
+as its cause.
+
+The audited normal, Gemini inference and Gemini discovery views share the same
+persistent website data store and browser identity. The isolated ChatGPT store
+is a separate path. Cache migration clears HTTP caches, and cookie retirement
+selects only ChatGPT temporary-conversation cookies. No explicit Google cookie
+deletion or Gemini reload/search loop was found in those paths. Total provider
+HTTP traffic and server-side verification state were not measured.
+
+One avoidable page load was reproduced: a manual catalog refresh queued behind
+automatic human-verification recovery performed a second discovery even after
+the first discovery succeeded. Two native regression tests failed on that old
+queue behavior, observing two Gemini discovery calls instead of one.
+
+The fix satisfies an overlapping manual request from a successful recovery only
+after catalog validation and publication, with the app still idle, the same
+trusted settled human document, and no saved verification checkpoint. Failure,
+unconfirmed cleanup, an invalid catalog, a replacement checkpoint or a revoked
+human source preserves the manual request. Other providers retain their order,
+and a later explicit refresh still performs new discovery. The freshness check
+does not clear checkpoints or authorize recovery; existing transport verification
+and cleanup remain authoritative.
+
+All 59 targeted native tests passed, including scoped/global refresh behavior,
+recovery admission, checkpoint persistence and WebKit source revocation. The
+source remained unchanged during the run, and independent review found no
+actionable issue. These offline fixtures made no live provider requests. The
+change is not installed yet; Computa remains on build328 while the displayed
+challenge awaits fresh action-time approval. This fixes the reproduced duplicate
+load, not proven CAPTCHA causation or prevention. Whether this overlap occurred
+before the latest challenge remains unestablished.
