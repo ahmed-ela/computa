@@ -279,6 +279,19 @@ enum ComputaAgentInstructions {
     \(commandChecks)
     """
 
+    /// A complete custom update, shared by native guidance and the final wire
+    /// example. Raw text preserves source quotes/backslashes before JSON encoding.
+    static let patchUpdateExample = #"""
+    *** Begin Patch
+    *** Update File: /absolute/observed/file.py
+    @@
+     def label():
+    -    return "old\\path"
+    +    return "new\\path"
+     # Other code stays unchanged.
+    *** End Patch
+    """#
+
     static let codeEditing = """
     For authorized code work, inspect relevant files and existing changes first.
     Use exec_command for relevant reads, searches and tests; prefer the
@@ -290,12 +303,7 @@ enum ComputaAgentInstructions {
     Patch input is literal text, not a shell command or Markdown fence. Follow the
     offered grammar. An update has this envelope (replace the sample absolute path
     and lines with observed file context):
-    *** Begin Patch
-    *** Update File: /absolute/observed/file.py
-    @@
-    -old line
-    +new line
-    *** End Patch
+    \(patchUpdateExample)
     The first line is exactly *** Begin Patch, with no filename or colon. Put
     paths only in file headers; finish with exactly one *** End Patch line.
     Preserve unrelated user edits, credentials and generated files. Do not commit,
@@ -321,13 +329,13 @@ enum ComputaAgentInstructions {
     /// The native custom patch grammar treats text after @@ as source context,
     /// not a unified-diff range. This guidance changes no parser or payload.
     static let patchExecutionChecks = """
-    For the offered custom apply_patch, update hunks use bare @@ or @@ followed
-    by exact observed source context. Never use unified-diff numeric headers
-    such as @@ -1,2 +1,3 @@. Keep the required patch envelope and literal input.
-    Await the matching patch result before dependent tests or commands; never
-    batch an edit with work that depends on it. After rejection, read the actual
-    file before a changed retry. Do not resend the same rejected patch, invent
-    matching context, or weaken verification.
+    Custom apply_patch updates use bare @@ or @@ plus a space and exact observed
+    context; never numeric unified-diff ranges. Prefix EVERY hunk source line (blank
+    lines too) with ' ' for unchanged context, '-' for deletion, '+' for addition,
+    then exact source indentation/text. Preserve source quotes and out-of-scope code.
+    Await the patch result before dependent work; do not batch them. After
+    rejection, read the actual file before a changed retry; never repeat the
+    same rejected patch or invent context.
     """
 
     /// Shared native guidance and always-current post-history browser handoff.
@@ -657,11 +665,15 @@ enum ComputaAgentInstructions {
         let customNames = currentNames.intersection(customToolNames)
         let functionNames = currentNames.subtracting(customNames)
         let exampleNames = currentNames.intersection(allowedToolNames ?? currentNames)
+        func isPatchName(_ name: String) -> Bool {
+            let parts = name.split(separator: ".", omittingEmptySubsequences: false)
+            return parts.allSatisfy { !$0.isEmpty } && parts.last == "apply_patch"
+        }
         // Examples describe the current catalog and policy, never retained
         // history. The JSON encoder preserves literal names/input correctly.
         func toolExample(_ name: String, custom: Bool) -> String {
             let call: [String: Any] = custom
-                ? ["name": name, "input": "literal input\nwith \"quotes\" and \\backslash"]
+                ? ["name": name, "input": isPatchName(name) ? patchUpdateExample : "literal input\nwith \"quotes\" and \\backslash"]
                 : ["name": name, "arguments": [String: Any]()]
             let value: [String: Any] = ["type": "tool_calls", "calls": [call]]
             guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return "" }
@@ -672,7 +684,10 @@ enum ComputaAgentInstructions {
             callExamples.append("Function call shape: replace {} with that tool's required argument fields.\n" + toolExample(name, custom: false))
         }
         if let name = customNames.intersection(exampleNames).sorted().first {
-            callExamples.append("Custom call shape: replace sample input with the requested literal text; no arguments.\n" + toolExample(name, custom: true))
+            let instruction = isPatchName(name)
+                ? "Custom apply_patch example: replace the sample path/lines with observed file context; no arguments."
+                : "Custom call shape: replace sample input with the requested literal text; no arguments."
+            callExamples.append(instruction + "\n" + toolExample(name, custom: true))
         }
         let serializationExamples = callExamples.isEmpty ? "" : callExamples.joined(separator: "\nOR\n") + "\nOR\n"
         let responseFormatInstructions: String
@@ -727,11 +742,7 @@ enum ComputaAgentInstructions {
         Do not include arguments on a custom call. Escape patch newlines and
         quotes as valid JSON; the host passes the decoded string unchanged.
         """
-        let hasCustomPatch = offeredToolNames.contains { name in
-            let parts = name.split(separator: ".", omittingEmptySubsequences: false)
-            return customToolNames.contains(name) && parts.allSatisfy { !$0.isEmpty }
-                && parts.last == "apply_patch"
-        }
+        let hasCustomPatch = customNames.contains(where: isPatchName)
         let selectionContract = singleActionRelay && !offeredToolNames.isEmpty ? """
         This ChatGPT relay issues one tool call per inference. Propose only the
         next action. If a valid reply proposes several calls, only the first is

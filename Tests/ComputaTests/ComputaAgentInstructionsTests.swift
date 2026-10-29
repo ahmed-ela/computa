@@ -208,7 +208,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
             let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [
                 #"{"calls":[{"arguments":{},"name":"relay.browser_read"}],"type":"tool_calls"}"#,
-                #"{"calls":[{"input":"literal input\nwith \"quotes\" and \\backslash","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
+                #"{"calls":[{"input":"*** Begin Patch\n*** Update File: /absolute/observed/file.py\n@@\n def label():\n-    return \"old\\\\path\"\n+    return \"new\\\\path\"\n # Other code stays unchanged.\n*** End Patch","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
             ] : [])
             for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
                 let defaultContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
@@ -1300,8 +1300,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(first, last)
         XCTAssertEqual(lines.filter { $0 == "*** Begin Patch" }.count, 1)
         XCTAssertEqual(lines.filter { $0 == "*** End Patch" }.count, 1)
-        XCTAssertEqual(Array(lines[first...last]), ["*** Begin Patch", "*** Update File: /absolute/observed/file.py", "@@", "-old line", "+new line", "*** End Patch"])
         let example = lines[first...last].joined(separator: "\n")
+        try assertCompletePatchUpdateExample(example)
+        XCTAssertEqual(example, ComputaAgentInstructions.patchUpdateExample)
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt", "input": "Edit the authorized file.",
             "tools": [["type": "namespace", "name": "relay", "tools": [["type": "custom", "name": "apply_patch"]]]],
@@ -1649,7 +1650,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(native.contains(guidance))
     }
 
-    func testFreshPatchGrammarRequiresCurrentExactCustomPatchIdentity() {
+    func testFreshPatchGrammarRequiresCurrentExactCustomPatchIdentity() throws {
         let cases: [(names: [String], custom: Set<String>, expected: Bool)] = [
             (["apply_patch"], ["apply_patch"], true),
             (["relay.apply_patch"], ["relay.apply_patch"], true),
@@ -1665,10 +1666,24 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
             XCTAssertEqual(handoff.contains(ComputaAgentInstructions.patchExecutionChecks), item.expected)
             if item.expected {
-                XCTAssertTrue(handoff.contains("Never use unified-diff numeric headers"))
-                XCTAssertTrue(handoff.contains("Await the matching patch result before dependent tests or commands"))
-                XCTAssertTrue(handoff.contains("After rejection, read the actual\nfile before a changed retry"))
+                XCTAssertTrue(handoff.contains("never numeric unified-diff ranges"))
+                XCTAssertTrue(handoff.contains("Prefix EVERY hunk source line (blank\nlines too)"))
+                XCTAssertTrue(handoff.contains("' ' for unchanged context, '-' for deletion, '+' for addition"))
+                XCTAssertTrue(handoff.contains("then exact source indentation/text. Preserve source quotes and out-of-scope code."))
+                XCTAssertTrue(handoff.contains("Await the patch result before dependent work; do not batch them"))
+                XCTAssertTrue(handoff.contains("read the actual file before a changed retry"))
                 XCTAssertLessThan(handoff.utf8.count, 5_200, "Custom grammar and repair guidance remain bounded after history")
+            }
+            for line in handoff.split(separator: "\n") {
+                guard let value = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let calls = value["calls"] as? [[String: Any]],
+                      let call = calls.first, let input = call["input"] as? String else { continue }
+                if item.expected {
+                    try assertCompletePatchUpdateExample(input)
+                } else {
+                    XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash",
+                                   "Lookalikes and malformed qualifications keep the generic custom example")
+                }
             }
         }
         XCTAssertLessThan(ComputaAgentInstructions.patchExecutionChecks.utf8.count, 550)
@@ -1722,7 +1737,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 if let selected = functions.sorted().last {
                     policies.append((["type": "function", "name": selected], [selected]))
                 }
-                if let selected = customs.sorted().last {
+                for selected in customs.sorted() {
                     policies.append((["type": "custom", "name": selected], [selected]))
                     policies.append((["type": "allowed_tools", "tools": [["type": "custom", "name": selected]]], [selected]))
                     policies.append((["type": "allowed_tools", "mode": "none", "tools": [["type": "custom", "name": selected]]], []))
@@ -1761,7 +1776,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                         if customs.contains(name) {
                             XCTAssertEqual(Set(call.keys), ["name", "input"])
                             let input = try XCTUnwrap(call["input"] as? String)
-                            XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash")
+                            if name == "relay.apply_patch" {
+                                try assertCompletePatchUpdateExample(input)
+                                XCTAssertTrue(handoff.contains("replace the sample path/lines with observed file context"))
+                                XCTAssertTrue(text.contains(#"\"old\\\\path\""#), "The wire escapes source quotes and backslashes")
+                            } else {
+                                XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash")
+                            }
                             XCTAssertEqual(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true),
                                            .toolCalls([.init(name: String(name.dropFirst("relay.".count)), argumentsJSON: "", namespace: "relay", customInput: input)]))
                         } else {
@@ -1773,6 +1794,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     }
                     XCTAssertEqual(exampleNames, expectedExamples, "Only policy-allowed current kinds get final call examples")
                     XCTAssertEqual(examples.count, expectedExamples.count)
+                    XCTAssertEqual(handoff.contains("Custom apply_patch example:"), exampleNames.contains("relay.apply_patch"),
+                                   "A forbidden or historical patch tool cannot publish an executable patch example")
                     for name in names.subtracting(allowed) {
                         let call: [String: Any] = customs.contains(name) ? ["name": name, "input": "literal"] : ["name": name, "arguments": [String: Any]()]
                         let rejected = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
@@ -1783,6 +1806,25 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// Verify the decoded example as an update with real context/change lines,
+    /// not merely JSON accepted by the response envelope parser.
+    private func assertCompletePatchUpdateExample(_ input: String,
+                                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let lines = input.components(separatedBy: "\n")
+        XCTAssertEqual(Array(lines.prefix(3)), ["*** Begin Patch", "*** Update File: /absolute/observed/file.py", "@@"], file: file, line: line)
+        XCTAssertEqual(lines.last, "*** End Patch", file: file, line: line)
+        let hunk = Array(lines.dropFirst(3).dropLast())
+        XCTAssertGreaterThanOrEqual(hunk.count, 4, file: file, line: line)
+        XCTAssertTrue(hunk.allSatisfy { $0.first.map { " +-".contains($0) } == true },
+                      "Every literal hunk source line must retain its context/add/delete prefix", file: file, line: line)
+        XCTAssertEqual(hunk.first, " def label():", file: file, line: line)
+        XCTAssertEqual(hunk.last, " # Other code stays unchanged.", file: file, line: line)
+        let before = hunk.filter { $0.first != "+" }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        let after = hunk.filter { $0.first != "-" }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        XCTAssertEqual(before, "def label():\n    return \"old\\\\path\"\n# Other code stays unchanged.", file: file, line: line)
+        XCTAssertEqual(after, "def label():\n    return \"new\\\\path\"\n# Other code stays unchanged.", file: file, line: line)
     }
 
     private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,

@@ -257,3 +257,50 @@ concrete Gemini model, both successful native validations must equal the same
 immutable selection; a post-await disagreement cannot arise after both pass.
 The diagnostic is scoped to investigating the captured concrete-model failure,
 not a claim that every future provider mismatch is fully explained.
+
+
+## Build 326 live results
+
+The diagnostic tests passed after correcting one new test expectation: the
+synthetic Gemini picker initially selects its third label, not the first. The
+diagnostic correctly reported the actual changed selection. Thirty other cases
+passed unchanged; the corrected real-WebKit drift case then passed separately.
+The signed installed artifact matched commit `9799ab7`.
+
+A fresh Pro task stopped after 2.051 seconds with `model_unavailable`, before any
+prompt or tool dispatch. Exact-window picker diagnostics showed Flash-Lite enabled
+and Flash, Pro and Argon disabled. A subsequent normal-browser inspection showed
+all three disabled rows saying “Limit resets Oct 29 at 4:42 PM” (America/New_York).
+The provider-scoped catalog refresh retained only enabled choices and marked the
+saved Pro choice unavailable. This is current website usage-limit evidence; the
+unretained identity in the earlier build325 failure prevents exact retroactive
+attribution. The advertised reset time is not proof of restored availability.
+
+The next Flash-Lite workflow failed and was stopped after 129.986 seconds. All
+17 accepted inferences retained model, prompt and temporary-session proofs. Six
+custom patch calls were routed correctly but rejected for missing hunk-line
+prefixes or incorrect context. A later whole-file shell rewrite removed the
+opening module-docstring quotes, introducing a syntax error outside the requested
+function. It repeated failing commands and filled an unverified reference in the
+browser; no submission occurred. The independent audit refused to execute the
+malformed helper. Protected inputs remained unchanged, and both website-session
+and automatic task-tab cleanup were verified. This is failed repair behavior,
+not successful qualification or recurrence of the custom-call envelope error.
+
+The native history contains each correlated custom-tool rejection. The continuation
+validator requires those outputs and the Gemini serializer preserves the complete
+input; no feedback-loss defect was demonstrated. The shared patch guidance will
+make required line prefixes explicit and use a valid patch-specific serialization
+example. That is a targeted instruction improvement whose adherence still needs
+fresh live qualification, not a parser relaxation or a claimed transport repair.
+
+Build327 shares a complete update-patch example between native instructions and
+the final serialized custom-call example. It includes unchanged-context, deletion
+and addition lines with source indentation, quotes and backslashes preserved.
+Fresh guidance requires a prefix on every hunk line, including blank lines. The
+specialized example is emitted only for the actual allowed custom `apply_patch`
+name; other custom tools retain their generic literal-input example. Existing
+instruction size limits, response parser, tool policy and ownership checks are
+unchanged. All 162 instruction/response-codec tests passed; the unchanged transport
+and adapter retain their 31 native and 155 JavaScript checks. Fresh live model
+qualification remains necessary.
