@@ -529,6 +529,7 @@ const rejectAction = code => {
   actionRejections.set(error, code); throw error;
 };
 let actionStage = 'initial_revalidation';
+let actionHitTest = null;
 try {
 const element = state.nodes.get(input.nodeID);
 const revalidateElement = () => {
@@ -545,10 +546,39 @@ const revalidateElement = () => {
   if (current.isDisabled || input.expectedURL !== location.href) rejectAction('stale_document');
   return current;
 };
+// Failure-only geometry classes. Preserve the existing hit-test call and
+// rejection order; no added layout reads on successful input, raw coordinates,
+// names, classes or arbitrary attributes leave this private world.
+const hitTestFailureDiagnostic = (rect, hit) => {
+  try {
+    const x = rect.left + rect.width/2, y = rect.top + rect.height/2;
+    const axis = (center, extent) => !Number.isFinite(center) || !Number.isFinite(extent) || extent <= 0
+      ? 'unknown' : center < 0 ? 'before' : center >= extent ? 'after' : 'inside';
+    const centerX = axis(x, innerWidth), centerY = axis(y, innerHeight);
+    const nonfinite = ![rect.left, rect.top, rect.width, rect.height, x, y].every(Number.isFinite);
+    const reason = nonfinite ? 'rect_nonfinite' : rect.width <= 0 || rect.height <= 0 ? 'rect_nonpositive'
+      : [centerX,centerY].some(value => value === 'before' || value === 'after') ? 'outside_viewport'
+        : !hit ? 'null_hit' : 'foreign_hit';
+    const tags = ['input','textarea','select','button','div','span','iframe','body','html'];
+    const tag = hit?.tagName;
+    const hitTag = !hit ? 'none' : typeof tag === 'string' && tag.length <= 16 && tags.includes(tag.toLowerCase())
+      ? tag.toLowerCase() : 'other';
+    const roles = ['dialog','alertdialog','listbox','option','combobox','textbox','button','menu','menuitem','tooltip'];
+    const rawRole = hit?.getAttribute?.('role');
+    const role = typeof rawRole === 'string' && rawRole.length <= 100 ? trim(rawRole).split(' ')[0].toLowerCase() : null;
+    const hitRole = !hit || rawRole == null || rawRole === '' ? 'none' : roles.includes(role) ? role : 'other';
+    const relation = !hit ? 'none' : hit === element ? 'self' : element.contains(hit) ? 'descendant'
+      : hit.contains?.(element) ? 'ancestor' : 'other';
+    return {reason,centerX,centerY,hitTag,hitRole,relation};
+  } catch { return null; } // Diagnostics cannot replace the original rejection.
+};
 const requireUnobstructed = () => {
   const rect = element.getBoundingClientRect();
   const hit = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2);
-  if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) rejectAction('element_obstructed');
+  if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) {
+    actionHitTest = hitTestFailureDiagnostic(rect, hit);
+    rejectAction('element_obstructed');
+  }
 };
 const current = revalidateElement();
 actionStage = 'scroll';
@@ -612,6 +642,7 @@ if (input.operation === 'press') {
 return {dispatched:true, noReplay:true, constraintFeedback};
 
 } catch (error) {
-  return {browserActionFailure:{version:1,operation:input.operation,stage:actionStage,
-    code:actionRejections.get(error) || 'unexpected'}};
+  const code = actionRejections.get(error) || 'unexpected';
+  return {browserActionFailure:{version:1,operation:input.operation,stage:actionStage,code,
+    ...(code === 'element_obstructed' && actionHitTest ? {hitTest:actionHitTest} : {})}};
 }

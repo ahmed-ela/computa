@@ -723,7 +723,26 @@ closed operation/stage/code schema and records native tab/document UUIDs within
 512 bytes. Both failures before input and failures after a real value write
 retain the same unconfirmed, no-replay public error. No action guard or event
 ordering changes. Seventy-nine JavaScript and fourteen focused native tests
-pass; the subject failure still requires a live diagnostic reproduction.
+pass.
+
+Installed build 319 reproduced the Subject failure at `initial_hit_test` with
+`element_obstructed`, after scrolling and before focus or the value setter.
+That identifies the failed check, but does not distinguish an off-screen
+center from a covering element. All twenty captures used 1024x768. The recipient
+and body were observed; Subject stayed empty and no Send was attempted. Sixteen
+started ChatGPT Instant sessions verified and closed. The next inference was
+rejected before starting by the existing turn limit; that is separate from
+website cleanup failure. Repeated Send searches still had truncated source
+captures and did not establish that Send was absent.
+
+Build 320 adds failure-only hit-test categories: invalid box, center outside the
+viewport, null hit or foreign hit, with finite tag, role and relationship enums.
+It reuses the failing rectangle and hit result. No raw coordinates, page text,
+selectors or classes are retained, and successful actions perform no additional
+layout reads. The original center-point check and every input guard remain in
+place. A separate approved Inspector comparison at 360x527 hid compose controls;
+it does not establish the cause of the 1024x768 task failure. Inspector settings
+were restored and the comparison tab was closed.
 
 ## Diagnostics and limits
 

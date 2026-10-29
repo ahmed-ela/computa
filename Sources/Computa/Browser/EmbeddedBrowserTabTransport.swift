@@ -151,15 +151,53 @@ struct BrowserActionFailureDiagnostic: Encodable, Equatable, Sendable {
         case staleDocument = "stale_document", elementChanged = "element_changed", elementObstructed = "element_obstructed"
         case unsupportedAction = "unsupported_action", popupUnsupported = "popup_unsupported", unexpected
     }
+    struct HitTest: Encodable, Equatable, Sendable {
+        enum Reason: String, CaseIterable, Codable, Sendable {
+            case rectNonfinite = "rect_nonfinite", rectNonpositive = "rect_nonpositive", outsideViewport = "outside_viewport"
+            case nullHit = "null_hit", foreignHit = "foreign_hit"
+        }
+        enum Axis: String, CaseIterable, Codable, Sendable { case before, inside, after, unknown }
+        enum Tag: String, CaseIterable, Codable, Sendable { case input, textarea, select, button, div, span, iframe, body, html, other, none }
+        enum Role: String, CaseIterable, Codable, Sendable { case dialog, alertdialog, listbox, option, combobox, textbox, button, menu, menuitem, tooltip, other, none }
+        enum Relation: String, CaseIterable, Codable, Sendable { case none, sameElement = "self", descendant, ancestor, other }
+        let reason: Reason
+        let centerX: Axis
+        let centerY: Axis
+        let hitTag: Tag
+        let hitRole: Role
+        let relation: Relation
+
+        static func decode(_ raw: Any?) -> Self? {
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == ["reason", "centerX", "centerY", "hitTag", "hitRole", "relation"],
+                  let reason = (fields["reason"] as? String).flatMap(Reason.init(rawValue:)),
+                  let x = (fields["centerX"] as? String).flatMap(Axis.init(rawValue:)),
+                  let y = (fields["centerY"] as? String).flatMap(Axis.init(rawValue:)),
+                  let tag = (fields["hitTag"] as? String).flatMap(Tag.init(rawValue:)),
+                  let role = (fields["hitRole"] as? String).flatMap(Role.init(rawValue:)),
+                  let relation = (fields["relation"] as? String).flatMap(Relation.init(rawValue:)),
+                  (tag == .none) == (relation == .none), tag != .none || role == .none,
+                  reason != .nullHit || relation == .none,
+                  reason != .foreignHit || [.ancestor, .other].contains(relation),
+                  reason != .outsideViewport || [x, y].contains(where: { $0 == .before || $0 == .after }) else { return nil }
+            return Self(reason: reason, centerX: x, centerY: y, hitTag: tag, hitRole: role, relation: relation)
+        }
+    }
     let version = 1
     let operation: Operation
     let stage: Stage
     let code: Code
+    let hitTest: HitTest?
+
+    init(operation: Operation, stage: Stage, code: Code, hitTest: HitTest? = nil) {
+        self.operation = operation; self.stage = stage; self.code = code; self.hitTest = hitTest
+    }
 
     static func decode(_ raw: Any?, operation: String) -> Self? {
         guard let outer = raw as? [String: Any], Set(outer.keys) == ["browserActionFailure"],
               let fields = outer["browserActionFailure"] as? [String: Any],
-              Set(fields.keys) == ["version", "operation", "stage", "code"],
+              Set(fields.keys) == ["version", "operation", "stage", "code"]
+                || Set(fields.keys) == ["version", "operation", "stage", "code", "hitTest"],
               let version = fields["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
               let requested = Operation(rawValue: operation), fields["operation"] as? String == operation,
               let stageName = fields["stage"] as? String, let stage = Stage(rawValue: stageName), stage != .unknown,
@@ -167,7 +205,13 @@ struct BrowserActionFailureDiagnostic: Encodable, Equatable, Sendable {
         let pressStages: Set<Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
         let fillStages: Set<Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]
         guard requested == .press ? !fillStages.contains(stage) : !pressStages.contains(stage) else { return nil }
-        return Self(operation: requested, stage: stage, code: code)
+        var hitTest: HitTest?
+        if let rawHitTest = fields["hitTest"] {
+            guard code == .elementObstructed, [.initialHitTest, .focusedHitTest].contains(stage),
+                  let decoded = HitTest.decode(rawHitTest) else { return nil }
+            hitTest = decoded
+        }
+        return Self(operation: requested, stage: stage, code: code, hitTest: hitTest)
     }
 }
 

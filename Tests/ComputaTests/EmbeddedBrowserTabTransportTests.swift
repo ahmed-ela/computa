@@ -10,6 +10,149 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testHitTestDiagnosticClosedSchemaRelationshipsAndLegacyCompatibility() throws {
+        let valid: [String: Any] = ["reason":"foreign_hit", "centerX":"inside", "centerY":"inside", "hitTag":"div", "hitRole":"listbox", "relation":"other"]
+        func envelope(_ hit: Any, stage: String = "initial_hit_test", code: String = "element_obstructed") -> [String: Any] {
+            ["browserActionFailure":["version":1,"operation":"fill","stage":stage,"code":code,"hitTest":hit]]
+        }
+        let shapes: [[String: Any]] = [
+            valid,
+            ["reason":"rect_nonfinite","centerX":"unknown","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"],
+            ["reason":"rect_nonpositive","centerX":"inside","centerY":"inside","hitTag":"input","hitRole":"textbox","relation":"self"],
+            ["reason":"outside_viewport","centerX":"before","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"],
+            ["reason":"null_hit","centerX":"inside","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"]
+        ]
+        for shape in shapes { XCTAssertNotNil(BrowserActionFailureDiagnostic.decode(envelope(shape), operation: "fill")) }
+        XCTAssertNotNil(BrowserActionFailureDiagnostic.decode(envelope(valid, stage:"focused_hit_test"), operation:"fill"))
+        for stage in ["initial_revalidation", "focus", "value_write"] {
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(valid,stage:stage),operation:"fill"))
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(valid,code:"unexpected"),operation:"fill"))
+        for key in valid.keys {
+            for bad in ["PRIVATE_CANARY", 1, true, NSNull()] as [Any] {
+                var invalid=valid; invalid[key]=bad
+                XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(invalid),operation:"fill"),key)
+            }
+            var missing=valid;missing.removeValue(forKey:key)
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(missing),operation:"fill"),key)
+        }
+        for alteration: [String: Any] in [["hitTag":"none"], ["relation":"none"], ["relation":"self"], ["relation":"descendant"],
+                                        ["reason":"null_hit"], ["reason":"outside_viewport"], ["text":"PRIVATE_CANARY"], ["rect":[1,2,3,4]]] {
+            var invalid=valid;invalid.merge(alteration){ _,new in new }
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(invalid),operation:"fill"))
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(NSNull()),operation:"fill"))
+        let legacy: [String: Any] = ["browserActionFailure":["version":1,"operation":"fill","stage":"initial_hit_test","code":"element_obstructed"]]
+        let old = try XCTUnwrap(BrowserActionFailureDiagnostic.decode(legacy,operation:"fill"))
+        XCTAssertNil(old.hitTest)
+        let oldJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        XCTAssertNil(oldJSON["hitTest"], "Legacy logs retain their exact key set")
+        let maximum = BrowserActionFailureDiagnostic(operation:.fill,stage:.focusedHitTest,code:.elementObstructed,
+            hitTest:.init(reason:.rectNonpositive,centerX:.unknown,centerY:.unknown,hitTag:.textarea,hitRole:.alertdialog,relation:.descendant))
+        let bytes = try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID:UUID(),generation:UUID(),failure:maximum))
+        XCTAssertLessThanOrEqual(bytes.count,512)
+        XCTAssertFalse(String(decoding:bytes,as:UTF8.self).contains("PRIVATE"))
+        print("browserHitTestMaximumEncoding bytes=\(bytes.count)")
+    }
+
+    func testHitTestDiagnosticFindsRecipientOverlayBeforeSubjectFocus() async throws {
+        let body = """
+            <input id='recipient' aria-label='Recipients' style='position:fixed;left:20px;top:20px;width:200px;height:24px'>
+            <input id='subject' aria-label='Subject' style='position:fixed;left:20px;top:80px;width:200px;height:24px'>
+            <script>window.inputs=0;window.changes=0;window.subjectFocuses=0;
+            document.addEventListener('input',()=>window.inputs++);document.addEventListener('change',()=>window.changes++);
+            document.getElementById('subject').addEventListener('focus',()=>window.subjectFocuses++);
+            document.getElementById('recipient').addEventListener('input',()=>{
+              const cover=document.createElement('div');cover.id='cover';cover.setAttribute('role','listbox');
+              cover.style='position:fixed;left:20px;top:80px;width:220px;height:36px;z-index:999;background:white';document.body.append(cover);
+            });</script>
+            """
+        let (session,transport,view,target) = try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let first=try await transport.observe(target:target)
+        let recipient=try XCTUnwrap(first.nodes.first { $0.name=="Recipients" })
+        try await transport.setText(target:target,backendNodeID:XCTUnwrap(recipient.backendNodeID),text:"synthetic@example.test",document:first,permit:BrowserMutationPermit())
+        let fresh=try await transport.observe(target:target)
+        let subject=try XCTUnwrap(fresh.nodes.first { $0.name=="Subject" })
+        XCTAssertTrue(subject.isEditable);XCTAssertFalse(subject.isDisabled)
+        let oracle=try await script(view,"const r=document.getElementById('subject').getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2).id;")
+        XCTAssertEqual(oracle,Data("\"cover\"".utf8))
+        try await assertHitTestRejection(transport,target:target,field:subject,document:fresh,stage:.initialHitTest,
+            reason:.foreignHit,tag:.div,role:.listbox,relation:.other,x:.inside,y:.inside)
+        let state=try await script(view,"return {value:document.getElementById('subject').value,focus:window.subjectFocuses,inputs:window.inputs,changes:window.changes,active:document.activeElement.id};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:state) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,0)
+        XCTAssertEqual(fields["inputs"] as? Int,1);XCTAssertEqual(fields["changes"] as? Int,1)
+        XCTAssertEqual(fields["active"] as? String,"recipient")
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    func testHitTestDiagnosticClassifiesFixedOffscreenFieldWithoutFocusing() async throws {
+        let body="""
+            <input id='field' aria-label='Subject' style='position:fixed;left:-2048px;top:40px;width:200px;height:24px'>
+            <script>window.focuses=0;window.inputs=0;document.getElementById('field').addEventListener('focus',()=>window.focuses++);document.addEventListener('input',()=>window.inputs++);</script>
+            """
+        let (session,transport,view,target)=try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let observed=try await transport.observe(target:target)
+        let field=try XCTUnwrap(observed.nodes.first { $0.name=="Subject" })
+        XCTAssertTrue(field.isEditable)
+        try await assertHitTestRejection(transport,target:target,field:field,document:observed,stage:.initialHitTest,
+            reason:.outsideViewport,tag:.none,role:.none,relation:.none,x:.before,y:.inside)
+        let effects=try await script(view,"return {value:document.getElementById('field').value,focus:window.focuses,input:window.inputs};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:effects) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,0);XCTAssertEqual(fields["input"] as? Int,0)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    func testHitTestDiagnosticRetainsSecondGuardAfterFocusCreatesOverlay() async throws {
+        let body="""
+            <input id='field' aria-label='Subject' style='position:fixed;left:20px;top:80px;width:200px;height:24px'>
+            <script>window.focuses=0;window.inputs=0;window.changes=0;
+            document.addEventListener('input',()=>window.inputs++);document.addEventListener('change',()=>window.changes++);
+            document.getElementById('field').addEventListener('focus',()=>{window.focuses++;
+              const cover=document.createElement('div');cover.setAttribute('role','tooltip');
+              cover.style='position:fixed;left:20px;top:80px;width:220px;height:36px;z-index:999;background:white';document.body.append(cover);
+            });</script>
+            """
+        let (session,transport,view,target)=try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let observed=try await transport.observe(target:target)
+        let field=try XCTUnwrap(observed.nodes.first { $0.name=="Subject" })
+        try await assertHitTestRejection(transport,target:target,field:field,document:observed,stage:.focusedHitTest,
+            reason:.foreignHit,tag:.div,role:.tooltip,relation:.other,x:.inside,y:.inside)
+        let effects=try await script(view,"return {value:document.getElementById('field').value,focus:window.focuses,input:window.inputs,change:window.changes};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:effects) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,1)
+        XCTAssertEqual(fields["input"] as? Int,0);XCTAssertEqual(fields["change"] as? Int,0)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    private func assertHitTestRejection(_ transport:EmbeddedBrowserTabTransport,target:BrowserTarget,field:BrowserDocumentNode,
+        document:BrowserDocumentObservation,stage:BrowserActionFailureDiagnostic.Stage,reason:BrowserActionFailureDiagnostic.HitTest.Reason,
+        tag:BrowserActionFailureDiagnostic.HitTest.Tag,role:BrowserActionFailureDiagnostic.HitTest.Role,
+        relation:BrowserActionFailureDiagnostic.HitTest.Relation,x:BrowserActionFailureDiagnostic.HitTest.Axis,y:BrowserActionFailureDiagnostic.HitTest.Axis,
+        file:StaticString = #filePath,line:UInt = #line) async throws {
+        do {
+            try await transport.setText(target:target,backendNodeID:XCTUnwrap(field.backendNodeID),text:"MUST_NOT_APPEAR",document:document,permit:BrowserMutationPermit())
+            XCTFail("The hit-test guard must retain its original rejection",file:file,line:line)
+        } catch {
+            XCTAssertEqual(error as? BrowserTabBrokerError,.browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."),file:file,line:line)
+        }
+        let diagnostic=try XCTUnwrap(transport.actionFailureDiagnosticForTesting,file:file,line:line)
+        XCTAssertEqual(diagnostic.stage,stage,file:file,line:line);XCTAssertEqual(diagnostic.code,.elementObstructed,file:file,line:line)
+        let hit=try XCTUnwrap(diagnostic.hitTest,file:file,line:line)
+        XCTAssertEqual(hit.reason,reason,file:file,line:line);XCTAssertEqual(hit.hitTag,tag,file:file,line:line)
+        XCTAssertEqual(hit.hitRole,role,file:file,line:line);XCTAssertEqual(hit.relation,relation,file:file,line:line)
+        XCTAssertEqual(hit.centerX,x,file:file,line:line);XCTAssertEqual(hit.centerY,y,file:file,line:line)
+        let log=try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID:UUID(),generation:UUID(),failure:diagnostic))
+        XCTAssertLessThanOrEqual(log.count,512,file:file,line:line)
+        XCTAssertFalse(String(decoding:log,as:UTF8.self).contains("MUST_NOT_APPEAR"),file:file,line:line)
+    }
+
     func testActionFailureDiagnosticStrictFiniteEnvelopeAndBoundedEncoding() throws {
         let pressOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
         let fillOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]

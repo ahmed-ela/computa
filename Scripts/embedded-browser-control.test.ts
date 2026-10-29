@@ -117,7 +117,10 @@ describe('finite browser action failure diagnostics', () => {
     return { ...f, field, row, action };
   }
   function finite(result: any, stage: string, code: string, operation = 'fill') {
-    expect(result).toEqual({ browserActionFailure: { version: 1, operation, stage, code } });
+    const { hitTest, ...diagnostic } = result.browserActionFailure || {};
+    expect(diagnostic).toEqual({ version: 1, operation, stage, code });
+    expect(Object.keys(result)).toEqual(['browserActionFailure']);
+    if (code !== 'element_obstructed') expect(hitTest).toBeUndefined();
     const serialized = JSON.stringify(result);
     for (const secret of ['PRIVATE_', 'example.test', 'owned-document', 'selector', 'stack', 'message']) expect(serialized).not.toContain(secret);
     expect(result).not.toHaveProperty('dispatched'); expect(result).not.toHaveProperty('noReplay');
@@ -185,6 +188,76 @@ describe('finite browser action failure diagnostics', () => {
     const f = await setup();
     expect(await f.action()).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
     expect(f.field.valueWrites).toEqual(['PRIVATE_TYPED_VALUE']); expect(f.field.events.map(event => event.type)).toEqual(['input', 'change']);
+  });
+});
+
+describe('finite hit-test obstruction diagnostics', () => {
+  async function setup() {
+    const f = fixture(null), field = new f.Node('INPUT', { 'aria-label': 'PRIVATE_SUBJECT' });
+    const panel = new f.Node('DIV', { role: 'dialog' }); panel.append(field); f.document.body.append(panel);
+    f.document.elementFromPoint = () => field;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.name === 'PRIVATE_SUBJECT');
+    const action = () => f.rawRun({ operation: 'fill', nodeID: row.backendNodeID, expected: row, expectedURL: f.location.href, text: 'PRIVATE_VALUE' });
+    return { ...f, field, panel, row, action };
+  }
+  function finite(result: any, stage: string, hitTest: Record<string, string>) {
+    expect(result).toEqual({ browserActionFailure: { version: 1, operation: 'fill', stage, code: 'element_obstructed', hitTest } });
+    const json = JSON.stringify(result);
+    for (const secret of ['PRIVATE', 'left', 'top', 'width', 'height', 'value', 'label', 'selector', 'class', 'message']) expect(json).not.toContain(secret);
+    expect(json.length).toBeLessThan(512); expect(result).not.toHaveProperty('dispatched');
+  }
+  test('recipient-style overlay classifies a foreign listbox without focus, write or replay', async () => {
+    const f = await setup(), overlay = new f.Node('DIV', { role: 'listbox', 'aria-label': 'PRIVATE_RECIPIENTS' });
+    f.document.body.append(overlay); f.document.elementFromPoint = () => overlay;
+    finite(await f.action(), 'initial_hit_test', { reason: 'foreign_hit', centerX: 'inside', centerY: 'inside',
+      hitTag: 'div', hitRole: 'listbox', relation: 'other' });
+    expect(f.field.focusOptions).toEqual([]); expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toEqual([]);
+  });
+  test('post-focus overlay and an ancestor hit are distinguished without changing guard order', async () => {
+    for (const ancestor of [false, true]) {
+      const f = await setup(), overlay = ancestor ? f.panel : new f.Node('SPAN', { role: 'tooltip' });
+      f.field.onFocus = () => { f.document.elementFromPoint = () => overlay; };
+      finite(await f.action(), 'focused_hit_test', { reason: 'foreign_hit', centerX: 'inside', centerY: 'inside',
+        hitTag: ancestor ? 'div' : 'span', hitRole: ancestor ? 'dialog' : 'tooltip', relation: ancestor ? 'ancestor' : 'other' });
+      expect(f.field.focusOptions).toEqual([{ preventScroll: true }]); expect(f.field.valueWrites).toEqual([]); expect(f.field.events).toEqual([]);
+    }
+  });
+  test('offscreen centers, null hits and nonpositive boxes use finite relative classes only', async () => {
+    for (const scenario of [
+      { left: 1100, top: 0, width: 100, height: 20, reason: 'outside_viewport', x: 'after', y: 'inside' },
+      { left: -200, top: 0, width: 100, height: 20, reason: 'outside_viewport', x: 'before', y: 'inside' },
+      { left: 0, top: 800, width: 100, height: 20, reason: 'outside_viewport', x: 'inside', y: 'after' },
+      { left: 0, top: 0, width: 100, height: 20, reason: 'null_hit', x: 'inside', y: 'inside' },
+      { left: 0, top: 0, width: 0, height: 20, reason: 'rect_nonpositive', x: 'inside', y: 'inside' },
+      { left: NaN, top: 0, width: 100, height: 20, reason: 'rect_nonfinite', x: 'unknown', y: 'inside' },
+    ]) {
+      const f = await setup(), calls: unknown[] = [];
+      f.field.getBoundingClientRect = () => scenario;
+      f.document.elementFromPoint = ((x: number, y: number) => { calls.push([x, y]); return null; }) as any;
+      finite(await f.action(), 'initial_hit_test', { reason: scenario.reason, centerX: scenario.x, centerY: scenario.y,
+        hitTag: 'none', hitRole: 'none', relation: 'none' });
+      expect(calls).toHaveLength(1); expect(f.field.focusOptions).toEqual([]); expect(f.field.valueWrites).toEqual([]);
+    }
+  });
+  test('unknown tags and arbitrary roles cannot escape their finite buckets', async () => {
+    for (const role of ['PRIVATE_CUSTOM_ROLE', 'PRIVATE_' + 'x'.repeat(2000)]) {
+      const f = await setup(), overlay = new f.Node('PRIVATE-TAG', { role }); f.document.elementFromPoint = () => overlay;
+      finite(await f.action(), 'initial_hit_test', { reason: 'foreign_hit', centerX: 'inside', centerY: 'inside',
+        hitTag: 'other', hitRole: 'other', relation: 'other' });
+    }
+  });
+  test('diagnostic getter failures preserve the original obstruction without leaking or altering effects', async () => {
+    const f = await setup(), overlay = new f.Node('DIV');
+    overlay.getAttribute = () => { throw new Error('PRIVATE_GETTER'); }; f.document.elementFromPoint = () => overlay;
+    expect(await f.action()).toEqual({ browserActionFailure: { version: 1, operation: 'fill', stage: 'initial_hit_test', code: 'element_obstructed' } });
+    expect(f.field.focusOptions).toEqual([]); expect(f.field.valueWrites).toEqual([]);
+  });
+  test('successful input adds no geometry reads or hit-test diagnostics', async () => {
+    const f = await setup(); let rects = 0, hits = 0;
+    f.field.getBoundingClientRect = () => { rects++; return { left: 0, top: 0, width: 100, height: 20 }; };
+    f.document.elementFromPoint = () => { hits++; return f.field; };
+    expect(await f.action()).toEqual({ dispatched: true, noReplay: true, constraintFeedback: null });
+    expect(rects).toBe(2); expect(hits).toBe(2); expect(f.field.valueWrites).toEqual(['PRIVATE_VALUE']);
   });
 });
 
