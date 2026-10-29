@@ -778,6 +778,57 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   try {
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
+    // Temporary-page hydration can leave the exact visible model trigger
+    // disabled while its recognized power label is already rendered. Wait only
+    // in this first, effect-free mutable selection and spend its original clock.
+    // Enabling authorizes a fresh full picker read, never model proof by itself.
+    const disabled = node => !!node && (node.disabled === true || node.getAttribute('disabled') !== null
+      || node.getAttribute('aria-disabled') === 'true');
+    const closedShape = current => !current.topMenu && current.allMenus.length === 0
+      && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
+      && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
+    const disabledPower = websiteChatHeaderPresentation(initial.trigger?.innerText).power;
+    if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
+      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledPower
+      && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
+      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
+      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      const form = trigger.closest('form');
+      headerExpected = disabledPower;
+      headerReadiness = { startedDisabled: true, outcome: 'waiting', reason: null };
+      readStage = 'initial_trigger_disabled_wait';
+      let rejected = null;
+      const reject = reason => { rejected = reason; return true; };
+      const ready = () => {
+        if (rejected) return true;
+        if (!owned()) return reject('ownership_changed');
+        if (freshGuard() !== true || globalThis.__computaChatPresetPin || globalThis.__computaModelSelection !== attempt
+          || attempt.completed !== false || attempt.powerEvents !== 0 || attempt.familyClicked !== false
+          || primaryOpened || secondaryOpened || closeAttempted || observedProof) return reject('state_changed');
+        let current;
+        try { current = state(); } catch { return reject('state_changed'); }
+        if (current.trigger !== trigger || !current.visible(trigger) || !closedShape(current)
+          || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
+        const power = websiteChatHeaderPresentation(trigger.innerText).power;
+        if (!power) return reject('unknown_header');
+        if (power.key !== disabledPower.key) return reject('state_changed');
+        if (current.enabled(trigger)) return true;
+        if (!disabled(trigger)) return reject('state_changed');
+        return false;
+      };
+      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      if (!ready() && changed) rejected ||= 'state_changed';
+      if (!changed || Date.now() >= until || rejected) {
+        headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';
+        readStage = 'initial_trigger_disabled_rejected';
+        return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
+      }
+      initial = state();
+      // The wait has ended. The existing mutable picker flow may now change
+      // power intentionally; its normal proof-lock boundary owns those checks.
+      headerExpected = null;
+      headerReadiness.outcome = 'recognized'; readStage = 'initial_trigger_ready';
+    }
     // Only the first mutable selection may observe an empty, still-hydrating
     // label. Waiting spends the same proof deadline and dispatches no input.
     const initialText = websiteChatHeaderTextShape(initial.trigger?.innerText);
@@ -1249,8 +1300,9 @@ function websiteModelDiagnostic(state, readObservation = null) {
         visible: node.nodeType === 1 ? state.visible(node) : null,
         text: websiteChatHeaderTextShape(node.textContent) })) };
     const readiness = readObservation?.headerReadiness;
-    if (readiness?.startedEmpty === true && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
-      diagnostic.chatHeader.readiness = { startedEmpty: true, outcome: readiness.outcome,
+    if ((readiness?.startedEmpty === true || readiness?.startedDisabled === true)
+      && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
+      diagnostic.chatHeader.readiness = { ...(readiness.startedDisabled === true ? { startedDisabled: true } : { startedEmpty: true }), outcome: readiness.outcome,
         reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
           ? readiness.reason : null };
   }

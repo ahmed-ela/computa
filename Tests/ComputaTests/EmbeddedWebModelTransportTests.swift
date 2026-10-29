@@ -9191,6 +9191,159 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testChatGPTInitialDisabledPickerAfterOwnedTemporaryWaitsForEnableThenVerifiesInstantOnce() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setModelDiagnosticsObserverForTesting { diagnostics.append($0) }
+        let start = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        var finished = false
+        let preparation = Task { @MainActor in
+            defer { finished = true }
+            let ready = try await self.fixturePhaseProbe("initial_disabled_picker_ready", trace: true) {
+                try await self.waitForState("ready", fixture.transport, token: token)
+            }
+            try self.assertChoiceEvidence(ready, choice: choice)
+            XCTAssertEqual(try WebsiteProductModeEvidence.parse(ready["productModeEvidence"], requireTemporary: true).source,
+                .chatComposerMarker)
+            return true
+        }
+        defer { preparation.cancel() }
+        let registrationDeadline = ContinuousClock.now + .seconds(3)
+        var registered = false
+        while ContinuousClock.now < registrationDeadline, !finished {
+            let snapshot = fixture.browser.modelDiagnosticSnapshot(tabID: tabID)
+            if snapshot.contains("model_wait") && snapshot.contains("clocksPending=1") {
+                registered = true; break
+            }
+            await Task.yield()
+        }
+        if !registered {
+            _ = try await preparation.value
+            XCTFail("The initial disabled picker must register the existing bounded native model wait")
+            throw FixtureFailure.timeout
+        }
+        let before = try await evaluate(view, """
+            const trigger = document.getElementById('fixture-model-trigger');
+            return {disabled: trigger.disabled, header: trigger.innerText.replace(/\\s+/g, ' ').trim(),
+              temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks,
+              selections: window.fixtureModelSelectionClicks, powerInputs: window.fixturePowerKeyEvents,
+              inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};
+            """) as? [String: Any]
+        XCTAssertEqual(before?["disabled"] as? Bool, true)
+        XCTAssertEqual(before?["header"] as? String, "Thinking effort Instant")
+        XCTAssertEqual(before?["temporary"] as? Int, 1)
+        for key in ["opens", "selections", "powerInputs", "inputs", "sends"] { XCTAssertEqual(before?[key] as? Int, 0, key) }
+        _ = try await evaluate(view, "document.dispatchEvent(new Event('fixture-enable-picker')); return true;")
+        _ = try await preparation.value
+        let readiness = try diagnostics.compactMap { line -> [String: Any]? in
+            let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
+        }
+        XCTAssertTrue(readiness.contains { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "recognized" })
+        let prompt = "Read the exact reply after the owned temporary picker becomes enabled"
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTInitialDisabledPickerNeverEnabledExhaustsOneModelDeadlineWithoutActions() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setModelDiagnosticsObserverForTesting { diagnostics.append($0) }
+        let start = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let began = ContinuousClock.now
+        do {
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            XCTFail("A permanently disabled picker cannot establish a selected model")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(4), "Initial model waiting cannot renew its 1.8-second deadline")
+        let readiness = try diagnostics.compactMap { line -> [String: Any]? in
+            let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
+        }
+        XCTAssertTrue(readiness.contains { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "rejected"
+            && $0["reason"] as? String == "deadline" })
+        let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0])
+    }
+
+    func testChatGPTInitialDisabledPickerRejectsIdentityOwnerRouteAndHeaderDriftWithoutActions() async throws {
+        for mutation in ["identity", "owner", "route", "header_restore"] {
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+            let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
+            defer { fixture.shutdown() }
+            let start = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            var finished = false
+            let preparation = Task { @MainActor in
+                defer { finished = true }
+                _ = try await self.waitForState("ready", fixture.transport, token: token)
+                return true
+            }
+            defer { preparation.cancel() }
+            let registrationDeadline = ContinuousClock.now + .seconds(3)
+            var registered = false
+            while ContinuousClock.now < registrationDeadline, !finished {
+                let snapshot = fixture.browser.modelDiagnosticSnapshot(tabID: tabID)
+                if snapshot.contains("model_wait") && snapshot.contains("clocksPending=1") {
+                    registered = true; break
+                }
+                await Task.yield()
+            }
+            guard registered else {
+                _ = try await preparation.value
+                XCTFail("The drift must cross an actual initial disabled picker wait: \(mutation)")
+                throw FixtureFailure.timeout
+            }
+            if mutation == "owner" {
+                _ = try await evaluate(view, "globalThis.__computaModelOwner = '00000000-0000-4000-8000-000000000001'; return true;",
+                    world: .world(name: "computa-chatgpt-model-v1"))
+            }
+            _ = try await evaluate(view, """
+                const trigger = document.getElementById('fixture-model-trigger');
+                if ('\(mutation)' === 'identity') trigger.replaceWith(trigger.cloneNode(true));
+                if ('\(mutation)' === 'route') history.replaceState({}, '', '/?temporary-chat=true&fixture-route-changed=1');
+                if ('\(mutation)' === 'header_restore') {
+                  const label = document.getElementById('fixture-model-header');
+                  const children = [...label.childNodes];
+                  label.textContent = 'High'; label.replaceChildren(...children);
+                }
+                document.dispatchEvent(new Event('fixture-enable-picker')); return true;
+                """)
+            do {
+                _ = try await preparation.value
+                XCTFail("Enabling cannot revive changed initial selection authority: \(mutation)")
+            } catch {
+                let failure = error as? EmbeddedWebModelTransport.Failure
+                switch mutation {
+                case "owner": XCTAssertEqual(failure, .ownershipFailure(.javaScriptDocument))
+                case "route": XCTAssertTrue(failure == .ownershipFailure(.routeAfter)
+                    || failure == .ownershipFailure(.javaScriptDocument), "\(String(describing: failure))")
+                default: XCTAssertEqual(failure, .modelUnverified, mutation)
+                }
+            }
+            let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0], mutation)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
+    }
+
     func testChatGPTGenericClosedHeaderRejectsPostFamilyPowerResetWithoutRepairOrSend() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.genericClosedChatPowerPage(resetAfterFamily: true))
@@ -15394,6 +15547,29 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         window.fixtureGeneration = 'initial'; window.fixtureReady = true;
         </script></body></html>
         """
+    }
+
+    /// Mirror the live initial selection boundary: the owned temporary action
+    /// leaves one physical closed picker with a recognized composite Instant
+    /// header, but the website has not enabled that control yet. Only the
+    /// explicit fixture DOM event enables it; no selection proof is injected.
+    private static var disabledTemporaryChatPickerPage: String {
+        chatComposerMarkerPage.replacingOccurrences(of: "window.fixtureFormReplacements++;", with: """
+            window.fixtureFormReplacements++;
+            const trigger = document.getElementById('fixture-model-trigger');
+            trigger.disabled = true; trigger.setAttribute('data-state', 'closed');
+            const header = document.getElementById('fixture-model-header');
+            const prefix = document.createElement('span'), power = document.createElement('span');
+            prefix.style.display = power.style.display = 'block';
+            prefix.textContent = 'Thinking effort'; power.textContent = 'Instant';
+            header.replaceChildren(prefix, power);
+            """).replacingOccurrences(of: "</body>", with: """
+            <script>
+            document.addEventListener('fixture-enable-picker', () => {
+              document.getElementById('fixture-model-trigger').disabled = false;
+            });
+            </script></body>
+            """)
     }
 
     /// The unified website home uses an explicit product marker on the actual

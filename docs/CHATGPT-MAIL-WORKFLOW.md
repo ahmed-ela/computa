@@ -522,6 +522,35 @@ same final test binary rejects the immutable314 adapter with
 workflow qualification remains separate; these checks do not establish a sent
 email.
 
+The installed315 original email task stopped after 3.250 seconds at model
+selection, with zero provider prompts, tool calls or email input. Product
+verification and the owned temporary transition succeeded, and cleanup closed
+with `not_created`. Exact-attempt picker diagnostics show one visible trigger
+with a recognized Instant header, no open menus and no ambiguity, but the
+trigger was disabled. `selectModel` rejected it immediately before opening the
+picker. This establishes a missing initial readiness wait; it does not establish
+why the website disabled that control. A later manual empty temporary page
+allowed the picker to open and showed GPT-6 selected with Instant power, then
+was restored without a prompt or model change. That later observation does not
+replace the failed task's evidence. No real email was sent.
+
+Build316 adds an event-driven readiness wait only to the first mutable model
+selection, before any picker action or proof. It requires the same visible,
+closed, disabled trigger with a recognized power label and unchanged owner,
+temporary context and form. The wait spends the original 1.8-second selection
+deadline; it does not add a retry or extend that deadline. Enabling the control
+permits the existing complete family-and-power verification to proceed.
+Persistent disabling, context/identity drift or an unknown header still reject
+without input. Read-only and retained model checks do not gain this wait.
+All three adapter suites pass 796 tests (547 ChatGPT, 102 Claude, 147 Gemini),
+with 34,110 assertions; the latter two check shared-helper compatibility, not
+live provider availability. The focused native cohort passes 28 tests. Its
+positive fixture observes the disabled wait before enabling the control, then
+requires one Instant submission and exact completion. The same final native
+binary rejects the immutable315 adapter and passes the candidate. Persistent
+disabling expires within the original deadline with no picker/editor action;
+identity, owner, route and header drift also reject without input.
+
 ## Diagnostics and limits
 
 Completion-observer preparation and user-count rejection diagnostics retain only
