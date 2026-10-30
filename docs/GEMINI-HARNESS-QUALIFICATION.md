@@ -687,8 +687,10 @@ The next fresh, explicitly tool-free connectivity task hit a Google verification
 redirect in 1.313 seconds. No prompt was submitted, no model selection was
 established and no tool ran; cleanup was confirmed. The first-failure navigation
 diagnostic reports `serverRedirectObservedInCurrentNavigation=true` and
-`geminiDocumentCommitObserved=false`, so this was a fresh server redirect, not
-merely rejection by a stale local checkpoint. The challenge-settled callback at
+`geminiDocumentCommitObserved=false`, so WebKit observed a redirect during the
+new navigation rather than rejection solely by a stale local checkpoint. The
+delegate callback does not establish whether the HTTP redirect came from the
+network or cache. The challenge-settled callback at
 08:23:29 and model-close callback at 08:23:30 still found one future candidate.
 Its lifetime bucket was now more than ten minutes and at most one hour; the
 67-second interval is consistent with crossing the one-hour bucket boundary,
@@ -703,3 +705,21 @@ metadata expiry therefore does not explain this occurrence. Cookie identity,
 actual request-header inclusion, partition eligibility and Google's acceptance
 are still unproven. Inspector approval is pending to inspect the request boundary;
 no root-cause fix or permanent CAPTCHA-prevention claim is justified yet.
+
+
+### Redirect provenance and one bounded reload comparison
+
+The redirect flag records `didReceiveServerRedirectForProvisionalNavigation` on
+the bound view; it contains no response headers, cache-source metric or HTTP
+status. It must not be read as proof that Google freshly rejected that request
+over the network. The remaining inspection needs both actual request-cookie
+inclusion and response/cache provenance before choosing an HTTP-cache change.
+
+At 08:43:25 UTC, one ordinary Reload of the normal tab's visible challenge left
+its unchecked CAPTCHA in place. The new settled callback at 08:43:26 retained
+one future candidate with more than ten minutes and at most an hour remaining.
+No checkbox was clicked, no model prompt was replayed and no verification state
+was cleared. This does not reproduce the earlier reload recovery; because it
+reloads the current challenge URL, it also does not determine the cache source
+of the original Gemini redirect. No repeated reload or speculative cache purge
+is justified by this result. Inspector approval remains pending.
