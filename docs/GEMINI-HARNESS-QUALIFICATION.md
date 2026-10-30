@@ -661,3 +661,45 @@ sources during execution, including the explicit lifecycle fallback. Earlier
 failed diagnostic probes remain separately retained. This establishes local
 metadata, lifecycle and verification regressions; it is not live CAPTCHA
 prevention evidence.
+
+## Build331 live recurrence with persisted, unexpired state
+
+Build331 from `cf36dc6` passed complete source, executable, resource, version,
+Developer ID and hardened-runtime audits and was installed. Before any Gemini
+navigation, the initial shared-store callback at 08:15:50 UTC contained one
+future exemption candidate with more than an hour remaining. The normal Gemini
+page loaded, and a fresh Pro task completed eight verified inference rounds over
+94.941 seconds without CAPTCHA. That task nevertheless failed its exact-marker
+instruction: it unnecessarily used seven browser tools, filled the marker into
+the normal tab and ultimately clicked the model picker, then returned the wrong
+answer. Two stale click proposals were rejected before dispatch. No Send action
+was captured. Its exact unsent test draft was cleared separately, and its owned
+session was confirmed closed. This is an adherence failure, not a passing task
+or proof that CAPTCHA recurrence was fixed.
+
+The model-close sample at 08:19:48 and early shutdown sample at 08:21:56 still
+contained one future candidate with more than an hour remaining. The app quit
+normally and reopened the identical build: PID 92783 became 94965. With a blank
+view and before any provider navigation, the 08:22:22 callback again found one
+future candidate with more than an hour remaining.
+
+The next fresh, explicitly tool-free connectivity task hit a Google verification
+redirect in 1.313 seconds. No prompt was submitted, no model selection was
+established and no tool ran; cleanup was confirmed. The first-failure navigation
+diagnostic reports `serverRedirectObservedInCurrentNavigation=true` and
+`geminiDocumentCommitObserved=false`, so this was a fresh server redirect, not
+merely rejection by a stale local checkpoint. The challenge-settled callback at
+08:23:29 and model-close callback at 08:23:30 still found one future candidate.
+Its lifetime bucket was now more than ten minutes and at most one hour; the
+67-second interval is consistent with crossing the one-hour bucket boundary,
+not expiry. These results hold across all seven fixed scopes.
+
+A single normal-browser navigation at 08:26:40 also displayed Google's unchecked
+CAPTCHA; its native callback retained the future candidate. No new challenge was
+completed, no blocked prompt was replayed, and model qualification remains
+stopped. The cookie survives ordinary restart before navigation, and its native
+metadata is not expired when the challenge occurs. Complete candidate loss or
+metadata expiry therefore does not explain this occurrence. Cookie identity,
+actual request-header inclusion, partition eligibility and Google's acceptance
+are still unproven. Inspector approval is pending to inspect the request boundary;
+no root-cause fix or permanent CAPTCHA-prevention claim is justified yet.
