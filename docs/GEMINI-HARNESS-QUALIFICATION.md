@@ -491,3 +491,9 @@ zero. The hook adds no navigation, wait, cookie mutation or recovery authority.
 All 111 targeted native tests passed with unchanged source, including 13 new
 metadata/privacy and local-WebKit lifecycle tests. Independent review found no
 actionable issue. Live collection is pending; no causal conclusion is drawn.
+
+The signed build330 artifact from `f8381b7` passed executable, resource, version,
+Developer ID and hardened-runtime audits. It is staged, not installed or
+published. Build329 and its current challenge remain open. The approved earlier
+challenge was consumed once; fresh action-time confirmation is pending for the
+new challenge. Remaining models and repeats are unfinished.
