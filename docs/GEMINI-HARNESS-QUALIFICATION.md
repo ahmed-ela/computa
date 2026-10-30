@@ -426,3 +426,12 @@ change is not installed yet; Computa remains on build328 while the displayed
 challenge awaits fresh action-time approval. This fixes the reproduced duplicate
 load, not proven CAPTCHA causation or prevention. Whether this overlap occurred
 before the latest challenge remains unestablished.
+
+Computa 0.7.0 (329) was subsequently built from `b303fea` with the same tested
+production source; only the build number changed after the 59-test run. The
+signed artifact passed executable, resource, version, Developer ID and hardened
+runtime checks. It is staged locally, not installed, notarized or published.
+Build328 and its open challenge remain in place. A read-only inspection confirmed
+that the same unchecked challenge was still displayed; no CAPTCHA action or new
+provider request was dispatched. Current-build live tests and recurrence testing
+remain incomplete pending challenge approval and verified recovery.
