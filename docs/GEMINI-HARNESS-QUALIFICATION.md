@@ -5,14 +5,17 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current status (October 30): build330 is installed and audited. At the user's
-request, CAPTCHA investigation now takes priority over all-model qualification.
-The latest approved challenge cleared; the verification-cookie candidate
-survived a same-build restart, and two subsequent owned-session response checks
-passed without CAPTCHA. One intervening storage failure is retained separately.
-The earlier recurrence's cause and permanent prevention remain unproven. Earlier
-staged/installed statements below describe the sequence of evidence, not the
-current installation.
+Current status (October 30): build331 is installed and audited. CAPTCHA
+investigation takes priority over all-model qualification. Approved inspection
+captured one normal Gemini network response with HTTP 200 and no exemption cookie
+in its outgoing Cookie header. A subsequent owned task verified its submission
+but timed out without an answer; the first normal Gemini navigation after an
+ordinary same-build restart then showed CAPTCHA again. The earlier run also
+challenged while a future cookie candidate survived restart. Simple cookie loss
+does not explain that earlier run; no browser-version cause has been established.
+The rejection trigger and permanent prevention remain unproven. Earlier
+staged/installed statements below describe historical evidence, not the current
+installation.
 
 ## Ownership failure and repair
 
@@ -703,7 +706,7 @@ stopped. The cookie survives ordinary restart before navigation, and its native
 metadata is not expired when the challenge occurs. Complete candidate loss or
 metadata expiry therefore does not explain this occurrence. Cookie identity,
 actual request-header inclusion, partition eligibility and Google's acceptance
-are still unproven. Inspector approval is pending to inspect the request boundary;
+are still unproven. Inspector approval was pending at this boundary;
 no root-cause fix or permanent CAPTCHA-prevention claim is justified yet.
 
 
@@ -722,4 +725,60 @@ No checkbox was clicked, no model prompt was replayed and no verification state
 was cleared. This does not reproduce the earlier reload recovery; because it
 reloads the current challenge URL, it also does not determine the cache source
 of the original Gemini redirect. No repeated reload or speculative cache purge
-is justified by this result. Inspector approval remains pending.
+is justified by this result. Inspector approval was still pending at this point.
+
+### Approved request inspection and another restart recurrence
+
+The user approved temporary inspection of the normal Gemini tab. Computa's
+per-tab Inspector control and Safari's developer feature setting were both
+originally off. Both were enabled for this inspection and restored to off;
+Inspector and its app-selection window closed afterward. Network caching stayed
+enabled. No HAR, raw Cookie/Set-Cookie header, cookie value or page-body capture
+was retained.
+
+One ordinary navigation to `https://gemini.google.com/app` at 13:15:46 UTC
+loaded the signed-in composer without another CAPTCHA completion. Inspector's
+document details explicitly reported **Source: Network**, status **200**, and
+a response Date matching that navigation. The actual Request section contained
+a Cookie header but no `GOOGLE_ABUSE_EXEMPTION` name. The response did not set
+that name and specified `Cache-Control: no-cache, no-store, max-age=0,
+must-revalidate` and a past Expires date, with no Age header.
+This is direct request-boundary evidence for this successful navigation only.
+The earlier blocked redirect's headers and cache source remain unavailable.
+
+Three native lifecycle samples at 13:15:48–50 also found zero exemption
+candidates in all seven scopes. More than four hours had passed since the
+08:23 sample with at most an hour remaining, so current absence is consistent
+with expiry. It is not evidence of lost persistence or that removing a cookie
+caused recovery. The old challenge remaining visible throughout the idle
+interval is not proof of continuous network rejection.
+
+After restoring inspection settings, fresh case C selected 3.1 Pro and verified
+the exact no-tools marker prompt at 13:19:45. Computa recorded no assistant answer
+or tool calls before `provider_timeout`, after 302.341 seconds. Its model and
+initial-submission evidence were preserved; the same owned session closed with
+a durable cleanup receipt. Native snapshots at navigation and closure had zero
+exemption candidates. No CAPTCHA block was recorded for this task, but no finite
+inspection-progress records were available to distinguish provider generation
+from extraction or completion-detection failure. This is a failed task, not
+model qualification or a CAPTCHA fix; it was not replayed.
+
+The idle app then quit normally at 13:25:27 and reopened the unchanged build
+at 13:25:35 (PID 94965 to 91508). A blank WebKit tab's initial callback at
+13:26:03, before provider navigation, contained zero exemption candidates.
+The first normal Gemini navigation at 13:26:34 displayed an unchecked CAPTCHA;
+the challenge-settled callback at 13:26:35 also contained zero candidates.
+No model prompt or CAPTCHA action was dispatched after restart. The user's
+four original tabs were restored and the challenged Gemini tab left selected.
+Inspection of this new tab requires a new approval and is pending. The next
+causal boundary is the blocked request's outgoing cookie-name presence and
+explicit response/cache provenance, rather than another speculative cache or
+cookie change.
+
+Local evidence: `captcha331-lifecycle/inspector-current-recovery.json`,
+`captcha331-lifecycle/marker-c/capture/independent-boundary-review.json` (SHA-256
+`c938179a1d7c0f18746882fbb9786364f3ec8e61e915a9f5589e03b278ba4230`),
+`captcha331-lifecycle/restart-two.json`, and the corresponding
+`cookie-timeline331-*` receipts under the October 29 qualification evidence
+directory. The prematurely bounded pre-tab collector's empty result is retained
+separately from the later successful blank-tab initial capture.
