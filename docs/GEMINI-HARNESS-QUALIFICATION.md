@@ -5,12 +5,14 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current status (October 30): build330 is installed and audited. One complete
-3.1 Pro workflow passed independent review, including an explicit browser-tab
-close. The following fresh Argon task reached Google's verification page before
-any prompt or tool call. CAPTCHA recurrence and repeated all-model qualification
-remain unresolved. Earlier staged/installed statements below describe the
-sequence of evidence, not the current installation.
+Current status (October 30): build330 is installed and audited. At the user's
+request, CAPTCHA investigation now takes priority over all-model qualification.
+The latest approved challenge cleared; the verification-cookie candidate
+survived a same-build restart, and two subsequent owned-session response checks
+passed without CAPTCHA. One intervening storage failure is retained separately.
+The earlier recurrence's cause and permanent prevention remain unproven. Earlier
+staged/installed statements below describe the sequence of evidence, not the
+current installation.
 
 ## Ownership failure and repair
 
@@ -552,3 +554,56 @@ displayed expiry, so the earlier already-past redirect expiry is not necessary
 for the observed recurrence pattern; it still does not establish actual cookie
 validity or Google's rejection cause. The next controlled comparison is recovery
 and a fresh task without restarting, if the new challenge is approved.
+
+## CAPTCHA persistence comparison on unchanged build330
+
+The next approved checkbox cleared at 06:35:28 UTC without restarting the app.
+At 06:35:31 and 06:35:32, the normal page and automatic model-discovery page each
+reported one future-expiring, non-session exemption candidate and 25 scoped
+cookies. A fresh normal Gemini tab at 06:38:21 reported the same counts and loaded
+the composer without a challenge. These are native candidate observations, not
+cookie-value comparisons or proof of the request Cookie header.
+
+The app then quit normally and reopened the same installed build, without
+reinstallation or settings changes. Its PID changed from 46181 to 58017. Gemini
+was the first provider opened after restart; its composer loaded, and the native
+callback at 06:42:52 again reported one future exemption candidate and 25 scoped
+cookies. The original four user tabs were restored afterward. This paired test
+does not reproduce automatic loss on ordinary restart. The earlier zero-after-
+restart and current one-after-restart followed different challenge completions;
+they do not establish that a particular cookie was lost.
+
+Two fresh, single-response Pro tasks then tested owned-session creation and
+cleanup without file, terminal or browser-action workflows. Both returned their
+exact unique marker and retained model, prompt, temporary-mode, ownership and
+cleanup proofs: 11.539 seconds and 8.433 seconds, with zero tool calls. The latter
+page's native callback at 06:59:00 still reported one future exemption candidate
+and 25 scoped cookies. No CAPTCHA was observed in these completed comparisons.
+These checks do not resume or replace the deferred full model qualification.
+
+An intervening task failed with `inference_evidence_unsaved` after observed
+prompt insertion. Local storage briefly reported `ENOSPC`; no response or tool
+call was released, and the cleanup receipt initially could not be saved. The
+failed attempt and its incomplete journal are retained. After removing about
+306 MiB of old, rebuildable Clang cache, a cleanup-only action durably saved the
+original closed-session receipt without resending the prompt or restarting the
+model. The subsequent passing task used a new prompt and new session. This
+storage failure is not a CAPTCHA result and does not establish the cause of the
+earlier Google redirects.
+
+A separate local fixture used a unique app identity and new WebKit profile,
+without loading a URL or accessing Computa's profile. Two synthetic cookies with
+explicit 24-hour expiry survived immediate view/store teardown and a separate
+reader process; the session-cookie control did not. The initial cleanup-only
+process crashed before its callback. A separately built cleanup helper initialized
+WebKit and deferred termination outside the callback, then acknowledged removal
+of exactly that synthetic profile. Original writer/reader evidence and the crash
+remain preserved. This is a generic persistence control, not a reproduction of
+real-cookie loss or a production fix.
+
+Source review found no Google-cookie deletion in discovery, temporary-session
+cleanup, app shutdown or cache migration. ChatGPT retirement rechecks a
+ChatGPT-only domain/name/path filter. No new production patch is justified by
+the current persistence evidence. The current verification is working, but the
+earlier rejection trigger and behavior after future provider expiry or risk
+changes remain unresolved; no permanent CAPTCHA-prevention claim is made.
