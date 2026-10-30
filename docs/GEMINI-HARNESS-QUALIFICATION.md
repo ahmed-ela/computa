@@ -435,3 +435,59 @@ Build328 and its open challenge remain in place. A read-only inspection confirme
 that the same unchecked challenge was still displayed; no CAPTCHA action or new
 provider request was dispatched. Current-build live tests and recurrence testing
 remain incomplete pending challenge approval and verified recovery.
+
+## Build 329 live results
+
+The user approved the displayed challenge on October 30. One checkbox action
+returned the normal Gemini composer and all four enabled models. The redirect
+displayed an exemption expiry around 02:39 UTC, preceding completion around
+04:40 UTC. That is an observed timing confounder, not proof of the actual cookie
+state or the cause of previous challenges. No token or IP value is retained in
+the bounded evidence. Build329 was installed from `b303fea`, passed its full
+bundle/signature audit, restored the original four tabs, and successfully loaded
+a new normal Gemini page after restart.
+
+The fresh Flash-Lite workflow failed independent review after 44.049 seconds.
+Seven inference rounds and six tool calls retained their model/session/prompt
+proofs, but the model ran the failing baseline tests, read the full README and
+source, then skipped editing and verification. It submitted an invented reference
+once and read `wrong_reference` twice. Its final claim that the file was repaired
+and tests passed was false: the source remained unchanged and no successful
+retest or reference-producing command occurred. The fixture rejected the single
+submission. Website cleanup succeeded, and automatic app cleanup closed the
+task tab. This is a failed task, not a passing browser or code-edit workflow.
+
+Independent inspection found the failed test output and complete source in the
+native history. The successful build328 run used identical developer
+instructions and unchanged codec, tool catalog and Gemini driver. No captured
+transport defect explains this omission; exact outbound schemas were not retained,
+so per-round full tool availability is not independently attested. Another
+instruction change is not justified by this result alone.
+
+The next Pro attempt was blocked after 0.916 seconds before prompt submission or
+tools. Native diagnostics show a server redirect without a Gemini document
+commit. One normal-browser reload displayed a new CAPTCHA as well. The fixture
+remained unchanged, with no submission, and website cleanup succeeded. Both
+fixture servers were stopped. This recurrence demonstrates that the redundant
+discovery fix alone did not prevent the issue. New challenge approval and the
+remaining model runs are pending. A bounded, read-only cookie-metadata diagnostic
+is being prepared to compare callback-time native candidate metadata across
+healthy and verification pages. It cannot establish which cookies a rejected
+request sent or why Google rejected it. It is not yet installed and does not
+change admission or cookies.
+
+Build330 adds this diagnostic after successful committed navigations to exact
+Gemini and Google verification routes. It reports only finite destination/role
+enums, shared-store identity, and bounded candidate-cookie counts split into
+future-expiring, expired and session categories. Gemini and verification-page
+destinations are evaluated separately. Values, arbitrary cookie names/domains,
+URLs, queries, IP addresses and absolute expiry times are excluded. Metadata is
+not proof of an HTTP Cookie header, authentication or CAPTCHA clearance.
+
+Reads are asynchronous, limited to once per document generation and 16 per app
+session. A callback whose entry, view, document, route, store or tool-use state
+changed reports unavailable with no counts. No callback is pending, not a known
+zero. The hook adds no navigation, wait, cookie mutation or recovery authority.
+All 111 targeted native tests passed with unchanged source, including 13 new
+metadata/privacy and local-WebKit lifecycle tests. Independent review found no
+actionable issue. Live collection is pending; no causal conclusion is drawn.

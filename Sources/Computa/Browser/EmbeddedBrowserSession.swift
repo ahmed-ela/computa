@@ -109,6 +109,7 @@ final class EmbeddedBrowserSession {
     }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
+    @ObservationIgnored private var geminiCookieObservationRequests = 0
     @ObservationIgnored private var cacheIdentity: EmbeddedBrowserCacheIdentity?
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
@@ -240,6 +241,7 @@ final class EmbeddedBrowserSession {
         var recoveryCommittedGeneration: UUID?
         var recoverySettledGeneration: UUID?
         var recoveryToolUsed = false
+        var geminiCookieObservationGeneration: UUID?
         var recoveryAttemptedCheckpointID: UUID?
         var recoveryAttemptedDocumentID: UUID?
         // The callback that requests a popup carries no public tool-origin
@@ -1978,6 +1980,102 @@ final class EmbeddedBrowserSession {
     }
 
     private static let inferencePrewarmLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
+
+    struct GeminiVerificationCookieObservation: Encodable, Equatable, Sendable {
+        enum Role: String, Encodable, Equatable, Sendable { case human, model }
+        enum Phase: String, Encodable, Equatable, Sendable { case requested, callback }
+        enum Status: String, Encodable, Equatable, Sendable { case pending, available, unavailable }
+        enum Reason: String, Encodable, Equatable, Sendable {
+            case sessionClosed = "session_closed", entryChanged = "entry_changed", documentChanged = "document_changed"
+            case toolUsed = "tool_used", unsettled, storeChanged = "store_changed", routeChanged = "route_changed"
+        }
+        let kind = "gemini_verification_cookie_observation_v1"
+        let evidence = "callback_time_native_metadata_not_request_cookie_proof"
+        let request: Int
+        let role: Role
+        let destination: GeminiVerificationCookieDiagnostic.Destination
+        let sharedStore: Bool
+        let phase: Phase
+        let status: Status
+        let reason: Reason?
+        let metadata: GeminiVerificationCookieDiagnostic.Snapshot?
+    }
+
+    static let geminiCookieObservationLimit = 16
+    @MainActor private final class GeminiCookieObservationTicket { var completed = false }
+
+    private static func geminiCookieDestination(_ url: URL?) -> GeminiVerificationCookieDiagnostic.Destination? {
+        guard let url, url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
+              url.port == nil || url.port == 443 else { return nil }
+        switch (url.host?.lowercased(), url.path) {
+        case ("gemini.google.com", "/app"): return .geminiApp
+        case ("google.com", "/sorry"): return .googleSorry
+        case ("google.com", "/sorry/"): return .googleSorrySlash
+        case ("google.com", "/sorry/index"): return .googleSorryIndex
+        case ("www.google.com", "/sorry"): return .googleWWWSorry
+        case ("www.google.com", "/sorry/"): return .googleWWWSorrySlash
+        case ("www.google.com", "/sorry/index"): return .googleWWWSorryIndex
+        default: return nil
+        }
+    }
+
+    /// Observation only, after a successful committed navigation. Never awaits
+    /// WebKit, retains cookies, clears a checkpoint, or grants model authority.
+    private func observeGeminiVerificationCookies(_ entry: Entry) {
+        guard !isShutdown, entries[entry.tab.id] === entry, !entry.isToolOwned, !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+              entry.toolRenderLeases.isEmpty, entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading,
+              entry.tab.error == nil, let destination = Self.geminiCookieDestination(entry.view.url),
+              entry.geminiCookieObservationGeneration != entry.tab.documentGeneration,
+              geminiCookieObservationRequests < Self.geminiCookieObservationLimit else { return }
+        let view = entry.view, store = view.configuration.websiteDataStore, shared = websiteDataStore
+        let generation = entry.tab.documentGeneration, documentID = entry.tab.documentID
+        let committedID = entry.humanCommittedDocumentID, url = view.url, tabID = entry.tab.id
+        entry.geminiCookieObservationGeneration = generation
+        geminiCookieObservationRequests += 1
+        let ordinal = geminiCookieObservationRequests, role: GeminiVerificationCookieObservation.Role = entry.isModelOwned ? .model : .human
+        let emit: @MainActor @Sendable (GeminiVerificationCookieObservation.Phase, GeminiVerificationCookieObservation.Reason?,
+                                       GeminiVerificationCookieDiagnostic.Snapshot?) -> Void = { [weak self] phase, reason, metadata in
+            let value = GeminiVerificationCookieObservation(request: ordinal, role: role, destination: destination,
+                sharedStore: store === shared, phase: phase,
+                status: phase == .requested ? .pending : metadata?.status == .available ? .available : .unavailable,
+                reason: reason, metadata: metadata)
+            if let data = try? JSONEncoder().encode(value), data.count <= 2_048 {
+                Self.inferencePrewarmLog.notice("geminiVerificationCookieObservation \(String(decoding: data, as: UTF8.self), privacy: .public)")
+            }
+            #if DEBUG
+            self?.geminiCookieObservationSinkForTesting?(value)
+            #endif
+        }
+        emit(.requested, nil, nil)
+        let ticket = GeminiCookieObservationTicket()
+        let completion: @MainActor @Sendable ([HTTPCookie]) -> Void = { [weak self, weak entry, weak view] cookies in
+            guard !ticket.completed else { return }
+            ticket.completed = true
+            guard let self, !self.isShutdown else { emit(.callback, .sessionClosed, nil); return }
+            guard let entry, let view, self.entries[tabID] === entry, entry.view === view else {
+                emit(.callback, .entryChanged, nil); return
+            }
+            guard entry.tab.documentGeneration == generation, entry.tab.documentID == documentID,
+                  entry.humanCommittedDocumentID == committedID else { emit(.callback, .documentChanged, nil); return }
+            guard !entry.recoveryToolUsed, entry.toolPopupContext == nil, entry.toolRenderLeases.isEmpty else {
+                emit(.callback, .toolUsed, nil); return
+            }
+            guard entry.navigation == nil, !view.isLoading, !entry.tab.isLoading, entry.tab.error == nil else {
+                emit(.callback, .unsettled, nil); return
+            }
+            guard view.configuration.websiteDataStore === store, self.websiteDataStore === shared else {
+                emit(.callback, .storeChanged, nil); return
+            }
+            guard view.url == url, Self.geminiCookieDestination(view.url) == destination else {
+                emit(.callback, .routeChanged, nil); return
+            }
+            emit(.callback, nil, GeminiVerificationCookieDiagnostic.project(cookies, destination: destination, now: Date()))
+        }
+        #if DEBUG
+        if let reader = geminiCookieObservationReaderForTesting { reader(store.httpCookieStore, completion); return }
+        #endif
+        store.httpCookieStore.getAllCookies(completion)
+    }
     // Keep one prompt-free root through normal pauses between tasks. Expiring
     // it sooner repeatedly discards a hydrated page just before the next Send.
     // Adoption still validates current cookies, view, generation and route;
@@ -2340,6 +2438,16 @@ final class EmbeddedBrowserSession {
     }
 
     #if DEBUG
+    private var geminiCookieObservationReaderForTesting: (@MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void)?
+    private var geminiCookieObservationSinkForTesting: (@MainActor (GeminiVerificationCookieObservation) -> Void)?
+
+    func setGeminiCookieObservationForTesting(
+        reader: @escaping @MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void,
+        sink: @escaping @MainActor (GeminiVerificationCookieObservation) -> Void) {
+        geminiCookieObservationReaderForTesting = reader
+        geminiCookieObservationSinkForTesting = sink
+    }
+
     private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
     private var responseCompletionSourceForTesting: String?
     private var cookieSeedFactoryForTesting: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?
@@ -2661,6 +2769,11 @@ final class EmbeddedBrowserSession {
             observeHumanVerificationRecovery(entry)
         }
         emitGeminiPostBlockNativeEvent(entry, error == nil ? .finished : .failed)
+        if error == nil, navigation != nil,
+           entry.isModelOwned ? entry.modelFinishedGeneration == entry.tab.documentGeneration
+                : entry.recoverySettledGeneration == entry.tab.documentGeneration {
+            observeGeminiVerificationCookies(entry)
+        }
     }
 
     fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
