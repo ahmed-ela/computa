@@ -5,6 +5,13 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
+Current status (October 30): build330 is installed and audited. One complete
+3.1 Pro workflow passed independent review, including an explicit browser-tab
+close. The following fresh Argon task reached Google's verification page before
+any prompt or tool call. CAPTCHA recurrence and repeated all-model qualification
+remain unresolved. Earlier staged/installed statements below describe the
+sequence of evidence, not the current installation.
+
 ## Ownership failure and repair
 
 The installed 0.7.0 (321) baseline displayed a healthy signed-in Gemini page.
@@ -497,3 +504,51 @@ Developer ID and hardened-runtime audits. It is staged, not installed or
 published. Build329 and its current challenge remain open. The approved earlier
 challenge was consumed once; fresh action-time confirmation is pending for the
 new challenge. Remaining models and repeats are unfinished.
+
+## Build 330 live results
+
+The newly approved checkbox cleared at 06:08:33 UTC. The normal composer and
+all four enabled model choices returned. Its displayed redirect exemption
+expiry was 07:49:48 UTC, still in the future. Build330 from `f8381b7` was then
+installed and independently audited against the complete staged bundle,
+production source, version, executable/resources and signature. The original
+four user tabs were restored; a normal Gemini page loaded after restart.
+The app has not been notarized or published.
+
+| Model | Current-build result | Qualification boundary |
+| --- | --- | --- |
+| 3.1 Pro | Passed in 141.554 seconds: eight verified inference rounds and seven tool calls | One complete file-edit, terminal and built-in-browser workflow; repeat remains open |
+| 4 Argon | Blocked in 0.929 seconds by `website_verification_required` | No prompt submitted, model response or tool call; not exercised |
+| 3.8 Flash | Not dispatched on build330 | Current-build qualification pending |
+| 3.5 Flash-Lite | Not dispatched on build330 | Prior build329 task failure remains retained; current-build qualification pending |
+
+Pro reproduced the original test failures, changed only the permitted aggregation
+function, reran all six tests successfully, and printed the independently expected
+reference. It opened the local fixture through the built-in browser, submitted
+exactly once, observed and reported the unique accepted receipt, and explicitly
+closed its task-created tab. The persisted physical cleanup receipt confirms
+closure with no pending action or failure. Independent code, protected-input,
+server-ledger, provider/model, exact-prompt and session reviews passed. The initial
+nonzero command was the intended baseline reproduction, followed by the successful
+retest. No later user instructions were added.
+
+The next fresh Argon task observed a server redirect to Google's verification
+route without any Gemini document commit. Its fixture stayed unchanged and its
+submission ledger stayed empty; the failing fixture audit is preserved, classified
+as not exercised rather than a model failure. Website-session cleanup succeeded
+for both tasks, and both local servers were stopped. One reload of the normal
+Gemini tab then displayed a new unchecked CAPTCHA at 06:22:39 UTC. Fresh action-time
+approval is pending. No prompt or uncertain submission was replayed.
+
+The metadata hook completed reads in the shared store for the healthy human
+Gemini `/app` page (25 scoped candidates), healthy model `/app` page (24), and
+blocked model `www.google.com/sorry/index` page (18). Each reported zero
+`GOOGLE_ABUSE_EXEMPTION` candidates in all expiry categories. These are different
+destination scopes and callback times; they do not prove equal sent cookies,
+cookie loss, or absence of exemption state elsewhere. Query parameters and other
+storage are outside this diagnostic. The current evidence cannot determine
+whether a cookie was set before the restart. The recurrence happened before the
+displayed expiry, so the earlier already-past redirect expiry is not necessary
+for the observed recurrence pattern; it still does not establish actual cookie
+validity or Google's rejection cause. The next controlled comparison is recovery
+and a fresh task without restarting, if the new challenge is approved.
