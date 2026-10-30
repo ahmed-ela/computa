@@ -66,8 +66,111 @@ enum GeminiVerificationCookieDiagnostic {
         }
     }
 
+    struct RemainingLifetimeCounts: Encodable, Equatable, Sendable {
+        let upToOneMinute: Int
+        let upToTenMinutes: Int
+        let upToOneHour: Int
+        let overOneHour: Int
+    }
+
+    struct TimelineScope: Encodable, Equatable, Sendable {
+        let destination: Destination
+        let counts: Counts
+        /// Disjoint future-only buckets: (0, 60], (60, 600], (600, 3600], (3600, infinity).
+        let remainingLifetime: RemainingLifetimeCounts
+    }
+
+    struct TimelineSnapshot: Encodable, Equatable, Sendable {
+        let source: Snapshot.Source = .nativeCandidateMetadata
+        let status: Status
+        let reason: UnavailableReason?
+        let scopes: [TimelineScope]?
+
+        fileprivate init(scopes: [TimelineScope]) {
+            status = .available; reason = nil; self.scopes = scopes
+        }
+
+        fileprivate init(reason: UnavailableReason) {
+            status = .unavailable; self.reason = reason; scopes = nil
+        }
+    }
+
+    private struct ScopeAccumulator {
+        let destination: Destination
+        let domains: Set<String>
+        let path: String
+        var scoped = 0, future = 0, expired = 0, session = 0
+        var minute = 0, tenMinutes = 0, hour = 0, overHour = 0
+
+        init(_ destination: Destination) {
+            self.destination = destination; domains = destination.domains; path = destination.path
+        }
+
+        func matches(domain: String, cookiePath: String) -> Bool {
+            domains.contains(domain) && (path == cookiePath ||
+                (path.hasPrefix(cookiePath) && (cookiePath.hasSuffix("/") || path.dropFirst(cookiePath.count).first == "/")))
+        }
+
+        var snapshot: TimelineScope {
+            .init(destination: destination,
+                counts: .init(scopedGoogleCookies: scoped, exemptionFuture: future, exemptionExpired: expired, exemptionSession: session),
+                remainingLifetime: .init(upToOneMinute: minute, upToTenMinutes: tenMinutes, upToOneHour: hour, overOneHour: overHour))
+        }
+    }
+
     static let maximumCookieCount = 4_096
     static let maximumMetadataBytes = 262_144
+
+    /// One validation pass and one supplied clock for all fixed destinations.
+    /// A late invalid cookie discards every partial count. Cookie objects and
+    /// their identifying metadata are not retained in the returned timeline.
+    static func timeline(_ cookies: [HTTPCookie], now: Date) -> TimelineSnapshot {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { return .init(reason: .invalidClock) }
+        guard cookies.count <= maximumCookieCount else { return .init(reason: .inputLimitExceeded) }
+        var scannedBytes = 0
+        func bounded(_ text: String, limit: Int) -> Bool {
+            let bytes = text.utf8.prefix(limit + 1).count
+            guard bytes <= limit, scannedBytes <= maximumMetadataBytes - bytes else { return false }
+            scannedBytes += bytes
+            return true
+        }
+        func valid(_ text: String) -> Bool {
+            !text.isEmpty && !text.utf8.contains { $0 < 0x20 || $0 == 0x7f }
+        }
+        var scopes = Destination.allCases.map(ScopeAccumulator.init)
+        for cookie in cookies {
+            let domain = cookie.domain, path = cookie.path, name = cookie.name
+            guard bounded(domain, limit: 256), bounded(path, limit: 2_048), bounded(name, limit: 1_024) else {
+                return .init(reason: .metadataLimitExceeded)
+            }
+            guard valid(domain), valid(path), path.hasPrefix("/"), valid(name) else { return .init(reason: .invalidMetadata) }
+            let expiry = cookie.expiresDate
+            guard expiry?.timeIntervalSinceReferenceDate.isFinite != false else { return .init(reason: .invalidMetadata) }
+            let normalizedDomain = domain.lowercased()
+            let indices = scopes.indices.filter { scopes[$0].matches(domain: normalizedDomain, cookiePath: path) }
+            guard !indices.isEmpty else { continue }
+            for index in indices { scopes[index].scoped += 1 }
+            guard name == "GOOGLE_ABUSE_EXEMPTION" else { continue }
+            let sessionOnly = cookie.isSessionOnly
+            if sessionOnly || expiry == nil {
+                for index in indices { scopes[index].session += 1 }
+            } else if let expiry, expiry <= now {
+                for index in indices { scopes[index].expired += 1 }
+            } else if let expiry {
+                // Both dates are finite and expiry is later. Overflow of their
+                // difference is still safely in the final coarse bucket.
+                let remaining = expiry.timeIntervalSince(now)
+                for index in indices {
+                    scopes[index].future += 1
+                    if remaining <= 60 { scopes[index].minute += 1 }
+                    else if remaining <= 600 { scopes[index].tenMinutes += 1 }
+                    else if remaining <= 3_600 { scopes[index].hour += 1 }
+                    else { scopes[index].overHour += 1 }
+                }
+            }
+        }
+        return .init(scopes: scopes.map(\.snapshot))
+    }
 
     static func project(_ cookies: [HTTPCookie], destination: Destination, now: Date) -> Snapshot {
         func unavailable(_ reason: UnavailableReason) -> Snapshot { .init(destination: destination, reason: reason) }

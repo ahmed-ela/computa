@@ -110,6 +110,7 @@ final class EmbeddedBrowserSession {
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
     @ObservationIgnored private var geminiCookieObservationRequests = 0
+    @ObservationIgnored private var geminiCookieTimeline: GeminiVerificationCookieTimeline?
     @ObservationIgnored private var cacheIdentity: EmbeddedBrowserCacheIdentity?
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
@@ -404,6 +405,16 @@ final class EmbeddedBrowserSession {
             store = .nonPersistent()
         }
         websiteDataStore = store
+        let timeline = GeminiVerificationCookieTimeline(store: store.httpCookieStore, sink: { [weak self] event in
+            if let data = try? event.logData(), data.count <= 1_000 {
+                Self.inferencePrewarmLog.notice("geminiVerificationCookieTimeline \(String(decoding: data, as: UTF8.self), privacy: .public)")
+            }
+            #if DEBUG
+            self?.geminiCookieTimelineSinkForTesting?(event)
+            #endif
+        })
+        geminiCookieTimeline = timeline
+        timeline.start()
         if persistent {
             // ComputaApp creates one session and injects it into AppState; that
             // session owns this profile and one migration shared by all tabs.
@@ -719,6 +730,9 @@ final class EmbeddedBrowserSession {
         } else if entry.isModelOwned, !entry.ownedTemporaryChatGPTRoutes.isEmpty {
             _ = temporaryCookieRetirement?.registerClosedOwnedIDs(entry.ownedTemporaryChatGPTRoutes)
         } else { temporaryCookieRetirement?.requestSweep() }
+        if !isShutdown, entry.isModelOwned, entry.view.configuration.websiteDataStore === websiteDataStore {
+            geminiCookieTimeline?.observe(.modelClosed)
+        }
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
@@ -2076,6 +2090,24 @@ final class EmbeddedBrowserSession {
         #endif
         store.httpCookieStore.getAllCookies(completion)
     }
+
+    /// Store-level diagnostics survive model-view closure. They never authorize
+    /// navigation, recovery, model selection, or publication of a response.
+    private func observeGeminiCookieTimelineAfterNavigation(_ entry: Entry) {
+        guard !isShutdown, entries[entry.tab.id] === entry, !entry.isToolOwned, !entry.recoveryToolUsed,
+              entry.toolPopupContext == nil, entry.toolRenderLeases.isEmpty, entry.navigation == nil,
+              !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
+              entry.view.configuration.websiteDataStore === websiteDataStore,
+              let destination = Self.geminiCookieDestination(entry.view.url) else { return }
+        geminiCookieTimeline?.observe(destination == .geminiApp ? .navigationSettled : .challengeSettled)
+    }
+
+    /// Called before runtime teardown, without waiting for a diagnostic read.
+    /// A missing callback is unknown; this is not a disk-flush acknowledgement.
+    func observeGeminiCookieShutdownRequested() {
+        guard !isShutdown else { return }
+        geminiCookieTimeline?.observe(.shutdownRequested)
+    }
     // Keep one prompt-free root through normal pauses between tasks. Expiring
     // it sooner repeatedly discards a hydrated page just before the next Send.
     // Adoption still validates current cookies, view, generation and route;
@@ -2440,6 +2472,11 @@ final class EmbeddedBrowserSession {
     #if DEBUG
     private var geminiCookieObservationReaderForTesting: (@MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void)?
     private var geminiCookieObservationSinkForTesting: (@MainActor (GeminiVerificationCookieObservation) -> Void)?
+    private var geminiCookieTimelineSinkForTesting: (@MainActor (GeminiVerificationCookieTimeline.Event) -> Void)?
+
+    func setGeminiCookieTimelineSinkForTesting(_ sink: @escaping @MainActor (GeminiVerificationCookieTimeline.Event) -> Void) {
+        geminiCookieTimelineSinkForTesting = sink
+    }
 
     func setGeminiCookieObservationForTesting(
         reader: @escaping @MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void,
@@ -2533,6 +2570,8 @@ final class EmbeddedBrowserSession {
         cancelModelNativeFocusDiagnostic()
         #endif
         isShutdown = true
+        geminiCookieTimeline?.stop()
+        geminiCookieTimeline = nil
         cacheIdentity?.close()
         chatGPTInferencePrewarmingEnabled = false
         chatGPTInferencePrewarmAdmission = nil
@@ -2773,6 +2812,7 @@ final class EmbeddedBrowserSession {
            entry.isModelOwned ? entry.modelFinishedGeneration == entry.tab.documentGeneration
                 : entry.recoverySettledGeneration == entry.tab.documentGeneration {
             observeGeminiVerificationCookies(entry)
+            observeGeminiCookieTimelineAfterNavigation(entry)
         }
     }
 

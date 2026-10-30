@@ -1227,6 +1227,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        browserSession.observeGeminiCookieShutdownRequested()
         queuedDispatchProfiles.removeAll()
         updateWebsitePrewarming()
         websiteModelRefreshTask?.cancel()

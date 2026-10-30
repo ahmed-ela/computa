@@ -607,3 +607,57 @@ ChatGPT-only domain/name/path filter. No new production patch is justified by
 the current persistence evidence. The current verification is working, but the
 earlier rejection trigger and behavior after future provider expiry or risk
 changes remain unresolved; no permanent CAPTCHA-prevention claim is made.
+
+## Build331: observe the missing lifecycle boundaries
+
+The build330 persistence comparisons sampled only after a provider navigation.
+Those callbacks cannot distinguish a cookie that survived restart from one
+reissued during navigation. Build331 adds a read-only observer bound to the
+shared WebKit store, with initial, settled-navigation, model-closure and early
+shutdown observations. It projects the same seven fixed destination scopes and
+coarse remaining-lifetime buckets from one native callback. Cookie values,
+identifying metadata, absolute expiry and arbitrary URLs are not logged.
+
+Reads are single-flight, coalesced and bounded by rolling budgets. Deadline,
+supersession, exhaustion and shutdown gaps remain explicit unknowns; a timeout
+does not cancel a native operation or permit overlapping reads. Late callbacks
+cannot publish stale data. These observations do not delay navigation, mutate
+cookies, authorize recovery or weaken any model/session verification. They are
+diagnostics, not a CAPTCHA-prevention fix or request-header proof.
+
+The controlled restart comparison must collect the initial store callback while
+a blank view is open, before navigating to any provider. Compare that baseline
+with shutdown and fresh owned-session samples. A challenge while an unexpired
+candidate remains would falsify simple absence/expiry as the explanation for
+that run; it would still not reveal Google's private rejection criteria.
+
+Local qualification caught two diagnostic assumptions before installation.
+First, OSLog truncated the rich JSON projection at about 1,020 bytes: 34 of 87
+synthetic records were invalid JSON. The versioned compact wire format retains
+all seven scope/count/lifetime rows under a 1,000-byte whole-message limit.
+The real XCTest log collector then accepted all 546 records, including 206
+available snapshots, without malformed JSON. Per-session sequence resets in a
+multi-session test process are reported, not rejected as truncated records.
+
+Second, the isolated nonpersistent WebKit fixture delivered no cookie-change
+notifications to either the timeline or an independent observer after verified
+native and document.cookie writes. Re-registering after document initialization
+did not change that result. The early JavaScript probe also used the SDK's void
+completion-less overload; its corrected probe confirmed the write but still
+received no notification. These failed controls are preserved. Native change
+notifications remain best-effort; silence is not evidence of an unchanged store.
+Explicit lifecycle snapshots are required for the restart comparison and are
+tested against the actual synthetic cookie state independently of notifications.
+
+Storage is a separate unresolved hypothesis. A retained receipt reports only
+156,160,000 bytes free at 06:20:26 UTC, two seconds before the blocked Argon
+cookie observation. No correlated WebKit/SQLite cookie-write failure was retained.
+The later ordinary restart retained a future candidate, and the 06:49 ENOSPC
+failure affected inference evidence. This chronology establishes storage pressure
+before a recurrence, not the cause of Google's challenge.
+
+The final targeted cohort passed 137 tests with zero failures and unchanged
+sources during execution, including the explicit lifecycle fallback. Earlier
+failed diagnostic probes remain separately retained. This establishes local
+metadata, lifecycle and verification regressions; it is not live CAPTCHA
+prevention evidence.
