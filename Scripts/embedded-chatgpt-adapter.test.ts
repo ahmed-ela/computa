@@ -4241,12 +4241,28 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
     const overlay = new Element('DIV');
     f.userBody!.parentElement!.append(expand); f.body.append(send, overlay);
     f.window.innerWidth = 1_000; f.window.innerHeight = 800;
+    // Model real frames as separate tasks so a persistent obstruction does
+    // not starve the fixture's explicit clock or event controls.
+    f.window.requestAnimationFrame = (callback: Function) => setTimeout(() => callback(performance.now()), 0);
+    f.window.cancelAnimationFrame = (id: ReturnType<typeof setTimeout>) => clearTimeout(id);
+    const listeners = new Map<string, Set<Function>>();
+    for (const target of [f.document, f.window] as any[]) {
+      target.addEventListener = (name: string, callback: Function) => {
+        if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
+      };
+      target.removeEventListener = (name: string, callback: Function) => listeners.get(name)?.delete(callback);
+    }
     expand.getBoundingClientRect = () => ({ left: 20, top: 80, width: 100, height: 30 });
     f.setHit(overlay); // Finite in-window center, clipped or covered in the rendered page.
     expand.onClick = () => { f.userBody!.text = outbound; expand.connected = false; };
-    const inspect = () => f.inspect({ allowFirstUserExpansion: true,
-      firstUserExpansionModelChoice: choice, expectedModelChoice: choice }, false);
-    return { f, picker, expand, send, outbound, inspect };
+    const inspect = (overrides: Record<string, unknown> = {}) => f.inspect({ allowFirstUserExpansion: true,
+      firstUserExpansionModelChoice: choice, expectedModelChoice: choice, ...overrides }, false);
+    return { f, picker, expand, send, outbound, inspect, listeners,
+      emit: (name: string) => { for (const callback of listeners.get(name) || []) callback(); } };
+  };
+  const waiting = async (x: Awaited<ReturnType<typeof staged>>) => {
+    for (let attempt = 0; attempt < 100 && !(x.f.world.__computaModelFirstExpansion as any)?.exposureDiagnostic?.waited; attempt++) await Bun.sleep(1);
+    expect((x.f.world.__computaModelFirstExpansion as any)?.exposureDiagnostic?.waited).toBe(true);
   };
 
   test('a clipped center inside the window gets one scroll and one verified local expansion', async () => {
@@ -4261,6 +4277,24 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
     expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.composer.events).toHaveLength(0);
     expect((x.f.world.__computaModelFirstExpansion as any).outcome).toBe('expanded');
     expect((await x.inspect()).error).toBeUndefined(); expect(scrolls).toHaveLength(1); expect(x.expand.clicks).toBe(1);
+  });
+
+  test('a scroll whose hit test settles after two rendering frames keeps the same one-click claim', async () => {
+    const x = await staged(); let scrolls = 0, rendered = false;
+    (x.expand as any).scrollIntoView = () => {
+      scrolls++;
+      // The synchronous hit test remains covered. Layout exposes the exact
+      // captured control on the next frame, without changing any DOM text.
+      (x.f.window.requestAnimationFrame as Function)(() => (x.f.window.requestAnimationFrame as Function)(() => {
+        rendered = true; x.f.setHit(x.expand);
+      }));
+    };
+    const result = await x.inspect();
+    expect(rendered).toBe(true); expect(result.error).toBeUndefined();
+    expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
+    expect(x.f.userBody!.text).toBe(x.outbound); expect(scrolls).toBe(1);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.composer.events).toHaveLength(0);
+    expect((await x.inspect()).error).toBeUndefined(); expect(scrolls).toBe(1); expect(x.expand.clicks).toBe(1);
   });
 
   test('scrolling cannot bypass a persistent overlay or changed owned control, body or owner', async () => {
@@ -4278,7 +4312,9 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
         if (mutation === 'body') x.f.userBody!.text += 'changed';
         if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
       };
-      const result = await x.inspect();
+      const pending = x.inspect();
+      if (mutation === 'overlay') { await waiting(x); x.f.flush(); }
+      const result = await pending;
       expect(result.error, mutation).toBeDefined(); expect(result, mutation).not.toHaveProperty('firstUserVerified');
       if (mutation === 'overlay') expect(JSON.parse(result.debugStructure).expansionOutcome).toBe('obstructed');
       expect(scrolls, mutation).toBe(1); expect(x.expand.clicks, mutation).toBe(0);
@@ -4286,6 +4322,61 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
       expect(x.send.clicks, mutation).toBe(0); expect(x.f.composer.events, mutation).toHaveLength(0);
       expect((await x.inspect()).error, mutation).toBeDefined(); expect(scrolls, mutation).toBe(1);
     }
+  });
+
+  test('scroll events can expose the control without frames and still require the full exact marker body', async () => {
+    for (const changedText of [false, true]) {
+      const x = await staged(); let scrolls = 0;
+      x.f.window.requestAnimationFrame = () => 1;
+      (x.expand as any).scrollIntoView = () => { scrolls++; };
+      if (changedText) x.expand.onClick = () => { x.f.userBody!.text = x.outbound + '!'; };
+      const pending = x.inspect(); await waiting(x);
+      expect(x.expand.clicks).toBe(0); x.f.setHit(x.expand); x.emit('scroll');
+      const result = await pending;
+      if (changedText) { expect(result.error).toBeDefined(); expect(result).not.toHaveProperty('firstUserVerified'); }
+      else { expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true); }
+      expect(scrolls).toBe(1); expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(0);
+      expect([...x.listeners.values()].every(callbacks => callbacks.size === 0)).toBe(true);
+    }
+  });
+
+  test('readiness latches changed controls body owner Work model and an expired deadline without clicking', async () => {
+    for (const mutation of ['control', 'body', 'owner', 'work', 'model', 'late']) {
+      const x = await staged(); x.f.window.requestAnimationFrame = () => 1;
+      (x.expand as any).scrollIntoView = () => {};
+      const pending = x.inspect(); await waiting(x);
+      const originalBody = x.f.userBody!.text, originalOwner = x.f.world.__computaModelOwner;
+      const pin = x.f.world.__computaChatPresetPin as any;
+      if (mutation === 'control') x.expand.disabled = true;
+      if (mutation === 'body') x.f.userBody!.text += '!';
+      if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
+      if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'model') pin.invalidated = true;
+      if (mutation === 'late') x.f.advanceTime(1_801);
+      x.f.setHit(x.expand); x.emit('scroll');
+      // Restoring the page after the rejected observation cannot revive it.
+      x.expand.disabled = false; x.f.userBody!.text = originalBody; x.f.world.__computaModelOwner = originalOwner;
+      x.f.chatMode.values['aria-pressed'] = 'true'; x.f.workMode.values['aria-pressed'] = 'false'; pin.invalidated = false;
+      const result = await pending;
+      expect(result.error, mutation).toBeDefined(); expect(result, mutation).not.toHaveProperty('firstUserVerified');
+      expect(x.expand.clicks, mutation).toBe(0); expect(x.send.clicks, mutation).toBe(0);
+      expect((await x.inspect()).error, mutation).toBeDefined(); expect(x.expand.clicks, mutation).toBe(0);
+    }
+  });
+
+  test('native expiry releases a frozen-frame readiness wait and cannot be revived or replayed', async () => {
+    const x = await staged(); x.f.window.requestAnimationFrame = () => 1;
+    (x.expand as any).scrollIntoView = () => {};
+    let expire: (() => void) | undefined, budget: number | undefined;
+    (x.f.window.webkit as any).messageHandlers.computaModelClock = { postMessage: (request: any) => {
+      budget = request.milliseconds; return new Promise<void>(resolve => { expire = resolve; });
+    } };
+    const pending = x.inspect({ operationID: 'exposure-native-clock' }); await waiting(x);
+    expect(budget).toBeLessThanOrEqual(1_800); expect(budget).toBeGreaterThan(0); expire!();
+    const result = await pending;
+    expect(result.error).toBeDefined(); expect(JSON.parse(result.debugStructure).expansionExposure.waitOutcome).toBe('expired');
+    expect(x.expand.clicks).toBe(0); x.f.setHit(x.expand); x.emit('scroll');
+    expect((await x.inspect()).error).toBeDefined(); expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(0);
   });
 });
 

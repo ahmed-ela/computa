@@ -1769,6 +1769,8 @@ final class EmbeddedBrowserSession {
         case firstUserHash = "first_user_hash"
         case firstUserExpand = "first_user_expand"
         case firstUserExpandWait = "first_user_expand_wait"
+        case firstUserExposureWait = "first_user_exposure_wait"
+        case firstUserExposureDone = "first_user_exposure_done"
         case pageAction = "page_action"
         case finalModelGuard = "final_model_guard"
     }

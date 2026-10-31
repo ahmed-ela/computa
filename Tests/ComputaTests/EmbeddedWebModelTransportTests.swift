@@ -5685,6 +5685,65 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCollapsedFirstMessageWaitsForWebKitExposureThenRequiresTheExactExpandedBody() async throws {
+        for changedBody in [false, true] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(
+                expansionScript: changedBody ? "userBody.textContent += '!';" : "", exposureDelayFrames: 3))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await evaluate(view, """
+                const scroll = Element.prototype.scrollIntoView;
+                Element.prototype.scrollIntoView = function(options) {
+                  scroll.call(this, options);
+                  if (this.getAttribute('aria-label') === 'Show more') this.setAttribute('data-fixture-expansion-scroll', 'true');
+                };
+                return true;
+                """, world: .world(name: "computa-chatgpt-model-v1"))
+            var diagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+            defer { fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil) }
+            do {
+                let prompt = String(repeating: "Owned delayed layout payload line.\n", count: 600)
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTAssertEqual(sent["state"] as? String, "running")
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertFalse(changedBody, "Readiness must not grant ownership of a changed full body")
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+            } catch {
+                XCTAssertTrue(changedBody, "An unchanged body must survive the delayed WebKit hit test: \(error)")
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+            }
+            let ledger = try await evaluate(view, """
+                return {clicks:window.fixtureExpansionClicks, scrolls:window.fixtureExposureScrolls,
+                  frames:window.fixtureExposureFrames, coveredAtScroll:window.fixtureCoveredAtScroll};
+                """) as? [String: Any]
+            XCTAssertEqual(ledger?["clicks"] as? Int, 1)
+            XCTAssertEqual(ledger?["scrolls"] as? Int, 1)
+            XCTAssertEqual(ledger?["frames"] as? Int, 3)
+            XCTAssertEqual(ledger?["coveredAtScroll"] as? Bool, true)
+            let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            let exposure = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_expansion_exposure" })
+            XCTAssertEqual(exposure["afterScroll"] as? String, "other")
+            XCTAssertEqual(exposure["final"] as? String, "self")
+            XCTAssertEqual(exposure["waited"] as? Bool, true)
+            XCTAssertEqual(exposure["waitOutcome"] as? String, "ready")
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+            if !changedBody {
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            }
+            try await assertHumanTabIntact(fixture, retaining: changedBody ? fixture.createdTabs.last : nil)
+        }
+    }
+
     func testBoundFirstMessageDisplayRecoveryReprovesWholeBodyWithoutResending() async throws {
         let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
         defer { fixture.shutdown() }
@@ -12243,6 +12302,40 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(otherProvider), provider: .gemini))
     }
 
+    func testExpansionExposureDiagnosticsProjectOnlyFiniteReadinessFacts() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let exposure: [String: Any] = ["beforeScroll": "outside_viewport", "afterScroll": "other", "final": "self",
+            "scrolled": true, "waited": true, "waitOutcome": "ready", "waitMilliseconds": 42,
+            "obstructionText": "private_canary", "url": "https://private_canary"]
+        let source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "marker_not_final",
+            "scope": "marker_validation", "action": "inspect", "root": ["tag": "div", "classes": []],
+            "body": ["tag": "div", "classes": []], "userCount": 1, "textLength": 10_240, "lineCount": 82,
+            "markerOccurrences": 0, "controlDescendants": 0, "markerFinalLine": false, "submitted": true,
+            "markerMatches": true, "expansionExposure": exposure]
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(source), provider: .chatgpt))
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        let values = records.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        let result = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_expansion_exposure" })
+        XCTAssertEqual(result["afterScroll"] as? String, "other")
+        XCTAssertEqual(result["waitMilliseconds"] as? Int, 42)
+        for key in ["beforeScroll", "afterScroll", "final", "scrolled", "waited", "waitOutcome", "waitMilliseconds"] {
+            var changed = exposure; changed.removeValue(forKey: key)
+            var invalid = source; invalid["expansionExposure"] = changed
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalid), provider: .chatgpt))
+            changed[key] = "private_canary"; invalid["expansionExposure"] = changed
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalid), provider: .chatgpt))
+        }
+        for milliseconds in [-1, 1_801, 1.5, true] as [Any] {
+            var changed = exposure; changed["waitMilliseconds"] = milliseconds
+            var invalid = source; invalid["expansionExposure"] = changed
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalid), provider: .chatgpt))
+        }
+        var otherProvider = source; otherProvider["provider"] = "gemini"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(otherProvider), provider: .gemini))
+    }
+
     func testChatGPTAlternateBodyDiagnosticsRejectPrivateValuesAndDistinguishUnavailableAnalysis() throws {
         func encode(_ value: [String: Any]) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
@@ -15371,7 +15464,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false,
                                                expansionScript: String = "", expansionDelayMilliseconds: Int = 25,
-                                               earlyExpansionScript: String = "") -> String {
+                                               earlyExpansionScript: String = "", exposureDelayFrames: Int = 0) -> String {
         var page = acknowledgedAppendRacePage().replacingOccurrences(of: "user.appendChild(userBody);", with: """
             user.appendChild(userBody);
             if (window.fixturePrompts.length === 1) {
@@ -15387,6 +15480,28 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 setTimeout(() => { userBody.textContent = prompt; expand.remove(); \(expansionScript) }, \(expansionDelayMilliseconds));
               });
               user.appendChild(expand);
+              if (\(exposureDelayFrames) > 0) {
+                // A real WebKit hit-test obstruction survives the synchronous
+                // scroll return, then disappears only after rendering frames.
+                expand.style.cssText = 'position:fixed;left:240px;top:420px;width:120px;height:40px;z-index:1000';
+                const cover = document.createElement('div');
+                cover.style.cssText = 'position:fixed;left:240px;top:420px;width:120px;height:40px;z-index:1001';
+                document.body.appendChild(cover);
+                window.fixtureExposureScrolls = 0; window.fixtureExposureFrames = 0;
+                const scrolled = new MutationObserver(records => {
+                  if (!records.some(record => record.attributeName === 'data-fixture-expansion-scroll')) return;
+                  scrolled.disconnect(); window.fixtureExposureScrolls++;
+                  const rect = expand.getBoundingClientRect();
+                  window.fixtureCoveredAtScroll = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2) === cover;
+                  const settle = () => {
+                    window.fixtureExposureFrames++;
+                    if (window.fixtureExposureFrames >= \(exposureDelayFrames)) cover.remove();
+                    else requestAnimationFrame(settle);
+                  };
+                  requestAnimationFrame(settle);
+                });
+                scrolled.observe(expand, { attributes: true });
+              }
             }
             """)
         if !deferred {

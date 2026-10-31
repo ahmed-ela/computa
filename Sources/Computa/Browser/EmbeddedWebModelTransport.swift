@@ -3131,6 +3131,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
             safe["expansionOutcome"] = outcome
         }
+        if let rawExposure = value["expansionExposure"] {
+            guard provider == .chatgpt, let exposure = rawExposure as? [String: Any] else { return nil }
+            let hits: Set<String> = ["unavailable", "invalid_rect", "outside_viewport", "pointer_events",
+                "self", "descendant", "ancestor", "other", "none"]
+            var projected: [String: Any] = [:]
+            for key in ["beforeScroll", "afterScroll", "final"] {
+                guard let hit = exposure[key] as? String,
+                      hits.contains(hit) || key == "afterScroll" && hit == "not_scrolled" else { return nil }
+                projected[key] = hit
+            }
+            for key in ["scrolled", "waited"] {
+                guard let flag = firstUserDiagnosticBool(exposure[key]) else { return nil }
+                projected[key] = flag
+            }
+            guard let outcome = exposure["waitOutcome"] as? String,
+                  ["not_needed", "ready", "expired", "context_changed", "control_changed", "model_changed", "failed"].contains(outcome),
+                  let milliseconds = ComputerToolArgumentContract.exactInt64(exposure["waitMilliseconds"]),
+                  (0...1_800).contains(milliseconds) else { return nil }
+            projected["waitOutcome"] = outcome; projected["waitMilliseconds"] = milliseconds
+            safe["expansionExposure"] = projected
+        }
         if let rawFailure = value["expansionContextFailure"] {
             let failures: Set<String> = ["frame", "provider", "origin", "owner", "user_count", "submission", "submission_count",
                 "marker", "prompt", "private_pin", "product", "temporary", "root", "body", "conversation_route",
@@ -3435,6 +3456,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             initialExpansion["kind"] = "first_user_initial_expansion"; initialExpansion["provider"] = provider.rawValue
             for key in ["action", "scope"] { initialExpansion[key] = summary[key] }
         }
+        var exposure = summary.removeValue(forKey: "expansionExposure") as? [String: Any] ?? [:]
+        if !exposure.isEmpty {
+            exposure["kind"] = "first_user_expansion_exposure"; exposure["provider"] = provider.rawValue
+            for key in ["action", "scope"] { exposure[key] = summary[key] }
+        }
         var recovery = summary.removeValue(forKey: "recoveryLifecycle") as? [String: Any] ?? [:]
         if !recovery.isEmpty {
             recovery["kind"] = "first_user_recovery_lifecycle"; recovery["provider"] = provider.rawValue
@@ -3455,6 +3481,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
             + (initialExpansion.isEmpty ? [] : [initialExpansion])
+            + (exposure.isEmpty ? [] : [exposure])
             + (recovery.isEmpty ? [] : [recovery])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
             + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
@@ -3478,6 +3505,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_initial_expansion\"") {
                 event = "firstUserInitialExpansion"
+            }
+            else if safe.contains("\"kind\":\"first_user_expansion_exposure\"") {
+                event = "firstUserExpansionExposure"
             }
             else if safe.contains("\"kind\":\"first_user_recovery_lifecycle\"") {
                 event = "firstUserRecoveryLifecycle"
