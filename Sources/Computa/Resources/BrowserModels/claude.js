@@ -1955,6 +1955,43 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+// Completion belongs to the latest response's single message-actions bar.
+// Claude has changed the Copy button's testid; its observed accessible name
+// remains Copy. Author content and unrelated/nested toolbars cannot supply it.
+function modelCompletionObservation() {
+  const candidates = [...document.querySelectorAll('[data-testid="assistant-message"] [data-perf-reply-text]')].filter(modelVisible);
+  const answers = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
+  const answer = answers.at(-1), stop = modelFind(['button[aria-label="Stop response"]']);
+  const status = modelFind(['[data-testid="response-status-announcer"][role="status"]']);
+  const interrupted = !!status && !status.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
+    && (status.textContent || '').trim().replace(/’/g, "'") === "Claude's response was interrupted.";
+  const streaming = [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(modelVisible);
+  const busy = !!stop || streaming;
+  const message = answer?.closest('[data-testid="assistant-message"]');
+  const article = answer?.closest('[role="article"]');
+  const messages = article ? [...article.querySelectorAll('[data-testid="assistant-message"]')] : [];
+  const bodies = article ? [...article.querySelectorAll('[data-perf-reply-text]')] : [];
+  const bars = article ? [...article.querySelectorAll('[data-testid="message-actions"]')] : [];
+  const outsideAuthoredContent = node => !!node && !node.closest('[data-perf-reply-text], [data-testid="user-message"], pre, code')
+    && node.closest('[role="article"]') === article
+    && (!node.closest('[data-testid="assistant-message"]') || node.closest('[data-testid="assistant-message"]') === message);
+  const scopeOwned = !!article && !article.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
+    && messages.length === 1 && messages[0] === message && bodies.includes(answer)
+    && bodies.every(body => body === answer || answer.contains(body))
+    && article.querySelectorAll('[data-testid="user-message"]').length === 0;
+  const actionBar = scopeOwned && bars.length === 1 && outsideAuthoredContent(bars[0]) ? bars[0] : null;
+  const copies = actionBar ? [...actionBar.querySelectorAll('button[aria-label="Copy"]')] : [];
+  const copy = copies.length === 1 && outsideAuthoredContent(copies[0])
+    && copies[0].closest('[data-testid="message-actions"]') === actionBar ? copies[0] : null;
+  // A toolbar may use display:contents and have no box of its own. The exact
+  // button must be visible; the toolbar must remain semantically enabled.
+  const barEnabled = !!actionBar && actionBar.isConnected && !actionBar.disabled
+    && actionBar.getAttribute('aria-disabled') !== 'true' && !actionBar.closest('[hidden], [inert], [aria-hidden="true"]')
+    && !['hidden', 'collapse'].includes(getComputedStyle(actionBar).visibility) && getComputedStyle(actionBar).display !== 'none';
+  const scopedCopies = copies.length, enabledCopies = copy && barEnabled && modelEnabled(copy) ? 1 : 0;
+  const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies === 1;
+  return { answers, answer, stop, message, article, actionBar, copy, busy, interrupted, scopedCopies, enabledCopies, answerComplete };
+}
 // Diagnostic only: explain the existing completion guard without granting
 // completion from a missing, renamed, moved, hidden or disabled control.
 function modelCompletionStructure(answer, message, article) {
@@ -2286,6 +2323,7 @@ if (ownedUserCount > 0) {
   return modelFirstUserFailure('first_missing');
 if (usageLimited && input.action !== 'stop') return modelUsageLimitFailure();
 
+let completionSnapshot = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('claude');
@@ -2316,21 +2354,9 @@ async function providerPageAction() {
   const usageLimited = modelUsageLimited();
   if (usageLimited && action !== 'stop') return modelUsageLimitFailure();
   const composer = modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]']);
-  const candidates = [...document.querySelectorAll('[data-testid="assistant-message"] [data-perf-reply-text]')].filter(modelVisible);
-  const answers = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
-  const answer = answers.at(-1), stop = modelFind(['button[aria-label="Stop response"]']);
-  const status = modelFind(['[data-testid="response-status-announcer"][role="status"]']);
-  const interrupted = !!status && !status.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
-    && (status.textContent || '').trim().replace(/’/g, "'") === "Claude's response was interrupted.";
-  const streaming = [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(modelVisible);
-  const busy = !!stop || streaming;
-  const message = answer?.closest('[data-testid="assistant-message"]');
-  // The observed article is a DIV with this role, not necessarily an ARTICLE tag.
-  const article = answer?.closest('[role="article"]');
-  const copies = article && article.querySelectorAll('[data-testid="assistant-message"]').length === 1
-    ? [...article.querySelectorAll('[data-testid="message-actions"] button[data-testid="action-bar-copy"][aria-label="Copy"]')] : [];
-  const scopedCopies = copies.length, enabledCopies = copies.filter(modelEnabled).length;
-  const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies > 0;
+  const completion = modelCompletionObservation();
+  const { answers, answer, stop, message, article, busy, interrupted, scopedCopies, enabledCopies, answerComplete } = completion;
+  completionSnapshot = completion;
   const temporary = modelTemporaryVerified();
   const temporaryActionAvailable = modelEnabled(modelFind(['button[aria-label="Use incognito"]']));
   const responseExtraction = modelResponseExtraction(answer);
@@ -2434,6 +2460,24 @@ async function providerPageAction() {
   return { submitted: true };
 }
 const observed = await websiteModelFinalGuard('claude', input, await providerPageAction(), modelTemporaryVerified);
+// The final model proof can yield while opening/closing the picker. Never
+// admit a stale completed response if its exact physical landmarks, text, latest
+// answer, or streaming state changed during that proof. A fresh read may qualify
+// the replacement; this read only withdraws completion and performs no action.
+if (!observed.error && observed.answerComplete === true) {
+  const current = modelCompletionObservation();
+  const unchanged = completionSnapshot && current.answerComplete
+    && ['answer', 'message', 'article', 'actionBar', 'copy'].every(key => current[key] === completionSnapshot[key])
+    && current.answers.length === completionSnapshot.answers.length
+    && modelResponseText(current.answer, modelResponseExtraction(current.answer)).slice(0, 220_001) === observed.text;
+  if (!unchanged) {
+    observed.answerComplete = false;
+    observed.busy = current.busy; observed.interrupted = current.interrupted;
+    observed.completionEvidence = { ...observed.completionEvidence, logicalAnswers: current.answers.length,
+      scopedCopies: current.scopedCopies, enabledCopies: current.enabledCopies,
+      claudeCompletionStructure: modelCompletionStructure(current.answer, current.message, current.article) };
+  }
+}
 if (observed.error === 'first_user_observation_replaced') return observed;
 if (['inspect', 'verifyModel'].includes(input.action) && modelUserRoots().length !== ownedUserCount) {
   const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, modelUserRoots().length,

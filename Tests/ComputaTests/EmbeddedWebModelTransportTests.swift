@@ -11000,6 +11000,84 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
     }
 
+    func testClaudeSemanticCopyCompletionUsesOwnedControlsWithoutObsoleteTestID() async throws {
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "claude-native-fixture", "input": "Read the fixture", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]]]))
+        for scenario in ["missing", "changed_tool", "nested_display_contents", "authored", "duplicate"] {
+            let negative = ["authored", "duplicate"].contains(scenario)
+            let reply = scenario == "changed_tool" ? Self.fixtureToolReply : #"{"type":"message","text":"Fixture reply"}"#
+            let variation: String
+            switch scenario {
+            case "changed_tool": variation = "copy.setAttribute('data-testid', 'fixture-new-copy-id');"
+            case "nested_display_contents": variation = """
+                const nested=document.createElement('div'); nested.setAttribute('data-perf-reply-text','');
+                nested.textContent=body.textContent; body.replaceChildren(nested);
+                actions.style.display='contents'; answer.appendChild(actions);
+                """
+            case "authored": variation = "body.appendChild(actions);"
+            case "duplicate": variation = """
+                const duplicate=copy.cloneNode(true); duplicate.setAttribute('data-fixture-copy-duplicate','');
+                actions.appendChild(duplicate);
+                """
+            default: variation = ""
+            }
+            let base = Self.providerPage(.claude)
+            let page = base.replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                copy.removeAttribute('data-testid');
+                body.textContent=\(try matchedProbeJSON(reply));
+                window.fixtureSemanticActions=actions; window.fixtureSemanticTurn=turn;
+                \(variation)
+                document.getElementById('messages').appendChild(turn);
+                """)
+            XCTAssertNotEqual(page, base)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.claude)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read the fixture"])
+            if negative {
+                let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(first["state"] as? String, "running", scenario)
+                // Cross the ordinary completion settle interval: an authored
+                // or ambiguous Copy must not become a completed model reply.
+                try await Task.sleep(for: .milliseconds(1_900))
+                let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["state"] as? String, "running", scenario)
+                _ = try await evaluate(view, """
+                    window.fixtureSemanticTurn.appendChild(window.fixtureSemanticActions);
+                    document.querySelectorAll('[data-fixture-copy-duplicate]').forEach(node=>node.remove()); return true;
+                    """)
+            }
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            XCTAssertEqual(complete["text"] as? String, reply, scenario)
+            let decoded = try WebModelResponseCodec.parseEmbeddedReply(reply, request: prepared)
+            if scenario == "changed_tool" {
+                guard case let .toolCalls(calls) = decoded else { return XCTFail("Expected the unchanged tool envelope") }
+                XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls.first?.name, "exec_command")
+                XCTAssertEqual(calls.first?.argumentsJSON, #"{"cmd":"printf fixture"}"#)
+            } else { XCTAssertEqual(decoded, .message("Fixture reply")) }
+            if scenario == "nested_display_contents" {
+                let layout = try await evaluate(view, """
+                    return {barRects:window.fixtureSemanticActions.getClientRects().length,
+                      copyRects:window.fixtureSemanticActions.querySelector('button[aria-label="Copy"]').getClientRects().length,
+                      replyMarkers:window.fixtureSemanticTurn.querySelectorAll('[data-perf-reply-text]').length};
+                    """) as? [String: Int]
+                XCTAssertEqual(layout?["barRects"], 0)
+                XCTAssertGreaterThan(layout?["copyRects"] ?? 0, 0)
+                XCTAssertEqual(layout?["replyMarkers"], 2)
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))

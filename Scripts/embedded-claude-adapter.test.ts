@@ -755,6 +755,121 @@ describe("embedded Claude fixed adapter", () => {
     expect(await f.run()).toMatchObject({ answerComplete: false });
   });
 
+  test("the unique semantic Copy control completes after its obsolete testid disappears or changes", async () => {
+    for (const testid of [undefined, "new-provider-copy-id"] as const) for (const insideMessage of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (testid === undefined) delete f.copy.values["data-testid"]; else f.copy.values["data-testid"] = testid;
+      if (insideMessage) {
+        f.article.children = f.article.children.filter(node => node !== f.controls); f.response.append(f.controls);
+      }
+      const observed = await f.run();
+      expect(observed).toMatchObject({ answerComplete: true, busy: false, interrupted: false,
+        firstUserVerified: true, firstUserMarkerVerified: true, text: '{"type":"message","text":"OK"}',
+        completionEvidence: { scopedCopies: 1, enabledCopies: 1,
+          claudeCompletionStructure: { articleActionBars: 1, articleCopyLabelButtons: 1, articleCopyTestIDButtons: 0 } } });
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("semantic completion accepts one logical nested reply body and a display-contents toolbar", async () => {
+    const f = fixture(provider, { userPrompt: prompt, computedStyle: node => ({ visibility: "visible",
+      display: node.values["data-testid"] === "message-actions" ? "contents" : "block" }) });
+    delete f.copy.values["data-testid"];
+    const nested = new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text);
+    f.answer.text = ""; f.answer.append(nested);
+    f.controls.getClientRects = () => [];
+    expect(await f.run()).toMatchObject({ answerComplete: true, responseCount: 1,
+      text: '{"type":"message","text":"OK"}', completionEvidence: { scopedCopies: 1, enabledCopies: 1 } });
+  });
+
+  test("semantic completion rejects authored, nested, duplicate, hidden, disabled and unrelated controls", async () => {
+    for (const variant of ["authored-bar", "user-bar", "nested-article", "nested-bar", "duplicate-bar", "duplicate-copy",
+      "hidden-duplicate-copy", "disabled-copy", "aria-disabled-copy", "hidden-copy", "hidden-bar", "disabled-bar", "code-copy",
+      "foreign-copy", "other-assistant", "other-reply-body", "user-in-article", "nested-article-scope"] as const) {
+      const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+      const move = (node: Element, parent: Element) => {
+        if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node);
+        parent.append(node);
+      };
+      if (variant === "authored-bar") move(f.controls, f.answer);
+      if (variant === "user-bar") move(f.controls, f.userBody!);
+      if (variant === "nested-article" || variant === "code-copy") {
+        const wrapper = new Element(variant === "code-copy" ? "CODE" : "DIV", variant === "nested-article" ? { role: "article" } : {});
+        f.controls.append(wrapper); move(f.copy, wrapper);
+      }
+      if (variant === "nested-bar") {
+        const nested = new Element("DIV", { "data-testid": "message-actions" }); f.controls.append(nested); move(f.copy, nested);
+      }
+      if (variant === "duplicate-bar") f.article.append(new Element("DIV", { "data-testid": "message-actions" }));
+      if (["duplicate-copy", "hidden-duplicate-copy"].includes(variant)) f.controls.append(new Element("BUTTON", {
+        "aria-label": "Copy", ...(variant === "hidden-duplicate-copy" ? { hidden: "" } : {}) }));
+      if (variant === "disabled-copy") f.copy.disabled = true;
+      if (variant === "aria-disabled-copy") f.copy.values["aria-disabled"] = "true";
+      if (variant === "hidden-copy") f.copy.values.hidden = "";
+      if (variant === "hidden-bar") f.controls.values.hidden = "";
+      if (variant === "disabled-bar") f.controls.values["aria-disabled"] = "true";
+      if (variant === "foreign-copy") move(f.controls, f.body);
+      if (variant === "other-assistant") f.article.append(new Element("DIV", { "data-testid": "assistant-message" }));
+      if (variant === "other-reply-body") f.response.append(new Element("DIV", { "data-perf-reply-text": "" }, "Other response"));
+      if (variant === "user-in-article") f.article.append(new Element("DIV", { "data-testid": "user-message" }, "Other user"));
+      if (variant === "nested-article-scope") {
+        const wrapper = new Element("DIV", { "data-testid": "assistant-message" }); f.messages.append(wrapper); move(f.article, wrapper);
+      }
+      const observed = await f.run();
+      // A user-message mutation fails ownership before completion is considered.
+      if (variant === "user-in-article") expect(observed.error).toBe("conversation_changed");
+      else expect(observed.answerComplete).toBe(false);
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("semantic completion cannot reuse an older response's Copy toolbar", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+    const article = new Element("DIV", { role: "article" });
+    const message = new Element("DIV", { "data-testid": "assistant-message", "data-is-streaming": "false" });
+    message.append(new Element("DIV", { "data-perf-reply-text": "" }, '{"type":"message","text":"New response"}'));
+    article.append(message); f.messages.append(article);
+    expect(await f.run()).toMatchObject({ answerComplete: false, responseCount: 2,
+      text: '{"type":"message","text":"New response"}', completionEvidence: { scopedCopies: 0, enabledCopies: 0 } });
+  });
+
+  test("the final model await cannot admit stale response landmarks, content or a restarted stream", async () => {
+    for (const variant of ["remove-copy", "replace-copy", "duplicate-copy", "replace-bar", "hidden-copy", "disabled-copy",
+      "streaming", "stop", "interrupted", "replace-answer", "changed-text", "append-response"] as const) {
+      const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+      const picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
+      picker.selected("Sonnet 5"); const click = picker.trigger.onClick!; let closes = 0;
+      picker.trigger.onClick = () => {
+        const wasOpen = picker.menu.values.hidden === undefined || picker.nested?.values.hidden === undefined;
+        click();
+        if (!wasOpen || ++closes !== 2) return;
+        if (variant === "remove-copy") f.copy.connected = false;
+        if (variant === "replace-copy") f.controls.replaceChildren(new Element("BUTTON", { "aria-label": "Copy" }));
+        if (variant === "duplicate-copy") f.controls.append(new Element("BUTTON", { "aria-label": "Copy" }));
+        if (variant === "replace-bar") {
+          const bar = new Element("DIV", { "data-testid": "message-actions" }); bar.append(new Element("BUTTON", { "aria-label": "Copy" }));
+          f.article.children = f.article.children.filter(node => node !== f.controls); f.controls.connected = false; f.article.append(bar);
+        }
+        if (variant === "hidden-copy") f.copy.values.hidden = "";
+        if (variant === "disabled-copy") f.copy.disabled = true;
+        if (variant === "streaming") f.response.values["data-is-streaming"] = "true";
+        if (variant === "stop") f.stop.connected = true;
+        if (variant === "interrupted") f.status.text = "Claude's response was interrupted.";
+        if (variant === "replace-answer") f.response.replaceChildren(new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text));
+        if (variant === "changed-text") f.answer.text = '{"type":"message","text":"Changed"}';
+        if (variant === "append-response") {
+          const article = new Element("DIV", { role: "article" }), message = new Element("DIV", { "data-testid": "assistant-message", "data-is-streaming": "false" });
+          const bar = new Element("DIV", { "data-testid": "message-actions" }); bar.append(new Element("BUTTON", { "aria-label": "Copy" }));
+          message.append(new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text)); article.append(message, bar); f.messages.append(article);
+        }
+      };
+      const observed = await completeClaudeRead(f, "inspect", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" } });
+      expect(closes).toBe(2);
+      expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(false);
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
   test("completion diagnostics distinguish a missing article from zero scoped controls without accepting it", async () => {
     const f = fixture(provider, { userPrompt: prompt });
     delete f.article.values.role;
@@ -779,7 +894,7 @@ describe("embedded Claude fixed adapter", () => {
       if (variant === "testid") f.copy.values["data-testid"] = "changed";
       if (variant === "label") f.copy.values["aria-label"] = "changed";
       const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
-      expect(observed.answerComplete).toBe(false);
+      expect(observed.answerComplete).toBe(variant === "testid");
       expect(shape.articleIsMessage).toBe(variant === "self");
       expect(shape.articleAssistantDescendants).toBe(variant === "self" ? 0 : 1);
       expect(shape.articleActionBars).toBe(["self", "bar"].includes(variant) ? 0 : 1);
@@ -822,11 +937,11 @@ describe("embedded Claude fixed adapter", () => {
     expect(JSON.stringify(shape)).not.toContain("PRIVATE");
   });
 
-  test("completion diagnostic counts and ancestor walks are bounded without changing completion", async () => {
+  test("completion diagnostic counts and ancestor walks remain bounded when duplicate controls deny completion", async () => {
     const f = fixture(provider, { userPrompt: prompt });
     for (let index = 0; index < 1_005; index++) f.controls.append(new Element("BUTTON", { "aria-label": "Copy", "data-testid": "action-bar-copy" }));
     const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
-    expect(observed.answerComplete).toBe(true);
+    expect(observed.answerComplete).toBe(false);
     expect(shape.articleExactCopyButtons).toBe(1_000);
     expect(shape.articleVisibleCopies).toBe(1_000); expect(shape.articleEnabledCopies).toBe(1_000);
     expect(shape.ancestors).toHaveLength(4);

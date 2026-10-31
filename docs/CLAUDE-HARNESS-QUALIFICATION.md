@@ -24,8 +24,8 @@ native logs and screenshot are retained, and its prompt was not replayed.
 A separate harmless direct Incognito control in the ordinary embedded browser
 returned its exact marker. Its accessibility tree exposed a completed assistant
 message, a Message actions toolbar with Copy/Read aloud/Retry, and the status
-“Claude finished the response.” That is a direct website result, not a repaired
-harness result. The precise DOM mismatch remains under investigation.
+"Claude finished the response." That is a direct website result, not a repaired
+harness result.
 
 ## Candidate 341: bounded structural diagnostics
 
@@ -38,8 +38,32 @@ changes cannot consume the diagnostic needed for this failure. Diagnostic
 exceptions or invalid values cannot authorize or reject an otherwise valid
 response.
 
-Candidate build/install and live results are pending. Diagnostic coverage is not
-a completion fix or a provider qualification pass.
+Signed build341, source `7da9620e364924b21746d53d356380acb9bbaf1a`, passed 108
+adapter tests and six native tests and was installed after all artifact checks.
+Its fresh Sonnet 5.5 request captured the mismatch at the first idle read:
+one article, one assistant, one reply body and one message-actions bar;
+`data-is-streaming=false`; one Copy-labelled button in that bar; **zero** buttons
+matching the old `data-testid="action-bar-copy"` requirement. The obsolete test
+identifier prevented completion despite the semantically correct Copy control.
+The diagnostic did not record whether the identifier was removed or renamed.
+
+After preserving those facts, the operator stopped the diagnostic request at
+77.050 seconds. Its genuine interrupted turn, zero tool calls and matching saved
+closed cleanup receipt are captured separately. It is not a qualification pass.
+No Web Inspector settings were enabled for these observations.
+
+## Candidate 342: semantic Copy-control binding
+
+The repair locates the unique Copy-labelled button in the latest owned response's
+single message-actions bar instead of relying on the obsolete button test ID.
+The response, article, model, first-user ownership, streaming/interruption,
+visibility and cleanup checks remain required. Authored reply content, other
+messages, ambiguous bars and duplicate, hidden or disabled controls cannot
+supply completion. After the final awaited model proof, a synchronous check
+requires the same latest answer, physical control and response text; changes
+withdraw completion until a fresh read can establish it.
+
+Candidate342 installed/live qualification remains pending.
 
 ## Qualification contract
 
