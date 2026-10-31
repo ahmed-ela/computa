@@ -41,7 +41,7 @@ final class ComputaLaunchModeTests: XCTestCase {
         XCTAssertTrue(state.tasks.isEmpty)
         XCTAssertEqual(state.connectionState, .disconnected)
         XCTAssertEqual(state.accessMode, .askEveryTime)
-        XCTAssertEqual(state.defaultModel, LocalModelCatalog.defaultModelID)
+        XCTAssertEqual(state.defaultModel, WebsiteModelCatalog.freshProfileDefaultModelID)
         XCTAssertEqual(state.automationPermissions.accessibility, .notGranted)
         XCTAssertEqual(state.automationPermissions.screenRecording, .notGranted)
         let shutdown = await state.shutdownRuntime()

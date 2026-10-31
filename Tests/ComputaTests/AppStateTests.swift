@@ -254,7 +254,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(secondSubmission?.modelID, nineBID)
 
         state.createTask()
-        XCTAssertEqual(state.selectedTask?.model, LocalModelCatalog.defaultModelID)
+        XCTAssertEqual(state.selectedTask?.model, state.defaultModel)
         XCTAssertFalse(state.setTaskModel("unlisted/model", taskID: firstTaskID))
     }
 

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { bundleFiles, inspectApp, packageRelease, parseOptions, sha256, type Context } from "./package-release";
+import { bundleFiles, inspectApp, packageRelease, parseOptions, sha256, validateRuntimeManifest, type Context } from "./package-release";
 
 const directories: string[] = [];
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
@@ -18,8 +18,12 @@ async function fixture() {
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
   await chmod(join(app, "Contents/MacOS/Computa"), 0o755);
   const binary = join(app, "Contents/Resources/AgentRuntime/codex-app-server");
+  const binaryText = "fixture-runtime".repeat(4);
+  await file(binary, binaryText);
+  await chmod(binary, 0o755);
   await file(join(app, "Contents/Resources/AgentRuntime/manifest.json"), JSON.stringify({ schemaVersion: 1,
-    platform: "macos", architecture: "arm64", executable: "codex-app-server", binarySize: 7, binarySHA256: await sha256(binary) }));
+    runtimeVersion: "mactopus-fixture", sourceCommit: "4607249e430dac1c961df4dc615beae88e33cec8", patchSHA256: "a".repeat(64),
+    platform: "macos", architecture: "arm64", executable: "codex-app-server", binarySize: binaryText.length, binarySHA256: await sha256(binary) }));
   const calls: string[][] = [];
   let failing = "";
   const context: Context = {
@@ -67,6 +71,81 @@ test("signed-test packaging preserves exact app bytes and mode, records pins, an
   expect(await readFile(join(f.output, "SHA256SUMS"), "utf8")).toContain(await sha256(result.dmg));
   expect(f.calls.some(call => call.includes("--sign") || call[0].endsWith("/open") || call[0].endsWith("/xattr"))).toBe(false);
   expect(f.calls.some(call => call[0].endsWith("/hdiutil") && call[1] === "verify")).toBe(true);
+  const guide = await readFile(join(result.stage, "payload/READ ME.txt"), "utf8");
+  expect(guide).toContain("drag Computa.app to Applications");
+  expect(guide).toContain("Browser and API models need no Python, MLX or model downloads");
+  expect(guide).toContain("After signing in, quit and reopen Computa once to discover verified model choices");
+  expect(guide).toContain("Optional legacy local-model setup");
+});
+
+test("packages schema2 runtime capabilities without changing the app or its integrity/signing checks", async () => {
+  const f = await fixture();
+  const path = join(f.app, "Contents/Resources/AgentRuntime/manifest.json");
+  const runtime = JSON.parse(await readFile(path, "utf8"));
+  runtime.schemaVersion = 2;
+  runtime.capabilities = ["browserLifecycleObservationsV1", "threadDynamicToolsV1"];
+  await file(path, JSON.stringify(runtime));
+  const before = await bundleFiles(f.app);
+  const result = (await packageRelease(f.options, f.context))!;
+  expect(await bundleFiles(f.app)).toEqual(before);
+  expect(JSON.parse(await readFile(join(result.stage, "payload/Computa.app/Contents/Resources/AgentRuntime/manifest.json"), "utf8")))
+    .toEqual(runtime);
+  const signatures = f.calls.filter(call => call[0] === "/usr/bin/codesign");
+  expect(signatures.some(call => call.some(value => value.includes("certificate leaf[field.1.2.840.113635.100.6.1.13] exists"))
+    && call.at(-1) === path.replace("manifest.json", "codex-app-server"))).toBe(true);
+  expect(signatures.some(call => call.includes("--strict") && call.at(-1) === path.replace("manifest.json", "codex-app-server"))).toBe(true);
+  expect(signatures.some(call => call.includes("--deep") && call.at(-1) === f.app)).toBe(true);
+  expect(f.calls.some(call => call.includes("--sign"))).toBe(false);
+});
+
+test("runtime manifest validation matches native supported schema and exact capability sets", async () => {
+  const f = await fixture();
+  const actual = { ...JSON.parse(await readFile(join(f.app, "Contents/Resources/AgentRuntime/manifest.json"), "utf8")),
+    schemaVersion: 2, capabilities: ["browserLifecycleObservationsV1"] };
+  expect(() => validateRuntimeManifest(actual)).not.toThrow();
+  const nativeSource = await readFile(resolve(import.meta.dir, "../Sources/Computa/Runtime/ComputaRuntimeArtifact.swift"), "utf8");
+  expect(nativeSource).toContain(`static let sourceCommit = "${actual.sourceCommit}"`);
+  const legacy = { ...actual, schemaVersion: 1 }; delete legacy.capabilities;
+  expect(() => validateRuntimeManifest(legacy)).not.toThrow();
+  for (const capabilities of [[], ["threadDynamicToolsV1"], ["browserLifecycleObservationsV1"],
+    ["threadDynamicToolsV1", "browserLifecycleObservationsV1"]]) {
+    expect(() => validateRuntimeManifest({ ...legacy, schemaVersion: 2, capabilities })).not.toThrow();
+  }
+  for (const capabilities of [null, {}, "threadDynamicToolsV1", [true], [1], [null], [""],
+    ["ThreadDynamicToolsV1"], ["threadDynamicToolsV1 "], ["browserLifecycleObservationsV2"],
+    ["threadDynamicToolsV1", 1], ["threadDynamicToolsV1", "threadDynamicToolsV1"],
+    ["browserLifecycleObservationsV1", "browserLifecycleObservationsV1"]]) {
+    expect(() => validateRuntimeManifest({ ...legacy, schemaVersion: 2, capabilities })).toThrow("capabilities");
+  }
+  for (const schemaVersion of [null, true, "2", -1, 0, 1.5, 3]) {
+    expect(() => validateRuntimeManifest({ ...legacy, schemaVersion })).toThrow("schema");
+  }
+  for (const invalid of [null, [], { ...legacy, capabilities: [] }, { ...legacy, schemaVersion: 2 },
+    { ...actual, extra: true }, { ...actual, runtimeVersion: "" }, { ...actual, runtimeVersion: "version\n" },
+    { ...actual, runtimeVersion: "x".repeat(65) }, { ...actual, sourceCommit: "0".repeat(40) },
+    { ...actual, patchSHA256: "0".repeat(64) }, { ...actual, binarySHA256: actual.binarySHA256 + "\n" },
+    { ...actual, binarySize: true }, { ...actual, binarySize: 31 }, { ...actual, binarySize: 32.5 },
+    { ...actual, binarySize: 512 * 1024 * 1024 + 1 }, { ...actual, architecture: "x86_64" }]) {
+    expect(() => validateRuntimeManifest(invalid)).toThrow("manifest");
+  }
+});
+
+test("schema2 cannot bypass runtime checksum, supported binary slice or Developer ID verification", async () => {
+  const f = await fixture();
+  const path = join(f.app, "Contents/Resources/AgentRuntime/manifest.json");
+  const runtime = { ...JSON.parse(await readFile(path, "utf8")), schemaVersion: 2, capabilities: ["browserLifecycleObservationsV1"] };
+  await file(path, JSON.stringify(runtime));
+  const run = f.context.run;
+  f.context.run = command => command[0] === "/usr/bin/lipo" && command.at(-1)!.endsWith("codex-app-server")
+    ? Promise.resolve({ code: 0, stdout: "x86_64" }) : run(command);
+  await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("arm64");
+  f.context.run = run;
+  f.fail("certificate leaf");
+  await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("Command failed");
+  f.fail("");
+  await file(join(f.app, "Contents/Resources/AgentRuntime/codex-app-server"), "changed signed bytes");
+  await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("sealed manifest");
+  expect(f.calls.some(call => call[0] === "/usr/bin/ditto" || call[0] === "/usr/bin/hdiutil")).toBe(false);
 });
 
 test("rejects invalid SemVer tags, nonnumeric Apple metadata and a tag for a different app version", async () => {

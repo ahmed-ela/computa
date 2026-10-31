@@ -103,6 +103,13 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 }
 
 enum WebsiteModelCatalog {
+    /// A fresh profile selects normal Chat's Instant policy. This is an intent,
+    /// not evidence of account availability; discovery still supplies the menu.
+    static let freshProfileDefaultModelID = WebsiteModelChoice(
+        provider: "chatgpt", key: WebsiteModelChoice.ChatGPTPower.instant.modelKey,
+        label: WebsiteModelChoice.ChatGPTPower.instant.label
+    ).modelID
+
     static let providers = ["chatgpt", "gemini", "claude"]
     static let maximumChoicesPerProvider = 32
     static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"

@@ -8,6 +8,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let instant = Self.choices("chatgpt")[0].modelID
         let task = AgentTask(title: "Prewarm fixture", summary: "", status: .draft,
@@ -50,6 +51,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let instant = Self.choices("chatgpt")[0].modelID
         let websiteTask = AgentTask(title: "Website fixture", summary: "", status: .draft,
@@ -91,6 +93,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser)
