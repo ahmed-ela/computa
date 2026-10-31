@@ -5,8 +5,18 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current status (October 31): build332, source `05d364f`, is installed and audited.
-CAPTCHA investigation takes priority over all-model qualification. After one
+Current checkpoint (October 31, 2026, 10:41:17.909 UTC / 06:41:17.909 EDT):
+Computa 0.7.0 build 333, executable source
+`f58c5c7d92324d5a24fcc28d1ea175452acad170`, is installed and audited. One fresh
+Gemini 3.5 Flash-Lite request returned its exact expected marker in 8.035 seconds,
+with verified selection/submission/release, zero tools and a saved closed
+cleanup receipt. No CAPTCHA or model error occurred in this check. This proves
+current direct-response readiness, not that recurrence has been prevented.
+See the [dated recovery checkpoint](#october-31-dated-recovery-and-merge-checkpoint)
+for the last action, commits and evidence.
+
+The preceding recovery/restart comparisons ran on build 332, source `05d364f`.
+CAPTCHA root cause and all-model qualification remain unresolved. After one
 specifically approved CAPTCHA completion, the direct website marker passed;
 another direct marker passed after restart, followed by an owned 3.1 Pro marker
 after a second restart. The owned task completed in 11.158 seconds with one
@@ -1267,3 +1277,55 @@ initial redirect chain. The original root-cause investigation remains unresolved
 
 Evidence: `native333-full-repaired/{plan.json,test.log,result.json}` and
 `native333-store-repair-result.json` under the existing local evidence root.
+
+### October 31: dated recovery and merge checkpoint
+
+This is the state being documented for PR #8's authorized squash merge, as of
+October 31, 2026. A successful request must not be relabeled a permanent CAPTCHA
+fix. The immediate observed recovery followed completion of the specifically
+approved Google CAPTCHA on unchanged build 332; no production patch between
+the preceding failed comparison and that recovery established its cause.
+
+| Date/time (UTC; EDT is UTC minus four hours) | Action or commit | Verified result and limit |
+| --- | --- | --- |
+| October 31, 09:15:29 | Approved CAPTCHA completion; build 332, source `05d364f` | Human Gemini HTTP 200 followed the checkbox clearing. A future exemption-cookie candidate appeared. This is a recovery baseline, not proof of which state caused recovery or why the challenge occurred. |
+| October 31, before 09:52:30 | Direct/owned comparisons and three ordinary restarts; recorded through `724ec49` | Direct cases E/F and owned Pro cases G/H passed. Owned durations were 11.158 and 8.508 seconds, with exact answers and saved closed cleanup. Intervening native turns prevent treating this as an isolated idle/expiry experiment. |
+| October 31, 10:25:39 | `f58c5c7d92324d5a24fcc28d1ea175452acad170` — persist bounded CAPTCHA evidence before cleanup | Adds automatic diagnostics, not automatic challenge completion or a prevention fix. All 219 focused native tests passed, including 34 new diagnostic cases. |
+| October 31, 10:31:08.512 | Installed build 333 audit | Source, executable, resources, version, signature, hardened runtime and rollback checks passed. This was an installation, not a published/notarized release. |
+| October 31, 10:41:09.975–10:41:17.909 | Last controlled provider action: fresh Gemini 3.5 Flash-Lite task, case I | Website journal progressed from `start_requested` through `submission_verified`, `complete` and `release_verified`. The native turn took 8.035 seconds, returned the exact marker and made zero tool calls. Cleanup saved `outcome=closed`, `reason=not_created`, `receiptSaved=true`. No CAPTCHA appeared. |
+
+The exact prompt was:
+
+```text
+Connectivity check. Do not use tools, browse, or interact with any application. Respond directly with exactly: GEMINI-CAPTCHA-CURRENT-333-I
+```
+
+The answer was exactly `GEMINI-CAPTCHA-CURRENT-333-I`. Website selection evidence
+identified 3.5 Flash-Lite at submission, completion and release. Two earlier UI
+Send attempts were interrupted while the prompt remained a draft; an exact
+native-record check found zero matching tasks before the single actual send.
+No uncertain prompt was replayed. The user's two current Kimi tabs remained
+open; the Gemini model view was released by the app.
+
+This check did not restart the app, exercise tools, test all Gemini models, or
+establish that the next request cannot be challenged. The last pre-check cookie
+sample still had an unexpired candidate with over one hour remaining; elapsed
+time since recovery is not evidence that an expiry boundary was tested. The
+automatic incident directory was absent after the successful request, so this
+is not a live qualification of diagnostic capture during a Google failure.
+
+The retained 302-to-429 failures, incomplete initial request-cookie evidence,
+and unresolved provider/network cause remain valid. If another challenge
+appears, the app must preserve the new bounded incident before cleanup and
+pause for verification; it must not bypass the challenge or weaken ownership,
+model, submission or cleanup checks. The merged diagnostics make that next
+failure observable, while prevention remains open work.
+
+Evidence: `captcha333-lifecycle/marker-i/{plan.json,dispatch.json,readiness-review.json}`,
+its `capture/{summary.json,website-journal.jsonl,cleanup-journal.jsonl,finite-diagnostics.json,success.png}`,
+`artifact333-installed-audit.json`, and
+`cookie-timeline332-build333-before-i.json` under the existing private local
+qualification evidence root. `dispatch.json` records the earlier send intent;
+the journal timestamps above identify the actual submitted task. The latest
+documentation commit adds this checkpoint without changing build 333's
+executable source identity.

@@ -6,6 +6,13 @@ page is observed, or the Gemini adapter reports verification required. The
 capture runs automatically; Web Inspector and its developer settings are not
 needed. This adds evidence for the unresolved recurrence, not a prevention fix.
 
+Installed-source checkpoint: `f58c5c7d92324d5a24fcc28d1ea175452acad170`.
+On October 31, 2026 at 10:41 UTC (06:41 EDT), one fresh Gemini 3.5 Flash-Lite
+request passed in 8.035 seconds without a challenge. The
+[dated recovery record](GEMINI-HARNESS-QUALIFICATION.md#october-31-dated-recovery-and-merge-checkpoint)
+separates the earlier approved CAPTCHA recovery from this diagnostic change and
+records the exact last action, validation and remaining limits.
+
 Reports live in:
 
 ```text
