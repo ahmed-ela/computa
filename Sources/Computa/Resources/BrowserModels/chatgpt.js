@@ -156,23 +156,27 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
     && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
     && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
 }
-function websiteChatHeaderMutationMismatch(records, trigger, expected) {
+function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null) {
   if (!trigger || !expected) return false;
+  const fail = (stage, rule) => {
+    if (diagnostic && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; }
+    return true;
+  };
   const different = value => {
     const power = websiteChatHeaderPresentation(value, true).power;
     return !!power && power.key !== expected.key;
   };
-  if (different(trigger.innerText)) return true;
+  if (different(trigger.innerText)) return fail('current', 'current_power');
   // Current ancestry loses an attached header child that changed and detached
   // before delivery. Undo structural records, then replay their exact lineage.
   // The bounded reconstruction supplies only negative drift evidence.
-  if (records.length > 512) return true;
+  if (records.length > 512) return fail('records', 'record_limit');
   const parents = new Map(), children = new Map(), text = new Map(), afterText = new Map();
   const parent = node => parents.has(node) ? parents.get(node) : node?.parentNode || node?.parentElement || null;
   const bounded = value => typeof value === 'string' && value.length <= 128 ? value : null;
   for (const record of records) if (record.type === 'childList') {
     const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
-    if (nodes.length > 128) return true;
+    if (nodes.length > 128) return fail('records', 'child_nodes_limit');
     const candidates = children.get(record.target) || new Set();
     for (const node of nodes) candidates.add(node);
     children.set(record.target, candidates);
@@ -186,7 +190,7 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
       afterText.set(record, text.has(record.target) ? text.get(record.target) : bounded(record.target?.textContent));
       text.set(record.target, bounded(record.oldValue));
     }
-    if (parents.size + text.size > 4_096) return true;
+    if (parents.size + text.size > 4_096) return fail('reconstruction', 'reconstruction_limit');
   }
   const suppressed = node => node === trigger && node.nodeType === 1
     && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null);
@@ -197,21 +201,30 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
     }
     return node ? null : false;
   };
+  let textFailure = null;
+  const rejectText = rule => { textFailure ||= rule; return null; };
   const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
-    if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
-    if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
+    if (!node) return rejectText('node_missing');
+    if (--budget.nodes < 0) return rejectText('node_limit');
+    if (budget.depth > 32) return rejectText('depth_limit');
+    if (node.nodeType === 3) {
+      const value = text.has(node) ? text.get(node) : bounded(node.textContent);
+      return value === null ? rejectText('text_limit') : value;
+    }
     // AX suppression below the header does not hide rendered innerText. These
     // bounded records can only reject a pin, including after a node detaches.
     if (node.nodeType !== 1 || suppressed(node)) return '';
     const current = [...(node.childNodes || [])];
-    if (current.length > 128) return null;
+    if (current.length > 128) return rejectText('children_limit');
     const candidates = new Set([...current, ...(children.get(node) || [])]);
-    if (candidates.size > 128) return null;
+    if (candidates.size > 128) return rejectText('candidate_limit');
     let value = '';
     budget.depth++;
     for (const child of candidates) if (parent(child) === node) {
       const part = textAt(child, budget);
-      if (part === null || value.length + part.length > 128) { budget.depth--; return null; }
+      if (part === null || value.length + part.length > 128) {
+        budget.depth--; return part === null ? null : rejectText('aggregate_limit');
+      }
       value += part;
     }
     budget.depth--;
@@ -220,36 +233,49 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   for (const record of records) {
     if (record.type === 'characterData') {
       const owned = headerTarget(record.target);
-      if (owned === null || owned && (bounded(record.oldValue) === null || afterText.get(record) === null
-        || different(record.oldValue) || different(afterText.get(record)))) return true;
+      if (owned === null) return fail('character_data', 'ancestry_limit');
+      if (owned) {
+        if (bounded(record.oldValue) === null) return fail('character_data', 'old_text_limit');
+        if (afterText.get(record) === null) return fail('character_data', 'new_text_limit');
+        if (different(record.oldValue)) return fail('character_data', 'old_power');
+        if (different(afterText.get(record))) return fail('character_data', 'new_power');
+      }
       text.set(record.target, afterText.get(record));
     } else if (record.type === 'childList') {
       for (const node of record.removedNodes || []) {
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('removed', 'ancestry_limit');
+        if (owned && value === null) return fail('removed', textFailure);
+        if (owned && different(value)) return fail('removed', 'power');
         if (parent(node) === record.target) parents.set(node, null);
       }
       for (const node of record.addedNodes || []) {
         parents.set(node, record.target);
         const owned = headerTarget(node), value = owned ? textAt(node) : '';
-        if (owned === null || owned && (value === null || different(value))) return true;
+        if (owned === null) return fail('added', 'ancestry_limit');
+        if (owned && value === null) return fail('added', textFailure);
+        if (owned && different(value)) return fail('added', 'power');
       }
     }
   }
   return false;
 }
-function websiteChatInvalidatePin(pin, reason, facts = null) {
+function websiteChatInvalidatePin(pin, reason, facts = null, source = 'unknown') {
   pin.invalidated = true;
   // Preserve the first finite cause. This records negative evidence only;
   // it cannot revive a selection or change any model/ownership guard.
   if (!pin.invalidationReason && ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(reason)) {
     pin.invalidationReason = reason;
     pin.invalidationFacts = facts;
+    pin.invalidationSource = ['header_tracking', 'pinned_header', 'remount_header', 'remount_context', 'provisional_header',
+      'provisional_context', 'semantic_observer', 'deferred_model'].includes(source) ? source : 'unknown';
   }
 }
 function websiteChatTrackPinnedHeader(pin, trigger) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
-  if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) {
+    websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'header_tracking', rule: 'trigger_identity' }, 'header_tracking'); return;
+  }
   pin.headerTrigger = trigger;
   if (pin.headerObserver) return;
   pin.headerObserver = new MutationObserver(records => websiteChatObservePinnedHeader(pin, trigger, records));
@@ -259,7 +285,9 @@ function websiteChatTrackPinnedHeader(pin, trigger) {
 function websiteChatObservePinnedHeader(pin, trigger, records) {
   if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
     || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
-  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
+  const diagnostic = {};
+  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power, diagnostic))
+    websiteChatInvalidatePin(pin, 'header_mutation', Object.freeze(diagnostic), 'pinned_header');
 }
 function websiteChatDrainPinnedMutations(pin) {
   // Only private model observers are drained. The shared notification observer
@@ -299,7 +327,7 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
         attribute: record.attributeName, nodeConnected: record.target.isConnected === true,
         attributePresent: value !== null, currentMatches: value === expected.value,
         oldMatches: record.oldValue === null || record.oldValue === expected.value,
-      });
+      }, 'semantic_observer');
       return;
     }
   }
@@ -444,9 +472,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerReadiness = null;
   const tracked = new Map();
   const observeHeader = records => {
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
+    const diagnostic = {};
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic)) {
       selectionChanged = true;
-      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation');
+      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation', Object.freeze(diagnostic), 'remount_header');
     }
   };
   const headerObserver = new MutationObserver(observeHeader);
@@ -488,8 +517,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
-    if (remount && (remount.previous.isConnected !== false || current.trigger !== remount.replacement)) {
-      websiteChatInvalidatePin(pin, 'header_replaced');
+    let remountFailure = null;
+    const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
+    if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
+      || rejectRemount('trigger_identity', current.trigger !== remount.replacement))) {
+      websiteChatInvalidatePin(pin, 'header_replaced', { stage: 'remount_context', rule: remountFailure }, 'remount_context');
       throw failure('model_mismatch');
     }
     if (current.triggerCount !== 1 || !current.trigger || trigger && current.trigger !== trigger
@@ -746,6 +778,57 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   try {
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
+    // Temporary-page hydration can leave the exact visible model trigger
+    // disabled while its recognized power label is already rendered. Wait only
+    // in this first, effect-free mutable selection and spend its original clock.
+    // Enabling authorizes a fresh full picker read, never model proof by itself.
+    const disabled = node => !!node && (node.disabled === true || node.getAttribute('disabled') !== null
+      || node.getAttribute('aria-disabled') === 'true');
+    const closedShape = current => !current.topMenu && current.allMenus.length === 0
+      && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
+      && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
+    const disabledPower = websiteChatHeaderPresentation(initial.trigger?.innerText).power;
+    if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
+      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledPower
+      && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
+      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
+      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      const form = trigger.closest('form');
+      headerExpected = disabledPower;
+      headerReadiness = { startedDisabled: true, outcome: 'waiting', reason: null };
+      readStage = 'initial_trigger_disabled_wait';
+      let rejected = null;
+      const reject = reason => { rejected = reason; return true; };
+      const ready = () => {
+        if (rejected) return true;
+        if (!owned()) return reject('ownership_changed');
+        if (freshGuard() !== true || globalThis.__computaChatPresetPin || globalThis.__computaModelSelection !== attempt
+          || attempt.completed !== false || attempt.powerEvents !== 0 || attempt.familyClicked !== false
+          || primaryOpened || secondaryOpened || closeAttempted || observedProof) return reject('state_changed');
+        let current;
+        try { current = state(); } catch { return reject('state_changed'); }
+        if (current.trigger !== trigger || !current.visible(trigger) || !closedShape(current)
+          || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
+        const power = websiteChatHeaderPresentation(trigger.innerText).power;
+        if (!power) return reject('unknown_header');
+        if (power.key !== disabledPower.key) return reject('state_changed');
+        if (current.enabled(trigger)) return true;
+        if (!disabled(trigger)) return reject('state_changed');
+        return false;
+      };
+      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      if (!ready() && changed) rejected ||= 'state_changed';
+      if (!changed || Date.now() >= until || rejected) {
+        headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';
+        readStage = 'initial_trigger_disabled_rejected';
+        return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
+      }
+      initial = state();
+      // The wait has ended. The existing mutable picker flow may now change
+      // power intentionally; its normal proof-lock boundary owns those checks.
+      headerExpected = null;
+      headerReadiness.outcome = 'recognized'; readStage = 'initial_trigger_ready';
+    }
     // Only the first mutable selection may observe an empty, still-hydrating
     // label. Waiting spends the same proof deadline and dispatches no input.
     const initialText = websiteChatHeaderTextShape(initial.trigger?.innerText);
@@ -1217,8 +1300,9 @@ function websiteModelDiagnostic(state, readObservation = null) {
         visible: node.nodeType === 1 ? state.visible(node) : null,
         text: websiteChatHeaderTextShape(node.textContent) })) };
     const readiness = readObservation?.headerReadiness;
-    if (readiness?.startedEmpty === true && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
-      diagnostic.chatHeader.readiness = { startedEmpty: true, outcome: readiness.outcome,
+    if ((readiness?.startedEmpty === true || readiness?.startedDisabled === true)
+      && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
+      diagnostic.chatHeader.readiness = { ...(readiness.startedDisabled === true ? { startedDisabled: true } : { startedEmpty: true }), outcome: readiness.outcome,
         reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
           ? readiness.reason : null };
   }
@@ -2112,12 +2196,18 @@ function websiteChatProvisionalHeaderRecords(pin, pending, records) {
   const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
   const allowed = value => typeof value === 'string' && value.length <= 128
     && ['', pending.power.label, ...(proving ? ['Thinking effort'] : [])].includes(websiteModelNormalize(value));
-  const changed = records.length > 512 || websiteChatHeaderMutationMismatch(records, pending.header, pending.power)
+  const diagnostic = {};
+  const reject = (stage, rule, value) => {
+    if (value && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; } return value;
+  };
+  const changed = reject('records', 'record_limit', records.length > 512)
+    || websiteChatHeaderMutationMismatch(records, pending.header, pending.power, diagnostic)
     || records.some(record => record.type === 'characterData'
-      ? !allowed(record.oldValue) || !allowed(record.target?.textContent)
-      : record.type === 'childList' && ([...(record.addedNodes || []), ...(record.removedNodes || [])].length > 128
-        || [...(record.addedNodes || []), ...(record.removedNodes || [])].some(node => !allowed(node.textContent || ''))));
-  if (changed) websiteChatInvalidatePin(pin, 'header_mutation');
+      ? reject('character_data', 'provisional_old', !allowed(record.oldValue))
+        || reject('character_data', 'provisional_current', !allowed(record.target?.textContent))
+      : record.type === 'childList' && (reject('child_list', 'child_nodes_limit', [...(record.addedNodes || []), ...(record.removedNodes || [])].length > 128)
+        || [...(record.addedNodes || []), ...(record.removedNodes || [])].some(node => reject('child_list', 'provisional_child', !allowed(node.textContent || '')))));
+  if (changed) websiteChatInvalidatePin(pin, 'header_mutation', Object.freeze(diagnostic), 'provisional_header');
 }
 function websiteChatDrainProvisionalHeader(pin) {
   const pending = pin?.provisionalHeader;
@@ -2126,29 +2216,57 @@ function websiteChatDrainProvisionalHeader(pin) {
   if (pin.invalidated === true) return;
   const current = websiteChatPickerState();
   const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
-  if (globalThis.__computaChatPresetPin !== pin || pin.owner !== pending.owner || pin.document !== pending.document
-    || globalThis.__computaModelOwner !== pending.owner || document !== pending.document
-    || window !== window.top || location.origin !== 'https://chatgpt.com'
-    || pin.selection !== pending.selection || pin.selection?.family?.key !== pending.family
-    || pin.selection?.power?.key !== pending.power.key || pending.previous.isConnected !== false
-    || pin.headerTrigger !== pending.previous && !(proving && pin.headerTrigger === pending.header)
-    || current.triggerCount !== 1 || current.trigger !== pending.header || !current.enabled(pending.header)
-    || !proving && !current.closedPresentation || current.headerPower && current.headerPower.key !== pending.power.key
-    || !current.headerPower && !(proving && current.headerPresentation)
-    || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
-    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pending.power.key))
-    || current.checkedFamily && current.checkedFamily.key !== pending.family) websiteChatInvalidatePin(pin, 'header_replaced');
+  const diagnostic = { stage: 'provisional_context', rule: null };
+  const reject = (rule, value) => { if (value && diagnostic.rule == null) diagnostic.rule = rule; return value; };
+  if (reject('pin_current', globalThis.__computaChatPresetPin !== pin)
+    || reject('pin_owner', pin.owner !== pending.owner)
+    || reject('pin_document', pin.document !== pending.document)
+    || reject('global_owner', globalThis.__computaModelOwner !== pending.owner)
+    || reject('document', document !== pending.document)
+    || reject('frame', window !== window.top)
+    || reject('origin', location.origin !== 'https://chatgpt.com')
+    || reject('selection_identity', pin.selection !== pending.selection)
+    || reject('selection_family', pin.selection?.family?.key !== pending.family)
+    || reject('selection_power', pin.selection?.power?.key !== pending.power.key)
+    || reject('previous_connected', pending.previous.isConnected !== false)
+    || reject('header_identity', pin.headerTrigger !== pending.previous && !(proving && pin.headerTrigger === pending.header))
+    || reject('trigger_count', current.triggerCount !== 1)
+    || reject('trigger_identity', current.trigger !== pending.header)
+    || reject('trigger_enabled', !current.enabled(pending.header))
+    || reject('closed_presentation', !proving && !current.closedPresentation)
+    || reject('header_power', current.headerPower && current.headerPower.key !== pending.power.key)
+    || reject('header_presentation', !current.headerPower && !(proving && current.headerPresentation))
+    || reject('duplicate', current.duplicate)
+    || reject('conflicting', current.conflicting)
+    || reject('indicator', current.indicatorInvalid)
+    || reject('selection_ambiguous', current.selectionAmbiguous)
+    || reject('navigation_ambiguous', current.navigationAmbiguous)
+    || reject('slider_power', current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pending.power.key)))
+    || reject('checked_family', current.checkedFamily && current.checkedFamily.key !== pending.family))
+    websiteChatInvalidatePin(pin, 'header_replaced', Object.freeze(diagnostic), 'provisional_context');
 }
-function websiteChatClaimProvisionalHeader(pin, current) {
+function websiteChatClaimProvisionalHeader(pin, current, diagnostic = null) {
+  const reject = (rule, value) => {
+    if (value && diagnostic && diagnostic.rule == null) diagnostic.rule = rule;
+    return value;
+  };
   const pending = pin.provisionalHeader;
   if (pending) {
     websiteChatDrainProvisionalHeader(pin);
-    return !pending.completed && pending.header === current.trigger && pin.invalidated !== true;
+    return !reject('pending_completed', pending.completed)
+      && !reject('pending_header', pending.header !== current.trigger)
+      && !reject('pending_invalidated', pin.invalidated === true);
   }
-  if (!pin.headerTrigger || pin.headerTrigger.isConnected !== false || current.triggerCount !== 1
-    || !current.trigger || !current.enabled(current.trigger) || !current.closedPresentation
-    || current.headerPower?.key !== pin.selection.power.key || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return false;
+  if (reject('previous_missing', !pin.headerTrigger)
+    || reject('previous_connected', pin.headerTrigger.isConnected !== false)
+    || reject('trigger_count', current.triggerCount !== 1)
+    || reject('trigger_missing', !current.trigger)
+    || reject('trigger_disabled', !current.enabled(current.trigger))
+    || reject('closed_presentation', !current.closedPresentation)
+    || reject('header_power', current.headerPower?.key !== pin.selection.power.key)
+    || reject('product', !chatGPTProductModeProof())
+    || reject('temporary', !chatGPTTemporaryVerified())) return false;
   const candidate = { owner: pin.owner, document, invocation: websiteChatInvocationLease,
     previous: pin.headerTrigger, header: current.trigger, selection: pin.selection,
     family: pin.selection.family.key, power: { ...pin.selection.power }, completed: false, proofLease: null, observer: null };
@@ -2156,7 +2274,17 @@ function websiteChatClaimProvisionalHeader(pin, current) {
   candidate.observer.observe(candidate.header, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
   pin.provisionalHeader = candidate;
   websiteChatDrainProvisionalHeader(pin);
-  return pin.invalidated !== true;
+  return !reject('pending_invalidated', pin.invalidated === true);
+}
+function chatGPTBoundRouteModelDeadlineFailed(candidate) {
+  if (!candidate?.routeModelRemount || candidate.verified === true) return false;
+  if (candidate.contextFailure === 'deadline') return true;
+  if (Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline) return false;
+  // Negative history is sticky even if the wall clock moves backward. These
+  // existing failure slots grant no model, body, receipt or retry authority.
+  candidate.modelFailure ||= { error: 'model_unverified' };
+  candidate.contextFailure ||= 'deadline';
+  return true;
 }
 function websiteChatDeferredModelRead(expected, context) {
   const started = chatGPTSyncWorkStart();
@@ -2191,11 +2319,13 @@ function websiteChatDeferredModelReadUnprofiled(expected, context) {
   // never transfers the original pin or creates positive model evidence.
   if (current.trigger !== pin.headerTrigger && !websiteChatClaimProvisionalHeader(pin, current))
     return { error: 'model_mismatch' };
-  if (current.headerPower && current.headerPower.key !== pin.selection.power.key
-    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
-    || current.checkedFamily && current.checkedFamily.key !== pin.selection.family.key) {
-    websiteChatInvalidatePin(pin, 'semantic_mutation');
+  const diagnostic = { stage: 'deferred_model', rule: null };
+  const reject = (rule, value) => { if (value && diagnostic.rule == null) diagnostic.rule = rule; return value; };
+  if (reject('header_power', current.headerPower && current.headerPower.key !== pin.selection.power.key)
+    || reject('slider_power', current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)))
+    || reject('checked_family', current.checkedFamily && current.checkedFamily.key !== pin.selection.family.key)) {
+    websiteChatInvalidatePin(pin, 'semantic_mutation', Object.freeze(diagnostic), 'deferred_model');
     return { error: 'model_mismatch' };
   }
   return { modelVerificationPending: true };
@@ -2571,7 +2701,16 @@ function chatGPTAwaitFirstInsertEditor(request, observed) {
 }
 const websiteModelFullReadEvidence = websiteModelReadEvidence;
 websiteModelReadEvidence = async function(provider, expected, openingRecovery = null, context = null) {
-  if (provider === 'chatgpt') {
+  const routeRecovery = provider === 'chatgpt' ? globalThis.__computaModelBoundFirstExpansion : null;
+  const routeHeader = routeRecovery?.routeModelRemount;
+  if (routeHeader && !chatGPTBoundRouteModelRemountIntact(routeRecovery)) return { error: 'model_mismatch' };
+  // A route witness retained only negative history of this exact successor.
+  // It cannot use the in-flight shortcut: the existing full readonly family /
+  // power proof must transfer the original pin before any accepted result.
+  const requireRouteModelProof = !!routeHeader && (!routeHeader.completed || routeRecovery.verified !== true);
+  const routeProofExpired = () => requireRouteModelProof && chatGPTBoundRouteModelDeadlineFailed(routeRecovery);
+  if (routeProofExpired()) return { error: 'model_unverified' };
+  if (provider === 'chatgpt' && !requireRouteModelProof) {
     const deferred = websiteChatDeferredModelRead(expected, context);
     if (deferred) return deferred;
   }
@@ -2588,6 +2727,7 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
     ? { ...context, firstInsertDeadline: chatGPTFirstInsertFinalDeadline } : context;
   try {
     const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, cappedContext);
+    if (routeProofExpired()) return { error: 'model_unverified' };
     if (pending && !pending.completed) {
       websiteChatDrainPinnedMutations(pin);
       if (pin.invalidated === true) return { error: 'model_mismatch' };
@@ -2597,6 +2737,9 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
         pending.observer.disconnect?.();
       }
     }
+    if (requireRouteModelProof && !result.error && (!result.modelEvidence || !pending?.completed
+      || pin !== routeRecovery.routeModelPin || pin.headerTrigger !== routeHeader.header
+      || !websiteModelChoiceEqual(result.modelEvidence.selected, expected))) return { error: 'model_unverified' };
     return result;
   } finally {
     if (pending) pending.proofLease = null;
@@ -3238,7 +3381,7 @@ function chatGPTPendingProductSubmission(state, record, roots, root, body, rende
       && chatGPTSubmissionContext(state) && chatGPTSubmissionPins(record)
       && parent?.sequence === record.sequence - 1 && chatGPTSubmissionPins(parent) && chatGPTSubmissionBodyIntact(parent, roots)
       && observed.temporary === true && product?.product === 'chatgpt' && product.mode === 'chat'
-      && product.source === 'composer_mode_control' && product.temporaryTransition === 'acknowledged'
+      && ['composer_mode_control', 'chat_composer_marker'].includes(product.source) && product.temporaryTransition === 'acknowledged'
       && typeof rendered === 'string' && rendered.length > 0 && rendered.length < record.canonical.length
       && record.canonical.startsWith(rendered) && !rendered.includes(`Computa session marker: ${record.marker}`)
       && chatGPTSubmissionBodyText(body, record.canonical) === rendered;
@@ -3324,6 +3467,11 @@ async function chatGPTSubmissionResult(request, observed) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const currentRoots = chatGPTMessageRoots('user');
+  const routeRecovery = globalThis.__computaModelBoundFirstExpansion;
+  // This new route-only picker handoff retains its original deadline through
+  // the final digest too, before the existing body receipt can be consumed.
+  if (routeRecovery?.state === state && routeRecovery.record === record
+    && chatGPTBoundRouteModelDeadlineFailed(routeRecovery)) return { error: 'model_unverified' };
   if (!chatGPTSubmissionContext(state) || (state.pending !== pending) || !chatGPTSubmissionPins(record)
     || state.lastVerified !== capturedParent || capturedParent && !chatGPTSubmissionBodyIntact(capturedParent, currentRoots, capturedParent === record ? replacement : null)
     || currentRoots.length !== roots.length || currentRoots.some((node, index) => node !== roots[index])
@@ -3521,12 +3669,31 @@ function chatGPTProductModeStateUnprofiled() {
   const pair = chat.length === 1 && work.length === 1;
   const chatSelected = pair ? state(chat[0]) : null, workSelected = pair ? state(work[0]) : null;
   const recognized = pair && chatSelected != null && workSelected != null && chatSelected !== workSelected;
+  // The unified picker deliberately removes the Chat/Work group. Its actual
+  // composer FORM emits this marker only for Chat (never a Work conversation
+  // or Work home composer). Suggestion-card mode attributes are not evidence.
+  const forms = [...document.querySelectorAll('form[data-chatgpt-composer], form[data-thread-find-composer]')];
+  const activeForms = forms.length <= 64 ? forms.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const markedForm = activeForms.length === 1 ? activeForms[0] : null;
+  const markerShape = node => !!node && node.tagName?.toLowerCase() === 'form'
+    && node.getAttribute('data-chatgpt-composer') === '' && node.getAttribute('data-thread-find-composer') === 'true'
+    && ['home', 'thread'].includes(node.getAttribute('data-composer-placement'));
+  const editorCandidates = markedForm ? [...document.querySelectorAll('[contenteditable="true"][role="textbox"][aria-label="Ask ChatGPT"]')] : [];
+  const triggerCandidates = markedForm ? [...document.querySelectorAll('button[aria-label="Select ChatGPT model"]')] : [];
+  const editors = editorCandidates.length <= 64 ? editorCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const triggers = triggerCandidates.length <= 64 ? triggerCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
+  const markedEditor = editors.length === 1 && editors[0].closest('form') === markedForm ? editors[0] : null;
+  const markedTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
+  const markerRecognized = markerShape(markedForm) && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const markerReady = markerRecognized && enabled(markedEditor) && enabled(markedTrigger);
   return { group, groups, chat: chat[0] || null, work: work[0] || null, recognized, chatSelected, workSelected,
     ready: recognized && enabled(chat[0]) && enabled(work[0]),
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    labelledGroup,
+    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape,
+    markerActiveForms: Math.min(activeForms.length, 16),
+    markerCandidateOverflow: forms.length > 64 || editorCandidates.length > 64 || triggerCandidates.length > 64,
     modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
       && (node.tagName.toLowerCase() === 'button' || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role'))) };
 }
@@ -3540,6 +3707,10 @@ function chatGPTProductModeDiagnostic(state) {
   return { kind: 'chatgpt_product_mode_structure', groupCount: Math.min(state.groups.length, 16),
     groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
     chat: control(state.chat), work: control(state.work),
+    markerDiagnostic: { version: 1, activeForms: state.markerActiveForms, candidateOverflow: state.markerCandidateOverflow,
+      recognized: state.markerRecognized, enabled: state.markerReady,
+      proofSource: ['composer_mode_control', 'chat_composer_marker'].includes(globalThis.__computaChatProductMode?.source)
+        ? globalThis.__computaChatProductMode.source : null },
     proofPresent: !!globalThis.__computaChatProductMode, proofInvalidated: globalThis.__computaChatProductMode?.invalidated === true,
     chatClickClaimed: globalThis.__computaChatModeClickClaimed === true,
     ...chatGPTProductProofFailureDiagnostic() };
@@ -3554,6 +3725,12 @@ function chatGPTProductProofFailureDiagnostic() {
     if (Number.isInteger(proof[key]) && proof[key] >= 0) diagnostic[key] = Math.min(proof[key], 1_000);
   const histogram = chatGPTProductMutationHistogramDiagnostic(proof.productMutationHistogram);
   if (histogram) diagnostic.productMutationHistogram = histogram;
+  if (proof.invalidationReason === 'mutation_uninspectable'
+    && ['record_shape', 'node_shape', 'children_shape', 'ancestry_cycle', 'label_bounds', 'read_exception'].includes(proof.productMutationFailureRule)
+    && ['element', 'text', 'comment', 'document', 'fragment', 'other', 'missing'].includes(proof.productMutationFailureNodeKind)) {
+    diagnostic.productMutationFailureRule = proof.productMutationFailureRule;
+    diagnostic.productMutationFailureNodeKind = proof.productMutationFailureNodeKind;
+  }
   return diagnostic;
 }
 function chatGPTProductMutationHistogramDiagnostic(value) {
@@ -3579,6 +3756,10 @@ function chatGPTInvalidateProductProof(proof, reason, counts = null) {
       proof.productMutationRelevantCount = Math.min(counts.relevant, 1_000);
       proof.productMutationIgnoredCount = Math.min(counts.ignored, 1_000);
       if (counts.histogram) proof.productMutationHistogram = counts.histogram;
+      if (reason === 'mutation_uninspectable' && counts.failure) {
+        proof.productMutationFailureRule = counts.failure.rule;
+        proof.productMutationFailureNodeKind = counts.failure.nodeKind;
+      }
     }
   }
   proof.invalidated = true;
@@ -3598,8 +3779,24 @@ function chatGPTObserveProductMutations(proof, state, records) {
   if (proof.invalidated) return;
   const groups = proof.groups, works = proof.works;
   const limits = { relevant: 4_096, records: 8_192, visits: 16_384, children: 4_096, depth: 128 };
-  let analysisFailure = null, visits = 0;
-  const unavailable = reason => { if (!analysisFailure) analysisFailure = reason; return []; };
+  let analysisFailure = null, analysisFailureDiagnostic = null, visits = 0;
+  const nodeKind = node => {
+    try {
+      if (node == null) return 'missing';
+      switch (node.nodeType) {
+        case 1: return 'element'; case 3: return 'text'; case 8: return 'comment';
+        case 9: return 'document'; case 11: return 'fragment'; default: return 'other';
+      }
+    } catch { return 'other'; }
+  };
+  const unavailable = (reason, rule = null, node = null) => {
+    if (!analysisFailure) {
+      analysisFailure = reason;
+      // Finite first-cause metadata only: never retain the node or its content.
+      if (reason === 'mutation_uninspectable') analysisFailureDiagnostic = { rule, nodeKind: nodeKind(node) };
+    }
+    return [];
+  };
   const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
   const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
   const ancestry = new Map(), containments = new Map();
@@ -3611,7 +3808,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     if (!ancestry.has(node)) {
       const chain = new Set(); let current = node;
       for (; current && chain.size <= limits.depth; current = current.parentElement) {
-        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable'); return false; }
+        if (!charge() || chain.has(current)) { unavailable('mutation_uninspectable', 'ancestry_cycle', current); return false; }
         chain.add(current);
       }
       if (current) { unavailable('mutation_scan_overflow'); return false; }
@@ -3629,19 +3826,19 @@ function chatGPTObserveProductMutations(proof, state, records) {
       while (stack.length) {
         const { node, depth } = stack.pop();
         if (!charge()) return [];
-        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable');
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable', 'node_shape', node);
         if (depth > limits.depth) return unavailable('mutation_scan_overflow');
         seen.add(node);
         if (node.nodeType === 1) result.push(node);
         if (![1, 9, 11].includes(node.nodeType)) continue;
         const children = node.childNodes;
-        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable');
+        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable', 'children_shape', node);
         if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
           return unavailable('mutation_scan_overflow');
         for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
       }
       subtrees.set(root, result); return result;
-    } catch { return unavailable('mutation_uninspectable'); }
+    } catch { return unavailable('mutation_uninspectable', 'read_exception', root); }
   };
   const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
     || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
@@ -3666,7 +3863,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
       if (id) { const matches = ids.get(id) || []; matches.push(node); ids.set(id, matches); }
       const value = node.getAttribute('aria-labelledby');
       if (value != null) {
-        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable'); break; }
+        if (value.length > 1_024 || value.trim().split(/\s+/).length > 32) { unavailable('mutation_uninspectable', 'label_bounds', node); break; }
         for (const token of value.trim().split(/\s+/)) if (token) {
           references.add(token); const referring = referrers.get(token) || new Set(); referring.add(node); referrers.set(token, referring);
         }
@@ -3691,7 +3888,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const messageBoundary = '[data-message-author-role="user"], [data-message-author-role="assistant"], '
     + '[data-markdown-text-style="user-message"], [data-markdown-text-style="assistant-message"], '
     + 'article[data-turn="user"], article[data-turn="assistant"], [data-user-message-bubble]';
-  const tracked = [...groups, ...works];
+  const tracked = [...groups, ...works, ...(proof.forms || []), ...(proof.editors || [])];
   const touchesTracked = node => !!node && tracked.some(control => control === node
     || contains(control, node) || contains(node, control));
   const containsGroup = node => {
@@ -3721,8 +3918,9 @@ function chatGPTObserveProductMutations(proof, state, records) {
       || editable && (node.parentElement?.closest('#prompt-textarea') || node.getAttribute('aria-label') === 'Ask ChatGPT')
       || textarea && node.getAttribute('data-testid') === 'prompt-textarea';
   });
-  const composer = composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
-    && composerCandidates[0].isConnected ? composerCandidates[0] : null;
+  const composer = proof.source === 'chat_composer_marker' && state.markerRecognized ? state.markedEditor
+    : composerCandidates.length === 1 && composerCandidates[0]?.nodeType === 1
+      && composerCandidates[0].isConnected ? composerCandidates[0] : null;
   const productNodes = [...tracked, ...(state.groups || []), state.work].filter(Boolean);
   const intersects = (left, right) => !!left && !!right && (left === right || contains(left, right) || contains(right, left));
   const emptyNodes = value => value == null || Number.isInteger(value.length) && value.length === 0;
@@ -3731,7 +3929,9 @@ function chatGPTObserveProductMutations(proof, state, records) {
     && (record.type === 'attributes' && record.target.nodeType === 1 && typeof record.attributeName === 'string'
         && observedAttributes.has(record.attributeName)
         && emptyNodes(record.addedNodes) && emptyNodes(record.removedNodes)
-      || record.type === 'characterData' && record.target.nodeType === 3
+      // Comment.data is also CharacterData. Keep these records in the same
+      // bounded history analysis; accepting their shape does not ignore them.
+      || record.type === 'characterData' && [3, 8].includes(record.target.nodeType)
       || record.type === 'childList' && record.target.nodeType === 1
         && record.addedNodes != null && record.removedNodes != null
         && Number.isInteger(record.addedNodes.length) && record.addedNodes.length >= 0
@@ -3760,8 +3960,13 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return false;
   };
   const presentationBatchSafe = () => {
+    // A Chat marker lives on the editor's enclosing form. That relationship
+    // does not make the exact editor's class/style presentation product state;
+    // all marker, ancestry and editor-identity mutations stay relevant below.
+    const presentationProductNodes = proof.source === 'chat_composer_marker' && state.markerRecognized
+      && composer === state.markedEditor ? productNodes.filter(node => node !== state.markedForm && node !== composer) : productNodes;
     if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
-      || productNodes.some(node => intersects(node, composer)) || containsGroup(composer)
+      || presentationProductNodes.some(node => intersects(node, composer)) || containsGroup(composer)
       || candidates(composer, 'controls').length
       || editorCanAffectReferencedLabel()) return false;
     for (const record of records) {
@@ -3804,7 +4009,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   // relevant record. Unrelated message rendering does not consume that budget.
   for (const record of records) {
     countRecord(record);
-    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable'); break; }
+    if (!knownRecord(record)) { relevant.push(record); unavailable('mutation_uninspectable', 'record_shape', record?.target); break; }
     if (record.type === 'childList' && record.addedNodes.length + record.removedNodes.length > limits.children) {
       relevant.push(record); unavailable('mutation_scan_overflow'); break;
     }
@@ -3814,9 +4019,57 @@ function chatGPTObserveProductMutations(proof, state, records) {
   }
   Object.freeze(histogram.types); Object.freeze(histogram.scopes); Object.freeze(histogram.composerAttributes); Object.freeze(histogram);
   const counts = { relevant: relevant.length, ignored, histogram };
-  const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
+  const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, { ...counts, failure: analysisFailureDiagnostic });
   if (analysisFailure) { invalidate(analysisFailure); return; }
   if (records.length > limits.records || relevant.length > limits.relevant) { invalidate('mutation_overflow'); return; }
+  if (proof.source === 'chat_composer_marker') {
+    // Keep the same bounded history scan for hidden/removed predecessors. A
+    // temporary-page transition may mount a new Chat composer while retaining
+    // its hidden predecessor; it cannot erase a Work/marker-loss transition.
+    const forms = proof.forms, editors = proof.editors;
+    const registerComposer = node => {
+      for (const candidate of elements(node)) {
+        if (!charge()) return;
+        if (candidate.tagName?.toLowerCase() !== 'form'
+          || candidate.getAttribute('data-chatgpt-composer') == null && candidate.getAttribute('data-thread-find-composer') == null
+          || !state.outside(candidate) && !forms.has(candidate)) continue;
+        if (!state.markerShape(candidate)) { unavailable('product_history_ambiguous'); return; }
+        forms.add(candidate);
+        if (forms.size > 64) { unavailable('mutation_scan_overflow'); return; }
+      }
+    };
+    for (const record of relevant) if (record.type === 'childList') {
+      if (!proof.temporaryRequested && [...record.removedNodes].some(node =>
+        contains(node, proof.form) || contains(node, proof.editor))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      for (const node of [...record.addedNodes, ...record.removedNodes]) registerComposer(node);
+      if (analysisFailure) break;
+    }
+    if (analysisFailure) { invalidate(analysisFailure); return; }
+    for (const record of relevant) if (record.type === 'attributes') {
+      const node = record.target, name = record.attributeName;
+      const markerAttribute = ['data-chatgpt-composer', 'data-thread-find-composer'].includes(name);
+      if (markerAttribute && (forms.has(node) || node.tagName?.toLowerCase() === 'form'
+        && state.outside(node) && (record.oldValue != null || node.getAttribute(name) != null))) {
+        if (record.oldValue !== node.getAttribute(name) || !state.markerShape(node)) {
+          invalidate('product_history_ambiguous'); return;
+        }
+      }
+      if (forms.has(node) && name === 'data-composer-placement'
+        && (!['home', 'thread'].includes(record.oldValue) || !state.markerShape(node))) {
+        invalidate('product_history_ambiguous'); return;
+      }
+      if (editors.has(node) && ['contenteditable', 'role', 'aria-label'].includes(name)
+        && record.oldValue !== node.getAttribute(name)) { invalidate('product_history_ambiguous'); return; }
+    }
+    if (!state.markerRecognized || !proof.temporaryRequested
+      && (!state.markerReady || state.markedForm !== proof.form || state.markedEditor !== proof.editor)) {
+      invalidate('not_ready'); return;
+    }
+    forms.add(state.markedForm); editors.add(state.markedEditor);
+    if (forms.size > 64 || editors.size > 64) { invalidate('mutation_scan_overflow'); return; }
+  }
   const ownedControls = new Set(works);
   const historicallyOwnedNodes = new Set(works);
   const ownControl = node => { ownedControls.add(node); if (ownedControls.size > 128) unavailable('mutation_scan_overflow'); };
@@ -3948,7 +4201,12 @@ function chatGPTProductModeProofUnprofiled() {
   if (!/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(new URL(document.URL).pathname))
     return chatGPTInvalidateProductProof(proof, 'route');
   if (state.contradictory) return chatGPTInvalidateProductProof(proof, 'contradictory_controls');
-  if (!proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
+  if (proof.source === 'chat_composer_marker' && (!state.markerRecognized
+    || state.groups.length > 0 && (!state.recognized || state.chatSelected !== true)
+    || !proof.temporaryRequested && (!state.markerReady || state.markedForm !== proof.form || state.markedEditor !== proof.editor))) {
+    return chatGPTInvalidateProductProof(proof, 'not_ready');
+  }
+  if (proof.source !== 'chat_composer_marker' && !proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
     return chatGPTInvalidateProductProof(proof, 'not_ready');
   }
   // Only the private acknowledgement changes between these consecutive
@@ -3956,7 +4214,7 @@ function chatGPTProductModeProofUnprofiled() {
   const renderedTemporary = chatGPTRenderedTemporary();
   if (proof.temporaryRequested && renderedTemporary) proof.temporaryAcknowledged = true;
   if (renderedTemporary && !proof.temporaryAcknowledged) return null;
-  return { product: 'chatgpt', mode: 'chat', source: 'composer_mode_control',
+  return { product: 'chatgpt', mode: 'chat', source: proof.source || 'composer_mode_control',
     temporaryTransition: proof.temporaryAcknowledged ? 'acknowledged' : 'not_requested' };
 }
 function chatGPTTemporaryVerified() {
@@ -3975,12 +4233,17 @@ function chatGPTProductModeAction(request) {
   const root = new URL(document.URL).pathname === '/' && !chatGPTRenderedTemporary()
     && new URL(document.URL).searchParams.get('temporary-chat') !== 'true';
   let proof = chatGPTProductModeProof();
-  if (!proof && !globalThis.__computaChatProductMode && fresh && root && state.ready && state.chatSelected === true) {
+  const markerAdmission = state.groups.length === 0 && state.markerReady;
+  if (!proof && !globalThis.__computaChatProductMode && fresh && root
+    && (state.ready && state.chatSelected === true || markerAdmission)) {
     // Pending mode mutations belong to the pre-proof phase. The next observed
     // mutation can revoke this proof even if Work immediately switches back.
     globalThis.__computaModelSignal?.observer?.takeRecords?.();
     globalThis.__computaChatProductMode = { owner: globalThis.__computaModelOwner, document,
-      groups: new Set([state.group]), works: new Set([state.work]), invalidated: false,
+      source: markerAdmission ? 'chat_composer_marker' : 'composer_mode_control',
+      ...(markerAdmission ? { form: state.markedForm, editor: state.markedEditor,
+        forms: new Set([state.markedForm]), editors: new Set([state.markedEditor]) } : {}),
+      groups: new Set(state.group ? [state.group] : []), works: new Set(state.work ? [state.work] : []), invalidated: false,
       temporaryRequested: false, temporaryAcknowledged: false };
     proof = chatGPTProductModeProof();
   }
@@ -4001,16 +4264,214 @@ function chatGPTProductModeAction(request) {
   const disabledControl = node => node.disabled === true || node.getAttribute('aria-disabled') === 'true';
   if (request.action === 'inspect' && fresh && root && !globalThis.__computaChatProductMode
     && globalThis.__computaChatModeClickClaimed !== true && globalThis.__computaModelTemporaryRequested !== true
-    && state.recognized && state.visible(state.group) && state.visible(state.chat) && state.visible(state.work)
-    && (disabledControl(state.chat) || disabledControl(state.work))) {
-    // The signed-in page briefly disables its already recognized Chat/Work
-    // pair while hydrating. This is only a bounded native readiness wait;
-    // neither provenance nor any click is authorized until both enable.
+    && (state.recognized && state.visible(state.group) && state.visible(state.chat) && state.visible(state.work)
+        && (disabledControl(state.chat) || disabledControl(state.work))
+      || state.groups.length === 0 && state.markerRecognized
+        && (disabledControl(state.markedEditor) || disabledControl(state.markedTrigger)))) {
+    // The signed-in page briefly disables recognized mode controls or the
+    // marked Chat composer while hydrating. This is only a bounded native
+    // readiness wait; neither provenance nor any click is authorized yet.
     return { chatModeReady: false, chatModeActionAvailable: false, chatModeHydrating: true, pending: true };
   }
   if (request.action === 'inspect' && fresh && root && !state.group && !document.querySelectorAll('#prompt-textarea, [contenteditable="true"]').length)
     return { chatModeReady: false, chatModeActionAvailable: false };
   return reject();
+}
+// A missing DOM root is never ownership proof. This one-shot, read-only wait
+// applies only after native and JS both adopted the exact first submission.
+// It retains negative mutation history and the original native call cutoff;
+// the ordinary full-body/model proof remains responsible for any successor.
+let chatGPTUserRootGapDisposition = 'not_attempted';
+let chatGPTInvocationUserRootGap = null;
+function chatGPTUserRootGapCurrent(claim, requireDetached = true) {
+  chatGPTDrainSignalRecords();
+  websiteChatDrainPinnedMutations(claim.pin);
+  const state = claim.state, record = claim.record, pin = globalThis.__computaChatPresetPin;
+  if (Date.now() >= claim.deadline) { claim.outcome = 'expired'; return false; }
+  if (!['waiting', 'returned'].includes(claim.outcome) || record.userRootGap !== claim
+    || claim.document !== document || claim.invocation !== websiteChatInvocationLease
+    || globalThis.__computaChatActiveInvocation !== claim.invocation
+    || !chatGPTSubmissionContext(state) || state.pending != null || state.lastVerified !== record
+    || record.phase !== 'verified' || record.sequence !== 1 || !chatGPTSubmissionPins(record)
+    || record.document !== document || record.owner !== input.ownerToken
+    || record.root !== claim.oldRoot || record.body !== claim.oldBody
+    || requireDetached && (claim.oldRoot.isConnected || claim.oldBody.isConnected)
+    || record.fingerprint !== input.expectedFirstUserFingerprint
+    || input.submissionSequence !== 1 || input.submissionMarker !== record.marker
+    || input.expectedFirstUserMarker !== record.marker || globalThis.__computaModelFirstMarker !== record.marker
+    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
+    || globalThis.__computaModelFirstProof !== claim.firstProof
+    || claim.firstProof?.fingerprint !== record.fingerprint || claim.firstProof.marker !== record.marker
+    || globalThis.__computaModelFirstPrompt !== claim.prompt || record.canonical !== claim.canonical
+    || !websiteModelChoiceEqual(input.expectedModelChoice, claim.modelChoice)
+    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, claim.modelChoice)
+    || !websiteModelChoiceEqual(state.modelChoice, claim.modelChoice)
+    || !pin || pin !== claim.pin || pin.invalidated === true || pin.owner !== input.ownerToken || pin.document !== document
+    || pin.selection !== claim.selection || pin.headerTrigger !== claim.header
+    || !websiteModelChoiceEqual(websiteChatPresetChoice(pin.selection?.family, pin.selection?.power), claim.modelChoice)) return false;
+  const picker = websiteChatPickerState();
+  return picker.trigger === claim.header && websiteChatClosedHeaderMatches(picker, pin.selection.power, pin)
+    && !picker.duplicate && !picker.conflicting && !picker.indicatorInvalid
+    && !picker.selectionAmbiguous && !picker.navigationAmbiguous;
+}
+async function chatGPTWaitForBoundUserRoot() {
+  chatGPTUserRootGapDisposition = 'not_eligible';
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  const now = Date.now(), expiry = input.evaluationDeadlineEpochMilliseconds;
+  if (input.action !== 'inspect' || input.submissionSequence !== 1
+    || !Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length !== 1 || input.expectedUserCounts[0] !== 1
+    || input.allowBoundFirstUserExpansion !== true || input.allowFirstUserBinding === true || input.allowFirstUserExpansion === true
+    || input.allowProvisionalFirstUserExpansion === true || input.allowBoundFirstUserRemountRefresh === true
+    || input.suppressFirstUserExpansionClaim === true || globalThis.__computaModelBoundFirstExpansion != null
+    || !Number.isSafeInteger(expiry) || expiry <= now || expiry > now + 30_000
+    || !record || record.userRootGap != null || record.replacement != null
+    || !record.root || !record.body || record.root.isConnected !== false || record.body.isConnected !== false
+    || !websiteModelChoiceValid(input.expectedModelChoice) || chatGPTMessageRoots('user').length !== 0) return false;
+  const claim = { state, record, oldRoot: record.root, oldBody: record.body, document,
+    invocation: websiteChatInvocationLease, firstProof: globalThis.__computaModelFirstProof,
+    prompt: globalThis.__computaModelFirstPrompt, canonical: record.canonical,
+    modelChoice: input.expectedModelChoice, pin: globalThis.__computaChatPresetPin,
+    selection: globalThis.__computaChatPresetPin?.selection, header: globalThis.__computaChatPresetPin?.headerTrigger,
+    deadline: Math.min(expiry, now + 1_800), outcome: 'waiting', records: 0, nodes: 0, successor: null };
+  // Admission itself creates no recoverable claim. Temporarily associate it
+  // only to evaluate the exact same predicates used on every awaited wake.
+  record.userRootGap = claim;
+  if (!chatGPTUserRootGapCurrent(claim)) { delete record.userRootGap; return false; }
+  chatGPTInvocationUserRootGap = claim;
+  chatGPTUserRootGapDisposition = 'waiting';
+  const selectorAttributes = ['data-message-author-role', 'data-markdown-text-style', 'data-turn', 'data-user-message-bubble'];
+  const isRoot = node => node?.nodeType === 1 && (node.getAttribute('data-message-author-role') === 'user'
+    || node.getAttribute('data-markdown-text-style') === 'user-message'
+    || node.tagName === 'ARTICLE' && node.getAttribute('data-turn') === 'user' || node.hasAttribute('data-user-message-bubble'));
+  const remember = node => {
+    let outer = node;
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      if (++claim.nodes > 256) return false;
+      if (isRoot(parent)) outer = parent;
+    }
+    if (outer === claim.oldRoot || outer === claim.oldBody || claim.successor && claim.successor !== outer) return false;
+    claim.successor = outer;
+    return true;
+  };
+  const ledger = records => {
+    for (const mutation of records) {
+      if (++claim.records > 64) return false;
+      // Attribute history is deliberately negative-only: a root that acquired
+      // and lost a selector in one batch cannot be erased by its final shape.
+      if (mutation.type === 'attributes') {
+        const name = mutation.attributeName, target = mutation.target;
+        if (!selectorAttributes.includes(name) || target?.nodeType !== 1) return false;
+        const valueIsUser = value => name === 'data-user-message-bubble' ? value != null
+          : name === 'data-markdown-text-style' ? value === 'user-message'
+            : name === 'data-turn' ? target.tagName === 'ARTICLE' && value === 'user' : value === 'user';
+        if (valueIsUser(mutation.oldValue) || valueIsUser(target.getAttribute(name))) return false;
+        for (let parent = target; parent; parent = parent.parentElement) {
+          if (++claim.nodes > 256 || isRoot(parent)) return false;
+        }
+        continue;
+      }
+      if (mutation.type !== 'childList') return false;
+      if (mutation.addedNodes.length + mutation.removedNodes.length + claim.nodes > 256) return false;
+      const pending = [...mutation.addedNodes, ...mutation.removedNodes];
+      while (pending.length) {
+        if (++claim.nodes > 256) return false;
+        const node = pending.pop();
+        if (isRoot(node)) { if (!remember(node)) return false; }
+        else if (node.nodeType === 1) {
+          // An added nested body may already belong to the one outer root.
+          let root = null;
+          for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+            if (++claim.nodes > 256) return false;
+            if (isRoot(parent)) root = parent;
+          }
+          if (root) { if (!remember(root)) return false; }
+          else {
+            if (pending.length + node.childNodes.length + claim.nodes > 256) return false;
+            pending.push(...node.childNodes);
+          }
+        }
+      }
+    }
+    return true;
+  };
+  await new Promise(resolve => {
+    let finished = false, observer;
+    const finish = outcome => {
+      if (finished) return;
+      finished = true; claim.outcome = outcome;
+      observer?.disconnect?.(); resolve(null);
+    };
+    const check = records => {
+      if (finished) return;
+      try {
+        if (!ledger(records || []) || !chatGPTUserRootGapCurrent(claim))
+          return finish(claim.outcome === 'expired' ? 'expired' : 'rejected');
+        const roots = chatGPTMessageRoots('user');
+        if (roots.length > 1) return finish('rejected');
+        if (roots.length === 1) {
+          if (!remember(roots[0]) || !roots[0].isConnected) return finish('rejected');
+          return finish('returned');
+        }
+      } catch { finish('rejected'); }
+    };
+    observer = new MutationObserver(check);
+    observer.observe(document, { subtree: true, childList: true, attributes: true, attributeOldValue: true,
+      attributeFilter: selectorAttributes });
+    check([]);
+    if (finished) return;
+    const milliseconds = Math.max(0, claim.deadline - Date.now());
+    const clockFinished = outcome => {
+      if (!finished) finish(outcome);
+      else if (!claim.readFinished && claim.outcome === 'returned') claim.outcome = outcome;
+    };
+    const clock = window.webkit?.messageHandlers?.computaModelClock;
+    if (clock && typeof clock.postMessage === 'function') {
+      try { Promise.resolve(clock.postMessage({ ownerToken: input.ownerToken, operationID: input.operationID, milliseconds }))
+        .then(() => clockFinished('expired'), () => clockFinished('clock_failed')); }
+      catch { clockFinished('clock_failed'); }
+    } else setTimeout(() => clockFinished('expired'), milliseconds);
+  });
+  if (claim.outcome === 'returned' && !chatGPTUserRootGapCurrent(claim) && claim.outcome === 'returned') claim.outcome = 'rejected';
+  chatGPTUserRootGapDisposition = claim.outcome;
+  return claim.outcome === 'returned';
+}
+function chatGPTUserRootGapReadFailure() {
+  const claim = chatGPTInvocationUserRootGap || (input.allowBoundFirstUserRemountRefresh === true
+    ? globalThis.__computaModelBoundFirstExpansion?.userRootGap : null);
+  if (!claim) return null;
+  // After the existing certifier rebinds the nodes, its own full guard governs
+  // identity. This invocation still cannot publish past its original cutoff.
+  if (claim.outcome !== 'returned' || Date.now() >= claim.deadline
+    || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease) {
+    if (Date.now() >= claim.deadline) claim.outcome = 'expired';
+    chatGPTUserRootGapDisposition = claim.outcome;
+    return chatGPTUserCountFailure('entry', 0, chatGPTMessageRoots('user').length);
+  }
+  return null;
+}
+// Shape-only evidence at rejected branches; no diagnostic grants authority.
+function chatGPTUserCountFailure(stage, entryCount, currentCount) {
+  const failure = { error: 'conversation_changed', detail: 'user_count' };
+  try {
+    if (!['action_precheck', 'repeated_submit', 'entry', 'preparation_final_read', 'outer_final_read'].includes(stage)
+      || !['inspect', 'prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'verifyProductMode',
+        'ensureChatMode', 'enableTemporary', 'selectModel', 'discoverModels', 'modelDiagnostic', 'stop', 'cleanup'].includes(input.action))
+      return failure;
+    const finiteCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 10_000 ? value : null;
+    const expected = Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length >= 1
+      && input.expectedUserCounts.length <= 2 && input.expectedUserCounts.every(value => finiteCount(value) !== null)
+      && new Set(input.expectedUserCounts).size === input.expectedUserCounts.length ? [...input.expectedUserCounts] : null;
+    failure.userCountDiagnostic = { kind: 'chatgpt_user_count_v1', stage, action: input.action,
+      entryUserCount: finiteCount(entryCount), currentUserCount: finiteCount(currentCount), expectedUserCounts: expected,
+      expectedCountMatches: expected !== null && finiteCount(currentCount) !== null && expected.includes(currentCount),
+      topFrame: window === window.top, urlMatches: document.URL === input.expectedURL,
+      originMatches: location.origin === 'https://chatgpt.com', ownerMatches: globalThis.__computaModelOwner === input.ownerToken };
+    const record = globalThis.__computaChatSubmissionState?.lastVerified;
+    Object.assign(failure.userCountDiagnostic, { boundRootPresent: !!record?.root, boundBodyPresent: !!record?.body,
+      boundRootConnected: !!record?.root?.isConnected, boundBodyConnected: !!record?.body?.isConnected,
+      gapDisposition: chatGPTUserRootGapDisposition });
+  } catch { /* Diagnostics never replace the original fail-closed result. */ }
+  return failure;
 }
 async function chatGPTGuardedPageAction(request, fingerprint = null) {
   const setupStarted = chatGPTPreparationNow();
@@ -4703,7 +5164,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (window !== window.top || document.URL !== input.expectedURL || globalThis.__computaModelOwner !== input.ownerToken
       || currentCount !== ownedUserCount) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, currentCount,
         firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: readLineageFingerprint } : null, chatGPTTemporaryVerified())
-        || { error: 'conversation_changed', detail: 'user_count' };
+        || chatGPTUserCountFailure('action_precheck', ownedUserCount, currentCount);
     if (firstSnapshot && !snapshotUnchanged()) return await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
@@ -5007,7 +5468,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (!enabled(send)) return { error: "send_unavailable" };
     if (globalThis.__computaModelLastSubmissionCount !== undefined
       && userCount <= globalThis.__computaModelLastSubmissionCount)
-      return { error: 'conversation_changed', detail: 'user_count' };
+      return chatGPTUserCountFailure('repeated_submit', ownedUserCount, userCount);
     if (userCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -5059,6 +5520,7 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
     attributeNames: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style", "id",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
+      "data-chatgpt-composer", "data-thread-find-composer", "data-composer-placement",
       "data-user-message-bubble", "data-talvt-turn-state", "data-content-search-turn-key",
       "data-chatgpt-selection-message-id", "data-tool-call-id", "role"] };
   signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
@@ -5082,10 +5544,26 @@ if (input.action === 'insert' && input.matchedObservationDiagnostic != null && i
       computaInstallObservationDiagnostic(input.matchedObservationDiagnostic);
   } catch { /* diagnostic failure leaves inference unchanged */ }
 }
-const ownedMessages = chatGPTMessageRoots('user');
+let ownedMessages = chatGPTMessageRoots('user');
+const priorGap = globalThis.__computaChatSubmissionState?.lastVerified?.userRootGap;
+if (priorGap?.outcome === 'returned' && priorGap.readFinished !== true) priorGap.outcome = 'rejected';
+if (priorGap && ['rejected', 'expired', 'clock_failed', 'waiting'].includes(priorGap.outcome)) {
+  chatGPTUserRootGapDisposition = priorGap.outcome;
+  return chatGPTUserCountFailure('entry', ownedMessages.length, ownedMessages.length);
+}
+if (ownedMessages.length === 0 && Array.isArray(input.expectedUserCounts)
+  && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1) {
+  if (await chatGPTWaitForBoundUserRoot()) ownedMessages = chatGPTMessageRoots('user');
+  else return chatGPTUserCountFailure('entry', 0, chatGPTMessageRoots('user').length);
+  // Awaited observation does not bypass the original entry guards.
+  if (window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+    || globalThis.__computaModelOwner !== input.ownerToken
+    || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease)
+    return { error: 'document_changed', detail: 'document_url' };
+}
 const ownedUserCount = ownedMessages.length;
 if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
-  return { error: "conversation_changed", detail: "user_count" };
+  return chatGPTUserCountFailure('entry', ownedUserCount, ownedUserCount);
 let firstUserVerified = false;
 let firstUserFingerprint = null;
 let firstSnapshot = null;
@@ -5225,28 +5703,52 @@ function chatGPTBoundFirstUserExpansionCandidate(root, body, rendered) {
   // no physical pin yet. Only the successful initial display's detached nodes,
   // native-certified route and original live deadline can supply that witness.
   const candidate = { bound: true, provisional: input.allowProvisionalFirstUserExpansion === true,
-    state, record, pendingPrivate, predecessor, deadline: pendingPrivate ? predecessor?.deadline : undefined, fingerprint: record?.fingerprint,
+    state, record, pendingPrivate, predecessor, userRootGap: chatGPTInvocationUserRootGap,
+    deadline: chatGPTInvocationUserRootGap?.deadline ?? (pendingPrivate ? predecessor?.deadline : undefined), fingerprint: record?.fingerprint,
     remount: pendingPrivate || !!record && (record.root !== root || record.body !== body), oldRoot, oldBody,
     root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
     document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
   const failure = chatGPTFirstUserExpansionContextFailure(candidate);
   return failure === null ? candidate : reject(failure);
 }
+let chatGPTFirstRouteModelFailureRule = 'none';
+let chatGPTFirstRouteModelFailurePin = null;
+let chatGPTFirstRouteModelFailureState = null;
+let chatGPTFirstRouteModelFailurePicker = null;
 function chatGPTFirstRouteModelPins(candidate) {
   // Preserve negative model history and physical picker continuity when URL
   // drift discarded a read. This is not fresh model evidence; the continued
   // invocation still performs the ordinary complete model proof.
+  chatGPTFirstRouteModelFailureRule = 'none';
+  const reject = (rule, value) => {
+    if (value && chatGPTFirstRouteModelFailureRule === 'none') chatGPTFirstRouteModelFailureRule = rule;
+    return value;
+  };
   const pin = globalThis.__computaChatPresetPin;
+  chatGPTFirstRouteModelFailurePin = pin;
   websiteChatDrainPinnedMutations(pin);
   const picker = websiteChatPickerState(), selected = pin && websiteChatPresetChoice(pin.selection?.family, pin.selection?.power);
-  if (!pin || pin.owner !== candidate.owner || pin.document !== document || pin.invalidated === true
-    || !selected || selected.key !== candidate.modelChoice.key
-    || picker.trigger !== pin.headerTrigger || !picker.trigger || !picker.enabled(picker.trigger)
-    || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous
-    || picker.headerPower && picker.headerPower.key !== pin.selection.power.key
-    || picker.semanticSlider && picker.semanticSlider.getAttribute('aria-valuenow')
-      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
-    || picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key) return false;
+  chatGPTFirstRouteModelFailurePicker = picker;
+  chatGPTFirstRouteModelFailureState = Object.freeze({ triggerPresent: !!picker.trigger,
+    triggerCount: picker.triggerCount, triggerCandidateCount: picker.triggerCandidates.length, pinHeaderPresent: !!pin?.headerTrigger });
+  if (reject('model_pin_missing', !pin)
+    || reject('model_pin_owner', pin.owner !== candidate.owner)
+    || reject('model_pin_document', pin.document !== document)
+    || reject('model_pin_invalidated', pin.invalidated === true)
+    || reject('model_selection_missing', !selected)
+    || reject('model_selection_key', selected.key !== candidate.modelChoice.key)
+    || reject('model_trigger_identity', picker.trigger !== pin.headerTrigger)
+    || reject('model_trigger_missing', !picker.trigger)
+    || reject('model_trigger_disabled', !picker.enabled(picker.trigger))
+    || reject('model_duplicate', picker.duplicate)
+    || reject('model_conflicting', picker.conflicting)
+    || reject('model_indicator', picker.indicatorInvalid)
+    || reject('model_selection_ambiguous', picker.selectionAmbiguous)
+    || reject('model_navigation_ambiguous', picker.navigationAmbiguous)
+    || reject('model_header_power', picker.headerPower && picker.headerPower.key !== pin.selection.power.key)
+    || reject('model_slider_power', picker.semanticSlider && picker.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)))
+    || reject('model_checked_family', picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key)) return false;
   return true;
 }
 // Before either first-message pin exists, only the already dispatched native
@@ -5309,8 +5811,36 @@ function chatGPTPendingInitialRouteDiscard(candidate, fingerprint, stage) {
 // display attempt. Retain only an exact, native-bound physical candidate. This
 // witness grants no response, replacement receipt, or retry; the next call must
 // present the native-certified route edge and repeat the complete proof.
-function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
+// First rejected operand only; diagnostics never supply ownership authority.
+let chatGPTBoundRouteFailureRule = 'not_attempted';
+let chatGPTBoundRouteFailureStage = null, chatGPTBoundRouteFailureCandidate = null;
+function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedDiscard = null) {
+  chatGPTBoundRouteFailureRule = 'none';
+  chatGPTBoundRouteFailureStage = stage; chatGPTBoundRouteFailureCandidate = candidate;
+  const reject = (rule, value) => {
+    if (value && chatGPTBoundRouteFailureRule === 'none') chatGPTBoundRouteFailureRule = rule;
+    return value;
+  };
+  let receiptRule = 'none';
+  const receiptCheck = (rule, value) => { if (!value && receiptRule === 'none') receiptRule = rule; return value; };
   const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
+  // The replacement helper may install its one certificate just before this
+  // caller resumes on a promoted URL. Preserve that exact unclaimed receipt
+  // for native's existing fresh-read handoff, never manufacture another one.
+  const returningReceipt = receiptCheck('return_result', certifiedDiscard?.error === 'first_user_observation_replaced')
+    && receiptCheck('return_remount', candidate?.remount === true)
+    && receiptCheck('return_awaiting', candidate.awaitingNativeRefresh === true)
+    && receiptCheck('return_unclaimed', candidate.refreshClaimed !== true)
+    && receiptCheck('return_grant', input.allowBoundFirstUserRemountRefresh !== true)
+    && receiptCheck('return_receipt', candidate.replacementReceipt != null)
+    && receiptCheck('return_retained', record?.replacement === candidate.replacementReceipt)
+    && receiptCheck('return_document', candidate.replacementReceipt.document === document)
+    && receiptCheck('return_owner', candidate.replacementReceipt.owner === candidate.owner)
+    && receiptCheck('return_root', candidate.replacementReceipt.root === candidate.root)
+    && receiptCheck('return_body', candidate.replacementReceipt.body === candidate.body)
+    && receiptCheck('return_old_root', candidate.replacementReceipt.oldRoot === candidate.oldRoot)
+    && receiptCheck('return_old_body', candidate.replacementReceipt.oldBody === candidate.oldBody);
+  if (certifiedDiscard != null && !returningReceipt) { chatGPTBoundRouteFailureRule = receiptRule; return null; }
   const roots = chatGPTMessageRoots('user');
   const root = roots[0], body = root && chatGPTUserBody(root);
   // Display recovery can start on the originally verified nodes, then cross
@@ -5323,57 +5853,113 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
     && candidate.oldRoot === record?.root && candidate.oldBody === record?.body;
   const lateRemount = sameNodeRecovery && candidate.root?.isConnected === false
     && candidate.body?.isConnected === false && root !== candidate.root && body !== candidate.body;
-  const currentBodyIntact = roots.length === 1 && root?.isConnected === true && body?.isConnected === true
-    && (lateRemount || root === candidate?.root && body === candidate?.body)
-    && normalizedFirstBody(body) === candidate?.canonical;
-  if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
-    || !candidate.bound || candidate.provisional || candidate.initialRoute || candidate.pendingPrivate
-    || !candidate.remount && !sameNodeRecovery
-    || candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard
-    || (candidate.routeContinuationEdges?.length || 0) >= 2 || candidate.modelFailure || candidate.contextFailure
-    || candidate.outcome !== 'expanded' || candidate.clicked !== true
-    || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
-    || input.action !== 'inspect' || input.allowBoundFirstUserExpansion !== true
-    || (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true)
-    || input.suppressFirstUserExpansionClaim === true
-    || input.allowFirstUserBinding !== false || input.allowFirstUserExpansion === true
-    || input.allowProvisionalFirstUserExpansion === true
-    || window !== window.top || input.provider !== 'chatgpt' || location.origin !== 'https://chatgpt.com'
-    || candidate.document !== document || candidate.owner !== input.ownerToken
-    || globalThis.__computaModelOwner !== candidate.owner
-    || websiteChatInvocationLease == null || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
-    || candidate.routeURL !== input.expectedURL || document.URL === input.expectedURL
-    || !state || state !== globalThis.__computaChatSubmissionState || state.revoked
-    || state.document !== document || state.owner !== candidate.owner || state.firstMarker !== candidate.marker
-    || state.pending != null || state.lastVerified !== record || record?.phase !== 'verified'
-    || record.sequence !== 1 || record.document !== document || record.owner !== candidate.owner
+  let bodyRule = 'none';
+  const bodyCheck = (rule, value) => { if (!value && bodyRule === 'none') bodyRule = rule; return value; };
+  const currentBodyIntact = bodyCheck('body_count', roots.length === 1)
+    && bodyCheck('body_root_connected', root?.isConnected === true)
+    && bodyCheck('body_connected', body?.isConnected === true)
+    && bodyCheck('body_identity', lateRemount || root === candidate?.root && body === candidate?.body)
+    && bodyCheck('body_canonical', normalizedFirstBody(body) === candidate?.canonical);
+  if (reject('candidate_missing', !candidate)
+    || reject('candidate_current', candidate !== globalThis.__computaModelBoundFirstExpansion)
+    || reject('bound', !candidate.bound)
+    || reject('provisional', candidate.provisional)
+    || reject('initial_route', candidate.initialRoute)
+    || reject('pending_private', candidate.pendingPrivate)
+    || reject('recovery_shape', !candidate.remount && !sameNodeRecovery)
+    || reject('unconsumed_route', candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard)
+    || reject('route_budget', (candidate.routeContinuationEdges?.length || 0) >= 2)
+    || reject('model_failure', candidate.modelFailure)
+    || reject('context_failure', candidate.contextFailure)
+    || reject('outcome', candidate.outcome !== 'expanded')
+    || reject('clicked', candidate.clicked !== true)
+    || reject('deadline_finite', !Number.isFinite(candidate.deadline))
+    || reject('deadline_expired', Date.now() > candidate.deadline)
+    || reject('action', input.action !== 'inspect')
+    || reject('bound_permission', input.allowBoundFirstUserExpansion !== true)
+    || reject('refresh_permission', !returningReceipt && (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true))
+    || reject('suppressed', input.suppressFirstUserExpansionClaim === true)
+    || reject('binding_permission', input.allowFirstUserBinding !== false)
+    || reject('expansion_permission', input.allowFirstUserExpansion === true)
+    || reject('provisional_permission', input.allowProvisionalFirstUserExpansion === true)
+    || reject('frame', window !== window.top)
+    || reject('provider', input.provider !== 'chatgpt')
+    || reject('origin', location.origin !== 'https://chatgpt.com')
+    || reject('document', candidate.document !== document)
+    || reject('owner', candidate.owner !== input.ownerToken)
+    || reject('global_owner', globalThis.__computaModelOwner !== candidate.owner)
+    || reject('lease_missing', websiteChatInvocationLease == null)
+    || reject('lease_current', globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease)
+    || reject('from_url', candidate.routeURL !== input.expectedURL)
+    || reject('url_unchanged', document.URL === input.expectedURL)
+    || reject('state_missing', !state)
+    || reject('state_current', state !== globalThis.__computaChatSubmissionState)
+    || reject('state_revoked', state.revoked)
+    || reject('state_document', state.document !== document)
+    || reject('state_owner', state.owner !== candidate.owner)
+    || reject('state_marker', state.firstMarker !== candidate.marker)
+    || reject('pending', state.pending != null)
+    || reject('last_verified', state.lastVerified !== record)
+    || reject('record_phase', record?.phase !== 'verified')
+    || reject('record_sequence', record.sequence !== 1)
+    || reject('record_document', record.document !== document)
+    || reject('record_owner', record.owner !== candidate.owner)
     || (candidate.awaitingNativeRefresh === true
-      ? !candidate.refreshClaimed || record.replacement !== candidate.replacementReceipt || !candidate.replacementReceipt
-      : record.replacement != null)
-    || record.root !== candidate.oldRoot || record.body !== candidate.oldBody
-    || candidate.remount && (candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
-      || candidate.root === candidate.oldRoot || candidate.body === candidate.oldBody)
-    || !currentBodyIntact
-    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
-    || globalThis.__computaModelFirstPrompt !== candidate.prompt || globalThis.__computaModelFirstMarker !== candidate.marker
-    || candidate.expandedText !== candidate.canonical
-    || record.canonical !== candidate.canonical || record.fingerprint !== fingerprint || candidate.fingerprint !== fingerprint
-    || input.expectedFirstUserFingerprint !== fingerprint || pinned?.fingerprint !== fingerprint || pinned.marker !== candidate.marker
-    || input.expectedFirstUserMarker !== candidate.marker || input.submissionSequence !== 1 || input.submissionMarker !== record.marker
-    || record.marker !== candidate.marker || !chatGPTSubmissionPins(record)
-    || !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
-    || !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice)
-    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice)
-    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return null;
-  if (!chatGPTFirstRouteModelPins(candidate)) return null;
+      ? reject('receipt_claim', !candidate.refreshClaimed && !returningReceipt)
+        || reject('receipt_identity', record.replacement !== candidate.replacementReceipt)
+        || reject('receipt_missing', !candidate.replacementReceipt)
+      : reject('receipt_unexpected', record.replacement != null))
+    || reject('old_root_pin', record.root !== candidate.oldRoot)
+    || reject('old_body_pin', record.body !== candidate.oldBody)
+    || (candidate.remount && (reject('old_root_connected', candidate.oldRoot?.isConnected !== false)
+      || reject('old_body_connected', candidate.oldBody?.isConnected !== false)
+      || reject('new_root_identity', candidate.root === candidate.oldRoot)
+      || reject('new_body_identity', candidate.body === candidate.oldBody)))
+    || reject(bodyRule, !currentBodyIntact)
+    || reject('submitted', globalThis.__computaModelFirstSubmitted !== true)
+    || reject('submission_count', globalThis.__computaModelLastSubmissionCount !== 0)
+    || reject('prompt', globalThis.__computaModelFirstPrompt !== candidate.prompt)
+    || reject('marker', globalThis.__computaModelFirstMarker !== candidate.marker)
+    || reject('expanded_text', candidate.expandedText !== candidate.canonical)
+    || reject('record_canonical', record.canonical !== candidate.canonical)
+    || reject('record_fingerprint', record.fingerprint !== fingerprint)
+    || reject('candidate_fingerprint', candidate.fingerprint !== fingerprint)
+    || reject('native_fingerprint', input.expectedFirstUserFingerprint !== fingerprint)
+    || reject('private_fingerprint', pinned?.fingerprint !== fingerprint)
+    || reject('private_marker', pinned.marker !== candidate.marker)
+    || reject('native_marker', input.expectedFirstUserMarker !== candidate.marker)
+    || reject('submission_sequence', input.submissionSequence !== 1)
+    || reject('submission_marker', input.submissionMarker !== record.marker)
+    || reject('record_marker', record.marker !== candidate.marker)
+    || reject('submission_pins', !chatGPTSubmissionPins(record))
+    || reject('state_model', !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice))
+    || reject('expected_model', !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice))
+    || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
+    || reject('product', !chatGPTProductModeProof())
+    || reject('temporary', !chatGPTTemporaryVerified())) return null;
+  let modelRemount = null;
+  if (!chatGPTFirstRouteModelPins(candidate)) {
+    const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
+    const diagnostic = {};
+    const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
+    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
+    if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
+    if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
+      return failModel('model_remount_pending_replaced');
+    // Do not adopt the replacement picker here. Reuse the existing single
+    // provisional-header observer, retaining the old pin and all negatives.
+    if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
+      return failModel(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
+    modelRemount = { pin, pending: pin.provisionalHeader };
+  }
   // Any non-route conversation identity remains a hard boundary. Route-only
   // lineage is independently checked against the original URL by native.
-  if (input.expectedConversationIdentity) return null;
+  if (reject('conversation_identity', input.expectedConversationIdentity)) return null;
   if (input.expectedConversation) {
     try {
       const old = new URL(input.expectedURL);
-      if (input.expectedConversation !== old.origin + decodeURIComponent(old.pathname).replace(/\/$/, '')) return null;
-    } catch { return null; }
+      if (reject('conversation_route', input.expectedConversation !== old.origin + decodeURIComponent(old.pathname).replace(/\/$/, ''))) return null;
+    } catch { chatGPTBoundRouteFailureRule = 'conversation_url'; return null; }
   }
   if (lateRemount) {
     // Retain only this observed successor to both detached original nodes.
@@ -5382,13 +5968,28 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage) {
     candidate.remount = true;
     candidate.root = root; candidate.body = body;
   }
+  if (modelRemount) {
+    candidate.routeModelPin = modelRemount.pin;
+    candidate.routeModelRemount = modelRemount.pending;
+  }
+  // No new witness or claim: native already knows how to carry this discarded
+  // certificate across its bounded route chain and require a fresh full proof.
+  if (returningReceipt) return certifiedDiscard;
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
 // Both a discarded certification and a completed replacement receipt consume
 // the same native-certified route suffix. The two-edge navigation budget is
 // independent of the one display click and one replacement-read handoff.
+function chatGPTBoundRouteModelRemountIntact(candidate) {
+  const pending = candidate?.routeModelRemount;
+  if (!pending) return true;
+  const pin = globalThis.__computaChatPresetPin;
+  return pin === candidate.routeModelPin && pin?.provisionalHeader === pending
+    && (!pending.completed || pin.headerTrigger === pending.header);
+}
 function chatGPTConsumeBoundFirstRoute(candidate, witness = null) {
+  if (!chatGPTBoundRouteModelRemountIntact(candidate)) return false;
   const start = chatGPTFirstUserExpansionRouteStart(candidate), edges = input.firstUserExpansionRouteContinuation;
   if (start < 0 || (candidate.routeContinuationEdges?.length || 0) + edges.length - start > 2
     || witness && (edges[start].fromURL !== witness.fromURL || edges[start].toURL !== witness.toURL)) return false;
@@ -5412,29 +6013,48 @@ async function chatGPTCertifyBoundFirstRemount(candidate, fingerprint) {
   // the record's authority until this exact replacement has complete bytes,
   // a current model proof, and the existing full-hash discard certificate.
   // A prefix authorizes only the bounded display click, never this receipt.
+  chatGPTBoundRouteFailureRule = 'not_attempted';
   const model = await websiteModelReadEvidence('chatgpt', candidate.modelChoice, null,
     { scope: 'action_precheck', action: input.action });
   if (model.error) {
     const discarded = model.error === 'document_changed'
       ? chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'model_read') : null;
     if (discarded) return discarded;
-    chatGPTLatchExpansionModelFailure(candidate, model); return null;
+    chatGPTLatchExpansionModelFailure(candidate, model);
+    chatGPTLatchCertificateFailure(candidate, 'model_read', 'model_error', 'not_checked', model);
+    return null;
   }
-  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical)
-    return chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'model_read');
+  const modelContext = chatGPTFirstUserExpansionContextFailure(candidate);
+  if (modelContext !== null || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+    const result = chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'model_read');
+    if (!result) chatGPTLatchCertificateFailure(candidate, 'model_context', modelContext !== null ? 'context' : 'body', modelContext);
+    return result;
+  }
   const discarded = await chatGPTFirstReplacementObservation({ ...input, expectedModelChoice: candidate.modelChoice }, 1,
     { root: candidate.oldRoot, body: candidate.oldBody, text: candidate.canonical },
     { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
       identity: () => null, temporary: chatGPTTemporaryVerified });
   const receipt = candidate.record.replacement;
-  if (discarded?.error !== 'first_user_observation_replaced' || !receipt
-    || receipt.root !== candidate.root || receipt.body !== candidate.body
-    || receipt.oldRoot !== candidate.oldRoot || receipt.oldBody !== candidate.oldBody)
-    return chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'replacement_hash');
+  let receiptFailure = 'none';
+  const rejectReceipt = (rule, value) => { if (value && receiptFailure === 'none') receiptFailure = rule; return value; };
+  if (rejectReceipt('replacement_result', discarded?.error !== 'first_user_observation_replaced')
+    || rejectReceipt('receipt_absent', !receipt)
+    || rejectReceipt('receipt_root', receipt.root !== candidate.root)
+    || rejectReceipt('receipt_body', receipt.body !== candidate.body)
+    || rejectReceipt('receipt_old_root', receipt.oldRoot !== candidate.oldRoot)
+    || rejectReceipt('receipt_old_body', receipt.oldBody !== candidate.oldBody)) {
+    const result = chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'replacement_hash');
+    if (!result) chatGPTLatchCertificateFailure(candidate, 'replacement_observation', receiptFailure, 'not_checked', discarded);
+    return result;
+  }
   candidate.replacementReceipt = receipt;
   candidate.awaitingNativeRefresh = true;
-  if (!chatGPTFirstUserExpansionContext(candidate) || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+  const receiptContext = chatGPTFirstUserExpansionContextFailure(candidate);
+  if (receiptContext !== null || normalizedFirstBody(candidate.body) !== candidate.canonical) {
+    const routeDiscard = chatGPTBoundFirstRouteDiscard(candidate, fingerprint, 'replacement_hash', discarded);
+    if (routeDiscard) return routeDiscard;
     candidate.refreshClaimed = true;
+    chatGPTLatchCertificateFailure(candidate, 'receipt_context', receiptContext !== null ? 'context' : 'body', receiptContext, discarded);
     return null;
   }
   // Return no response or ownership proof. Only native's specifically granted
@@ -5467,6 +6087,9 @@ function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   return contextFailure === null ? candidate : reject(contextFailure);
 }
 function chatGPTFirstUserExpansionContextFailure(candidate) {
+  if (candidate.userRootGap && (candidate.userRootGap.outcome !== 'returned'
+    || candidate.deadline !== candidate.userRootGap.deadline || Date.now() >= candidate.deadline
+    || candidate.userRootGap.record.userRootGap !== candidate.userRootGap)) return 'deadline';
   const roots = chatGPTMessageRoots('user');
   if (window !== window.top || candidate.document !== document) return 'frame';
   if (input.provider !== 'chatgpt') return 'provider';
@@ -5853,7 +6476,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
-    if (!candidate.initialRoute && !candidate.pendingPrivate) candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap) candidate.deadline = Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
@@ -6017,16 +6640,85 @@ function chatGPTRecoveryLifecycle(path = 'other') {
       initialRoute: candidate?.initialRoute === true, remount: candidate?.remount === true, provisional: candidate?.provisional === true,
       outcome: !candidate ? 'none' : candidate.outcome === 'expanded' ? 'expanded' : 'other',
       ...(candidate?.finalizationDiagnostic || chatGPTRecoveryFinalizationFacts(candidate, 'not_reached')),
-      ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash'].includes(candidate.routeDiscard.stage)
+      ...(candidate?.routeDiscard ? { boundRouteStage: ['body_hash', 'model_read', 'replacement_hash', 'finalization_hash'].includes(candidate.routeDiscard.stage)
         ? candidate.routeDiscard.stage : 'other',
         boundRouteEdges: Math.min(candidate.routeContinuationEdges?.length || 0, 2),
         boundRoutePending: candidate.routeDiscardConsumed !== candidate.routeDiscard } : {}) };
   } catch { return null; }
 }
+function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, observed = null) {
+  try {
+    if (!candidate || candidate.certificateDiagnostic) return;
+    const record = candidate.record, receipt = record?.replacement;
+    const errors = ['document_changed', 'conversation_changed', 'first_user_observation_replaced',
+      'model_selection_unverified', 'product_mode_unverified', 'temporary_mode_unverified'];
+    let modelPinInvalidation = null;
+    if (chatGPTBoundRouteFailureRule === 'model_pin_invalidated') {
+      const pin = chatGPTFirstRouteModelFailurePin, facts = pin?.invalidationFacts;
+      const reason = ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(pin?.invalidationReason)
+        ? pin.invalidationReason : 'other';
+      const source = ['header_tracking', 'pinned_header', 'remount_header', 'remount_context', 'provisional_header',
+        'provisional_context', 'semantic_observer', 'deferred_model'].includes(pin?.invalidationSource) ? pin.invalidationSource : 'unknown';
+      modelPinInvalidation = { reason, source };
+      if (reason === 'header_mutation'
+        && ['current', 'records', 'reconstruction', 'character_data', 'removed', 'added', 'child_list'].includes(facts?.stage)
+        && ['current_power', 'record_limit', 'child_nodes_limit', 'reconstruction_limit', 'ancestry_limit',
+          'old_text_limit', 'new_text_limit', 'old_power', 'new_power', 'node_missing', 'node_limit', 'depth_limit',
+          'text_limit', 'children_limit', 'candidate_limit', 'aggregate_limit', 'power',
+          'provisional_old', 'provisional_current', 'provisional_child'].includes(facts?.rule))
+        Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      const contextRules = {
+        header_tracking: ['trigger_identity'], remount_context: ['previous_connected', 'trigger_identity'],
+        provisional_context: ['pin_current', 'pin_owner', 'pin_document', 'global_owner', 'document', 'frame', 'origin',
+          'selection_identity', 'selection_family', 'selection_power', 'previous_connected', 'header_identity', 'trigger_count',
+          'trigger_identity', 'trigger_enabled', 'closed_presentation', 'header_power', 'header_presentation', 'duplicate',
+          'conflicting', 'indicator', 'selection_ambiguous', 'navigation_ambiguous', 'slider_power', 'checked_family'],
+      };
+      if (reason === 'header_replaced' && Object.prototype.hasOwnProperty.call(contextRules, facts?.stage)
+        && contextRules[facts.stage].includes(facts?.rule)) Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      if (reason === 'semantic_mutation' && facts?.stage === 'deferred_model'
+        && ['header_power', 'slider_power', 'checked_family'].includes(facts.rule))
+        Object.assign(modelPinInvalidation, { stage: facts.stage, rule: facts.rule });
+      if (reason === 'semantic_mutation' && ['aria-valuenow', 'aria-checked'].includes(facts?.attribute)
+        && ['nodeConnected', 'attributePresent', 'currentMatches', 'oldMatches'].every(key => typeof facts[key] === 'boolean'))
+        Object.assign(modelPinInvalidation, { attribute: facts.attribute, nodeConnected: facts.nodeConnected,
+          attributePresent: facts.attributePresent, currentMatches: facts.currentMatches, oldMatches: facts.oldMatches });
+      Object.freeze(modelPinInvalidation);
+    }
+    // Read only stored scalar/identity facts. In particular, do not call a
+    // model/product/context proof getter again to explain a rejected operand.
+    candidate.certificateDiagnostic = Object.freeze({ kind: 'chatgpt_bound_certificate_v1', stage, rule,
+      routeRule: chatGPTBoundRouteFailureRule, contextFailure: contextFailure ?? 'none',
+      observedError: !observed?.error ? 'none' : errors.includes(observed.error) ? observed.error : 'other',
+      phase: !record ? 'absent' : ['prepared', 'send_claimed', 'verified'].includes(record.phase) ? record.phase : 'other',
+      receiptPresent: !!receipt,
+      receiptNodesMatch: !!receipt && receipt.root === candidate.root && receipt.body === candidate.body
+        && receipt.oldRoot === candidate.oldRoot && receipt.oldBody === candidate.oldBody,
+      receiptRetained: !!receipt && receipt === candidate.replacementReceipt,
+      expectedModelPresent: input.expectedModelChoice != null, deferModelVerification: input.deferModelVerification === true,
+      awaitingNativeRefresh: candidate.awaitingNativeRefresh === true, refreshClaimed: candidate.refreshClaimed === true,
+      ...(chatGPTBoundRouteFailureRule === chatGPTFirstRouteModelFailureRule && chatGPTFirstRouteModelFailureRule !== 'none'
+        && chatGPTFirstRouteModelFailureState ? { modelPinState: chatGPTFirstRouteModelFailureState } : {}),
+      ...(modelPinInvalidation ? { modelPinInvalidation } : {}) });
+    candidate.certificateDiagnosticDocument = document;
+    candidate.certificateDiagnosticOwner = input.ownerToken;
+  } catch { /* Diagnostic failure cannot change admission or retry a read. */ }
+}
 function chatGPTWithRecoveryLifecycle(observed, path = 'other') {
-  if (!globalThis.__computaModelBoundFirstExpansion) return observed;
+  const candidate = globalThis.__computaModelBoundFirstExpansion;
+  if (!candidate) return observed;
+  // Keep otherwise-unreported terminal route refusals at the shared result
+  // boundary. The certifier/body-hash callers retain their more precise first
+  // checkpoint before reaching here. No proof is evaluated for diagnostics.
+  if (candidate === chatGPTBoundRouteFailureCandidate && chatGPTBoundRouteFailureRule !== 'none'
+    && ['body_hash', 'model_read', 'replacement_hash', 'finalization_hash'].includes(chatGPTBoundRouteFailureStage))
+    chatGPTLatchCertificateFailure(candidate, chatGPTBoundRouteFailureStage, 'route_guard', 'not_checked', observed);
   const recoveryLifecycle = chatGPTRecoveryLifecycle(path);
-  return recoveryLifecycle ? { ...observed, recoveryLifecycleDiagnostic: recoveryLifecycle } : observed;
+  const boundCertificateDiagnostic = candidate.certificateDiagnosticDocument === document
+    && candidate.certificateDiagnosticOwner === input.ownerToken ? candidate.certificateDiagnostic : null;
+  if (!recoveryLifecycle && !boundCertificateDiagnostic) return observed;
+  return { ...observed, ...(recoveryLifecycle ? { recoveryLifecycleDiagnostic: recoveryLifecycle } : {}),
+    ...(boundCertificateDiagnostic ? { boundCertificateDiagnostic } : {}) };
 }
 function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
   try {
@@ -6121,8 +6813,10 @@ const finalReadContextFailure = observed => {
     return { error: 'document_changed', detail: 'model_read_context' };
   // Verification retains the explicit acknowledged-append branch below.
   // Preparation cannot acquire a new message while its final proof awaits.
-  if (input.action === 'prepare' && chatGPTMessageRoots('user').length !== ownedUserCount)
-    return { error: 'conversation_changed', detail: 'user_count' };
+  if (input.action === 'prepare') {
+    const currentCount = chatGPTMessageRoots('user').length;
+    if (currentCount !== ownedUserCount) return chatGPTUserCountFailure('preparation_final_read', ownedUserCount, currentCount);
+  }
   if (input.action === 'verifyProductMode') {
     const product = chatGPTProductModeProof();
     if (!product) return { error: 'product_mode_unverified' };
@@ -6254,11 +6948,19 @@ if (ownedUserCount > 0) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const boundRecovery = expansion?.bound ? expansion : boundRefresh;
-  if (boundRecovery && (!chatGPTFirstUserExpansionContext(boundRecovery)
-    || rendered !== boundRecovery.canonical || fingerprint !== boundRecovery.fingerprint))
-    return chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
-      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash')
-      || chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
+  const gapHashFailure = chatGPTUserRootGapReadFailure();
+  if (gapHashFailure) return gapHashFailure;
+  let boundHashFailure = 'none', boundHashContextFailure = null;
+  const rejectBoundHash = (rule, value) => { if (value && boundHashFailure === 'none') boundHashFailure = rule; return value; };
+  if (boundRecovery && (rejectBoundHash('context', (boundHashContextFailure = chatGPTFirstUserExpansionContextFailure(boundRecovery)) !== null)
+    || rejectBoundHash('rendered', rendered !== boundRecovery.canonical)
+    || rejectBoundHash('fingerprint', fingerprint !== boundRecovery.fingerprint))) {
+    const continued = chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
+      || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash');
+    if (continued) return continued;
+    chatGPTLatchCertificateFailure(boundRecovery, 'body_hash', boundHashFailure, boundHashContextFailure);
+    return chatGPTFirstUserFailure('pinned_fingerprint', 'digest', { roots: ownedMessages, body: first, rendered }, false, fingerprint);
+  }
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
     { snapshotIntact: snapshotUnchanged(true), fingerprint }, chatGPTTemporaryVerified())
     || await chatGPTFirstReplacementObservation(input, ownedUserCount, firstSnapshot,
@@ -6267,8 +6969,17 @@ if (ownedUserCount > 0) {
     || chatGPTFirstUserFailure('snapshot_before_action', 'digest', { recoveryPath: 'hash_snapshot' }, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
-  if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) return await chatGPTCertifyBoundFirstRemount(expansion, fingerprint)
-    || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
+  if (expansion?.remount && !expansion.provisional && !expansion.initialRoute) {
+    const certified = await chatGPTCertifyBoundFirstRemount(expansion, fingerprint)
+      || chatGPTFirstUserFailure('snapshot_before_action', 'digest');
+    const gapCertificateFailure = chatGPTUserRootGapReadFailure();
+    if (chatGPTInvocationUserRootGap) {
+      chatGPTInvocationUserRootGap.readFinished = true;
+      if (gapCertificateFailure || certified.error !== 'first_user_observation_replaced')
+        chatGPTInvocationUserRootGap.outcome = 'rejected';
+    }
+    return gapCertificateFailure || certified;
+  }
   firstUserFingerprint = fingerprint;
   const pinned = globalThis.__computaModelFirstProof;
   if (pinned) {
@@ -6379,6 +7090,19 @@ if (ownedUserCount > 0) {
   if (boundRecovery && globalThis.__computaModelBoundFirstExpansion === boundRecovery
     && (!finalized.error || discardedURLRead)) boundRecovery.verified = true;
   chatGPTLatchRecoveryFinalization(boundRecovery, 'returned', finalized, discardedURLRead);
+  // The granted remount refresh can cross the route during its final full
+  // submission hash too. Keep only the existing certificate and bounded native
+  // route handoff; no result, verified flag, fresh click or renewed deadline.
+  if (boundRecovery && finalized.error === 'document_changed' && finalized.detail === 'model_read_context') {
+    const discarded = chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'finalization_hash');
+    if (discarded) return discarded;
+  }
+  const gapFinalFailure = chatGPTUserRootGapReadFailure();
+  if (gapFinalFailure) return gapFinalFailure;
+  if (chatGPTInvocationUserRootGap) {
+    chatGPTInvocationUserRootGap.readFinished = true;
+    if (finalized.error) chatGPTInvocationUserRootGap.outcome = 'rejected';
+  }
   return chatGPTWithRecoveryLifecycle(finalized);
 }
 if (input.expectedFirstUserFingerprint != null)
@@ -6389,9 +7113,12 @@ const outerFinalizationStarted = chatGPTPreparationNow();
 if (!observed.error && observed.chatModeReady && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
 const readContextFailure = finalReadContextFailure(observed);
 if (readContextFailure) return readContextFailure;
-if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount)
-  return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
-    || { error: 'conversation_changed', detail: 'user_count' };
+if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)) {
+  const currentCount = chatGPTMessageRoots('user').length;
+  if (currentCount !== ownedUserCount)
+    return websiteModelAcknowledgedUserAppend(input, ownedUserCount, currentCount, null, chatGPTTemporaryVerified())
+      || chatGPTUserCountFailure('outer_final_read', ownedUserCount, currentCount);
+}
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);

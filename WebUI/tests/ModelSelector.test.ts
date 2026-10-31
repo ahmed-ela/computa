@@ -7,7 +7,7 @@ import type { ModelOption } from '../src/types';
 
 mock.module('@octanejs/shadcn/Button', () => ({ Button: ({ variant: _variant, size: _size, ...props }: Record<string, unknown>) => h('button', props) }));
 mock.module('@octanejs/shadcn/NativeSelect', () => ({ NativeSelect: (props: Record<string, unknown>) => h('select', props), NativeSelectOption: (props: Record<string, unknown>) => h('option', props) }));
-const { ModelSelector, WebsiteModelsRefresh, modelOptionLabel } = await import('../src/ModelSelector');
+const { ModelSelector, WebsiteModelsRefresh, modelOptionLabel, websiteModelsRefreshAction } = await import('../src/ModelSelector');
 
 const options: ModelOption[] = [
   { id: 'browser/chatgpt', label: 'ChatGPT / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
@@ -63,6 +63,37 @@ describe('website model selectors', () => {
     const allowed = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, onRefresh: () => {} })).html;
     expect(allowed).not.toMatch(/<button[^>]*disabled/);
     expect(allowed).toContain('Read the model choices available');
+  });
+
+  test('task refresh addresses only its selected website provider for default and concrete choices', () => {
+    for (const [provider, label] of [['gemini', 'Gemini'], ['chatgpt', 'ChatGPT'], ['claude', 'Claude']]) {
+      for (const model of [`browser/${provider}`, `browser/${provider}/choice/eyJrZXkiOiJmaXh0dXJlIn0`]) {
+        expect(websiteModelsRefreshAction(model)).toEqual({ action: 'refreshWebsiteModels', provider });
+        const html = renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html;
+        expect(html).toContain(`aria-label="Refresh ${label} models"`);
+        expect(html).toContain(`>Refresh ${label} models</button>`);
+        expect(html).toContain(`signed-in ${label} website`);
+      }
+    }
+    expect(websiteModelsRefreshAction()).toEqual({ action: 'refreshWebsiteModels' });
+    expect(Object.keys(websiteModelsRefreshAction()!)).toEqual(['action']);
+  });
+
+  test('nonwebsite and malformed model scopes cannot request a global refresh', () => {
+    for (const model of ['', 'local/model', 'api/cerebras/gpt-oss-120b', 'browser/unknown', 'browser/Gemini',
+      'browser/gemini ', 'browser/gemini\n', 'browser/gemini/choice/value\n',
+      'browser/gemini/choice/', 'browser/gemini/choice/value/extra', 'browser/gemini/not-choice/value']) {
+      expect(websiteModelsRefreshAction(model)).toBeUndefined();
+      expect(renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html).toBe('');
+    }
+  });
+
+  test('scoped refresh retains idle permission and in-progress disabling', () => {
+    for (const state of [{ canRefresh: false }, { canRefresh: undefined }, { canRefresh: true, refreshing: true }]) {
+      const html = renderToStaticMarkup(h(WebsiteModelsRefresh, { model: 'browser/gemini', ...state, onRefresh: () => {} })).html;
+      expect(html).toContain('aria-label="Refresh Gemini models"');
+      expect(html).toMatch(/<button[^>]*disabled/);
+    }
   });
 
   test('observed website labels and IDs are escaped as text and attribute values', async () => {

@@ -3953,6 +3953,84 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testBorrowedRenderingLeasePrecedesCaptureAndEndsWithEachBindingRelease() async throws {
+        for ending in ["explicit", "automatic", "shutdown"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.requireRenderingForCapture()
+            _ = try await call(controller, "browser_tabs")
+            let targetID = await backend.humanID
+            let bound = try jsonObject(await call(controller, "browser_bind", ["tab_id": targetID]))
+            XCTAssertEqual(bound["ownership"] as? String, "user_existing")
+            _ = try await call(controller, "browser_bind", ["tab_id": targetID])
+            _ = try await call(controller, "browser_read")
+            let active = await backend.renderingFacts()
+            XCTAssertEqual(active.acquisitions, 1, "An already-bound request cannot replace its rendering lease")
+            XCTAssertEqual(active.active, 1); XCTAssertEqual(active.capturesWithoutLease, 0)
+            if ending == "explicit" { _ = try await call(controller, "browser_close") }
+            else if ending == "automatic" { _ = await controller.releaseReport(taskKey: "turn-a") }
+            else { _ = await controller.shutdown() }
+            let released = await backend.renderingFacts(), counts = await backend.counts()
+            XCTAssertEqual(released.active, 0); XCTAssertEqual(released.releases, 1)
+            XCTAssertEqual(released.liveReleaseAttempts, 0, "Input authority must be revoked before rendering is released")
+            XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.closeAttempts, 0)
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            let preserved = try await backend.target(id: targetID)
+            XCTAssertNotNil(preserved)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testFailedBorrowedRenderingOrInitialCaptureLeavesNoLeaseOrInputAuthority() async throws {
+        for phase in ["rendering", "capture"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.requireRenderingForCapture()
+            _ = try await call(controller, "browser_tabs")
+            let targetID = await backend.humanID
+            if phase == "rendering" { await backend.failNextRendering() }
+            else { await backend.failObservations([.browserUnavailable("Synthetic capture failure")]) }
+            do { _ = try await call(controller, "browser_bind", ["tab_id": targetID]); XCTFail("Expected \(phase) failure") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Synthetic \(phase) failure")) }
+            let failed = await backend.renderingFacts(), state = try await controller.apiToolState(taskKey: "turn-a")
+            XCTAssertEqual(failed.active, 0); XCTAssertEqual(failed.liveReleaseAttempts, 0)
+            XCTAssertEqual(state.availability, .unbound)
+            _ = try await call(controller, "browser_bind", ["tab_id": targetID])
+            _ = try await call(controller, "browser_read")
+            let recovered = await backend.renderingFacts()
+            XCTAssertEqual(recovered.active, 1); XCTAssertEqual(recovered.capturesWithoutLease, 0)
+            _ = await controller.releaseReport(taskKey: "turn-a")
+            let released = await backend.renderingFacts(), counts = await backend.counts()
+            XCTAssertEqual(released.active, 0); XCTAssertEqual(counts.closeAttempts, 0)
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testReleasedPendingRenderingCannotMountOrReleaseTheNextTasksBinding() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.requireRenderingForCapture()
+        _ = try await call(controller, "browser_tabs")
+        let targetID = await backend.humanID
+        await backend.holdNextRendering()
+        let pending = Task { try await self.call(controller, "browser_bind", ["tab_id": targetID]) }
+        await backend.waitUntilRenderingHeld()
+        let stopped = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(stopped.pendingOperation)
+        _ = try await call(controller, "browser_tabs", key: "turn-b")
+        _ = try await call(controller, "browser_bind", ["tab_id": targetID], key: "turn-b")
+        await backend.resumeRendering()
+        do { _ = try await pending.value; XCTFail("Stopped acquisition cannot publish a binding") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        _ = try await call(controller, "browser_read", key: "turn-b")
+        let active = await backend.renderingFacts(), counts = await backend.counts()
+        XCTAssertEqual(active.active, 1); XCTAssertEqual(active.acquisitions, 1)
+        XCTAssertEqual(active.capturesWithoutLease, 0); XCTAssertEqual(active.liveReleaseAttempts, 0)
+        XCTAssertEqual(counts.closeAttempts, 0); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.releaseReport(taskKey: "turn-b")
+        let released = await backend.renderingFacts()
+        XCTAssertEqual(released.active, 0); XCTAssertEqual(released.releases, 1)
+        _ = await controller.shutdown()
+    }
+
     func testCancelledOrReleasedBindCleanupCannotClearTheNextContext() async throws {
         for cancelled in [false, true] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -4338,6 +4416,40 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var holdFreshRead = false, freshReadHeld = false
     private var freshReadContinuation: CheckedContinuation<Void, Never>?
     private var freshReadWaiters = [CheckedContinuation<Void, Never>]()
+    struct RenderingFacts: Sendable {
+        var acquisitions = 0, releases = 0, active = 0, capturesWithoutLease = 0, liveReleaseAttempts = 0
+    }
+    private var rendering = RenderingFacts(), renderingRequired = false, renderingFailure = false
+    private var renderingLeases = [String: BrowserTabLifetime]()
+    private var holdRendering = false, renderingHeld = false
+    private var renderingContinuation: CheckedContinuation<Void, Never>?
+    private var renderingWaiters = [CheckedContinuation<Void, Never>]()
+
+    func requireRenderingForCapture() { renderingRequired = true }
+    func failNextRendering() { renderingFailure = true }
+    func holdNextRendering() { holdRendering = true }
+    func waitUntilRenderingHeld() async {
+        if !renderingHeld { await withCheckedContinuation { renderingWaiters.append($0) } }
+    }
+    func resumeRendering() { renderingContinuation?.resume(); renderingContinuation = nil }
+    func renderingFacts() -> RenderingFacts { var value = rendering; value.active = renderingLeases.count; return value }
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws {
+        if holdRendering {
+            holdRendering = false; renderingHeld = true
+            renderingWaiters.forEach { $0.resume() }; renderingWaiters.removeAll()
+            await withCheckedContinuation { renderingContinuation = $0 }
+        }
+        try Task.checkCancellation(); try lifetime.check()
+        if renderingFailure { renderingFailure = false; throw BrowserTabBrokerError.browserUnavailable("Synthetic rendering failure") }
+        renderingLeases[target.targetID + "/" + target.instanceToken] = lifetime
+        rendering.acquisitions += 1
+    }
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async {
+        do { try lifetime.check(); rendering.liveReleaseAttempts += 1 } catch { }
+        let key = target.targetID + "/" + target.instanceToken
+        guard renderingLeases[key] === lifetime else { return }
+        renderingLeases.removeValue(forKey: key); rendering.releases += 1
+    }
 
     private var changeResult = BrowserDocumentChangeResult(changed: false, navigationReady: false)
     private var changeDestination: URL?, changeHold = false, changeHeld = false, changeWaits = 0
@@ -4469,6 +4581,10 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func observe(target:BrowserTarget) async throws -> BrowserDocumentObservation {
         stats.observes += 1
+        if renderingRequired, renderingLeases[target.targetID + "/" + target.instanceToken] == nil {
+            rendering.capturesWithoutLease += 1
+            throw BrowserTabBrokerError.browserUnavailable("Synthetic capture has no rendering lease")
+        }
         if holdRead {
             holdRead = false; observationHeld = true
             observationWaiters.forEach { $0.resume() }; observationWaiters.removeAll()

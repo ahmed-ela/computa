@@ -24,7 +24,8 @@ final class EmbeddedBrowserTab: Identifiable {
 }
 
 /// Browser views are independent of the privileged Octane UI WebView.
-/// Human views may detach when hidden; inference views return to a render host.
+/// Hidden human views detach unless an active tool binding leases rendering.
+/// Rendering leases never transfer tab ownership or presentation authority.
 /// Only close/shutdown destroys either session.
 @MainActor @Observable
 final class EmbeddedBrowserSession {
@@ -108,6 +109,20 @@ final class EmbeddedBrowserSession {
     }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
+    @ObservationIgnored private var geminiCookieObservationRequests = 0
+    @ObservationIgnored private var geminiCookieTimeline: GeminiVerificationCookieTimeline?
+    @ObservationIgnored private var geminiDiagnosticCookieEvents: [GeminiCAPTCHADiagnostic.CookieEvent] = []
+    @ObservationIgnored private var geminiDiagnosticCookieEventsDropped = 0
+    @ObservationIgnored private let geminiDiagnosticDirectory: URL?
+    @ObservationIgnored private var geminiDiagnosticSaveInstants: [ContinuousClock.Instant] = []
+    #if DEBUG
+    @ObservationIgnored private var geminiDiagnosticWriterForTesting: ((GeminiCAPTCHADiagnostic.Report) throws -> URL)?
+    #endif
+    @ObservationIgnored private var geminiResponseObservationClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var geminiResponseObservationInstants: [ContinuousClock.Instant] = []
+    #if DEBUG
+    @ObservationIgnored private var geminiResponseObserverForTesting: (@MainActor (String) -> Void)?
+    #endif
     @ObservationIgnored private var cacheIdentity: EmbeddedBrowserCacheIdentity?
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
@@ -184,9 +199,17 @@ final class EmbeddedBrowserSession {
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         weak var presentationHost: NSView?
+        var toolRenderLeases: Set<UUID> = []
+        var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
+        var needsBackgroundRendering: Bool { isModelOwned || isToolOwned || !toolRenderLeases.isEmpty }
+        var shouldMountInBackground: Bool { needsBackgroundRendering && (presentationHost == nil || !toolRenderLeases.isEmpty) }
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
+        var geminiResponseObservationGeneration: UUID?
+        var geminiResponseObservationsInGeneration = 0
+        var geminiDiagnosticJournal = GeminiCAPTCHADiagnostic.Journal()
+        var geminiDiagnosticIncident: (generation: UUID, report: GeminiCAPTCHADiagnostic.Report, attempts: Int, saved: Bool)?
         var preparedDocumentNavigation = false
         // Native lifecycle facts can defer an untouched initial inspection,
         // but never grant adapter, document, or recovery authority.
@@ -207,6 +230,7 @@ final class EmbeddedBrowserSession {
         var responseCompletionObserver: ResponseCompletionObserver?
         var responseCompletion: ChatGPTResponseCompletion?
         var responseCompletionDiagnosticLogged = false
+        var responseCompletionPreparation: ResponseCompletionPreparation?
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
@@ -234,6 +258,7 @@ final class EmbeddedBrowserSession {
         var recoveryCommittedGeneration: UUID?
         var recoverySettledGeneration: UUID?
         var recoveryToolUsed = false
+        var geminiCookieObservationGeneration: UUID?
         var recoveryAttemptedCheckpointID: UUID?
         var recoveryAttemptedDocumentID: UUID?
         // The callback that requests a popup carries no public tool-origin
@@ -259,12 +284,16 @@ final class EmbeddedBrowserSession {
     /// `persistent: false` makes an isolated, nonpersistent test/private session.
     /// An explicit profile ID avoids reading or writing the production preference in tests.
     init(persistent: Bool = true, maximumTabs: Int = 8, profileID: UUID? = nil, defaults: UserDefaults = .standard,
-         cookieRetirementDirectory: URL? = nil) {
+         cookieRetirementDirectory: URL? = nil, geminiDiagnosticDirectory: URL? = nil) {
         self.maximumTabs = max(1, min(maximumTabs, 32))
         self.persistent = persistent
         self.profileID = profileID
         self.defaults = defaults
         self.cookieRetirementDirectory = cookieRetirementDirectory
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        self.geminiDiagnosticDirectory = geminiDiagnosticDirectory ?? (persistent ? support.appendingPathComponent(
+            "LocalCodex/CodexHome/GeminiCAPTCHADiagnostics-v1", isDirectory: true) : nil)
     }
 
     /// Resolve once for both WebKit and saved checkpoints, even if preferences
@@ -320,6 +349,18 @@ final class EmbeddedBrowserSession {
     }
 
     func isHumanVerificationRecoveryCandidateCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
+        isHumanVerificationRecoverySourceCurrent(candidate)
+            && savedHumanVerificationCheckpointIDs[candidate.provider] == candidate.checkpointID
+    }
+
+    /// Freshness only after a separately verified discovery and cleanup. This
+    /// does not clear a checkpoint, authorize a probe or establish recovery.
+    func isHumanVerificationRecoverySourceCurrentAfterDiscovery(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
+        isHumanVerificationRecoverySourceCurrent(candidate)
+            && savedHumanVerificationCheckpointIDs[candidate.provider] == nil
+    }
+
+    private func isHumanVerificationRecoverySourceCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
         guard !isShutdown, let entry = entries[candidate.tabID], !entry.isModelOwned, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
@@ -327,8 +368,7 @@ final class EmbeddedBrowserSession {
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
-              EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider,
-              savedHumanVerificationCheckpointIDs[candidate.provider] == candidate.checkpointID else { return false }
+              EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider else { return false }
         return true
     }
 
@@ -385,6 +425,17 @@ final class EmbeddedBrowserSession {
             store = .nonPersistent()
         }
         websiteDataStore = store
+        let timeline = GeminiVerificationCookieTimeline(store: store.httpCookieStore, sink: { [weak self] event in
+            self?.recordGeminiDiagnosticCookieEvent(event)
+            if let data = try? event.logData(), data.count <= 1_000 {
+                Self.inferencePrewarmLog.notice("geminiVerificationCookieTimeline \(String(decoding: data, as: UTF8.self), privacy: .public)")
+            }
+            #if DEBUG
+            self?.geminiCookieTimelineSinkForTesting?(event)
+            #endif
+        })
+        geminiCookieTimeline = timeline
+        timeline.start()
         if persistent {
             // ComputaApp creates one session and injects it into AppState; that
             // session owns this profile and one migration shared by all tabs.
@@ -582,13 +633,14 @@ final class EmbeddedBrowserSession {
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
         else {
-            view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
-                : WKWebView(frame: .zero, configuration: configuration)
+            view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+                                        configuration: configuration)
         }
         #else
-        view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
-            : WKWebView(frame: .zero, configuration: configuration)
+        view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+                                    configuration: configuration)
         #endif
+        (view as? EmbeddedModelWebView)?.protectsNativeFocus = modelOwned || toolOwned
         // Inspection is an explicit, ephemeral choice for each human tab.
         // An inspectable opener must not grant it to a new popup.
         view.isInspectable = false
@@ -650,7 +702,16 @@ final class EmbeddedBrowserSession {
     }
 
     func closeTab(_ id: UUID) {
-        guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard let entry = entries[id], let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Freeze and sync evidence while this exact page, generation and its
+        // delegates still exist. Failure to save never changes cleanup authority.
+        if EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: entry.view.url) == "gemini"
+            || entry.geminiDiagnosticIncident != nil {
+            captureGeminiCAPTCHA(tabID: id, view: entry.view, trigger: .beforeClose)
+        }
+        entries.removeValue(forKey: id)
+        entry.toolRenderLeases.removeAll()
+        entry.frameBeforeToolRendering = nil
         removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
@@ -697,6 +758,9 @@ final class EmbeddedBrowserSession {
         } else if entry.isModelOwned, !entry.ownedTemporaryChatGPTRoutes.isEmpty {
             _ = temporaryCookieRetirement?.registerClosedOwnedIDs(entry.ownedTemporaryChatGPTRoutes)
         } else { temporaryCookieRetirement?.requestSweep() }
+        if !isShutdown, entry.isModelOwned, entry.view.configuration.websiteDataStore === websiteDataStore {
+            geminiCookieTimeline?.observe(.modelClosed)
+        }
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
@@ -1015,6 +1079,44 @@ final class EmbeddedBrowserSession {
         entry.responseCompletionObserver = ResponseCompletionObserver(key: key, script: script, allowsDiagnostics: allowsDiagnostics)
     }
 
+    /// Content-free observation of one preparation attempt. It is retained after
+    /// revocation so cancellation diagnostics can distinguish a silent armed
+    /// observer from a missing/failed observer; it never participates in proof.
+    private final class ResponseCompletionPreparation {
+        enum Outcome: String {
+            case preparing, armed
+            case observerUnavailable = "observer_unavailable", bindingRejected = "binding_rejected"
+            case expired, pageRejected = "page_rejected", evaluationFailed = "evaluation_failed"
+            case timedOut = "timed_out", contextChanged = "context_changed", cancelled
+        }
+        enum Signal: String { case terminal, terminalFailure = "terminal_failure", invalidated }
+        let owner: String
+        let generation: UUID
+        let sequence: Int
+        var correlationID: UUID?
+        var outcome: Outcome = .preparing
+        var diagnostic: ChatGPTResponseCompletion.Diagnostic?
+        var signal: Signal?
+        init(owner: String, generation: UUID, sequence: Int) {
+            self.owner = owner; self.generation = generation; self.sequence = sequence
+        }
+    }
+
+    /// Does not evaluate the page or test receipt authority. Deliberately usable
+    /// after task cancellation/lease expiry, but never across owners or documents.
+    func chatGPTResponseObserverDiagnostic(tabID: UUID, view: WKWebView, ownerToken: String,
+                                          generation: UUID, sequence: Int) -> [String: Any]? {
+        guard !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.tab.documentGeneration == generation, let record = entry.responseCompletionPreparation,
+              record.owner == ownerToken, record.generation == generation, record.sequence == sequence else { return nil }
+        return ["outcome": record.outcome.rawValue,
+                "reason": record.diagnostic.map { $0.reason.rawValue as Any } ?? NSNull(),
+                "calls": record.diagnostic.map { $0.calls as Any } ?? NSNull(),
+                "instances": record.diagnostic.map { $0.instances as Any } ?? NSNull(),
+                "signal": record.signal.map { $0.rawValue as Any } ?? NSNull()]
+    }
+
     /// Arming is a bounded preparation, never a Send or a response proof. A
     /// missing/changed decoder simply leaves the ordinary completion fallback.
     func prepareChatGPTResponseCompletion(tabID: UUID, view: WKWebView, ownerToken: String, generation: UUID,
@@ -1023,16 +1125,22 @@ final class EmbeddedBrowserSession {
         guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
               entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
               entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == generation,
-              Self.responseCompletionURLAllowed(view.url), let expectedURL = view.url?.absoluteString,
-              let observer = entry.responseCompletionObserver else { return false }
+              Self.responseCompletionURLAllowed(view.url), let expectedURL = view.url?.absoluteString else { return false }
+        let preparation = ResponseCompletionPreparation(owner: ownerToken, generation: generation, sequence: sequence)
+        entry.responseCompletionPreparation = preparation
+        guard let observer = entry.responseCompletionObserver else { preparation.outcome = .observerUnavailable; return false }
         revokeResponseCompletion(entry)
         guard let lease = ChatGPTResponseCompletion(view: ObjectIdentifier(view), ownerToken: ownerToken,
             generation: generation, sequence: sequence, inputSHA256: outboundSHA256,
-            inputUTF8Bytes: outboundUTF8Bytes, deadline: deadline) else { return false }
+            inputUTF8Bytes: outboundUTF8Bytes, deadline: deadline) else {
+            preparation.outcome = ContinuousClock.now >= deadline ? .expired : .bindingRejected
+            return false
+        }
         let parts = (deadline - .now).components
         let duration = Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
-        guard duration > 0 else { return false }
+        guard duration > 0 else { preparation.outcome = .expired; return false }
         entry.responseCompletion = lease
+        preparation.correlationID = lease.correlationID
         entry.responseCompletionDiagnosticLogged = false
         let evaluationDeadline = min(deadline, ContinuousClock.now + .seconds(1))
         let result = EmbeddedScriptResult()
@@ -1073,10 +1181,13 @@ final class EmbeddedBrowserSession {
             && Self.responseCompletionURLAllowed(view.url)
             && lease.isCurrent(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation, sequence: sequence)
         guard current, reply == Data([1]) else {
+            preparation.outcome = Task.isCancelled ? .cancelled : ContinuousClock.now >= evaluationDeadline ? .timedOut
+                : !current ? .contextChanged : reply == nil ? .evaluationFailed : .pageRejected
             if entry.responseCompletion === lease { revokeResponseCompletion(entry) }
             else { lease.revoke() }
             return false
         }
+        preparation.outcome = .armed
         return true
     }
 
@@ -1131,6 +1242,11 @@ final class EmbeddedBrowserSession {
             // parser, even when malformed or foreign to the current lease.
             guard let diagnostic = lease.diagnostic(body), !entry.responseCompletionDiagnosticLogged else { return }
             entry.responseCompletionDiagnosticLogged = true
+            if let record = entry.responseCompletionPreparation, record.owner == lease.ownerToken,
+               record.generation == lease.generation, record.sequence == lease.sequence,
+               record.correlationID == lease.correlationID {
+                record.diagnostic = diagnostic
+            }
             Self.inferencePrewarmLog.notice("completionObserver version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(diagnostic.reason.rawValue, privacy: .public) calls=\(diagnostic.calls) instances=\(diagnostic.instances)")
             return
         }
@@ -1140,6 +1256,11 @@ final class EmbeddedBrowserSession {
             let failure = lease.failureReceipt(view: ObjectIdentifier(entry.view), ownerToken: entry.modelChanges?.ownerToken ?? "",
                 generation: entry.tab.documentGeneration, sequence: lease.sequence)
             let state = lease.invalidated ? "invalidated" : failure == nil ? "terminal" : "terminal_failure"
+            if let record = entry.responseCompletionPreparation, record.owner == lease.ownerToken,
+               record.generation == lease.generation, record.sequence == lease.sequence,
+               record.correlationID == lease.correlationID {
+                record.signal = .init(rawValue: state)
+            }
             Self.inferencePrewarmLog.notice("completionSignal version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) state=\(state, privacy: .public)")
             if let failure {
                 Self.inferencePrewarmLog.notice("completionFailure version=1 session=\(lease.ownerToken, privacy: .public) sequence=\(lease.sequence) reason=\(failure.reason.rawValue, privacy: .public) calls=\(failure.calls) assistantMessages=\(failure.assistantMessages) messageTerminalCount=\(failure.messageTerminalCount) mainTerminalCount=\(failure.mainTerminalCount)")
@@ -1382,7 +1503,7 @@ final class EmbeddedBrowserSession {
         // WindowGroup shares this session. Updating another window must not
         // move live pages away from a surviving designated render host.
         if modelRenderHost == nil { modelRenderHost = modelRenderHosts.first?.view }
-        for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
+        for entry in entries.values where entry.shouldMountInBackground {
             mountModelView(entry)
         }
     }
@@ -1391,7 +1512,7 @@ final class EmbeddedBrowserSession {
         modelRenderHosts.removeAll { $0.view == nil || $0.view === host }
         if modelRenderHost === host {
             modelRenderHost = modelRenderHosts.first?.view
-            for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
+            for entry in entries.values where entry.shouldMountInBackground {
                 if modelRenderHost != nil { mountModelView(entry) }
                 else if entry.view.superview === host {
                     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -1407,7 +1528,21 @@ final class EmbeddedBrowserSession {
         let entry = try entry(id)
         guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
         entry.presentationHost = host
+        if !entry.toolRenderLeases.isEmpty {
+            // The workspace may update or replace its selected pane while a
+            // task borrows this exact page. Remember the latest human host,
+            // but keep the task's viewport stable until its final lease ends.
+            rememberPresentedFrame(entry, host: host)
+            mountModelView(entry)
+            return
+        }
+        mountPresentedView(entry, in: host)
+    }
+
+    private func mountPresentedView(_ entry: Entry, in host: NSView) {
         entry.view.removeFromSuperview()
+        entry.frameBeforeToolRendering = nil
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = entry.isModelOwned || entry.isToolOwned
         entry.view.frame = host.bounds
         entry.view.autoresizingMask = [.width, .height]
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
@@ -1416,13 +1551,67 @@ final class EmbeddedBrowserSession {
 
     func detachPresentedTab(_ id: UUID, from host: NSView) {
         guard let entry = entries[id], entry.presentationHost === host else { return }
+        if !entry.toolRenderLeases.isEmpty { rememberPresentedFrame(entry, host: host) }
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
-        if entry.isModelOwned || entry.isToolOwned { mountModelView(entry) }
+        if entry.needsBackgroundRendering { mountModelView(entry) }
+    }
+
+    /// A revocable render lease borrows the exact human view. It cannot select,
+    /// navigate, close, or change the ownership of that tab. A selected narrow
+    /// human pane cannot shrink the task viewport; final release restores it.
+    func acquireToolRendering(tabID: UUID) throws -> UUID {
+        let entry = try entry(tabID)
+        guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
+        guard modelRenderHost?.window != nil else {
+            throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
+        }
+        let lease = UUID()
+        entry.toolRenderLeases.insert(lease)
+        mountModelView(entry)
+        return lease
+    }
+
+    func releaseToolRendering(tabID: UUID, lease: UUID) {
+        guard let entry = entries[tabID], entry.toolRenderLeases.remove(lease) != nil,
+              entry.toolRenderLeases.isEmpty else { return }
+        if let host = entry.presentationHost {
+            mountPresentedView(entry, in: host)
+            return
+        }
+        guard !entry.needsBackgroundRendering else { return }
+        entry.view.removeFromSuperview()
+        if let saved = entry.frameBeforeToolRendering {
+            entry.view.frame = saved.frame
+            entry.view.autoresizingMask = saved.autoresizing
+        }
+        entry.frameBeforeToolRendering = nil
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = false
+    }
+
+    /// A retained lease is not evidence that its render surface still exists.
+    /// Check immediately before tool dispatch, without moving or replaying it.
+    func requireToolRendering(tabID: UUID) throws {
+        let entry = try entry(tabID)
+        guard !entry.toolRenderLeases.isEmpty else { return }
+        guard let host = modelRenderHost, let window = host.window,
+              entry.view.superview === host, entry.view.window === window,
+              entry.view.bounds.width >= 1_024, entry.view.bounds.height >= 768 else {
+            throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
+        }
+    }
+
+    private func rememberPresentedFrame(_ entry: Entry, host: NSView) {
+        guard !entry.isModelOwned, !entry.isToolOwned else { return }
+        entry.frameBeforeToolRendering = (host.bounds, [.width, .height])
     }
 
     private func mountModelView(_ entry: Entry) {
         guard let host = modelRenderHost else { return }
+        if !entry.isModelOwned, !entry.isToolOwned, entry.frameBeforeToolRendering == nil {
+            entry.frameBeforeToolRendering = (entry.view.frame, entry.view.autoresizingMask)
+        }
+        (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = true
         if entry.view.superview !== host {
             #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
             endModelNativeFocusDiagnostic(entry)
@@ -1833,6 +2022,120 @@ final class EmbeddedBrowserSession {
     }
 
     private static let inferencePrewarmLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
+
+    struct GeminiVerificationCookieObservation: Encodable, Equatable, Sendable {
+        enum Role: String, Encodable, Equatable, Sendable { case human, model }
+        enum Phase: String, Encodable, Equatable, Sendable { case requested, callback }
+        enum Status: String, Encodable, Equatable, Sendable { case pending, available, unavailable }
+        enum Reason: String, Encodable, Equatable, Sendable {
+            case sessionClosed = "session_closed", entryChanged = "entry_changed", documentChanged = "document_changed"
+            case toolUsed = "tool_used", unsettled, storeChanged = "store_changed", routeChanged = "route_changed"
+        }
+        let kind = "gemini_verification_cookie_observation_v1"
+        let evidence = "callback_time_native_metadata_not_request_cookie_proof"
+        let request: Int
+        let role: Role
+        let destination: GeminiVerificationCookieDiagnostic.Destination
+        let sharedStore: Bool
+        let phase: Phase
+        let status: Status
+        let reason: Reason?
+        let metadata: GeminiVerificationCookieDiagnostic.Snapshot?
+    }
+
+    static let geminiCookieObservationLimit = 16
+    @MainActor private final class GeminiCookieObservationTicket { var completed = false }
+
+    private static func geminiCookieDestination(_ url: URL?) -> GeminiVerificationCookieDiagnostic.Destination? {
+        guard let url, url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
+              url.port == nil || url.port == 443 else { return nil }
+        switch (url.host?.lowercased(), url.path) {
+        case ("gemini.google.com", "/app"): return .geminiApp
+        case ("google.com", "/sorry"): return .googleSorry
+        case ("google.com", "/sorry/"): return .googleSorrySlash
+        case ("google.com", "/sorry/index"): return .googleSorryIndex
+        case ("www.google.com", "/sorry"): return .googleWWWSorry
+        case ("www.google.com", "/sorry/"): return .googleWWWSorrySlash
+        case ("www.google.com", "/sorry/index"): return .googleWWWSorryIndex
+        default: return nil
+        }
+    }
+
+    /// Observation only, after a successful committed navigation. Never awaits
+    /// WebKit, retains cookies, clears a checkpoint, or grants model authority.
+    private func observeGeminiVerificationCookies(_ entry: Entry) {
+        guard !isShutdown, entries[entry.tab.id] === entry, !entry.isToolOwned, !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+              entry.toolRenderLeases.isEmpty, entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading,
+              entry.tab.error == nil, let destination = Self.geminiCookieDestination(entry.view.url),
+              entry.geminiCookieObservationGeneration != entry.tab.documentGeneration,
+              geminiCookieObservationRequests < Self.geminiCookieObservationLimit else { return }
+        let view = entry.view, store = view.configuration.websiteDataStore, shared = websiteDataStore
+        let generation = entry.tab.documentGeneration, documentID = entry.tab.documentID
+        let committedID = entry.humanCommittedDocumentID, url = view.url, tabID = entry.tab.id
+        entry.geminiCookieObservationGeneration = generation
+        geminiCookieObservationRequests += 1
+        let ordinal = geminiCookieObservationRequests, role: GeminiVerificationCookieObservation.Role = entry.isModelOwned ? .model : .human
+        let emit: @MainActor @Sendable (GeminiVerificationCookieObservation.Phase, GeminiVerificationCookieObservation.Reason?,
+                                       GeminiVerificationCookieDiagnostic.Snapshot?) -> Void = { [weak self] phase, reason, metadata in
+            let value = GeminiVerificationCookieObservation(request: ordinal, role: role, destination: destination,
+                sharedStore: store === shared, phase: phase,
+                status: phase == .requested ? .pending : metadata?.status == .available ? .available : .unavailable,
+                reason: reason, metadata: metadata)
+            if let data = try? JSONEncoder().encode(value), data.count <= 2_048 {
+                Self.inferencePrewarmLog.notice("geminiVerificationCookieObservation \(String(decoding: data, as: UTF8.self), privacy: .public)")
+            }
+            #if DEBUG
+            self?.geminiCookieObservationSinkForTesting?(value)
+            #endif
+        }
+        emit(.requested, nil, nil)
+        let ticket = GeminiCookieObservationTicket()
+        let completion: @MainActor @Sendable ([HTTPCookie]) -> Void = { [weak self, weak entry, weak view] cookies in
+            guard !ticket.completed else { return }
+            ticket.completed = true
+            guard let self, !self.isShutdown else { emit(.callback, .sessionClosed, nil); return }
+            guard let entry, let view, self.entries[tabID] === entry, entry.view === view else {
+                emit(.callback, .entryChanged, nil); return
+            }
+            guard entry.tab.documentGeneration == generation, entry.tab.documentID == documentID,
+                  entry.humanCommittedDocumentID == committedID else { emit(.callback, .documentChanged, nil); return }
+            guard !entry.recoveryToolUsed, entry.toolPopupContext == nil, entry.toolRenderLeases.isEmpty else {
+                emit(.callback, .toolUsed, nil); return
+            }
+            guard entry.navigation == nil, !view.isLoading, !entry.tab.isLoading, entry.tab.error == nil else {
+                emit(.callback, .unsettled, nil); return
+            }
+            guard view.configuration.websiteDataStore === store, self.websiteDataStore === shared else {
+                emit(.callback, .storeChanged, nil); return
+            }
+            guard view.url == url, Self.geminiCookieDestination(view.url) == destination else {
+                emit(.callback, .routeChanged, nil); return
+            }
+            emit(.callback, nil, GeminiVerificationCookieDiagnostic.project(cookies, destination: destination, now: Date()))
+        }
+        #if DEBUG
+        if let reader = geminiCookieObservationReaderForTesting { reader(store.httpCookieStore, completion); return }
+        #endif
+        store.httpCookieStore.getAllCookies(completion)
+    }
+
+    /// Store-level diagnostics survive model-view closure. They never authorize
+    /// navigation, recovery, model selection, or publication of a response.
+    private func observeGeminiCookieTimelineAfterNavigation(_ entry: Entry) {
+        guard !isShutdown, entries[entry.tab.id] === entry, !entry.isToolOwned, !entry.recoveryToolUsed,
+              entry.toolPopupContext == nil, entry.toolRenderLeases.isEmpty, entry.navigation == nil,
+              !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
+              entry.view.configuration.websiteDataStore === websiteDataStore,
+              let destination = Self.geminiCookieDestination(entry.view.url) else { return }
+        geminiCookieTimeline?.observe(destination == .geminiApp ? .navigationSettled : .challengeSettled)
+    }
+
+    /// Called before runtime teardown, without waiting for a diagnostic read.
+    /// A missing callback is unknown; this is not a disk-flush acknowledgement.
+    func observeGeminiCookieShutdownRequested() {
+        guard !isShutdown else { return }
+        geminiCookieTimeline?.observe(.shutdownRequested)
+    }
     // Keep one prompt-free root through normal pauses between tasks. Expiring
     // it sooner repeatedly discards a hydrated page just before the next Send.
     // Adoption still validates current cookies, view, generation and route;
@@ -2195,6 +2498,21 @@ final class EmbeddedBrowserSession {
     }
 
     #if DEBUG
+    private var geminiCookieObservationReaderForTesting: (@MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void)?
+    private var geminiCookieObservationSinkForTesting: (@MainActor (GeminiVerificationCookieObservation) -> Void)?
+    private var geminiCookieTimelineSinkForTesting: (@MainActor (GeminiVerificationCookieTimeline.Event) -> Void)?
+
+    func setGeminiCookieTimelineSinkForTesting(_ sink: @escaping @MainActor (GeminiVerificationCookieTimeline.Event) -> Void) {
+        geminiCookieTimelineSinkForTesting = sink
+    }
+
+    func setGeminiCookieObservationForTesting(
+        reader: @escaping @MainActor (WKHTTPCookieStore, @escaping @MainActor @Sendable ([HTTPCookie]) -> Void) -> Void,
+        sink: @escaping @MainActor (GeminiVerificationCookieObservation) -> Void) {
+        geminiCookieObservationReaderForTesting = reader
+        geminiCookieObservationSinkForTesting = sink
+    }
+
     private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
     private var responseCompletionSourceForTesting: String?
     private var cookieSeedFactoryForTesting: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?
@@ -2280,6 +2598,8 @@ final class EmbeddedBrowserSession {
         cancelModelNativeFocusDiagnostic()
         #endif
         isShutdown = true
+        geminiCookieTimeline?.stop()
+        geminiCookieTimeline = nil
         cacheIdentity?.close()
         chatGPTInferencePrewarmingEnabled = false
         chatGPTInferencePrewarmAdmission = nil
@@ -2379,6 +2699,9 @@ final class EmbeddedBrowserSession {
         entry.humanCheckpointDocumentID = entry.humanCommittedDocumentID
         entry.humanCheckpointURL = entry.view.url
         recordHumanVerificationRequired(provider: provider, renewObservation: true)
+        if provider == "gemini" {
+            captureGeminiCAPTCHA(tabID: entry.tab.id, view: entry.view, trigger: .humanCheckpoint)
+        }
     }
 
     fileprivate func owns(_ view: WKWebView, tabID: UUID) -> Bool { entries[tabID]?.view === view }
@@ -2467,6 +2790,149 @@ final class EmbeddedBrowserSession {
         if selectedTabID == tabID { errorMessage = message }
     }
 
+    private func recordGeminiDiagnosticCookieEvent(_ event: GeminiVerificationCookieTimeline.Event) {
+        // Historical metadata only. Never start an extra cookie read or wait
+        // for one here; an absent/currently pending sample remains unknown.
+        geminiDiagnosticCookieEvents.append(.init(date: Date(), event: event))
+        if geminiDiagnosticCookieEvents.count > GeminiCAPTCHADiagnostic.maximumCookieEvents {
+            geminiDiagnosticCookieEvents.removeFirst()
+            if geminiDiagnosticCookieEventsDropped < Int.max { geminiDiagnosticCookieEventsDropped += 1 }
+        }
+    }
+
+    fileprivate func observeGeminiNavigationRequest(_ request: URLRequest, isMainFrame: Bool,
+                                                    view: WKWebView, tabID: UUID) {
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view else { return }
+        entry.geminiDiagnosticJournal.recordRequest(request, generation: entry.tab.documentGeneration, now: Date())
+    }
+
+    /// Observation, not admission/cleanup authority. Call only for an observed
+    /// challenge on this exact view, never for propagation of a saved gate.
+    /// Synchronous persistence makes the save acknowledgment precede teardown,
+    /// including cancellation and shutdown; no page evaluation or retry occurs.
+    func captureGeminiCAPTCHA(tabID: UUID, view: WKWebView, trigger: GeminiCAPTCHADiagnostic.Trigger) {
+        guard let entry = entries[tabID], entry.view === view else { return }
+        #if DEBUG
+        guard geminiDiagnosticDirectory != nil || geminiDiagnosticWriterForTesting != nil else { return }
+        #else
+        guard geminiDiagnosticDirectory != nil else { return }
+        #endif
+        let generation = entry.tab.documentGeneration
+        let closingPreviousIncident = trigger == .beforeClose && entry.geminiDiagnosticIncident != nil
+        // A transport/native observation can win the race with a response
+        // callback. Preserve its first report, then save at most one linked
+        // supplement if the actual challenge response arrives before teardown.
+        let precedingCaptureID = trigger == .response
+            && entry.geminiDiagnosticIncident?.generation == generation
+            && entry.geminiDiagnosticIncident?.report.trigger != .response
+            ? entry.geminiDiagnosticIncident?.report.id : nil
+        if (entry.geminiDiagnosticIncident?.generation != generation && !closingPreviousIncident)
+            || precedingCaptureID != nil {
+            let native: GeminiCAPTCHADiagnostic.NativeState? = entry.isModelOwned ? .init(
+                loading: view.isLoading, pending: entry.navigation != nil,
+                committed: entry.modelCommittedGeneration == generation,
+                finished: entry.modelFinishedGeneration == generation,
+                navigationError: entry.modelFailedGeneration == generation) : nil
+            let report = entry.geminiDiagnosticJournal.report(tabID: tabID, generation: generation,
+                role: entry.isToolOwned ? .tool : entry.isModelOwned ? .model : .human,
+                trigger: trigger, now: Date(), cookieEvents: geminiDiagnosticCookieEvents, nativeState: native,
+                earlierCookieEventsDropped: geminiDiagnosticCookieEventsDropped, precedingCaptureID: precedingCaptureID)
+            entry.geminiDiagnosticIncident = (generation, report, 0, false)
+        }
+        guard var incident = entry.geminiDiagnosticIncident, !incident.saved, incident.attempts < 2 else { return }
+        // A disk failure gets one retry at teardown, with the same immutable
+        // evidence. Repeated polls cannot repeatedly write or extend page life.
+        guard incident.attempts == 0 || trigger == .beforeClose else { return }
+        let now = ContinuousClock.now
+        geminiDiagnosticSaveInstants.removeAll { now - $0 >= .seconds(60) }
+        guard geminiDiagnosticSaveInstants.count < 8 else {
+            Self.inferencePrewarmLog.error("geminiCAPTCHADiagnostic result=not_saved reason=rate_limit trigger=\(trigger.rawValue, privacy: .public)")
+            return
+        }
+        geminiDiagnosticSaveInstants.append(now)
+        incident.attempts += 1
+        do {
+            #if DEBUG
+            if let writer = geminiDiagnosticWriterForTesting { _ = try writer(incident.report) }
+            else if let directory = geminiDiagnosticDirectory {
+                _ = try GeminiCAPTCHADiagnosticStore(directory: directory).save(incident.report)
+            }
+            #else
+            if let directory = geminiDiagnosticDirectory {
+                _ = try GeminiCAPTCHADiagnosticStore(directory: directory).save(incident.report)
+            }
+            #endif
+            incident.saved = true
+            Self.inferencePrewarmLog.notice("geminiCAPTCHADiagnostic incident=\(incident.report.id.uuidString.lowercased(), privacy: .public) result=saved trigger=\(trigger.rawValue, privacy: .public) beforeTeardown=true")
+        } catch {
+            // Never include arbitrary filesystem error text, paths or page
+            // content, and never replace the original model/verification error.
+            Self.inferencePrewarmLog.error("geminiCAPTCHADiagnostic incident=\(incident.report.id.uuidString.lowercased(), privacy: .public) result=not_saved reason=storage_failure trigger=\(trigger.rawValue, privacy: .public)")
+        }
+        entry.geminiDiagnosticIncident = incident
+    }
+
+    #if DEBUG
+    func setGeminiCAPTCHADiagnosticWriterForTesting(_ writer: @escaping (GeminiCAPTCHADiagnostic.Report) throws -> URL) {
+        geminiDiagnosticWriterForTesting = writer
+    }
+
+    func observeGeminiNavigationRequestForTesting(_ request: URLRequest, isMainFrame: Bool,
+                                                view: WKWebView, tabID: UUID) {
+        observeGeminiNavigationRequest(request, isMainFrame: isMainFrame, view: view, tabID: tabID)
+    }
+    #endif
+
+    /// A small callback-time sample, not a complete redirect trace. WebKit's
+    /// response-policy callback supplies neither a navigation token nor cache
+    /// provenance or the outgoing Cookie header. No observation affects policy.
+    fileprivate func observeGeminiNavigationResponse(_ response: URLResponse, isMainFrame: Bool,
+                                                     view: WKWebView, tabID: UUID) {
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view else { return }
+        let generation = entry.tab.documentGeneration
+        // The bounded durable journal is independent of the OSLog rate limit.
+        // A busy log window must not hide the response that actually failed.
+        entry.geminiDiagnosticJournal.recordResponse(response, generation: generation, now: Date())
+        if EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: response.url) == "gemini" {
+            captureGeminiCAPTCHA(tabID: tabID, view: view, trigger: .response)
+        }
+        if entry.geminiResponseObservationGeneration != generation {
+            entry.geminiResponseObservationGeneration = generation
+            entry.geminiResponseObservationsInGeneration = 0
+        }
+        guard entry.geminiResponseObservationsInGeneration < 2 else { return }
+        let instant = geminiResponseObservationClock()
+        geminiResponseObservationInstants.removeAll { instant - $0 >= .seconds(60) }
+        guard geminiResponseObservationInstants.count < 12,
+              let snapshot = GeminiNavigationResponseDiagnostic.project(response: response, now: Date()),
+              let data = snapshot.logData() else { return }
+        let sample = entry.geminiResponseObservationsInGeneration + 1
+        let role = entry.isToolOwned ? "tool" : entry.isModelOwned ? "model" : "human"
+        let message = "geminiNavigationResponse tab=\(tabID.uuidString.lowercased()) generation=\(generation.uuidString.lowercased()) role=\(role) sample=\(sample) \(String(decoding: data, as: UTF8.self))"
+        guard message.utf8.count <= 1_000 else { return }
+        entry.geminiResponseObservationsInGeneration = sample
+        geminiResponseObservationInstants.append(instant)
+        Self.inferencePrewarmLog.notice("\(message, privacy: .public)")
+        #if DEBUG
+        geminiResponseObserverForTesting?(message)
+        #endif
+    }
+
+    #if DEBUG
+    func setGeminiNavigationResponseObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        geminiResponseObserverForTesting = observer
+    }
+
+    func setGeminiNavigationResponseClockForTesting(_ clock: @escaping @MainActor () -> ContinuousClock.Instant) {
+        geminiResponseObservationClock = clock
+    }
+
+    func observeGeminiNavigationResponseForTesting(response: URLResponse, isMainFrame: Bool,
+                                                  view: WKWebView, tabID: UUID) {
+        observeGeminiNavigationResponse(response, isMainFrame: isMainFrame, view: view, tabID: tabID)
+    }
+    #endif
+
     fileprivate func started(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         // A native load/reload invalidates synchronously, before WebKit starts it.
@@ -2483,6 +2949,10 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func serverRedirected(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
+        if let entry = entries[tabID], entry.view === view, let navigation, entry.navigation === navigation,
+           GeminiNavigationResponseDiagnostic.destination(entry.pendingConversationURL ?? view.url) != nil {
+            entry.geminiDiagnosticJournal.recordRedirect(generation: entry.tab.documentGeneration, now: Date())
+        }
         guard let entry = entries[tabID], entry.isModelOwned, entry.view === view,
               let navigation, entry.navigation === navigation,
               entry.modelNavigationGeneration == entry.tab.documentGeneration,
@@ -2516,6 +2986,12 @@ final class EmbeddedBrowserSession {
             observeHumanVerificationRecovery(entry)
         }
         emitGeminiPostBlockNativeEvent(entry, error == nil ? .finished : .failed)
+        if error == nil, navigation != nil,
+           entry.isModelOwned ? entry.modelFinishedGeneration == entry.tab.documentGeneration
+                : entry.recoverySettledGeneration == entry.tab.documentGeneration {
+            observeGeminiVerificationCookies(entry)
+            observeGeminiCookieTimelineAfterNavigation(entry)
+        }
     }
 
     fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
@@ -2559,6 +3035,17 @@ final class EmbeddedBrowserSession {
 /// the application's native first responder, including during reparenting.
 @MainActor
 private final class EmbeddedModelWebView: WKWebView {
+    /// Human tabs use normal WebKit focus until a render lease temporarily
+    /// borrows the same view. Final release restores ordinary presentation.
+    var protectsNativeFocus = true {
+        didSet {
+            guard !protectsNativeFocus else { return }
+            NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: nil)
+            NotificationCenter.default.removeObserver(self, name: NSTextView.didChangeSelectionNotification, object: nil)
+            focusWindow = nil; focusResponder = nil; focusField = nil; focusFieldEditor = nil
+            focusFieldText = nil; focusFieldSelection = nil
+        }
+    }
     private weak var focusWindow: NSWindow?
     private weak var focusResponder: NSResponder?
     private weak var focusField: NSTextField?
@@ -2624,10 +3111,11 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     override var acceptsFirstResponder: Bool {
+        if !protectsNativeFocus { return super.acceptsFirstResponder }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
-        nativeFocusDiagnosticActive
+        return nativeFocusDiagnosticActive
         #else
-        false
+        return false
         #endif
     }
 
@@ -2639,6 +3127,7 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     func captureNativeFocus(in targetWindow: NSWindow? = nil) {
+        guard protectsNativeFocus else { return }
         guard let target = targetWindow ?? window, let responder = target.firstResponder,
               !ownsResponder(responder) else { return }
         focusWindow = target
@@ -2664,6 +3153,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     func restoreNativeFocus(allowWindowFallback: Bool = false) {
+        guard protectsNativeFocus else { return }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         guard !nativeFocusDiagnosticActive else { return }
         #endif
@@ -2743,6 +3233,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     override func becomeFirstResponder() -> Bool {
+        if !protectsNativeFocus { return super.becomeFirstResponder() }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         if nativeFocusDiagnosticActive { return super.becomeFirstResponder() }
         #endif
@@ -2943,6 +3434,8 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard session?.owns(webView, tabID: tabID) == true else { decisionHandler(.cancel); return }
+        session?.observeGeminiNavigationRequest(navigationAction.request,
+            isMainFrame: navigationAction.targetFrame?.isMainFrame == true, view: webView, tabID: tabID)
         if navigationAction.targetFrame?.isMainFrame ?? true { cancelCacheAdmission() }
         if navigationAction.shouldPerformDownload {
             deny("Downloads are not enabled. No file was saved.", view: webView)
@@ -2978,7 +3471,11 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             guard let url = navigationResponse.response.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
             try EmbeddedBrowserURLPolicy.validateNavigation(url,
                 isMainFrame: navigationResponse.isForMainFrame, mainDocumentURL: webView.url)
-            if navigationResponse.isForMainFrame { session?.protectPendingConversation(webView, tabID: tabID, url: url) }
+            if navigationResponse.isForMainFrame {
+                session?.observeGeminiNavigationResponse(navigationResponse.response, isMainFrame: true,
+                                                         view: webView, tabID: tabID)
+                session?.protectPendingConversation(webView, tabID: tabID, url: url)
+            }
         } catch {
             deny(error.localizedDescription, view: webView)
             decisionHandler(.cancel)

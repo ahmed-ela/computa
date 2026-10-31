@@ -1,4 +1,5 @@
 export type Tone = 'neutral' | 'blue' | 'green' | 'orange' | 'red' | 'purple';
+export type WebsiteModelProvider = 'chatgpt' | 'gemini' | 'claude';
 
 export interface ConnectionSnapshot {
   state: 'disconnected' | 'connecting' | 'connected' | 'failed';
@@ -191,7 +192,7 @@ export type NativeAction =
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
-  | { action: 'refreshWebsiteModels' }
+  | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
   | { action: 'showAPIProviders' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }

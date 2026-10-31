@@ -12,6 +12,308 @@ const disabledWorkDiagnostic = 'const chatGPTSyncWorkStart = () => null; const c
 const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
+describe('ChatGPT rejected user-count diagnostics', () => {
+  test('reproduces a verified zero-root gap rejecting before the existing collapsed-remount recovery', async () => {
+    const choice = { key: 'chat/latest/instant', label: 'Instant' };
+    const x = await chatTurnFixture(choice, firstMarker, true);
+    const suffix = '\n\nComputa session marker: ' + firstMarker;
+    const first = await x.dispatch('PRIVATE VERIFIED GAP\n'.padEnd(115_088 - suffix.length, 'x'));
+    expect(first.outbound.length).toBe(115_088);
+    const before = await x.observe(first);
+    expect(before.error).toBeUndefined(); expect(before.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.lastVerified;
+    expect(state.pending).toBeNull(); expect(record.phase).toBe('verified');
+    // Native has adopted the returned fingerprint. The next invocation must
+    // still require that exact outbound proof; no zero/prefix body is proof.
+    const oldRoot = record.root, oldBody = record.body;
+    x.f.messages.children = x.f.messages.children.filter(node => node !== oldRoot); oldRoot.connected = false;
+    const hashes = x.f.digestInputs.length, timers = x.f.scheduledDelays.length;
+    const allowance = { allowBoundFirstUserExpansion: true, allowFirstUserBinding: false,
+      allowFirstUserExpansion: false, firstUserExpansionModelChoice: choice };
+    const gap = await x.observe(first, allowance);
+    expect(gap).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'entry', entryUserCount: 0, currentUserCount: 0, expectedUserCounts: [1],
+      ownerMatches: true, originMatches: true, urlMatches: true, topFrame: true } });
+    expect(gap).not.toHaveProperty('submissionProof'); expect(gap).not.toHaveProperty('text');
+    expect(gap).not.toHaveProperty('firstUserVerified', true); expect(gap).not.toHaveProperty('answerComplete', true);
+    expect(x.f.digestInputs.length).toBe(hashes); expect(x.f.scheduledDelays.length).toBe(timers);
+    expect(x.f.world.__computaModelBoundFirstExpansion).toBeUndefined(); expect(x.send.clicks).toBe(1);
+    expect(state.revoked).toBe(false); expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+
+    // Independent fixture comparison only: native would stop on the error
+    // above. Once a collapsed replacement exists, existing recovery can prove
+    // its complete bytes without replaying Send or accepting the prefix.
+    const root = new Element('ARTICLE', { 'data-turn': 'user' });
+    const body = new Element('DIV', { class: 'whitespace-pre-wrap' }, first.outbound.slice(0, 10_240));
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, expand);
+    expand.onClick = () => { body.text = first.outbound; }; x.f.messages.append(root); x.f.setHit(expand);
+    const discard = await x.observe(first, allowance);
+    expect(discard).toMatchObject({ error: 'first_user_observation_replaced' });
+    expect(discard).not.toHaveProperty('submissionProof'); expect(discard).not.toHaveProperty('text');
+    expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    const proven = await x.observe(first, { ...allowance, allowBoundFirstUserRemountRefresh: true });
+    expect(proven.error).toBeUndefined(); expect(proven.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.canonical).toBe(first.outbound);
+    expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+  });
+
+  test('a missing or duplicated user stays rejected and reports only its current finite cardinality', async () => {
+    for (const count of [0, 2]) {
+      const f = fixture({ userPrompt: 'Keep this owned request', response: false });
+      expect((await f.inspect()).firstUserVerified).toBe(true);
+      const users = f.document.querySelectorAll('article[data-turn="user"]');
+      if (count === 0) { users[0].connected = false; f.messages.children = f.messages.children.filter(node => node !== users[0]); }
+      else f.appendUser('Another request that is not authorized');
+      const observed = await f.inspect();
+      expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count',
+        userCountDiagnostic: { kind: 'chatgpt_user_count_v1', stage: 'entry', action: 'inspect',
+          entryUserCount: count, currentUserCount: count, expectedUserCounts: [1], expectedCountMatches: false,
+          topFrame: true, urlMatches: true, originMatches: true, ownerMatches: true } });
+      expect(observed).not.toHaveProperty('text'); expect(observed).not.toHaveProperty('submissionProof');
+      expect(observed).not.toHaveProperty('firstUserVerified', true);
+      expect(f.composer.events).toEqual([]);
+      const diagnostic = JSON.stringify(observed.userCountDiagnostic);
+      expect(diagnostic.length).toBeLessThanOrEqual(512);
+      for (const secret of ['Keep this owned request', 'Another request', firstMarker, 'https://', 'f33c8869'])
+        expect(diagnostic).not.toContain(secret);
+    }
+  });
+
+  test('a valid unchanged user does not acquire a rejection diagnostic', async () => {
+    const f = fixture({ userPrompt: 'Keep this owned request' });
+    for (let pass = 0; pass < 2; pass++) {
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed).not.toHaveProperty('userCountDiagnostic');
+    }
+  });
+
+  test('malformed expected-count metadata is never copied into a diagnostic or treated as authority', async () => {
+    for (const expected of [[], [0, 0], [0, 2, 3], [1.5], [Infinity], [10_001], ['PRIVATE-NATIVE-VALUE']]) {
+      const f = fixture({ userPrompt: 'Keep this owned request', response: false }); await f.inspect();
+      const observed = await f.inspect({ expectedUserCounts: expected });
+      expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+        stage: 'entry', entryUserCount: 1, currentUserCount: 1, expectedUserCounts: null, expectedCountMatches: false } });
+      expect(JSON.stringify(observed.userCountDiagnostic)).not.toContain('PRIVATE-NATIVE-VALUE');
+      expect(observed).not.toHaveProperty('submissionProof'); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('an already claimed Send remains rejected without another click', async () => {
+    const x = await chatTurnFixture(); x.addBody(false);
+    const record = await x.dispatch('Only one Send is authorized');
+    x.f.composer.text = record.outbound;
+    const observed = await x.f.rawRun({ action: 'submit', prompt: record.outbound, expectedUserCounts: [0], ...x.values(record) });
+    expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'repeated_submit', action: 'submit', entryUserCount: 0, currentUserCount: 0,
+      expectedUserCounts: [0], expectedCountMatches: true } });
+    expect(x.send.clicks).toBe(1); expect(observed).not.toHaveProperty('submissionProof');
+    expect(observed).not.toHaveProperty('text');
+  });
+
+  test('a new unacknowledged user during an empty product read stays rejected at its final count check', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const pending = f.rawRun({ action: 'verifyProductMode', expectedUserCounts: [0] });
+    f.appendUser('Unacknowledged user added while the read yields');
+    const observed = await pending;
+    expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'user_count', userCountDiagnostic: {
+      stage: 'outer_final_read', action: 'verifyProductMode', entryUserCount: 0, currentUserCount: 1,
+      expectedUserCounts: [0], expectedCountMatches: false } });
+    expect(observed).not.toHaveProperty('submissionProof'); expect(observed).not.toHaveProperty('text');
+    expect(f.composer.events).toEqual([]);
+  });
+});
+
+describe('ChatGPT native-pinned first-user root gap', () => {
+  const choice = { key: 'chat/latest/instant', label: 'Instant' };
+  const allowance = { allowBoundFirstUserExpansion: true, allowFirstUserBinding: false,
+    allowFirstUserExpansion: false, firstUserExpansionModelChoice: choice };
+  async function stage() {
+    const x = await chatTurnFixture(choice, firstMarker, true);
+    const first = await x.dispatch('PRIVATE VERIFIED GAP\n'.padEnd(40_000, 'x'));
+    expect((await x.observe(first)).submissionProof?.fingerprint).toBe(first.fingerprint);
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.lastVerified;
+    const oldRoot = record.root, oldBody = record.body;
+    x.f.messages.children = x.f.messages.children.filter(node => node !== oldRoot); oldRoot.connected = false;
+    const root = new Element('ARTICLE', { 'data-turn': 'user' });
+    const body = new Element('DIV', { class: 'whitespace-pre-wrap', 'data-user-message-bubble': '' }, first.outbound.slice(0, 10_240));
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, expand);
+    expand.onClick = () => { body.text = first.outbound; }; x.f.setHit(expand);
+    const observer = () => x.f.observers.findLast(o => (o.options?.attributeFilter as string[])?.length === 4)!;
+    const emit = (records: any[] = []) => observer().callback(records);
+    const mount = () => { x.f.messages.append(root); emit([{ type: 'childList', target: x.f.messages, addedNodes: [root], removedNodes: [] }]); };
+    const start = (overrides: Record<string, unknown> = {}) => x.observe(first, { ...allowance,
+      evaluationDeadlineEpochMilliseconds: Date.now() + 5_000, ...overrides });
+    const waiting = () => { expect(record.userRootGap?.outcome).toBe('waiting'); expect(expand.clicks).toBe(0); expect(x.send.clicks).toBe(1); };
+    return { ...x, first, state, record, oldRoot, oldBody, root, body, expand, observer, emit, mount, start, waiting };
+  }
+  const denied = (result: any) => {
+    expect(result.error).toBeDefined(); expect(result).not.toHaveProperty('submissionProof');
+    expect(result).not.toHaveProperty('firstUserVerified', true); expect(result).not.toHaveProperty('text');
+  };
+
+  test('waits without action, then proves one nested collapsed successor with the same deadline and one expansion', async () => {
+    const x = await stage(), beforeHashes = x.f.digestInputs.length;
+    const pending = x.start(); x.waiting();
+    const deadline = x.record.userRootGap.deadline;
+    expect(x.f.digestInputs.length).toBe(beforeHashes);
+    // Ordinary assistant selector hydration is not a user-message mutation.
+    const assistant = new Element('ARTICLE', { 'data-turn': 'assistant' }); x.f.messages.append(assistant);
+    x.emit([{ type: 'attributes', target: assistant, attributeName: 'data-turn', oldValue: null }]);
+    x.waiting(); x.mount();
+    const discarded = await pending;
+    expect(discarded.error).toBe('first_user_observation_replaced'); denied(discarded);
+    const recovery: any = x.f.world.__computaModelBoundFirstExpansion;
+    expect(recovery.deadline).toBe(deadline); expect(recovery.userRootGap).toBe(x.record.userRootGap);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    const proven = await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true });
+    expect(proven.error).toBeUndefined(); expect(proven.submissionProof?.fingerprint).toBe(x.first.fingerprint);
+    expect(x.record.root).toBe(x.root); expect(x.record.body).toBe(x.body);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    // The spent wait does not impose its old cutoff on later healthy reads.
+    x.f.advanceTime(2_000);
+    expect((await x.observe(x.first)).submissionProof?.fingerprint).toBe(x.first.fingerprint);
+  });
+
+  test('a full-body successor without an existing replacement certificate gains no new recovery authority', async () => {
+    const x = await stage(), pending = x.start(); x.waiting();
+    x.body.text = x.first.outbound; x.mount();
+    const result = await pending; denied(result);
+    expect(result.error).not.toBe('first_user_observation_replaced');
+    expect(x.expand.clicks).toBe(0); expect(x.record.root).toBe(x.oldRoot);
+    denied(await x.start()); expect(x.record.userRootGap.outcome).toBe('rejected');
+    expect(x.send.clicks).toBe(1);
+  });
+
+  test('zero roots never produce proof, and timeout cannot renew or recover after a late root', async () => {
+    const x = await stage(), pending = x.start(); x.waiting();
+    const deadline = x.record.userRootGap.deadline;
+    x.f.flush(); const result = await pending; denied(result);
+    expect(result.userCountDiagnostic).toMatchObject({ gapDisposition: 'expired', boundRootPresent: true,
+      boundBodyPresent: true, boundRootConnected: false, boundBodyConnected: false });
+    const timers = x.f.scheduledDelays.length; x.mount();
+    const retry = await x.start(); denied(retry);
+    expect(retry.userCountDiagnostic.gapDisposition).toBe('expired');
+    expect(x.record.userRootGap.deadline).toBe(deadline); expect(x.f.scheduledDelays.length).toBe(timers);
+    expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+  });
+
+  test('clips to the native remaining budget and refuses expiry before or during expansion/hash', async () => {
+    for (const boundary of ['before_return', 'before_click', 'during_hash', 'fresh_rebind']) {
+      const x = await stage(), pending = x.start({ evaluationDeadlineEpochMilliseconds: Date.now() + 500 }); x.waiting();
+      const deadline = x.record.userRootGap.deadline;
+      expect(deadline - Date.now()).toBeLessThanOrEqual(500);
+      if (boundary === 'before_return') x.f.advanceTime(600);
+      if (boundary === 'before_click') {
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { x.f.advanceTime(600); click(); };
+      }
+      if (boundary === 'during_hash') x.f.onDigest(() => x.f.advanceTime(600));
+      x.mount(); const result = await pending; denied(result);
+      expect(x.record.userRootGap.deadline).toBe(deadline); expect(x.send.clicks).toBe(1);
+      if (boundary === 'fresh_rebind') {
+        expect(result.error).toBe('first_user_observation_replaced'); x.f.advanceTime(600);
+        denied(await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true }));
+      } else expect(result.error).not.toBe('first_user_observation_replaced');
+      expect(x.expand.clicks).toBe(['during_hash', 'fresh_rebind'].includes(boundary) ? 1 : 0);
+    }
+  });
+
+  test('rejects missing native/private authority and connected prior pins without installing a wait', async () => {
+    for (const mutation of ['no_deadline', 'bad_deadline', 'long_deadline', 'no_native_pin', 'wrong_hash', 'private_only',
+      'missing_model_pin', 'old_root_connected', 'old_body_connected', 'no_grant', 'later_sequence']) {
+      const x = await stage(), overrides: Record<string, unknown> = {};
+      if (mutation === 'no_deadline') overrides.evaluationDeadlineEpochMilliseconds = undefined;
+      if (mutation === 'bad_deadline') overrides.evaluationDeadlineEpochMilliseconds = NaN;
+      if (mutation === 'long_deadline') overrides.evaluationDeadlineEpochMilliseconds = Date.now() + 40_000;
+      if (mutation === 'no_native_pin') overrides.expectedFirstUserFingerprint = undefined;
+      if (mutation === 'wrong_hash') overrides.expectedFirstUserFingerprint = 'f'.repeat(64);
+      if (mutation === 'private_only') { overrides.allowFirstUserBinding = true; overrides.expectedFirstUserFingerprint = undefined; }
+      if (mutation === 'missing_model_pin') delete x.f.world.__computaChatPresetPin;
+      if (mutation === 'old_root_connected') x.oldRoot.connected = true;
+      if (mutation === 'old_body_connected') { x.oldBody.parentElement = null; x.oldBody.connected = true; }
+      if (mutation === 'no_grant') overrides.allowBoundFirstUserExpansion = false;
+      if (mutation === 'later_sequence') overrides.submissionSequence = 2;
+      const timers = x.f.scheduledDelays.length;
+      denied(await x.start(overrides)); expect(x.record.userRootGap).toBeUndefined();
+      expect(x.f.scheduledDelays.length).toBe(timers); expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('retains zero as a valid count for the existing native pending [0,1] read', async () => {
+    const x = await chatTurnFixture(choice, firstMarker, true); x.addBody(false);
+    const first = await x.dispatch('Pending native message');
+    const observed = await x.observe(first, { expectedUserCounts: [0, 1] });
+    expect(observed.error).toBeUndefined(); expect(observed.submissionPending).toBe(true);
+    expect(observed).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+    expect((x.f.world.__computaChatSubmissionState as any).pending.userRootGap).toBeUndefined();
+  });
+
+  test('observed ownership/model/product drift rejects immediately and never revives', async () => {
+    for (const drift of ['owner', 'url', 'origin', 'frame', 'product', 'model', 'selection', 'invocation']) {
+      const x = await stage(), pending = x.start(); x.waiting();
+      if (drift === 'owner') x.f.world.__computaModelOwner = 'foreign';
+      if (drift === 'url') x.f.document.URL += '&changed=true';
+      if (drift === 'origin') x.f.location.origin = 'https://example.com';
+      if (drift === 'frame') x.f.window.top = {};
+      if (drift === 'product') (x.f.world.__computaChatProductMode as any).invalidated = true;
+      if (drift === 'model') (x.f.world.__computaChatPresetPin as any).invalidated = true;
+      if (drift === 'selection') (x.f.world.__computaChatPresetPin as any).selection = { ...(x.f.world.__computaChatPresetPin as any).selection };
+      if (drift === 'invocation') x.f.world.__computaChatActiveInvocation = {};
+      x.emit(); denied(await pending);
+      expect(x.record.userRootGap.outcome).toBe('rejected'); expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('negative ledger retains vanished duplicate/retired user selectors and bounds records/nodes', async () => {
+    for (const mutation of ['duplicates', 'retired_selector', 'records', 'nodes', 'old_readded']) {
+      const x = await stage(), pending = x.start(); x.waiting();
+      const foreign = new Element('ARTICLE', { 'data-turn': 'user' }); foreign.connected = false;
+      let records: any[];
+      if (mutation === 'duplicates') records = [{ type: 'childList', target: x.f.messages, addedNodes: [foreign, x.root], removedNodes: [foreign] }];
+      else if (mutation === 'retired_selector') {
+        delete foreign.values['data-turn']; records = [{ type: 'attributes', target: foreign, attributeName: 'data-turn', oldValue: 'user' }];
+      } else if (mutation === 'records') records = Array.from({ length: 65 }, () => ({ type: 'childList', target: x.f.messages, addedNodes: [], removedNodes: [] }));
+      else if (mutation === 'nodes') {
+        const subtree = new Element('DIV'); for (let i = 0; i < 257; i++) subtree.append(new Element('SPAN'));
+        records = [{ type: 'childList', target: x.f.messages, addedNodes: [subtree], removedNodes: [] }];
+      } else records = [{ type: 'childList', target: x.f.messages, addedNodes: [x.oldRoot], removedNodes: [] }];
+      x.emit(records); denied(await pending);
+      expect(x.record.userRootGap.outcome).toBe('rejected'); x.mount(); denied(await x.start());
+      expect(x.expand.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('clock cancellation stays sticky before return and during a model await, but not after certified handoff', async () => {
+    for (const moment of ['waiting', 'model_await', 'expired_model_await', 'completed']) {
+      const x = await stage(); let rejectClock!: (error: Error) => void, resolveClock!: (value: unknown) => void;
+      (x.f.window.webkit as any).messageHandlers.computaModelClock = { postMessage: () => new Promise((resolve, reject) => { rejectClock = reject; resolveClock = resolve; }) };
+      const pending = x.start(); x.waiting();
+      if (moment === 'waiting') rejectClock(new Error('Cancelled'));
+      else {
+        if (['model_await', 'expired_model_await'].includes(moment)) {
+          const click = x.picker!.trigger.onClick!;
+          x.picker!.trigger.onClick = () => {
+            if (moment === 'expired_model_await') { x.f.advanceTime(-1_000); resolveClock(null); }
+            else rejectClock(new Error('Cancelled'));
+            click();
+          };
+        }
+        x.mount();
+      }
+      const result = await pending;
+      if (moment === 'completed') {
+        expect(result.error).toBe('first_user_observation_replaced'); rejectClock(new Error('Native call finished')); await Promise.resolve();
+        expect(x.record.userRootGap.outcome).toBe('returned');
+        expect((await x.observe(x.first, { ...allowance, allowBoundFirstUserRemountRefresh: true })).error).toBeUndefined();
+      } else {
+        denied(result); expect(x.record.userRootGap.outcome).toBe(moment === 'expired_model_await' ? 'expired' : 'clock_failed'); expect(x.expand.clicks).toBe(0);
+      }
+      expect(x.send.clicks).toBe(1);
+    }
+  });
+});
+
 class Element {
   private static nextRect = 0;
   private readonly rect = Element.nextRect++;
@@ -188,6 +490,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
   let adapterClockOffset = 0;
   let digestHook: (() => void | Promise<void>) | undefined;
   let digestExpectedText: string | undefined;
+  let digestReplacement: { bytes: ArrayBuffer, expectedText: string } | null = null;
   let productBootstrapped = false;
   const invoke = (request: Record<string, unknown>, useHook = true) => execute({ provider: 'chatgpt', ownerToken, bindOwner: true,
     expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
@@ -205,6 +508,9 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       if (useHook && (digestExpectedText === undefined || new TextDecoder().decode(data) === digestExpectedText)) {
         const hook = digestHook; digestHook = undefined; digestExpectedText = undefined; await hook?.();
       }
+      if (digestReplacement?.expectedText === new TextDecoder().decode(data)) {
+        const replacement = digestReplacement.bytes; digestReplacement = null; return replacement;
+      }
       return digest;
     } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
   return { rawRun: invoke, messages, posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, digestInputs, userBody, answer: outer,
@@ -215,6 +521,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root); return root;
     },
     onDigest: (hook: () => void | Promise<void>, expectedText?: string) => { digestHook = hook; digestExpectedText = expectedText; },
+    replaceNextDigest: (bytes: ArrayBuffer, expectedText: string) => { digestReplacement = { bytes, expectedText }; },
     diagnose: (overrides: Record<string, unknown> = {}) => invoke({ action: 'failedPageDiagnostic', bindOwner: false, ...overrides }),
     submit: (prompt: string) => invoke({ action: 'submit', prompt }),
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
@@ -250,6 +557,231 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     },
     flush: () => { const queued = timers.splice(0); queued.forEach(callback => callback()); } };
 }
+
+function markedChatComposerFixture() {
+  const f = fixture({ response: false, normalRoot: true });
+  f.modeGroup.connected = false;
+  f.body.children = f.body.children.filter(node => node !== f.modeGroup);
+  const picker = installObservedModelPicker(f, 'chatgpt', Element);
+  const form = new Element('FORM', { 'data-chatgpt-composer': '', 'data-thread-find-composer': 'true', 'data-composer-placement': 'home' });
+  f.composer.values.role = 'textbox'; f.composer.values['aria-label'] = 'Ask ChatGPT';
+  form.append(f.composer, picker.trigger); f.body.append(form);
+  return { ...f, form, picker };
+}
+
+describe('ChatGPT explicit Chat composer provenance', () => {
+  const successor = (f: ReturnType<typeof markedChatComposerFixture>, keepHidden = true) => {
+    const old = f.form, form = new Element('FORM', { ...old.values });
+    const editor = new Element('DIV', { ...f.composer.values });
+    const trigger = new Element('BUTTON', { ...f.picker.trigger.values }, f.picker.trigger.textContent);
+    form.append(editor, trigger);
+    if (keepHidden) { const hidden = new Element('DIV', { hidden: '' }); hidden.append(old); f.body.append(hidden); }
+    else { f.body.children = f.body.children.filter(node => node !== old); old.connected = false; }
+    f.body.append(form);
+    return { form, editor, trigger, records: [{ type: 'childList', target: f.body, addedNodes: [form], removedNodes: keepHidden ? [] : [old] }] };
+  };
+  const mutation = (f: ReturnType<typeof markedChatComposerFixture>, records: unknown[]) => f.observers[0].callback(records);
+  test('the unified picker admits its actual Chat-marked form before an owned temporary transition', async () => {
+    const f = markedChatComposerFixture();
+    expect(await f.inspect()).toMatchObject({ chatModeReady: true, temporary: false,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'not_requested' } });
+    expect(f.picker.trigger.clicks).toBe(0); expect(f.temporary.clicks).toBe(0);
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+    expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('owned temporary navigation can retain a hidden old Chat composer and admit one active successor', async () => {
+    for (const keepHidden of [true, false]) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      const enable = f.temporary.onClick!;
+      let replacement: ReturnType<typeof successor>;
+      f.temporary.onClick = () => { enable(); replacement = successor(f, keepHidden); mutation(f, replacement.records); };
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+        productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+      replacement!.form.values['data-composer-placement'] = 'thread';
+      mutation(f, [{ type: 'attributes', target: replacement!.form, attributeName: 'data-composer-placement', oldValue: 'home' }]);
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+        productModeEvidence: { source: 'chat_composer_marker' } });
+      expect(f.temporary.clicks).toBe(1); expect(replacement!.editor.events).toEqual([]); expect(replacement!.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('unrelated, ambiguous, hidden, disabled and malformed markers never establish Chat provenance', async () => {
+    const mutations = [
+      (f: ReturnType<typeof markedChatComposerFixture>) => { delete f.form.values['data-chatgpt-composer']; f.body.append(new Element('DIV', { 'data-composer-mode': 'chat' })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.tagName = 'DIV'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-chatgpt-composer'] = 'true'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-thread-find-composer'] = 'false'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-composer-placement'] = 'unknown'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values.inert = ''; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values.hidden = ''; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.values['data-message-author-role'] = 'assistant'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(new Element('FORM', { ...f.form.values })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.form.append(new Element('DIV', { ...f.composer.values })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(f.picker.trigger); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.picker.trigger.disabled = true; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.composer.values['aria-disabled'] = 'true'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.modeGroup.connected = true; f.body.append(f.modeGroup); f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.body.append(new Element('DIV', { 'aria-label': 'Composer mode' })); },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.document.URL = 'https://chatgpt.com/?temporary-chat=true'; f.temporary.values['aria-label'] = 'Turn off temporary chat'; },
+      (f: ReturnType<typeof markedChatComposerFixture>) => { f.appendUser('Existing conversation'); },
+    ];
+    for (const change of mutations) {
+      const f = markedChatComposerFixture(); change(f);
+      const result = await f.inspect();
+      expect(result.productModeEvidence).toBeUndefined(); expect(result.chatModeReady).not.toBe(true);
+      expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('marker loss and restored values, including hidden predecessors, permanently revoke the original proof', async () => {
+    for (const attr of ['data-chatgpt-composer', 'data-thread-find-composer', 'data-composer-placement']) {
+      for (const hiddenOld of [false, true]) {
+        const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+        if (hiddenOld) { const next = successor(f); mutation(f, next.records); }
+        const prior = f.form.values[attr];
+        mutation(f, [{ type: 'attributes', target: f.form, attributeName: attr, oldValue: prior },
+          { type: 'attributes', target: f.form, attributeName: attr, oldValue: attr === 'data-composer-placement' ? 'work' : null }]);
+        expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+        expect((f.world.__computaChatProductMode as any).invalidated).toBe(true);
+        expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+        expect(f.temporary.clicks).toBe(1);
+      }
+    }
+  });
+
+  test('temporary successor admission cannot erase a transient Work composer or a Work switch and restoration', async () => {
+    for (const kind of ['work_form', 'work_control']) {
+      const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+      let records: unknown[];
+      if (kind === 'work_form') {
+        const work = new Element('FORM', { 'data-thread-find-composer': 'true', 'data-composer-placement': 'home' });
+        records = [{ type: 'childList', target: f.body, addedNodes: [work], removedNodes: [] },
+          { type: 'childList', target: f.body, addedNodes: [], removedNodes: [work] }];
+      } else {
+        f.modeGroup.connected = true;
+        records = [{ type: 'childList', target: f.body, addedNodes: [f.modeGroup], removedNodes: [] },
+          { type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' },
+          { type: 'childList', target: f.body, addedNodes: [], removedNodes: [f.modeGroup] }];
+      }
+      mutation(f, records);
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.temporary.clicks).toBe(1); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('pre-temporary replacement and ownership changes cannot reuse a Chat marker proof', async () => {
+    for (const kind of ['form', 'owner', 'frame', 'origin', 'route']) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      if (kind === 'form') { const next = successor(f); mutation(f, next.records); }
+      if (kind === 'owner') f.world.__computaModelOwner = 'foreign';
+      if (kind === 'frame') f.window.top = {};
+      if (kind === 'origin') f.location.origin = 'https://example.invalid';
+      if (kind === 'route') f.document.URL = 'https://chatgpt.com/work';
+      expect((await f.inspect({ action: 'enableTemporary' })).error).toBeDefined();
+      expect(f.temporary.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('marker loss across an awaited full-model read cannot publish model or product evidence', async () => {
+    const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+    const open = f.picker.trigger.onClick!;
+    f.picker.trigger.onClick = () => {
+      open();
+      mutation(f, [{ type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: '' },
+        { type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: null }]);
+    };
+    const result = await f.inspect({ action: 'verifyModel', expectedModelChoice: { key: 'chat/latest/medium', label: 'Medium' } });
+    expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined(); expect(result.productModeEvidence).toBeUndefined();
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('a disabled recognized initial composer waits without granting proof or action authority', async () => {
+    for (const control of ['editor', 'picker']) {
+      const f = markedChatComposerFixture();
+      const node = control === 'editor' ? f.composer : f.picker.trigger;
+      node.values['aria-disabled'] = 'true';
+      expect(await f.inspect()).toMatchObject({ chatModeReady: false, chatModeActionAvailable: false,
+        chatModeHydrating: true, pending: true });
+      expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.temporary.clicks).toBe(0);
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+      delete node.values['aria-disabled'];
+      expect(await f.inspect()).toMatchObject({ chatModeReady: true,
+        productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'not_requested' } });
+      expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('temporary streaming disabled controls preserve Chat provenance while marker loss still revokes it', async () => {
+    const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+    f.composer.values['aria-disabled'] = 'true'; f.picker.trigger.disabled = true;
+    mutation(f, [{ type: 'attributes', target: f.composer, attributeName: 'aria-disabled', oldValue: null },
+      { type: 'attributes', target: f.picker.trigger, attributeName: 'disabled', oldValue: null }]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+      productModeEvidence: { source: 'chat_composer_marker', temporaryTransition: 'acknowledged' } });
+    delete f.form.values['data-chatgpt-composer'];
+    mutation(f, [{ type: 'attributes', target: f.form, attributeName: 'data-chatgpt-composer', oldValue: '' }]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('the exact marked editor retains presentation-only exclusion without ignoring marker or ancestor history', async () => {
+    for (const kind of ['presentation', 'marker_loss', 'ancestor', 'work', 'oversized']) {
+      const f = markedChatComposerFixture(); await f.inspect(); await f.inspect({ action: 'enableTemporary' });
+      const active = successor(f); mutation(f, active.records);
+      const records: any[] = Array.from({ length: kind === 'oversized' ? 4_097 : 1_100 }, (_, index) => ({
+        type: 'attributes', target: kind === 'ancestor' ? active.form : active.editor,
+        attributeName: index % 2 ? 'class' : 'style', oldValue: 'old presentation' }));
+      if (kind === 'marker_loss') records.push({ type: 'attributes', target: f.form,
+        attributeName: 'data-chatgpt-composer', oldValue: null });
+      if (kind === 'work') {
+        f.modeGroup.connected = true; f.body.append(f.modeGroup);
+        records.push({ type: 'childList', target: f.body, addedNodes: [f.modeGroup], removedNodes: [] },
+          { type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+      }
+      mutation(f, records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      if (kind === 'presentation' || kind === 'ancestor') {
+        // Ancestor mutations are fully counted; a bounded harmless batch may
+        // still pass, while presentation-only records use the narrow exclusion.
+        expect(result.productModeEvidence?.source).toBe('chat_composer_marker');
+      } else expect(result).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.composer.events).toEqual([]); expect(f.temporary.clicks).toBe(1);
+    }
+  });
+
+  test('detaching and restoring the original editor or form before claiming temporary cannot erase history', async () => {
+    for (const kind of ['editor', 'form']) {
+      const f = markedChatComposerFixture(); await f.inspect();
+      const node = kind === 'editor' ? f.composer : f.form;
+      const parent = node.parentElement!;
+      mutation(f, [{ type: 'childList', target: parent, addedNodes: [], removedNodes: [node] },
+        { type: 'childList', target: parent, addedNodes: [node], removedNodes: [] }]);
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.temporary.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('marker candidate bounds fail closed without reading layout of an unexamined tail', async () => {
+    for (const kind of ['forms', 'editors', 'triggers']) {
+      const f = markedChatComposerFixture(); let extraLayoutReads = 0;
+      for (let i = 0; i < 65; i++) {
+        const extra = kind === 'forms' ? new Element('FORM', { ...f.form.values })
+          : kind === 'editors' ? new Element('DIV', { ...f.composer.values })
+          : new Element('BUTTON', { ...f.picker.trigger.values });
+        extra.getClientRects = () => { extraLayoutReads++; return []; }; f.body.append(extra);
+      }
+      const result = await f.inspect();
+      expect(result.productModeEvidence).toBeUndefined();
+      expect(result.productModeDiagnostic.markerDiagnostic).toEqual({ version: 1,
+        activeForms: kind === 'forms' ? 0 : 1, candidateOverflow: true,
+        recognized: false, enabled: false, proofSource: null });
+      expect(extraLayoutReads).toBe(0); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+});
 
 function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean; measuredPRE?: boolean; renderedText?: () => string } = {}) {
   f.answer.text = ""; f.answer.children = [];
@@ -1286,6 +1818,8 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
       const observed = await x.observe(record, { deferModelVerification: true });
       expect(observed.error).toBe('model_mismatch'); expect(observed).not.toHaveProperty('modelEvidence');
       expect(pin.invalidated).toBe(true); expect(picker.trigger.clicks).toBe(before);
+      expect(pin.invalidationSource).toBe(field === 'power' ? 'semantic_observer' : 'pinned_header');
+      if (field === 'header') expect(pin.invalidationFacts).toEqual({ stage: 'character_data', rule: 'old_power' });
     }
   });
 
@@ -1334,6 +1868,16 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
       expect(observed).not.toHaveProperty('modelVerificationPending'); expect(picker.trigger.clicks).toBe(before);
       expect(pin.headerTrigger).toBe(old); expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(false);
       expect(JSON.stringify(observed)).not.toContain('PRIVATE_UNKNOWN_HEADER');
+      if (['flip_restore', 'unknown_restore', 'detached_flip_restore', 'queued_before_full'].includes(mutation)) {
+        expect(pin.invalidationSource).toBe('provisional_header');
+        expect(pin.invalidationFacts).toEqual({ stage: mutation === 'detached_flip_restore' ? 'removed' : 'character_data',
+          rule: mutation === 'unknown_restore' ? 'provisional_old' : mutation === 'detached_flip_restore' ? 'power' : 'old_power' });
+      }
+      if (['second_replacement', 'old_reconnect'].includes(mutation)) {
+        expect(pin.invalidationSource).toBe('provisional_context');
+        expect(pin.invalidationFacts).toEqual({ stage: 'provisional_context',
+          rule: mutation === 'old_reconnect' ? 'previous_connected' : 'trigger_identity' });
+      }
     }
   });
 
@@ -2370,6 +2914,460 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
       expect(record.body).toBe(body); expect(record.replacement).toBeNull(); expect(candidate.deadline).toBe(deadline);
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    const remountFinalizationRoute = async (mutation = 'none', afterPromotion?: (staged: any) => void, observeOverrides: Record<string, unknown> = {}) => {
+      const staged = await remounted(), { x, first, record, oldRoot, oldBody } = staged;
+      const home = 'https://chatgpt.com/?temporary-chat=true', local = x.f.document.URL;
+      const publicURL = 'https://chatgpt.com/c/public-finalization-recovery?temporary-chat=true';
+      x.f.document.URL = home; x.f.location.pathname = '/';
+      expect((await x.observe(first, allowance)).error).toBe('first_user_observation_replaced');
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      const receipt = record.replacement, deadline = candidate.deadline, owner = candidate.owner, originalDocument = candidate.document;
+      x.f.document.URL = local; x.f.location.pathname = new URL(local).pathname;
+      const firstEdge = { fromURL: home, toURL: local }, secondEdge = { fromURL: local, toURL: publicURL };
+      let crossed = false;
+      const promote = () => {
+        if (candidate.finalizationDiagnostic?.finalizationStage !== 'entered') {
+          x.f.onDigest(promote, first.outbound); return;
+        }
+        expect(candidate).toMatchObject({ awaitingNativeRefresh: true, refreshClaimed: true, remount: true });
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBe(receipt);
+        crossed = true; x.f.document.URL = publicURL; x.f.location.pathname = new URL(publicURL).pathname;
+        if (mutation === 'body') staged.body.text += '!';
+        if (mutation === 'model') x.picker!.selected('High');
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'document') candidate.document = {};
+        if (mutation === 'deadline') x.f.advanceTime(2_000);
+        if (mutation === 'receipt') record.replacement = { ...receipt };
+        if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
+        if (mutation === 'temporary') x.f.temporary.connected = false;
+        afterPromotion?.(staged);
+      };
+      x.f.onDigest(promote, first.outbound);
+      const discarded = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge], ...observeOverrides });
+      expect(crossed).toBe(true); denied(discarded);
+      expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+      expect(candidate).not.toHaveProperty('verified', true);
+      return { ...staged, candidate, receipt, deadline, owner, originalDocument, firstEdge, secondEdge, discarded };
+    };
+
+    const modelRemountFinalization = async (defer = true, beforeWitness = 'none') => {
+      let oldHeader: any;
+      const staged = await remountFinalizationRoute('none', ({ x }: any) => {
+        oldHeader = x.picker.replaceTrigger(beforeWitness !== 'connected_old');
+        if (beforeWitness === 'disabled') x.picker.trigger.disabled = true;
+        if (beforeWitness === 'wrong_power') x.picker.selected('High');
+      }, { deferModelVerification: defer });
+      return { ...staged, oldHeader, pin: staged.x.f.world.__computaChatPresetPin };
+    };
+
+    test('same-choice picker remount retains only a route witness until original full proof commits its pin', async () => {
+      for (const defer of [false, true]) {
+        const { x, first, oldRoot, oldBody, root, body, record, candidate, pin, oldHeader,
+          receipt, deadline, firstEdge, secondEdge, discarded, expand } = await modelRemountFinalization(defer);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' }); denied(discarded);
+        expect(oldHeader.isConnected).toBe(false); expect(pin.invalidated).not.toBe(true);
+        const pending = pin.provisionalHeader;
+        expect(pending.previous).toBe(oldHeader); expect(pending.header).toBe(x.picker!.trigger);
+        expect(pin.headerTrigger).toBe(oldHeader); expect(pending.completed).toBe(false);
+        expect(candidate.routeModelRemount).toBe(pending); expect(candidate.routeModelPin).toBe(pin);
+        expect(candidate.routeDiscard).toMatchObject(secondEdge); expect(record.replacement).toBe(receipt);
+        let fullReads = 0;
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          if (++fullReads === 1) expect(pin.headerTrigger).toBe(oldHeader);
+          expect(candidate).not.toHaveProperty('verified', true);
+          expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBe(receipt);
+          click();
+        };
+        const before = x.f.digestInputs.length;
+        const current = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: defer });
+        expect(current.error).toBeUndefined(); expect(current.modelEvidence?.selected).toEqual(choice);
+        expect(current).not.toHaveProperty('modelVerificationPending'); expect(fullReads).toBeGreaterThan(0);
+        expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pin.provisionalHeader).toBe(pending); expect(pending.completed).toBe(true);
+        expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]); expect(candidate.deadline).toBe(deadline);
+        expect(candidate.verified).toBe(true); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('route-only picker admission rejects connected predecessors disabled replacements and changed power', async () => {
+      for (const [mutation, rule] of [['connected_old', 'previous_connected'], ['disabled', 'trigger_disabled'], ['wrong_power', 'header_power']]) {
+        const { x, first, record, candidate, pin, oldHeader, receipt, deadline, firstEdge, secondEdge, discarded, expand }
+          = await modelRemountFinalization(true, mutation);
+        denied(discarded); expect(candidate.routeDiscard).toBeUndefined();
+        expect(discarded.boundCertificateDiagnostic).toMatchObject({ stage: 'finalization_hash', rule: 'route_guard',
+          routeRule: 'model_remount_' + rule, expectedModelPresent: true, deferModelVerification: true });
+        expect(pin.headerTrigger).toBe(oldHeader); expect(pin.provisionalHeader).toBeUndefined();
+        expect(record.replacement).toBe(receipt); expect(candidate.deadline).toBe(deadline);
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true }));
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('route model full proof cannot publish ownership after its original recovery deadline expires during the read', async () => {
+      const { x, first, candidate, pin, receipt, record, deadline, firstEdge, secondEdge, expand } = await modelRemountFinalization();
+      x.f.advanceTime(1_300);
+      const click = x.picker!.trigger.onClick!;
+      let advanced = false;
+      x.picker!.trigger.onClick = () => { if (!advanced) { advanced = true; x.f.advanceTime(700); } click(); };
+      const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true });
+      expect(advanced).toBe(true); denied(result); expect(result).not.toHaveProperty('modelEvidence');
+      expect(candidate.deadline).toBe(deadline); expect(candidate).not.toHaveProperty('verified', true);
+      expect(record.replacement).toBe(receipt); expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      x.f.advanceTime(-2_000);
+      denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true }));
+      expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+    });
+
+    test('route model final submission hash cannot consume its receipt after the original recovery deadline', async () => {
+      const { x, first, candidate, receipt, record, oldRoot, deadline, firstEdge, secondEdge, expand } = await modelRemountFinalization();
+      x.f.advanceTime(1_300);
+      let advanced = false;
+      const expire = () => {
+        if (!candidate.routeModelRemount.completed) { x.f.onDigest(expire, first.outbound); return; }
+        advanced = true; x.f.advanceTime(700);
+      };
+      x.f.onDigest(expire, first.outbound);
+      const options = { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: true };
+      const result = await x.observe(first, options);
+      expect(advanced).toBe(true); denied(result); expect(result).not.toHaveProperty('modelEvidence');
+      expect(record.root).toBe(oldRoot); expect(record.replacement).toBe(receipt);
+      expect(candidate.deadline).toBe(deadline); expect(candidate).not.toHaveProperty('verified', true);
+      x.f.advanceTime(-2_000); denied(await x.observe(first, options));
+      expect(record.replacement).toBe(receipt); expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+    });
+
+    test('route model remount cannot survive second replacement restored negatives missing full proof or stale authority', async () => {
+      for (const mutation of ['second_replacement', 'old_reconnected', 'switch_restore', 'wrong_family', 'disabled',
+        'body', 'deadline', 'extra_edge', 'owner', 'pending_identity']) {
+        const { x, first, oldRoot, record, candidate, pin, oldHeader, receipt, deadline, firstEdge, secondEdge, body, expand }
+          = await modelRemountFinalization();
+        const pending = pin.provisionalHeader, fullTrigger = x.picker!.trigger;
+        if (mutation === 'second_replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_reconnected') oldHeader.connected = true;
+        if (mutation === 'switch_restore') {
+          let once = true;
+          pending.observer.takeRecords = () => { if (!once) return []; once = false;
+            return [{ type: 'characterData', target: { nodeType: 3, parentElement: fullTrigger, textContent: 'Medium' }, oldValue: 'High' }]; };
+        }
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'disabled') fullTrigger.disabled = true;
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'deadline') x.f.advanceTime(2_000);
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        const edges = [firstEdge, secondEdge];
+        if (mutation === 'extra_edge') edges.push({ fromURL: secondEdge.toURL, toURL: 'https://chatgpt.com/c/extra?temporary-chat=true' });
+        const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: edges, deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence');
+        expect(pin.headerTrigger).toBe(oldHeader); expect(record.root).toBe(oldRoot); expect(record.replacement).toBe(receipt);
+        expect(candidate).not.toHaveProperty('verified', true); expect(candidate.deadline).toBe(deadline);
+        if (mutation === 'wrong_family') expect(fullTrigger.clicks).toBeGreaterThan(0);
+        if (mutation === 'switch_restore') expect(pin.invalidated).toBe(true);
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('fresh remount finalization retains only its existing certificate and certified two-edge route handoff', async () => {
+      const { x, first, record, root, body, expand, candidate, receipt, deadline, firstEdge, secondEdge, discarded }
+        = await remountFinalizationRoute();
+      expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+      expect(discarded.recoveryLifecycleDiagnostic).toMatchObject({ initialRoute: false, remount: true, provisional: false,
+        outcome: 'expanded', recordPhase: 'verified', finalizationStage: 'returned', finalizationError: 'document_changed',
+        contextStateMatches: true, lastVerifiedMatches: true, urlWitness: true, verified: false,
+        boundRouteStage: 'finalization_hash', boundRoutePending: true });
+      expect(record.replacement).toBe(receipt); expect(candidate.routeDiscard).toMatchObject(secondEdge);
+      const before = x.f.digestInputs.length;
+      const current = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+      expect(current.error).toBeUndefined();
+      expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(current.modelEvidence.selected).toEqual(choice); expect(current.temporary).toBe(true);
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+      expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]);
+      expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('fresh remount finalization cannot retain altered bytes model owner document deadline or certificate', async () => {
+      for (const mutation of ['body', 'model', 'owner', 'document', 'deadline', 'receipt', 'work', 'temporary']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, owner, originalDocument, firstEdge, secondEdge }
+          = await remountFinalizationRoute(mutation);
+        expect(candidate.routeDiscard, mutation).toBeUndefined();
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner;
+        candidate.document = originalDocument; record.replacement = receipt;
+        x.f.workMode.values['aria-pressed'] = 'false'; x.f.temporary.connected = true;
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBe(receipt);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('fresh remount finalization continuation rejects extra edges stale certificates and spent handoffs', async () => {
+      for (const mutation of ['missing_chain', 'extra_edge', 'receipt', 'body', 'root', 'native_pin']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, firstEdge, secondEdge }
+          = await remountFinalizationRoute();
+        const valid = [firstEdge, secondEdge], overrides: any = { ...fresh, firstUserExpansionRouteContinuation: valid };
+        if (mutation === 'missing_chain') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'extra_edge') overrides.firstUserExpansionRouteContinuation = [...valid,
+          { fromURL: secondEdge.toURL, toURL: 'https://chatgpt.com/c/another?temporary-chat=true' }];
+        if (mutation === 'receipt') record.replacement = { ...receipt };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'root') replaceRoot(x).body.text = first.outbound;
+        if (mutation === 'native_pin') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+        denied(await x.observe(first, overrides));
+        body.text = first.outbound; record.replacement = receipt;
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: valid }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBe(receipt);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    const certificateReturnRoute = async (mutation = 'none', overrides: Record<string, unknown> = {}) => {
+      const staged = await remounted(), { x, first, record, body } = staged;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-certificate-return?temporary-chat=true';
+      const owner = x.f.world.__computaModelOwner, originalDocument = record.document;
+      let crossed = false, receipt: any, deadline = 0;
+      const watchCertificate = () => {
+        x.f.onDigest(watchCertificate, first.outbound);
+        let remaining = 32;
+        const check = () => {
+          const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+          // Observe the real helper's receipt, then mutate only in the await
+          // return gap. This does not fabricate any recovery authority.
+          if (!crossed && record.replacement && !candidate?.awaitingNativeRefresh) {
+            crossed = true; receipt = record.replacement; deadline = candidate.deadline;
+            x.f.document.URL = toURL; x.f.location.pathname = new URL(toURL).pathname;
+            if (mutation === 'body') body.text += '!';
+            if (mutation === 'model') x.picker!.selected('High');
+            if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+            if (mutation === 'document') candidate.document = {};
+            if (mutation === 'deadline') x.f.advanceTime(2_000);
+            if (mutation === 'temporary') x.f.temporary.connected = false;
+            if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
+            if (mutation === 'lease') x.f.world.__computaChatActiveInvocation = {};
+          } else if (!crossed && --remaining > 0) queueMicrotask(check);
+        };
+        queueMicrotask(check);
+      };
+      x.f.onDigest(watchCertificate, first.outbound);
+      const discarded = await x.observe(first, { ...allowance, ...overrides });
+      expect(crossed).toBe(true); denied(discarded);
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      expect(candidate).not.toHaveProperty('verified', true); expect(candidate.routeDiscard).toBeUndefined();
+      expect(record.root).toBe(staged.oldRoot); expect(record.body).toBe(staged.oldBody);
+      return { ...staged, candidate, receipt, deadline, owner, originalDocument, fromURL, toURL, discarded };
+    };
+
+    test('certificate-return route crossing preserves the original unclaimed receipt for one fresh native proof', async () => {
+      const { x, first, record, root, body, expand, candidate, receipt, deadline, fromURL, toURL, discarded }
+        = await certificateReturnRoute();
+      expect(discarded).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+      expect(record.replacement).toBe(receipt); expect(candidate.replacementReceipt).toBe(receipt);
+      expect(candidate.awaitingNativeRefresh).toBe(true); expect(candidate.refreshClaimed).not.toBe(true);
+      const before = x.f.digestInputs.length;
+      const result = await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(result.modelEvidence.selected).toEqual(choice); expect(result.temporary).toBe(true);
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+      expect(candidate).toMatchObject({ verified: true, refreshClaimed: true, deadline });
+      expect(candidate.routeContinuationEdges).toEqual([{ fromURL, toURL }]);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('certificate-return route crossing cannot carry changed bytes model authority mode or expired recovery', async () => {
+      for (const mutation of ['body', 'model', 'owner', 'document', 'deadline', 'temporary', 'work', 'lease']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, owner, originalDocument, fromURL, toURL, discarded }
+          = await certificateReturnRoute(mutation);
+        expect(discarded.error, mutation).not.toBe('first_user_observation_replaced');
+        expect(candidate.refreshClaimed).toBe(true);
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner;
+        candidate.document = originalDocument; x.f.temporary.connected = true; x.f.workMode.values['aria-pressed'] = 'false';
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] }));
+        expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('certificate-return continuation still rejects absent or extra edges changed receipt and a spent handoff', async () => {
+      for (const mutation of ['no_edge', 'extra_edge', 'receipt', 'body', 'native_pin', 'no_handoff']) {
+        const { x, first, record, body, expand, candidate, receipt, deadline, fromURL, toURL, discarded }
+          = await certificateReturnRoute();
+        expect(discarded.error).toBe('first_user_observation_replaced');
+        const edge = { fromURL, toURL }, overrides: any = { ...fresh, firstUserExpansionRouteContinuation: [edge] };
+        if (mutation === 'no_edge') delete overrides.firstUserExpansionRouteContinuation;
+        if (mutation === 'extra_edge') overrides.firstUserExpansionRouteContinuation = [edge, edge, edge];
+        if (mutation === 'receipt') record.replacement = { ...receipt };
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'native_pin') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+        if (mutation === 'no_handoff') delete overrides.allowBoundFirstUserRemountRefresh;
+        denied(await x.observe(first, overrides)); body.text = first.outbound; record.replacement = receipt;
+        denied(await x.observe(first, { ...fresh, firstUserExpansionRouteContinuation: [edge] }));
+        expect(candidate).not.toHaveProperty('verified', true); expect(record.replacement).toBe(receipt);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('certificate diagnostics retain the exact first rejected guard through spent reads and cleanup without text or proof values', async () => {
+      const cases = [['body', 'body_canonical'], ['model', 'model_pin_invalidated'], ['owner', 'global_owner'],
+        ['document', 'document'], ['deadline', 'deadline_expired'], ['temporary', 'temporary'],
+        ['work', 'product'], ['lease', 'lease_current']] as const;
+      for (const [mutation, routeRule] of cases) {
+        const { x, first, body, candidate, owner, originalDocument, fromURL, toURL, discarded }
+          = await certificateReturnRoute(mutation);
+        const diagnostic = discarded.boundCertificateDiagnostic;
+        expect(diagnostic, mutation).toMatchObject({ kind: 'chatgpt_bound_certificate_v1', stage: 'receipt_context',
+          rule: 'context', routeRule, observedError: 'first_user_observation_replaced', phase: 'verified',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true, expectedModelPresent: true,
+          deferModelVerification: false, awaitingNativeRefresh: true, refreshClaimed: true });
+        expect(Object.isFrozen(candidate.certificateDiagnostic)).toBe(true);
+        const encoded = JSON.stringify(diagnostic);
+        expect(encoded.length).toBeLessThanOrEqual(768);
+        for (const value of [first.outbound, first.fingerprint, first.marker, fromURL, toURL, String(owner)])
+          expect(encoded).not.toContain(value);
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner;
+        candidate.document = originalDocument; x.f.temporary.connected = true; x.f.workMode.values['aria-pressed'] = 'false';
+        const continuation = { ...fresh, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] };
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...continuation, action }); denied(refused);
+          expect(JSON.stringify(refused.boundCertificateDiagnostic)).toBe(encoded);
+        }
+      }
+    });
+
+    test('certificate diagnostics distinguish a missing expected model from state and expansion model agreement', async () => {
+      const { x, first, expand, discarded, candidate } = await certificateReturnRoute('none', { expectedModelChoice: null });
+      expect(discarded).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
+        boundCertificateDiagnostic: { stage: 'receipt_context', rule: 'context', routeRule: 'expected_model',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true,
+          expectedModelPresent: false, deferModelVerification: false } });
+      expect(candidate).not.toHaveProperty('verified', true);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('bound body-hash diagnostics retain exact route refusals before any replacement certificate exists', async () => {
+      for (const [mutation, routeRule] of [['body', 'body_canonical'], ['model', 'model_pin_invalidated'], ['owner', 'global_owner'],
+        ['temporary', 'temporary'], ['expected_model', 'expected_model']] as const) {
+        const { x, first, record, body, oldRoot, oldBody, expand } = await remounted();
+        const owner = x.f.world.__computaModelOwner;
+        const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-body-hash-diagnostic?temporary-chat=true';
+        let crossed = false;
+        x.f.onDigest(() => {
+          crossed = true; x.f.document.URL = toURL; x.f.location.pathname = new URL(toURL).pathname;
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+        }, first.outbound);
+        const result = await x.observe(first, { ...allowance, ...(mutation === 'expected_model' ? { expectedModelChoice: null } : {}) });
+        expect(crossed).toBe(true); denied(result);
+        expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'body_hash', rule: 'context', routeRule,
+          observedError: 'none', receiptPresent: false, receiptNodesMatch: false, receiptRetained: false,
+          awaitingNativeRefresh: false, refreshClaimed: false, expectedModelPresent: mutation !== 'expected_model' });
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ reason: 'pinned_fingerprint', scope: 'digest' });
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion, initial = result.boundCertificateDiagnostic;
+        expect(candidate).not.toHaveProperty('verified', true); expect(candidate.routeDiscard).toBeUndefined();
+        body.text = first.outbound; x.picker!.selected('Medium'); x.f.world.__computaModelOwner = owner; x.f.temporary.connected = true;
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...allowance, action, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+          denied(refused); expect(refused.boundCertificateDiagnostic).toEqual(initial);
+        }
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('bound body-hash diagnostics distinguish an incorrect digest from context failure without adopting it', async () => {
+      const { x, first, record, oldRoot, oldBody, expand } = await remounted();
+      x.f.replaceNextDigest(new Uint8Array(32).buffer, first.outbound);
+      const result = await x.observe(first, allowance); denied(result);
+      expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'body_hash', rule: 'fingerprint',
+        contextFailure: 'none', routeRule: 'url_unchanged', receiptPresent: false });
+      expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.replacement).toBeUndefined();
+      const later = await x.observe(first, allowance); denied(later);
+      expect(later.boundCertificateDiagnostic).toEqual(result.boundCertificateDiagnostic);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('shared route refusal diagnostics cover ordinary model-read terminal guards without another proof or action', async () => {
+      const { x, first, expand, result, fromURL, toURL } = await lateOrdinaryModelRoute(true, 'deadline');
+      denied(result);
+      expect(result.boundCertificateDiagnostic).toMatchObject({ stage: 'model_read', rule: 'route_guard',
+        routeRule: 'deadline_expired', contextFailure: 'not_checked', receiptPresent: false });
+      const later = await x.observe(first, { ...allowance, firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      denied(later); expect(later.boundCertificateDiagnostic).toEqual(result.boundCertificateDiagnostic);
+      expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    test('model-pin route diagnostics distinguish disabled and replaced headers from retained negative history', async () => {
+      for (const mutation of ['disabled', 'missing', 'duplicate', 'header_old', 'header_old_limit',
+        'header_new_limit', 'header_record_limit', 'header_aggregate', 'semantic_current', 'semantic_old']) {
+        let oldTrigger: any;
+        const { x, first, record, candidate, receipt, deadline, firstEdge, secondEdge, discarded, expand }
+          = await remountFinalizationRoute('none', ({ x }: any) => {
+            const pin = x.f.world.__computaChatPresetPin;
+            if (mutation === 'disabled') x.picker.trigger.disabled = true;
+            if (mutation === 'missing') x.picker.trigger.connected = false;
+            if (mutation === 'duplicate') x.f.body.append(new Element('BUTTON', {
+              'aria-label': 'Select ChatGPT model', 'aria-haspopup': 'menu' }, 'Medium'));
+            if (mutation.startsWith('header_')) {
+              let once = true;
+              pin.headerObserver.takeRecords = () => { if (!once) return []; once = false;
+                if (mutation === 'header_record_limit') return Array.from({ length: 513 }, () => ({ type: 'childList',
+                  target: x.picker.trigger, addedNodes: [], removedNodes: [] }));
+                if (mutation === 'header_aggregate') {
+                  const removed = new Element('SPAN'); removed.append(new Element('SPAN', {}, 'x'.repeat(80)));
+                  removed.append(new Element('SPAN', {}, 'y'.repeat(80)));
+                  return [{ type: 'childList', target: x.picker.trigger, addedNodes: [], removedNodes: [removed] }];
+                }
+                return [{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker.primary,
+                  textContent: mutation === 'header_new_limit' ? 'x'.repeat(129) : 'Medium' },
+                  oldValue: mutation === 'header_old_limit' ? 'x'.repeat(129) : 'High' }]; };
+            }
+            if (mutation.startsWith('semantic')) {
+              if (mutation === 'semantic_current') x.picker.slider.values['aria-valuenow'] = '2';
+              let once = true;
+              pin.semanticObserver.takeRecords = () => { if (!once) return []; once = false;
+                return [{ type: 'attributes', target: x.picker.slider, attributeName: 'aria-valuenow',
+                  oldValue: mutation === 'semantic_old' ? '2' : '1' }]; };
+            }
+          });
+        const diagnostic = discarded.boundCertificateDiagnostic;
+        expect(diagnostic, mutation).toMatchObject({ stage: 'finalization_hash', rule: 'route_guard',
+          routeRule: mutation === 'disabled' ? 'model_trigger_disabled'
+            : mutation === 'missing' ? 'model_remount_trigger_count'
+              : mutation === 'duplicate' ? 'model_remount_previous_connected' : 'model_pin_invalidated',
+          receiptPresent: true, receiptNodesMatch: true, receiptRetained: true });
+        expect(diagnostic.modelPinState).toEqual({ triggerPresent: !['missing', 'duplicate'].includes(mutation),
+          triggerCount: mutation === 'missing' ? 0 : mutation === 'duplicate' ? 2 : 1,
+          triggerCandidateCount: mutation === 'missing' ? 0 : mutation === 'duplicate' ? 2 : 1, pinHeaderPresent: true });
+        if (mutation.startsWith('header_')) expect(diagnostic.modelPinInvalidation).toEqual({ reason: 'header_mutation', source: 'pinned_header',
+          stage: mutation === 'header_record_limit' ? 'records' : mutation === 'header_aggregate' ? 'removed' : 'character_data',
+          rule: ({ header_old: 'old_power', header_old_limit: 'old_text_limit', header_new_limit: 'new_text_limit',
+            header_record_limit: 'record_limit', header_aggregate: 'aggregate_limit' } as Record<string, string>)[mutation] });
+        else if (mutation.startsWith('semantic')) expect(diagnostic.modelPinInvalidation).toEqual({ reason: 'semantic_mutation', source: 'semantic_observer',
+          attribute: 'aria-valuenow', nodeConnected: false, attributePresent: true,
+          currentMatches: mutation === 'semantic_old', oldMatches: mutation === 'semantic_current' });
+        else expect(diagnostic.modelPinInvalidation).toBeUndefined();
+        expect(record.replacement).toBe(receipt); expect(candidate).not.toHaveProperty('verified', true);
+        const encoded = JSON.stringify(diagnostic); expect(encoded.length).toBeLessThanOrEqual(768);
+        for (const secret of [first.outbound, first.fingerprint, first.marker, firstEdge.fromURL, secondEdge.toURL])
+          expect(encoded).not.toContain(secret);
+        x.picker!.trigger.disabled = false; x.picker!.slider.values['aria-valuenow'] = '1';
+        if (oldTrigger) oldTrigger.connected = true;
+        for (const action of ['inspect', 'cleanup']) {
+          const refused = await x.observe(first, { ...fresh, action, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+          denied(refused); expect(JSON.stringify(refused.boundCertificateDiagnostic)).toBe(encoded);
+        }
+        expect(candidate.deadline).toBe(deadline); expect(record.replacement).toBe(receipt);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
     });
 
     test('certificate return and fresh hash can consume the two distinct native route edges in order', async () => {
@@ -4773,6 +5771,89 @@ describe('normal ChatGPT product provenance', () => {
     delete f.temporary.values['aria-hidden']; delete f.modeGroup.values['aria-hidden'];
     expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
       productModeEvidence: { temporaryTransition: 'acknowledged' } });
+  });
+
+  const productCommentBatch = (f: ReturnType<typeof fixture>, parent?: Element) => {
+    const holder = parent || new Element('DIV'); if (!parent) f.body.append(holder);
+    const spans = Array.from({ length: 4 }, () => new Element('SPAN', {}, 'Rendered helper'));
+    holder.append(...spans);
+    const comment = { nodeType: 8, parentElement: holder, textContent: 'hydrated', nodeValue: 'hydrated', isConnected: true };
+    // Comments are childNodes but not selector-matching element children.
+    Object.defineProperty(holder, 'childNodes', { configurable: true, get: () => [...holder.children, ...(comment.parentElement === holder ? [comment] : [])] });
+    const records: any[] = [...spans.map(node => ({ type: 'childList', target: holder, addedNodes: [node], removedNodes: [] })),
+      { type: 'characterData', target: comment, oldValue: 'pending' }];
+    return { holder, comment, records };
+  };
+
+  test('valid Comment characterData records retain the same Chat proof before and after temporary transition', async () => {
+    for (const mode of ['normal', 'temporary', 'hidden_temporary', 'detached']) {
+      const f = fixture({ response: false, normalRoot: mode === 'normal' });
+      expect((await f.inspect({ action: 'verifyProductMode' })).productModeEvidence.mode).toBe('chat');
+      const proof = f.world.__computaChatProductMode, { holder, records } = productCommentBatch(f);
+      if (mode === 'hidden_temporary') f.modeGroup.connected = false;
+      if (mode === 'detached') { holder.connected = false; f.body.children = f.body.children.filter(node => node !== holder); holder.parentElement = null; }
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      expect(result.error, mode).toBeUndefined(); expect(f.world.__computaChatProductMode).toBe(proof);
+      expect(proof).not.toHaveProperty('invalidated', true);
+      expect(result.productModeEvidence).toMatchObject({ mode: 'chat', temporaryTransition: mode === 'normal' ? 'not_requested' : 'acknowledged' });
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
+  });
+
+  test('valid Comment records cannot mask tracked product history referenced labels or transient Work selection', async () => {
+    for (const kind of ['tracked_history', 'referenced_label', 'work_selected']) {
+      const f = fixture({ response: false, normalRoot: kind === 'referenced_label' });
+      const label = new Element('SPAN', { id: 'comment-mode-label' }, 'Composer mode');
+      if (kind === 'referenced_label') {
+        f.body.append(label); delete f.modeGroup.values['aria-label'];
+        f.modeGroup.values['aria-labelledby'] = 'comment-mode-label';
+      }
+      await f.inspect();
+      const { comment, records } = productCommentBatch(f);
+      if (kind !== 'work_selected') {
+        const parent = kind === 'tracked_history' ? f.workMode : label;
+        comment.parentElement = parent;
+        Object.defineProperty(parent, 'childNodes', { get: () => [{ nodeType: 3, parentElement: parent, textContent: parent.text }, comment] });
+      } else records.push({ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' });
+      expect(result.error).toBe('product_mode_unverified');
+      expect(result.productModeDiagnostic.productProofFailure).toBe(kind === 'work_selected' ? 'work_selected' : 'product_history_ambiguous');
+      expect(result.productModeDiagnostic).not.toHaveProperty('productMutationFailureRule');
+      expect(result.productModeDiagnostic).not.toHaveProperty('productMutationFailureNodeKind');
+      f.chatMode.values['aria-pressed'] = 'true'; f.workMode.values['aria-pressed'] = 'false';
+      expect((await f.inspect({ action: 'verifyProductMode' })).error).toBe('product_mode_unverified');
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
+  });
+
+  test('Comment support preserves unknown nodes records mutation budgets and finite first-cause diagnostics', async () => {
+    for (const kind of ['unknown_node', 'unknown_record', 'overflow']) {
+      const f = fixture({ response: false }); await f.inspect();
+      const { comment, records } = productCommentBatch(f);
+      if (kind === 'unknown_node') comment.nodeType = 7; // Unsupported processing instruction, not an accepted Comment.
+      else if (kind === 'unknown_record') records.at(-1).type = 'PRIVATE_UNKNOWN_RECORD';
+      else records.push(...Array.from({ length: 4_093 }, () => ({ type: 'characterData', target: comment, oldValue: 'earlier' })));
+      f.observers[0].callback(records);
+      const result = await f.inspect({ action: 'verifyProductMode' }), diagnostic = result.productModeDiagnostic;
+      expect(result.error).toBe('product_mode_unverified');
+      expect(diagnostic.productProofFailure).toBe(kind === 'overflow' ? 'mutation_overflow' : 'mutation_uninspectable');
+      expect(diagnostic.productMutationRelevantCount).toBe(kind === 'unknown_node' ? 1 : kind === 'unknown_record' ? 5 : 1_000);
+      expect(diagnostic.productMutationIgnoredCount).toBe(0);
+      if (kind === 'overflow') expect(diagnostic).not.toHaveProperty('productMutationFailureRule');
+      else expect(diagnostic).toMatchObject({ productMutationFailureRule: kind === 'unknown_node' ? 'node_shape' : 'record_shape',
+        productMutationFailureNodeKind: kind === 'unknown_node' ? 'other' : 'comment' });
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE');
+      f.observers[0].callback([{ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' }]);
+      expect((await f.inspect({ action: 'verifyProductMode' })).productModeDiagnostic).toEqual(diagnostic);
+      const proof: any = f.world.__computaChatProductMode;
+      proof.productMutationFailureRule = 'PRIVATE_INVALID_RULE'; proof.productMutationFailureNodeKind = 'PRIVATE_INVALID_NODE';
+      const malformed = (await f.inspect({ action: 'verifyProductMode' })).productModeDiagnostic;
+      expect(malformed).not.toHaveProperty('productMutationFailureRule'); expect(malformed).not.toHaveProperty('productMutationFailureNodeKind');
+      expect(JSON.stringify(malformed)).not.toContain('PRIVATE');
+      expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+    }
   });
 
   test('Work or a disallowed product route revokes proof permanently, including a transient mode flip', async () => {

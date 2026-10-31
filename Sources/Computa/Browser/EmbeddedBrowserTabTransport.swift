@@ -20,12 +20,94 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
     let oversizedRoles: Int
     let clippedFields: Int
     let boxlessContents: Int
+    let scheduling: Scheduling?
+    let discovery: Discovery?
+
+    /// Only the existing bounded priority-discovery walk contributes counts.
+    /// Panel states use rendered/display-none/hard-hidden/visibility-hidden/no-box
+    /// order; a limit-reached walk never establishes that missing controls are absent.
+    struct Discovery: Codable, Equatable, Sendable {
+        let panelsByState: [Int]
+        let prunedSubtrees: Int
+        let limitReached: Bool
+
+        static func valid(_ raw: Any, scheduling: Any?) -> Bool {
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == ["panelsByState", "prunedSubtrees", "limitReached"],
+                  let scheduling = scheduling as? [String: Any],
+                  let slots = integer(scheduling["discoverySlots"]),
+                  let counts = fields["panelsByState"] as? [Any], counts.count == 5,
+                  let pruned = integer(fields["prunedSubtrees"]),
+                  let limitReached = fields["limitReached"] as? NSNumber,
+                  CFGetTypeID(limitReached) == CFBooleanGetTypeID() else { return false }
+            let panels = counts.compactMap(integer)
+            // The root can be inspected without consuming a child-discovery
+            // slot. A limit-reached diagnostic must refer to the existing shared
+            // ceiling, never a reset clock or an added traversal.
+            return panels.count == 5 && panels.reduce(0, +) <= min(4_096, slots + 1)
+                && pruned <= slots + 1 && (!limitReached.boolValue || slots == 4_096)
+        }
+
+        private static func integer(_ raw: Any?) -> Int? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                  (0...4_096).contains(number.doubleValue) else { return nil }
+            return number.intValue
+        }
+    }
+
+    /// Counts come from the existing bounded traversal, never page content.
+    /// Priority arrays use the fixed focus/dialog/form/ordinary order.
+    struct Scheduling: Codable, Equatable, Sendable {
+        let discoverySlots: Int
+        let panelProbes: Int
+        let partialPanels: Int
+        let controlsSeen: Int
+        let controlsVisible: Int
+        let controlsPrioritized: Int
+        let controlsEmitted: Int
+        let emittedByPriority: [Int]
+        let pendingByPriority: [Int]
+        let pendingClipped: Bool
+
+        static func valid(_ raw: Any, emitted: Int) -> Bool {
+            let counts = ["discoverySlots", "panelProbes", "partialPanels", "controlsSeen", "controlsVisible", "controlsPrioritized", "controlsEmitted"]
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == Set(counts + ["emittedByPriority", "pendingByPriority", "pendingClipped"]) else { return false }
+            func integer(_ raw: Any?, limit: Int) -> Int? {
+                guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                      (0...Double(limit)).contains(number.doubleValue) else { return nil }
+                return number.intValue
+            }
+            var values: [String: Int] = [:]
+            for key in counts {
+                guard let value = integer(fields[key], limit: key == "controlsEmitted" ? 3_000 : 4_096) else { return false }
+                values[key] = value
+            }
+            guard values["partialPanels"]! <= values["panelProbes"]!,
+                  values["controlsEmitted"]! <= values["controlsPrioritized"]!,
+                  values["controlsPrioritized"]! <= values["controlsVisible"]!,
+                  values["controlsVisible"]! <= values["controlsSeen"]!, values["controlsEmitted"]! <= emitted,
+                  let emittedRaw = fields["emittedByPriority"] as? [Any], emittedRaw.count == 4,
+                  let pendingRaw = fields["pendingByPriority"] as? [Any], pendingRaw.count == 4,
+                  let clipped = fields["pendingClipped"] as? NSNumber, CFGetTypeID(clipped) == CFBooleanGetTypeID() else { return false }
+            let emittedValues = emittedRaw.compactMap { integer($0, limit: 3_000) }
+            let pendingValues = pendingRaw.compactMap { integer($0, limit: 20_001) }
+            return emittedValues.count == 4 && emittedValues.reduce(0, +) == emitted && pendingValues.count == 4
+                && (!clipped.boolValue || pendingValues.contains(20_001))
+        }
+    }
 
     static func decode(_ raw: Any?, emitted: Int, sourceTruncated: Bool) throws -> Self {
+        let baseKeys: Set<String> = ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
+                                     "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"]
         guard let fields = raw as? [String: Any],
-              Set(fields.keys) == ["stopReason", "visited", "emitted", "estimatedBytes", "visibilityState", "viewportWidth", "viewportHeight", "frames",
-                                  "shadowRoots", "oversizedRoles", "clippedFields", "boxlessContents"],
-              let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 512,
+              baseKeys.isSubset(of: Set(fields.keys)),
+              Set(fields.keys).isSubset(of: baseKeys.union(["scheduling", "discovery"])),
+              fields["scheduling"].map({ Scheduling.valid($0, emitted: emitted) }) ?? true,
+              fields["discovery"].map({ Discovery.valid($0, scheduling: fields["scheduling"]) }) ?? true,
+              let bytes = try? JSONSerialization.data(withJSONObject: fields), bytes.count <= 768,
               let value = try? JSONDecoder().decode(Self.self, from: bytes),
               (0...20_001).contains(value.visited), (0...3_000).contains(value.emitted),
               value.emitted == emitted, value.emitted <= value.visited,
@@ -40,10 +122,127 @@ struct BrowserCaptureDiagnostics: Codable, Equatable, Sendable {
     }
 }
 
+struct BrowserCaptureLogRecord: Encodable {
+    let kind = "browser_capture_v1"
+    let tabID: UUID
+    let generation: UUID
+    let requestedReadiness: String
+    let readiness: String
+    let capture: BrowserCaptureDiagnostics
+    let viewAttached: Bool
+    let viewHasWindow: Bool
+    let viewHidden: Bool
+    let viewWidth: Int
+    let viewHeight: Int
+}
+
+/// Diagnostic-only driver failure. This never establishes whether browser input
+/// occurred and never grants retry authority. Page error text is not inspected.
+struct BrowserActionFailureDiagnostic: Encodable, Equatable, Sendable {
+    enum Operation: String, CaseIterable, Codable, Sendable { case press, fill }
+    enum Stage: String, CaseIterable, Codable, Sendable {
+        case initialRevalidation = "initial_revalidation", scroll, initialHitTest = "initial_hit_test"
+        case pressPrecheck = "press_precheck", pressDispatch = "press_dispatch", constraintFeedback = "constraint_feedback"
+        case focus, focusedRevalidation = "focused_revalidation", focusConfirmation = "focus_confirmation"
+        case focusedHitTest = "focused_hit_test", valueWrite = "value_write", inputEvent = "input_event", changeEvent = "change_event"
+        case unknown
+    }
+    enum Code: String, CaseIterable, Codable, Sendable {
+        case staleDocument = "stale_document", elementChanged = "element_changed", elementObstructed = "element_obstructed"
+        case unsupportedAction = "unsupported_action", popupUnsupported = "popup_unsupported", unexpected
+    }
+    struct HitTest: Encodable, Equatable, Sendable {
+        enum Reason: String, CaseIterable, Codable, Sendable {
+            case rectNonfinite = "rect_nonfinite", rectNonpositive = "rect_nonpositive", outsideViewport = "outside_viewport"
+            case nullHit = "null_hit", foreignHit = "foreign_hit"
+        }
+        enum Axis: String, CaseIterable, Codable, Sendable { case before, inside, after, unknown }
+        enum Tag: String, CaseIterable, Codable, Sendable { case input, textarea, select, button, div, span, iframe, body, html, other, none }
+        enum Role: String, CaseIterable, Codable, Sendable { case dialog, alertdialog, listbox, option, combobox, textbox, button, menu, menuitem, tooltip, other, none }
+        enum Relation: String, CaseIterable, Codable, Sendable { case none, sameElement = "self", descendant, ancestor, other }
+        let reason: Reason
+        let centerX: Axis
+        let centerY: Axis
+        let hitTag: Tag
+        let hitRole: Role
+        let relation: Relation
+
+        static func decode(_ raw: Any?) -> Self? {
+            guard let fields = raw as? [String: Any],
+                  Set(fields.keys) == ["reason", "centerX", "centerY", "hitTag", "hitRole", "relation"],
+                  let reason = (fields["reason"] as? String).flatMap(Reason.init(rawValue:)),
+                  let x = (fields["centerX"] as? String).flatMap(Axis.init(rawValue:)),
+                  let y = (fields["centerY"] as? String).flatMap(Axis.init(rawValue:)),
+                  let tag = (fields["hitTag"] as? String).flatMap(Tag.init(rawValue:)),
+                  let role = (fields["hitRole"] as? String).flatMap(Role.init(rawValue:)),
+                  let relation = (fields["relation"] as? String).flatMap(Relation.init(rawValue:)),
+                  (tag == .none) == (relation == .none), tag != .none || role == .none,
+                  reason != .nullHit || relation == .none,
+                  reason != .foreignHit || [.ancestor, .other].contains(relation),
+                  reason != .outsideViewport || [x, y].contains(where: { $0 == .before || $0 == .after }) else { return nil }
+            return Self(reason: reason, centerX: x, centerY: y, hitTag: tag, hitRole: role, relation: relation)
+        }
+    }
+    static let genericActionFailureDetail = "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+
+    /// Guidance reports only the strictly decoded covering role. It does not
+    /// identify a recipient, infer popup membership, or prove zero dispatch.
+    var publicFailureDetail: String {
+        guard code == .elementObstructed, [.initialHitTest, .focusedHitTest].contains(stage),
+              let hitTest, hitTest.reason == .foreignHit,
+              hitTest.centerX == .inside, hitTest.centerY == .inside,
+              [.ancestor, .other].contains(hitTest.relation), hitTest.hitTag != .none,
+              [.option, .listbox].contains(hitTest.hitRole) else { return Self.genericActionFailureDetail }
+        let coveringRole = hitTest.hitRole == .option ? "An option" : "A listbox"
+        return "The built-in action could not be confirmed. \(coveringRole) covers the target at its hit-test point. "
+            + "No replay is allowed; read the current page controls and popups before choosing another action with a fresh observed reference."
+    }
+
+    let version = 1
+    let operation: Operation
+    let stage: Stage
+    let code: Code
+    let hitTest: HitTest?
+
+    init(operation: Operation, stage: Stage, code: Code, hitTest: HitTest? = nil) {
+        self.operation = operation; self.stage = stage; self.code = code; self.hitTest = hitTest
+    }
+
+    static func decode(_ raw: Any?, operation: String) -> Self? {
+        guard let outer = raw as? [String: Any], Set(outer.keys) == ["browserActionFailure"],
+              let fields = outer["browserActionFailure"] as? [String: Any],
+              Set(fields.keys) == ["version", "operation", "stage", "code"]
+                || Set(fields.keys) == ["version", "operation", "stage", "code", "hitTest"],
+              let version = fields["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+              let requested = Operation(rawValue: operation), fields["operation"] as? String == operation,
+              let stageName = fields["stage"] as? String, let stage = Stage(rawValue: stageName), stage != .unknown,
+              let codeName = fields["code"] as? String, let code = Code(rawValue: codeName) else { return nil }
+        let pressStages: Set<Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
+        let fillStages: Set<Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]
+        guard requested == .press ? !fillStages.contains(stage) : !pressStages.contains(stage) else { return nil }
+        var hitTest: HitTest?
+        if let rawHitTest = fields["hitTest"] {
+            guard code == .elementObstructed, [.initialHitTest, .focusedHitTest].contains(stage),
+                  let decoded = HitTest.decode(rawHitTest) else { return nil }
+            hitTest = decoded
+        }
+        return Self(operation: requested, stage: stage, code: code, hitTest: hitTest)
+    }
+}
+
+struct BrowserActionFailureLogRecord: Encodable {
+    let kind = "browser_action_failure_v1"
+    let tabID: UUID
+    let generation: UUID
+    let failure: BrowserActionFailureDiagnostic
+}
+
 /// Runtime integration depends on this narrow backend, rather than WebKit or
 /// native window focus. Fixtures can implement it without launching a browser.
 protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
     func humanTargets() async throws -> [BrowserTarget]
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws
     func wait(target: BrowserTarget, text: String?, timeoutMS: Int) async throws -> Bool
     func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
@@ -53,6 +252,8 @@ protocol EmbeddedBrowserControlBackend: BrowserTabTransport {
 }
 
 extension EmbeddedBrowserControlBackend {
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws {}
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async {}
     /// Backends must implement the native predicate or explicitly reject it;
     /// an ordinary readiness check cannot stand in for document change.
     func waitForDocumentChange(target: BrowserTarget, checkpoint: BrowserDocumentChangeCheckpoint,
@@ -69,10 +270,17 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private let session: EmbeddedBrowserSession
     private let world = WKContentWorld.world(name: "Computa.BrowserControl.\(UUID().uuidString)")
     private var owned = [UUID: String]()
+    private struct RenderingLease {
+        let target: BrowserTarget
+        let lifetime: BrowserTabLifetime
+        let token: UUID
+    }
+    private var renderingLeases: [ObjectIdentifier: RenderingLease] = [:]
     private let script: String?
     private static let captureLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserCapture")
     #if DEBUG
     private(set) var captureDiagnosticsForTesting: BrowserCaptureDiagnostics?
+    private(set) var actionFailureDiagnosticForTesting: BrowserActionFailureDiagnostic?
     #endif
 
     init(session: EmbeddedBrowserSession, script: String? = nil) {
@@ -82,6 +290,35 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
 
     func humanTargets() async throws -> [BrowserTarget] {
         session.humanTabs.compactMap { target(for: $0.id) }
+    }
+
+    func acquireRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async throws {
+        try Task.checkCancellation()
+        try lifetime.check()
+        let id = try exactID(target), key = ObjectIdentifier(lifetime)
+        if let existing = renderingLeases[key] {
+            guard existing.target.targetID == target.targetID,
+                  existing.target.instanceToken == target.instanceToken else {
+                throw BrowserTabBrokerError.targetReplaced
+            }
+            try session.requireToolRendering(tabID: id)
+            return
+        }
+        let token = try session.acquireToolRendering(tabID: id)
+        // Revocation is synchronous and can race the actor hop. No cancelled
+        // binding may retain its host, even if acquisition just completed.
+        do { try lifetime.check(); try Task.checkCancellation() }
+        catch { session.releaseToolRendering(tabID: id, lease: token); throw error }
+        renderingLeases[key] = RenderingLease(target: target, lifetime: lifetime, token: token)
+    }
+
+    func releaseRendering(target: BrowserTarget, lifetime: BrowserTabLifetime) async {
+        let key = ObjectIdentifier(lifetime)
+        guard let lease = renderingLeases[key], lease.target.targetID == target.targetID,
+              lease.target.instanceToken == target.instanceToken,
+              let id = UUID(uuidString: target.targetID) else { return }
+        renderingLeases.removeValue(forKey: key)
+        session.releaseToolRendering(tabID: id, lease: lease.token)
     }
 
     func createTarget(url: URL) async throws -> BrowserTarget {
@@ -136,6 +373,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     func closeOwnedTargets() async -> [String] {
+        for lease in renderingLeases.values {
+            if let id = UUID(uuidString: lease.target.targetID) { session.releaseToolRendering(tabID: id, lease: lease.token) }
+        }
+        renderingLeases.removeAll()
         for (id, token) in owned where target(for: id)?.instanceToken == token { session.closeTab(id) }
         owned.removeAll()
         return []
@@ -256,25 +497,12 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         #endif
         // Emit only the final returned capture, not each MutationObserver probe.
         // These opaque IDs are host-generated and permit exact-tab correlation.
-        struct Record: Encodable {
-            let kind = "browser_capture_v1"
-            let tabID: UUID
-            let generation: UUID
-            let requestedReadiness: String
-            let readiness: String
-            let capture: BrowserCaptureDiagnostics
-            let viewAttached: Bool
-            let viewHasWindow: Bool
-            let viewHidden: Bool
-            let viewWidth: Int
-            let viewHeight: Int
-        }
         let view = session.webView(for: id)
         func dimension(_ value: CGFloat?) -> Int {
             guard let value, value.isFinite, (0...1_000_000).contains(value) else { return 0 }
             return Int(value.rounded(.down))
         }
-        let record = Record(tabID: id, generation: generation,
+        let record = BrowserCaptureLogRecord(tabID: id, generation: generation,
             requestedReadiness: requestedReadiness?.rawValue ?? "immediate",
             readiness: readiness?.rawValue ?? "immediate", capture: diagnostics,
             viewAttached: view?.superview != nil, viewHasWindow: view?.window != nil,
@@ -353,7 +581,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     func navigate(target: BrowserTarget, url: URL, permit: BrowserMutationPermit) async throws {
         let id = try exactID(target)
         try EmbeddedBrowserURLPolicy.validate(url)
-        try permit.commit { try session.navigate(tabID: id, to: url) }
+        try permit.commit {
+            try session.requireToolRendering(tabID: id)
+            try session.navigate(tabID: id, to: url)
+        }
         // A failed navigation is not resubmitted, even when its response times out.
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
     }
@@ -442,6 +673,9 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         else { throw BrowserTabBrokerError.staleDocument }
         var input = input
         input["documentToken"] = generation.uuidString
+        #if DEBUG
+        if mutation { actionFailureDiagnosticForTesting = nil }
+        #endif
         let result = EmbeddedBrowserScriptResult()
         let bytes: Data
         do {
@@ -454,6 +688,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                     result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
                     let enqueue = {
                         try readAdmission?()
+                        try self.session.requireToolRendering(tabID: id)
                         let operationID: UUID?
                         if mutation {
                             operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)
@@ -462,8 +697,16 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                         }
                         view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: self.world) {
                             reply in
+                            var actionFailure: BrowserActionFailureDiagnostic?
                             do {
                                 let value = try reply.get()
+                                if mutation, let object = value as? [String: Any], object["browserActionFailure"] != nil {
+                                    actionFailure = BrowserActionFailureDiagnostic.decode(object, operation: input["operation"] as? String ?? "")
+                                    // A driver failure can follow a setter or an
+                                    // event. Preserve the same unconfirmed error;
+                                    // never reinterpret this as no dispatch.
+                                    throw BrowserTabBrokerError.browserUnavailable("The built-in action could not be confirmed.")
+                                }
                                 guard JSONSerialization.isValidJSONObject(value) else {
                                     throw BrowserTabBrokerError.browserUnavailable(
                                         "The built-in script returned an invalid result.")
@@ -475,6 +718,16 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                                 }
                                 result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
                             } catch {
+                                if mutation, let operation = BrowserActionFailureDiagnostic.Operation(rawValue: input["operation"] as? String ?? "") {
+                                    let finite = actionFailure ?? BrowserActionFailureDiagnostic(operation: operation, stage: .unknown, code: .unexpected)
+                                    #if DEBUG
+                                    self.actionFailureDiagnosticForTesting = finite
+                                    #endif
+                                    let record = BrowserActionFailureLogRecord(tabID: id, generation: generation, failure: finite)
+                                    if let bytes = try? JSONEncoder().encode(record), bytes.count <= 512 {
+                                        Self.captureLog.notice("actionFailure \(String(decoding: bytes, as: UTF8.self), privacy: .public)")
+                                    }
+                                }
                                 // An empty-shell wait can span a real navigation,
                                 // which destroys its JS context before returning.
                                 // Only read-only operations may use the existing
@@ -491,7 +744,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                                     .failure(
                                         BrowserTabBrokerError.browserUnavailable(
                                             mutation
-                                                ? "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+                                                ? actionFailure?.publicFailureDetail ?? BrowserActionFailureDiagnostic.genericActionFailureDetail
                                                 : "The built-in page could not be inspected. Its document may have changed."
                                         ))
                                 )
@@ -521,6 +774,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         if !mutation {
             try Task.checkCancellation()
             try requireCurrentReadDocument(id: id, view: view, generation: generation)
+            try session.requireToolRendering(tabID: id)
         }
         return bytes
     }

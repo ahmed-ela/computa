@@ -5,6 +5,306 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testBorrowedHumanRenderingRestoresUsableViewportWithoutNavigationSelectionOrFocus() async throws {
+        try await verifyBorrowedHumanRendering(presented: false)
+    }
+
+    func testPresentedHumanRenderingKeepsStableTaskViewportAcrossPresentationUpdatesAndRestoresOnRelease() async throws {
+        try await verifyBorrowedHumanRendering(presented: true)
+    }
+
+    private func verifyBorrowedHumanRendering(presented: Bool) async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let root = NSView(frame: window.contentView!.bounds)
+        window.contentView = root
+        let backing = EmbeddedModelRenderContainer(session: session)
+        backing.frame = NSRect(x: -1_024, y: 0, width: 1_024, height: 768)
+        root.addSubview(backing)
+        session.installModelRenderHost(backing)
+        let initialPaneSize = NSSize(width: 360, height: presented ? 527 : 665)
+        let visible = NSView(frame: NSRect(origin: .zero, size: initialPaneSize))
+        root.addSubview(visible)
+        let field = NSTextField(string: "Unsent human buffer")
+        field.frame = NSRect(x: 400, y: 20, width: 400, height: 24)
+        root.addSubview(field)
+        let human = try session.createTab(), other = try session.createTab()
+        if presented { session.selectTab(human) }
+        let selectedBefore = session.selectedTabID
+        let view = try XCTUnwrap(session.webView(for: human))
+        try session.presentTab(human, in: visible)
+        let ordinaryFocusBehavior = view.acceptsFirstResponder
+        view.loadHTMLString("""
+            <!doctype html><style>#compose{display:none}@media(min-width:480px){#compose{display:block}}</style>
+            <main>Inbox</main><section id="compose" aria-label="New Message">
+            <input id="recipient" aria-label="Recipients" value="fixture@example.test"><textarea id="body" aria-label="Body">Unsent draft</textarea>
+            </section><script>window.fixtureIdentity='same-document';window.inputs=0;window.addEventListener('input',()=>window.inputs++);</script>
+            """, baseURL: URL(string: "https://viewport.example.test/"))
+        let ready = ContinuousClock.now + .seconds(10)
+        while true {
+            if !view.isLoading, (try? await script(view, "return !!document.getElementById('body');")) == Data("true".utf8) { break }
+            guard ContinuousClock.now < ready else { return XCTFail("Viewport fixture did not load") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let generation = session.documentGeneration(for: human)
+        let narrow = try await script(view, "return {width:innerWidth,visible:!!document.getElementById('compose').getClientRects().length};")
+        let narrowState = try XCTUnwrap(JSONSerialization.jsonObject(with: narrow) as? [String: Any])
+        XCTAssertEqual(narrowState["width"] as? Int, 360)
+        XCTAssertEqual(narrowState["visible"] as? Bool, false, "Control reproduces a responsive compose panel absent at narrow width")
+        if !presented { session.detachPresentedTab(human, from: visible) }
+        XCTAssertTrue(presented ? view.superview === visible : view.superview == nil)
+        XCTAssertEqual(view.frame.width, 360)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let resolvedTarget = try await transport.target(id: human.uuidString)
+        let target = try XCTUnwrap(resolvedTarget)
+        let narrowCapture = try await transport.observe(target: target)
+        XCTAssertFalse(narrowCapture.nodes.contains { $0.name == "Recipients" || $0.name == "Body" },
+                       "The real browser driver cannot expose the responsive panel at the detached narrow viewport")
+        field.selectText(nil)
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        editor.setSelectedRange(NSRange(location: 3, length: 4))
+        let keyWindow = NSApplication.shared.keyWindow
+        let lifetime = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        XCTAssertTrue(view.superview === backing)
+        XCTAssertTrue(view.window === window)
+        XCTAssertFalse(view.acceptsFirstResponder)
+        XCTAssertEqual(view.frame.size, NSSize(width: 1_024, height: 768))
+        if presented {
+            visible.setFrameSize(NSSize(width: 240, height: 400))
+            try session.presentTab(human, in: visible)
+            session.installModelRenderHost(backing)
+            XCTAssertTrue(view.superview === backing, "Presentation updates must not steal the active tool lease")
+            XCTAssertEqual(view.frame.size, NSSize(width: 1_024, height: 768), "A narrow selected pane cannot shrink the leased task viewport")
+            visible.setFrameSize(initialPaneSize)
+            try session.presentTab(human, in: visible)
+            XCTAssertTrue(view.superview === backing)
+        }
+        // The first native capture must observe the resized page. No timer,
+        // layout polling or intervening website request hides an IPC race.
+        let wideCapture = try await transport.observe(target: target)
+        let wide = try await script(view, "document.getElementById('body').focus();return {visible:!!document.getElementById('compose').getClientRects().length,recipient:document.getElementById('recipient').value,body:document.getElementById('body').value,inputs:window.inputs,identity:window.fixtureIdentity};")
+        let wideState = try XCTUnwrap(JSONSerialization.jsonObject(with: wide) as? [String: Any])
+        XCTAssertEqual(wideState["visible"] as? Bool, true)
+        XCTAssertEqual(wideState["recipient"] as? String, "fixture@example.test")
+        XCTAssertEqual(wideState["body"] as? String, "Unsent draft")
+        XCTAssertEqual(wideState["inputs"] as? Int, 0)
+        XCTAssertEqual(wideState["identity"] as? String, "same-document")
+        XCTAssertEqual(wideCapture.loaderID, narrowCapture.loaderID)
+        XCTAssertEqual(wideCapture.url, narrowCapture.url)
+        let recipient = try XCTUnwrap(wideCapture.nodes.first { $0.name == "Recipients" })
+        let body = try XCTUnwrap(wideCapture.nodes.first { $0.name == "Body" })
+        XCTAssertTrue(recipient.isEditable)
+        XCTAssertTrue(body.isEditable)
+        XCTAssertEqual(recipient.value, "fixture@example.test")
+        XCTAssertEqual(body.value, "Unsent draft")
+        XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertEqual(editor.string, "Unsent human buffer")
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 3, length: 4))
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+        XCTAssertEqual(session.selectedTabID, selectedBefore)
+        XCTAssertEqual(session.documentGeneration(for: human), generation)
+        XCTAssertEqual(session.humanTabs.map(\.id), [human, other])
+        lifetime.revoke()
+        await transport.releaseRendering(target: target, lifetime: lifetime)
+        XCTAssertTrue(presented ? view.superview === visible : view.superview == nil)
+        XCTAssertTrue(presented ? view.window === window : view.window == nil)
+        XCTAssertEqual(view.frame.size, initialPaneSize)
+        XCTAssertEqual(view.acceptsFirstResponder, ordinaryFocusBehavior)
+        XCTAssertTrue(session.webView(for: human) === view)
+        XCTAssertEqual(session.documentGeneration(for: human), generation)
+        XCTAssertEqual(session.selectedTabID, selectedBefore)
+        let restored = try await script(view, "return {width:innerWidth,identity:window.fixtureIdentity,inputs:window.inputs,body:document.getElementById('body').value};")
+        let restoredState = try XCTUnwrap(JSONSerialization.jsonObject(with: restored) as? [String: Any])
+        XCTAssertEqual(restoredState["width"] as? Int, 360)
+        XCTAssertEqual(restoredState["identity"] as? String, "same-document")
+        XCTAssertEqual(restoredState["inputs"] as? Int, 0)
+        XCTAssertEqual(restoredState["body"] as? String, "Unsent draft")
+        XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertEqual(editor.string, "Unsent human buffer")
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 3, length: 4))
+    }
+
+    func testBorrowedRenderLeasesRespectPresentationReplacementAndExactRelease() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let root = NSView(frame: window.contentView!.bounds); window.contentView = root
+        let first = EmbeddedModelRenderContainer(session: session), second = EmbeddedModelRenderContainer(session: session)
+        root.addSubview(first); root.addSubview(second)
+        session.installModelRenderHost(first); session.installModelRenderHost(second)
+        let human = try session.createTab(), view = try XCTUnwrap(session.webView(for: human))
+        let ordinaryFocusBehavior = view.acceptsFirstResponder
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let resolvedTarget = try await transport.target(id: human.uuidString)
+        let target = try XCTUnwrap(resolvedTarget)
+        let old = BrowserTabLifetime(), current = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: old)
+        try await transport.acquireRendering(target: target, lifetime: current)
+        old.revoke()
+        await transport.releaseRendering(target: target, lifetime: old)
+        await transport.releaseRendering(target: target, lifetime: old)
+        XCTAssertTrue(view.superview === first, "An old or repeated release cannot remove the newer lease")
+        first.detach()
+        XCTAssertTrue(view.superview === second)
+        let visible = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 665)); root.addSubview(visible)
+        try session.presentTab(human, in: visible)
+        XCTAssertTrue(view.superview === second)
+        XCTAssertEqual(view.frame.size, NSSize(width: 1_024, height: 768))
+        XCTAssertFalse(view.acceptsFirstResponder)
+        session.installModelRenderHost(second)
+        XCTAssertTrue(view.superview === second, "The active render lease now wins; human presentation resumes after final release")
+        session.detachPresentedTab(human, from: visible)
+        XCTAssertTrue(view.superview === second)
+        current.revoke(); await transport.releaseRendering(target: target, lifetime: current)
+        XCTAssertNil(view.superview)
+        XCTAssertEqual(view.frame.size, visible.bounds.size, "Restore the latest human presentation, not the older background frame")
+        XCTAssertEqual(view.acceptsFirstResponder, ordinaryFocusBehavior)
+        do { try await transport.acquireRendering(target: target, lifetime: old); XCTFail("Revoked lease mounted") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        XCTAssertNil(view.superview)
+        let late = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: late)
+        session.closeTab(human)
+        await transport.releaseRendering(target: target, lifetime: late)
+        XCTAssertNil(view.superview)
+        XCTAssertNil(session.webView(for: human))
+        let model = try session.createUnloadedModelTabForTesting()
+        XCTAssertThrowsError(try session.acquireToolRendering(tabID: model)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .modelTabPrivate)
+        }
+        let survivor = try session.createTab(), survivorView = try XCTUnwrap(session.webView(for: survivor))
+        _ = try session.acquireToolRendering(tabID: survivor)
+        session.shutdown()
+        XCTAssertNil(survivorView.superview)
+        XCTAssertNil(session.webView(for: survivor))
+    }
+
+    func testBorrowedRenderingRejectsMissingOrDetachedPresentationHost() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let human = try session.createTab(), view = try XCTUnwrap(session.webView(for: human))
+        func assertUnavailable() {
+            XCTAssertThrowsError(try session.acquireToolRendering(tabID: human)) {
+                guard case .browserUnavailable(let reason) = $0 as? BrowserTabBrokerError else {
+                    return XCTFail("Expected explicit render-host admission failure, got \($0)")
+                }
+                XCTAssertTrue(reason.contains("render host is unavailable"))
+            }
+        }
+        assertUnavailable()
+        XCTAssertNil(view.superview)
+        let detached = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 665))
+        try session.presentTab(human, in: detached)
+        assertUnavailable()
+        XCTAssertTrue(view.superview === detached)
+        XCTAssertEqual(view.frame.size, detached.bounds.size)
+        XCTAssertEqual(session.selectedTabID, human)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 600),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView?.addSubview(detached)
+        assertUnavailable()
+        XCTAssertTrue(view.superview === detached, "An attached human pane cannot replace the required background task surface")
+        XCTAssertEqual(view.frame.size, detached.bounds.size)
+    }
+
+    func testPresentedRenderLeasesRestoreLatestHumanHostOnlyAfterFinalExactRelease() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let root = try XCTUnwrap(window.contentView)
+        let backing = EmbeddedModelRenderContainer(session: session)
+        root.addSubview(backing); session.installModelRenderHost(backing)
+        let first = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 527))
+        let latest = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 620))
+        root.addSubview(first); root.addSubview(latest)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let generation = session.documentGeneration(for: id)
+        try session.presentTab(id, in: first)
+        let old = try session.acquireToolRendering(tabID: id)
+        let current = try session.acquireToolRendering(tabID: id)
+        try session.presentTab(id, in: latest)
+        session.detachPresentedTab(id, from: first)
+        session.releaseToolRendering(tabID: id, lease: old)
+        session.releaseToolRendering(tabID: id, lease: old)
+        session.releaseToolRendering(tabID: id, lease: UUID())
+        XCTAssertTrue(view.superview === backing)
+        XCTAssertEqual(view.frame.size, NSSize(width: 1_024, height: 768))
+        latest.setFrameSize(NSSize(width: 420, height: 580))
+        session.releaseToolRendering(tabID: id, lease: current)
+        XCTAssertTrue(view.superview === latest)
+        XCTAssertEqual(view.frame.size, latest.bounds.size, "Final release uses current human layout, not a stale saved rectangle")
+        XCTAssertTrue(session.webView(for: id) === view)
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        XCTAssertEqual(session.selectedTabID, id)
+        XCTAssertEqual(session.humanTabs.map(\.id), [id])
+    }
+
+    func testPresentedRenderHostLossRejectsCachedLeaseReadsAndInputWithoutDispatch() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let root = try XCTUnwrap(window.contentView), backing = EmbeddedModelRenderContainer(session: session)
+        root.addSubview(backing); session.installModelRenderHost(backing)
+        let visible = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 527)); root.addSubview(visible)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        try session.presentTab(id, in: visible)
+        view.loadHTMLString("""
+            <!doctype html><button onclick="window.clicks++">Fixture action</button><input id="field" aria-label="Fixture field">
+            <script>window.clicks=0;window.inputs=0;document.addEventListener('input',()=>window.inputs++);</script>
+            """, baseURL: URL(string: "http://localhost:8123/host-loss"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let transport = EmbeddedBrowserTabTransport(session: session), lifetime = BrowserTabLifetime()
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        let observed = try await transport.observe(target: target)
+        let action = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture action" })
+        let field = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture field" })
+        let generation = session.documentGeneration(for: id), url = view.url
+        backing.detach()
+        XCTAssertNil(view.superview, "A lost task surface cannot fall back to the narrow human pane")
+        func assertUnavailable(_ error: Error) {
+            guard case .browserUnavailable(let reason) = error as? BrowserTabBrokerError else {
+                return XCTFail("Expected missing render-host admission failure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("render host is unavailable"))
+        }
+        do { try await transport.acquireRendering(target: target, lifetime: lifetime); XCTFail("Cached lease cannot bypass current host admission") }
+        catch { assertUnavailable(error) }
+        do { _ = try await transport.observe(target: target); XCTFail("Detached task capture cannot publish") }
+        catch { assertUnavailable(error) }
+        do { try await transport.press(target: target, backendNodeID: XCTUnwrap(action.backendNodeID), document: observed, permit: BrowserMutationPermit()); XCTFail("Detached task cannot press") }
+        catch { assertUnavailable(error) }
+        do { try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "MUST_NOT_APPEAR", document: observed, permit: BrowserMutationPermit()); XCTFail("Detached task cannot fill") }
+        catch { assertUnavailable(error) }
+        do { try await transport.navigate(target: target, url: XCTUnwrap(URL(string: "http://localhost:8123/MUST_NOT_NAVIGATE")), permit: BrowserMutationPermit()); XCTFail("Detached task cannot navigate") }
+        catch { assertUnavailable(error) }
+        let effects = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,value:document.getElementById('field').value};")
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: effects) as? [String: Any])
+        XCTAssertEqual(state["clicks"] as? Int, 0); XCTAssertEqual(state["inputs"] as? Int, 0)
+        XCTAssertEqual(state["value"] as? String, "")
+        XCTAssertEqual(view.url, url); XCTAssertEqual(session.documentGeneration(for: id), generation)
+        session.installModelRenderHost(backing)
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        XCTAssertTrue(view.superview === backing)
+        _ = try await transport.observe(target: target)
+        lifetime.revoke(); await transport.releaseRendering(target: target, lifetime: lifetime)
+        XCTAssertTrue(view.superview === visible)
+        XCTAssertEqual(view.frame.size, visible.bounds.size)
+        XCTAssertEqual(session.selectedTabID, id)
+    }
+
     func testCommittedDocumentIdentityIgnoresCancelledProvisionalNavigationAndRejectsStaleOrModelReads() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

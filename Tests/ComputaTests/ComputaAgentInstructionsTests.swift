@@ -21,11 +21,26 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let original: [String: Any] = ["model": "browser/chatgpt", "input": input, "tools": functions]
         let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: original))
         let end = try XCTUnwrap(prepared.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
-        let handoff = String(prepared.prompt[end.upperBound...]).replacingOccurrences(of: "\n", with: " ")
-        for rule in ["Partial reads do not mean the relay is unavailable", "cursors cover captured nodes only",
-                     "fresh overview without query/cursor", "never replay input", "Respect actual access denials and approvals"] {
-            XCTAssertTrue(handoff.contains(rule), rule)
-        }
+        let handoff = String(prepared.prompt[end.upperBound...])
+        let progressGuidance = """
+        Partial reads do not mean the relay is unavailable. Use relevant observed controls;
+        continue only for missing evidence. Missing controls/query miss: one fresh
+        overview without query/cursor. source_truncated=1: cursors cover captured nodes only.
+        To reveal UI, use observed expand/full-screen controls with current refs.
+        If one bounded wait/read shows no change, use another observed presentation
+        control in task scope or report unresolved. Uncertain submission: read-only
+        verification; never replay input.
+        """
+        XCTAssertTrue(handoff.contains(progressGuidance),
+                      "The complete progress rule must follow quoted history on each fresh website handoff")
+        XCTAssertTrue(handoff.contains(ComputaAgentInstructions.browserAddressChecks),
+                      "Progress guidance must retain the full address, access and sign-in evidence contract")
+        XCTAssertTrue(handoff.contains(ComputaAgentInstructions.browserFormSubmission),
+                      "Presentation recovery cannot replace read-only verification of uncertain submissions")
+        XCTAssertEqual(handoff.components(separatedBy: progressGuidance).count - 1, 1)
+        XCTAssertFalse(handoff.contains("output_truncated=1: continue"),
+                       "Pagination is conditional on missing evidence, not a prerequisite for observed controls")
+        XCTAssertFalse(handoff.contains("Recover by reading"))
         let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.continuationRequest) as? NSDictionary)
         XCTAssertEqual(continued, original as NSDictionary, "Partial-read recovery must preserve draft-only scope and all original tool evidence")
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains("Partial reads do not mean"),
@@ -188,13 +203,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         or code blocks.
         Examples below are complete raw response objects.
         """
-        let examples = [
-            #"{"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}"#,
-            #"{"type":"message","text":"OK"}"#,
-        ]
         for includeTools in [false, true] {
             let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
+            let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [
+                #"{"calls":[{"arguments":{},"name":"relay.browser_read"}],"type":"tool_calls"}"#,
+                #"{"calls":[{"input":"*** Begin Patch\n*** Update File: /absolute/observed/file.py\n@@\n def label():\n-    return \"old\\\\path\"\n+    return \"new\\\\path\"\n # Other code stays unchanged.\n*** End Patch","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
+            ] : [])
             for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
                 let defaultContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
                     customToolNames: customNames, includedInstructionText: included)
@@ -294,7 +309,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]]])
                 let request = try WebModelResponseCodec.prepareRequest(original)
                 let fresh = try assertRequestValuesAndHandoff(original, request: request,
-                    includedInstructionText: [retained])
+                    includedInstructionText: [retained], expectedAllowedToolNames: toolChoice == "none" ? [] : nil)
                 XCTAssertEqual(request.continuationRequest, original)
                 XCTAssertEqual(fresh.components(separatedBy: ComputaAgentInstructions.taskCompletion).count - 1, 1)
                 XCTAssertTrue(fresh.contains("Continue remaining authorized work with offered tools and matching results"))
@@ -324,8 +339,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 customToolNames: custom, includedInstructionText: included)
             let response = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(tools.keys),
                 customToolNames: custom, includedInstructionText: included)
+            XCTAssertTrue(runtime.contains("Exact currently offered local tool names: " + expected))
+            XCTAssertTrue(response.contains("Exact currently offered local function names: " + (tools.isEmpty ? "(none)" : "relay.browser_read")))
+            XCTAssertTrue(response.contains("Exact currently offered custom names: " + (tools.isEmpty ? "(none)" : "relay.apply_patch")))
             for text in [runtime, response] {
-                XCTAssertTrue(text.contains("Exact currently offered local function names: " + expected))
                 XCTAssertFalse(text.contains("functions.apply_patch"))
                 XCTAssertFalse(text.contains("functions.browser_open"))
             }
@@ -409,7 +426,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
         let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
-        XCTAssertEqual(legacy, ComputaAgentInstructions.nativeLegacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.diagnosticEvidence + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+        XCTAssertEqual(legacy, ComputaAgentInstructions.nativeLegacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.diagnosticEvidence + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.codeRepairProgress + "\n\n" + ComputaAgentInstructions.patchExecutionChecks + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_snapshot(view=all or content)"))
         XCTAssertFalse(legacy.contains("computer_v2_follow_link"))
         XCTAssertTrue(legacy.contains("offered page continuation tool with next_cursor"))
@@ -418,7 +435,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testInstructionsAreSelfContainedAndBasePromptHasNoForeignPolicy() {
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(),
-                       ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.diagnosticEvidence + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+                       ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.diagnosticEvidence + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.codeRepairProgress + "\n\n" + ComputaAgentInstructions.patchExecutionChecks + "\n\n" + ComputaAgentInstructions.commandLine)
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertFalse(base.localizedCaseInsensitiveContains("StudyLock"))
         XCTAssertTrue(base.contains("Respect approvals and access controls"))
@@ -475,7 +492,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(computer.contains("Local command execution is offered as:"))
         XCTAssertFalse(computer.contains("Existing local command sessions accept input through:"))
         let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:])
-        XCTAssertTrue(absent.contains("Exact currently offered local function names: (none)"))
+        XCTAssertTrue(absent.contains("Exact currently offered local tool names: (none)"))
         XCTAssertFalse(absent.contains("Local command execution is offered as:"))
         XCTAssertFalse(absent.contains("Computer UI work requires"))
         XCTAssertLessThan(terminal.utf8.count, 5_200, "Fresh runtime context has a bounded instruction budget independent of history length")
@@ -1103,7 +1120,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertEqual(handoff.contains("This ChatGPT relay issues one tool call per inference"), provider == "chatgpt")
             if provider == "chatgpt" {
                 XCTAssertTrue(handoff.contains("the rest are not queued or replayed"))
-                XCTAssertLessThan(handoff.utf8.count, 4_200, "The explicit selection policy stays bounded after history")
+                XCTAssertLessThan(handoff.utf8.count, 4_700,
+                                  "The 4,200-byte website selection handoff plus a repair checkpoint under 450 bytes stays bounded")
             }
             XCTAssertEqual(request.continuationRequest, original, "Selection must not rewrite caller options or canonical history")
         }
@@ -1126,7 +1144,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(normalized.contains("Read content/all for the available receipt/status"))
         XCTAssertTrue(normalized.contains("compare its destination and content with the task before claiming success"))
         XCTAssertTrue(normalized.contains("Never resubmit to obtain verification"))
-        XCTAssertLessThan(guidance.utf8.count, 800, "Keep input and outcome verification guidance bounded")
+        XCTAssertTrue(normalized.contains("Read current options and select only an unambiguous intended match via click_ref"))
+        XCTAssertTrue(normalized.contains("Resolve covering popups, then re-read the next field before filling"))
+        XCTAssertLessThan(guidance.utf8.count, 1_000,
+                          "Input, outcome and observed popup-selection guidance stays below one KB")
         for delivered in [ComputaAgentInstructions.builtInBrowser,
                           ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
                           ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_fill", "relay.browser_click"])] {
@@ -1155,7 +1176,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("Recheck the observed label/action against the intended operation"))
-        XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
+        XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Never repeat uncertain input or loop over unchanged reads"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
@@ -1191,7 +1212,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
             XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
             XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
-            XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
+            XCTAssertTrue(text.contains("Never repeat uncertain input or loop over unchanged reads"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
             XCTAssertTrue(text.contains("compare with the task; never guess a variant/homepage"))
@@ -1218,7 +1239,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
         XCTAssertTrue(text.contains("Recheck the observed label/action against the intended operation"))
-        XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
+        XCTAssertTrue(text.contains("Never repeat uncertain input or loop over unchanged reads"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 5_000 + ComputaAgentInstructions.browserFormSubmission.utf8.count + 1,
                                 "Named-service and sign-in/loading guidance retain all reference, approval and cleanup rules.")
@@ -1279,8 +1300,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(first, last)
         XCTAssertEqual(lines.filter { $0 == "*** Begin Patch" }.count, 1)
         XCTAssertEqual(lines.filter { $0 == "*** End Patch" }.count, 1)
-        XCTAssertEqual(Array(lines[first...last]), ["*** Begin Patch", "*** Update File: /absolute/observed/file.py", "@@", "-old line", "+new line", "*** End Patch"])
         let example = lines[first...last].joined(separator: "\n")
+        try assertCompletePatchUpdateExample(example)
+        XCTAssertEqual(example, ComputaAgentInstructions.patchUpdateExample)
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt", "input": "Edit the authorized file.",
             "tools": [["type": "namespace", "name": "relay", "tools": [["type": "custom", "name": "apply_patch"]]]],
@@ -1435,7 +1457,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
             XCTAssertTrue(handoff.contains("string with next calls, never outside\nthe envelope or a final answer"))
-            XCTAssertLessThan(handoff.utf8.count, 3_800, "The handoff includes bounded current command and completion checks after history")
+            XCTAssertLessThan(handoff.utf8.count, 4_400,
+                              "The website allowance adds 150 bytes for separate catalogs and typed examples; API limits are unchanged")
         }
     }
 
@@ -1509,7 +1532,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(handoff.contains("Exact currently offered local function names: (none)\n"))
         XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
         XCTAssertFalse(handoff.contains("old.exec_command"))
-        XCTAssertFalse(handoff.contains("Exact currently offered custom names:"))
+        XCTAssertTrue(handoff.contains("Exact currently offered custom names: (none)\n"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The recorded result is explained."}"#, request: request, requireEnvelope: true), .message("The recorded result is explained."))
         XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"old.exec_command","arguments":{}}]}"#, request: request, requireEnvelope: true)) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("old.exec_command"))
@@ -1526,7 +1549,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 "model": "browser/claude", "input": "Make the authorized change.", "tools": tools, "tool_choice": choice,
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertRequestValuesAndHandoff(original, request: request)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                expectedAllowedToolNames: choice == "none" ? [] : nil)
             XCTAssertTrue(handoff.contains("Custom tools accept literal string input, not JSON object arguments"))
             XCTAssertTrue(handoff.contains("Do not include arguments on a custom call"))
             XCTAssertTrue(handoff.contains("Exact currently offered custom names: relay.apply_patch"))
@@ -1574,9 +1598,239 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                        .message("The requested operation is unavailable."))
     }
 
+    func testCodeRepairHandoffFollowsFailedChecksAndRetainedInstructionsWithoutChangingPatchContract() throws {
+        let guidance = ComputaAgentInstructions.codeRepairProgress
+        let native = ComputaAgentInstructions.developerInstructions()
+        let retained = native.replacingOccurrences(of: guidance, with: "Earlier code guidance: report failed checks.")
+            .replacingOccurrences(of: ComputaAgentInstructions.patchExecutionChecks, with: "Earlier patch guidance: use the offered schema.")
+        let user = "Fix only /tmp/repair/counter.py, preserve its tests, and use its result only after verification."
+        let failure = "Process exited with code 1\nFAILED: expected combined quantity 4, got 1."
+        let patch = "*** Begin Patch\n*** Update File: /tmp/repair/counter.py\n@@\n-total = quantity\n+total += quantity\n*** End Patch"
+        let tools: [[String: Any]] = [["type": "namespace", "name": "relay", "tools": [
+            ["type": "function", "name": "exec_command", "parameters": [
+                "type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false,
+            ]],
+            ["type": "custom", "name": "apply_patch", "format": ["type": "text"]],
+        ]]]
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for history in [retained, native] {
+                let original = try JSONSerialization.data(withJSONObject: [
+                    "model": "browser/\(provider)", "tool_choice": "auto", "parallel_tool_calls": false, "tools": tools,
+                    "input": [
+                        ["role": "developer", "content": history],
+                        ["role": "user", "content": user],
+                        ["type": "function_call", "name": "relay.exec_command", "call_id": "check", "arguments": #"{"cmd":"python3 -m unittest"}"#],
+                        ["type": "function_call_output", "call_id": "check", "output": failure],
+                        ["role": "assistant", "content": "Earlier claim: no edit is needed; move to submission."],
+                    ],
+                ])
+                let request = try WebModelResponseCodec.prepareRequest(original)
+                let handoff = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [history])
+                XCTAssertEqual(handoff.components(separatedBy: guidance).count - 1, 1,
+                               "Repair/dependency guidance must remain fresh after either old or complete native history")
+                XCTAssertEqual(handoff.components(separatedBy: ComputaAgentInstructions.patchExecutionChecks).count - 1, 1,
+                               "The native patch grammar and dependent-action rule must follow old or complete history")
+                XCTAssertEqual(request.continuationRequest, original)
+                XCTAssertEqual(request.offeredToolNames, ["relay.exec_command", "relay.apply_patch"])
+                XCTAssertEqual(request.customToolNames, ["relay.apply_patch"])
+                let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "relay.apply_patch", "input": patch]]])
+                XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true),
+                               .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "relay", customInput: patch)]))
+                let numericHeader = patch.replacingOccurrences(of: "@@\n", with: "@@ -1,1 +1,1 @@\n")
+                let numericEnvelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "relay.apply_patch", "input": numericHeader]]])
+                XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: numericEnvelope, as: UTF8.self), request: request, requireEnvelope: true),
+                               .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "relay", customInput: numericHeader)]),
+                               "The relay must preserve even rejected grammar literally; the native patch verifier retains authority")
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(
+                    #"{"type":"tool_calls","calls":[{"name":"relay.apply_patch","arguments":{"patch":"text"}}]}"#,
+                    request: request, requireEnvelope: true), "New guidance cannot convert an invalid custom call")
+            }
+        }
+        XCTAssertLessThan(guidance.utf8.count, 450)
+        XCTAssertTrue(native.contains(guidance))
+    }
+
+    func testFreshPatchGrammarRequiresCurrentExactCustomPatchIdentity() throws {
+        let cases: [(names: [String], custom: Set<String>, expected: Bool)] = [
+            (["apply_patch"], ["apply_patch"], true),
+            (["relay.apply_patch"], ["relay.apply_patch"], true),
+            (["nested.relay.apply_patch"], ["nested.relay.apply_patch"], true),
+            ([], ["apply_patch"], false),
+            (["apply_patch"], [], false),
+            (["relay.apply_patch_notes", "relay.exec_command"], ["relay.apply_patch_notes"], false),
+            (["relay.patch"], ["relay.patch"], false),
+            ([".apply_patch", "relay..apply_patch", "apply_patch."], [".apply_patch", "relay..apply_patch", "apply_patch."], false),
+        ]
+        for item in cases {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: item.names, customToolNames: item.custom,
+                includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
+            XCTAssertEqual(handoff.contains(ComputaAgentInstructions.patchExecutionChecks), item.expected)
+            if item.expected {
+                XCTAssertTrue(handoff.contains("never numeric unified-diff ranges"))
+                XCTAssertTrue(handoff.contains("Prefix EVERY hunk source line (blank\nlines too)"))
+                XCTAssertTrue(handoff.contains("' ' for unchanged context, '-' for deletion, '+' for addition"))
+                XCTAssertTrue(handoff.contains("then exact source indentation/text. Preserve source quotes and out-of-scope code."))
+                XCTAssertTrue(handoff.contains("Await the patch result before dependent work; do not batch them"))
+                XCTAssertTrue(handoff.contains("read the actual file before a changed retry"))
+                XCTAssertLessThan(handoff.utf8.count, 5_200, "Custom grammar and repair guidance remain bounded after history")
+            }
+            for line in handoff.split(separator: "\n") {
+                guard let value = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let calls = value["calls"] as? [[String: Any]],
+                      let call = calls.first, let input = call["input"] as? String else { continue }
+                if item.expected {
+                    try assertCompletePatchUpdateExample(input)
+                } else {
+                    XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash",
+                                   "Lookalikes and malformed qualifications keep the generic custom example")
+                }
+            }
+        }
+        XCTAssertLessThan(ComputaAgentInstructions.patchExecutionChecks.utf8.count, 550)
+        XCTAssertTrue(ComputaAgentInstructions.developerInstructions().contains(ComputaAgentInstructions.patchExecutionChecks))
+    }
+
+    func testCodeRepairHandoffPreservesReadOnlyScopeAndCannotGrantAbsentOrDisabledTools() throws {
+        let scope = "Read only. Diagnose the failing check; do not edit files or submit anything."
+        let patchCall = #"{"type":"tool_calls","calls":[{"name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}]}"#
+        let toolSets: [[[String: Any]]] = [[], [["type": "custom", "name": "apply_patch"]]]
+        for tools in toolSets {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/gemini", "tool_choice": "none", "tools": tools,
+                "input": [
+                    ["role": "developer", "content": "Retained instructions without repair guidance."],
+                    ["role": "user", "content": scope],
+                    ["type": "custom_tool_call", "name": "apply_patch", "call_id": "historical", "input": "historical patch"],
+                    ["type": "custom_tool_call_output", "call_id": "historical", "output": "Historical patch failed; state uncertain."],
+                ],
+            ])
+            let request = try WebModelResponseCodec.prepareRequest(original)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request, expectedAllowedToolNames: [])
+            XCTAssertEqual(request.continuationRequest, original)
+            XCTAssertEqual(handoff.contains(ComputaAgentInstructions.codeRepairProgress), !tools.isEmpty,
+                           "Historical patches cannot publish current edit capability")
+            if !tools.isEmpty {
+                XCTAssertTrue(handoff.contains("Read-only requests do not authorize edits."))
+                XCTAssertTrue(handoff.contains("Inspect actual state before retrying uncertain changes"))
+                XCTAssertTrue(handoff.contains("Respect tool_choice and Stop."))
+            }
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(patchCall, request: request, requireEnvelope: true),
+                                 "A fresh repair instruction cannot override tool_choice=none or absent tools")
+        }
+    }
+
+    func testFinalWireExamplesMatchCurrentKindsAndToolChoiceAcrossWebsiteProviders() throws {
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"],
+        ]]
+        let session: [String: Any] = ["type": "function", "name": "write_stdin", "parameters": ["type": "object"]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]
+        let literal: [String: Any] = ["type": "custom", "name": "literal_text", "format": ["type": "text"]]
+        let retained = "Old handoff: all tools use arguments, including obsolete.apply_patch."
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for children in [[], [command, session], [patch, literal], [command, session, patch, literal]] {
+                let definitions: [[String: Any]] = children.isEmpty ? [] : [["type": "namespace", "name": "relay", "tools": children]]
+                let functions = Set(children.filter { $0["type"] as? String == "function" }.compactMap { $0["name"] as? String }.map { "relay." + $0 })
+                let customs = Set(children.filter { $0["type"] as? String == "custom" }.compactMap { $0["name"] as? String }.map { "relay." + $0 })
+                let names = functions.union(customs)
+                var policies: [(Any, Set<String>)] = [("auto", names), ("none", [])]
+                if let selected = functions.sorted().last {
+                    policies.append((["type": "function", "name": selected], [selected]))
+                }
+                for selected in customs.sorted() {
+                    policies.append((["type": "custom", "name": selected], [selected]))
+                    policies.append((["type": "allowed_tools", "tools": [["type": "custom", "name": selected]]], [selected]))
+                    policies.append((["type": "allowed_tools", "mode": "none", "tools": [["type": "custom", "name": selected]]], []))
+                }
+                for (choice, allowed) in policies {
+                    let original = try JSONSerialization.data(withJSONObject: [
+                        "model": "browser/" + provider, "tools": definitions, "tool_choice": choice,
+                        "input": [["role": "developer", "content": retained], ["role": "user", "content": "Inspect only; do not edit."]],
+                    ])
+                    let request = try WebModelResponseCodec.prepareRequest(original)
+                    let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                        includedInstructionText: [retained], expectedAllowedToolNames: allowed)
+                    XCTAssertEqual(request.continuationRequest, original)
+                    XCTAssertEqual(request.offeredToolNames, names)
+                    XCTAssertEqual(request.customToolNames, customs)
+                    XCTAssertFalse(handoff.contains("obsolete.apply_patch"))
+                    XCTAssertFalse(handoff.contains("offered_tool_name"))
+                    let listedFunctions = functions.isEmpty ? "(none)" : functions.sorted().joined(separator: ", ")
+                    let listedCustoms = customs.isEmpty ? "(none)" : customs.sorted().joined(separator: ", ")
+                    XCTAssertTrue(handoff.contains("Exact currently offered local function names: " + listedFunctions + "\n"))
+                    XCTAssertTrue(handoff.contains("Exact currently offered custom names: " + listedCustoms + "\n"))
+                    let examples = handoff.split(separator: "\n").compactMap { line -> (String, [String: Any])? in
+                        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                              object["type"] as? String == "tool_calls" else { return nil }
+                        return (String(line), object)
+                    }
+                    let expectedExamples = Set([functions.intersection(allowed).sorted().first,
+                                                customs.intersection(allowed).sorted().first].compactMap { $0 })
+                    var exampleNames = Set<String>()
+                    for (text, envelope) in examples {
+                        let calls = try XCTUnwrap(envelope["calls"] as? [[String: Any]])
+                        XCTAssertEqual(calls.count, 1)
+                        let call = try XCTUnwrap(calls.first), name = try XCTUnwrap(call["name"] as? String)
+                        exampleNames.insert(name)
+                        XCTAssertTrue(allowed.contains(name))
+                        if customs.contains(name) {
+                            XCTAssertEqual(Set(call.keys), ["name", "input"])
+                            let input = try XCTUnwrap(call["input"] as? String)
+                            if name == "relay.apply_patch" {
+                                try assertCompletePatchUpdateExample(input)
+                                XCTAssertTrue(handoff.contains("replace the sample path/lines with observed file context"))
+                                XCTAssertTrue(text.contains(#"\"old\\\\path\""#), "The wire escapes source quotes and backslashes")
+                            } else {
+                                XCTAssertEqual(input, "literal input\nwith \"quotes\" and \\backslash")
+                            }
+                            XCTAssertEqual(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true),
+                                           .toolCalls([.init(name: String(name.dropFirst("relay.".count)), argumentsJSON: "", namespace: "relay", customInput: input)]))
+                        } else {
+                            XCTAssertEqual(Set(call.keys), ["name", "arguments"])
+                            XCTAssertEqual((call["arguments"] as? [String: Any])?.count, 0)
+                            XCTAssertTrue(handoff.contains("replace {} with that tool's required argument fields"))
+                            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true))
+                        }
+                    }
+                    XCTAssertEqual(exampleNames, expectedExamples, "Only policy-allowed current kinds get final call examples")
+                    XCTAssertEqual(examples.count, expectedExamples.count)
+                    XCTAssertEqual(handoff.contains("Custom apply_patch example:"), exampleNames.contains("relay.apply_patch"),
+                                   "A forbidden or historical patch tool cannot publish an executable patch example")
+                    for name in names.subtracting(allowed) {
+                        let call: [String: Any] = customs.contains(name) ? ["name": name, "input": "literal"] : ["name": name, "arguments": [String: Any]()]
+                        let rejected = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
+                        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: rejected, as: UTF8.self), request: request, requireEnvelope: true)) {
+                            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify the decoded example as an update with real context/change lines,
+    /// not merely JSON accepted by the response envelope parser.
+    private func assertCompletePatchUpdateExample(_ input: String,
+                                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let lines = input.components(separatedBy: "\n")
+        XCTAssertEqual(Array(lines.prefix(3)), ["*** Begin Patch", "*** Update File: /absolute/observed/file.py", "@@"], file: file, line: line)
+        XCTAssertEqual(lines.last, "*** End Patch", file: file, line: line)
+        let hunk = Array(lines.dropFirst(3).dropLast())
+        XCTAssertGreaterThanOrEqual(hunk.count, 4, file: file, line: line)
+        XCTAssertTrue(hunk.allSatisfy { $0.first.map { " +-".contains($0) } == true },
+                      "Every literal hunk source line must retain its context/add/delete prefix", file: file, line: line)
+        XCTAssertEqual(hunk.first, " def label():", file: file, line: line)
+        XCTAssertEqual(hunk.last, " # Other code stays unchanged.", file: file, line: line)
+        let before = hunk.filter { $0.first != "+" }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        let after = hunk.filter { $0.first != "-" }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        XCTAssertEqual(before, "def label():\n    return \"old\\\\path\"\n# Other code stays unchanged.", file: file, line: line)
+        XCTAssertEqual(after, "def label():\n    return \"new\\\\path\"\n# Other code stays unchanged.", file: file, line: line)
+    }
+
     private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
                                                  includedInstructionText: [String] = [],
                                                  expectedCurrentTools: [[String: Any]]? = nil,
+                                                 expectedAllowedToolNames: Set<String>? = nil,
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let range = try WebsiteRequestFixture.range(in: request.prompt, expectedModel: request.model)
@@ -1592,7 +1846,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay)
+            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
+            allowedToolNames: expectedAllowedToolNames)
         let closingFence = LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)

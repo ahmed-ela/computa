@@ -54,6 +54,97 @@ describe('Gemini per-submission ownership', () => {
     finally { subtle.digest = original; }
   };
 
+  test('Gemini Stop proves the current rendered submission before input and again afterward', async () => {
+    for (const verified of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2); await submitPending(f, 2, text);
+      if (verified) await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      const proof = { sequence: 2, fingerprint: await fingerprint(text) };
+      expect(await f.run('stop', { ...fields(2), expectedUserCounts: [2], expectedSubmissionProofs: [proof],
+        expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } })).toMatchObject({
+        stopped: true, firstUserVerified: true, submissionOwnershipCapability: 'per_submission_ownership_v1',
+        submissionProof: proof, modelEvidence: { selected: { key: '3.1 Pro', label: '3.1 Pro' } } });
+      expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop rejects changed or unrendered current payload before clicking', async () => {
+    for (const pending of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2);
+      if (pending) f.send.onClick = () => { f.composer.replaceChildren(); };
+      await submitPending(f, 2, text);
+      if (!pending) f.userBody!.text = text.replace('[literal]', '{changed}');
+      f.stop.connected = true;
+      const result = await f.run('stop', { ...fields(2), expectedUserCounts: [1, 2] });
+      expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+      expect(f.stop.clicks).toBe(0); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop rejects ownership changes while the current digest awaits', async () => {
+    for (const fault of ['body', 'owner', 'route', 'temporary', 'invocation']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      const subtle: any = crypto.subtle, original = subtle.digest; let mutated = false;
+      subtle.digest = async (algorithm: any, data: any) => {
+        const digest = await original.call(subtle, algorithm, data);
+        if (!mutated && new TextDecoder().decode(data) === normalized(roundPrompt(2))) {
+          mutated = true;
+          if (fault === 'body') f.userBody!.text = roundPrompt(2).replace('[literal]', '{changed}');
+          else if (fault === 'owner') f.world.__computaModelOwner = 'replaced-owner';
+          else if (fault === 'route') f.document.URL += '/different';
+          else if (fault === 'temporary') f.temporary(false);
+          else f.world.__computaGeminiReadInvocation = {};
+        }
+        return digest;
+      };
+      try {
+        const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2],
+          expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } });
+        expect(mutated).toBe(true); expect(result).toHaveProperty('error');
+        expect(result.submissionProof).toBeUndefined(); expect(f.stop.clicks).toBe(0); expect(f.send.clicks).toBe(2);
+      } finally { subtle.digest = original; }
+    }
+  });
+
+  test('Gemini Stop cannot return proof after a post-click payload change', async () => {
+    for (const fault of ['body']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      f.stop.connected = true;
+      f.stop.onClick = () => {
+        if (fault === 'body') f.userBody!.text = roundPrompt(2).replace('[literal]', '{changed}');
+      };
+      const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2],
+        expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } });
+      expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+      expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('Gemini Stop does not expose a superseded post-click digest', async () => {
+    for (const fault of ['invocation']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      f.stop.connected = true;
+      const subtle: any = crypto.subtle, original = subtle.digest;
+      subtle.digest = async (algorithm: any, data: any) => {
+        const digest = await original.call(subtle, algorithm, data);
+        if (fault === 'invocation' && f.stop.clicks && new TextDecoder().decode(data) === normalized(roundPrompt(2)))
+          f.world.__computaGeminiReadInvocation = {};
+        return digest;
+      };
+      try {
+        const result = await f.run('stop', { ...fields(2), expectedUserCounts: [2] });
+        expect(result).toHaveProperty('error'); expect(result.submissionProof).toBeUndefined();
+        expect(f.stop.clicks).toBe(1); expect(f.send.clicks).toBe(2);
+      } finally { subtle.digest = original; }
+    }
+  });
+
   test('seven exact round bodies get independent fingerprints while the first lineage remains pinned', async () => {
     const f = fixture(provider, { response: false });
     let first: string | undefined;
@@ -201,13 +292,11 @@ describe('Gemini per-submission ownership', () => {
           else { parent.children[parent.children.indexOf(body)] = replacement; replacement.parentElement = parent; body.connected = false; body.parentElement = null; }
         }
       }, () => submitThenInspect(f, 2, text));
-      if (change === 'temporary') expect(rejected).toEqual({ error: 'temporary_mode_unverified' });
-      else expect(rejected).toMatchObject({ error: 'conversation_changed',
-        detail: ['owner', 'route'].includes(change) ? 'first_user_message' : 'submission_message' });
-      if (['owner', 'route'].includes(change)) {
-        const diagnostic = JSON.parse(rejected.debugStructure);
-        expect(diagnostic.reason).toBe('snapshot_after_action');
-        expect(diagnostic.snapshot[change === 'owner' ? 'ownerSame' : 'urlSame']).toBe(false);
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionDiagnostic: { stage: 'observe_digest' } });
+      if (['owner', 'route', 'temporary'].includes(change)) {
+        expect(rejected.submissionDigestDiagnostic.contextMatches).toBe(false);
+        if (change === 'owner') expect(rejected.submissionDiagnostic.ownerMatches).toBe(false);
       }
       expect(rejected.submissionProof).toBeUndefined(); expect(JSON.stringify(rejected)).not.toContain('PRIVATE'); expect(f.send.clicks).toBe(2);
     }
@@ -376,7 +465,7 @@ describe('Gemini per-submission ownership', () => {
     }
   });
 
-  const maskedFirstSubmissionFailure = async () => {
+  const firstSubmissionFailureWithoutNativePin = async () => {
     const f = fixture(provider, { response: false }); await finishRound(f, 1);
     const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified;
     const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
@@ -387,18 +476,19 @@ describe('Gemini per-submission ownership', () => {
       if (new TextDecoder().decode(data) === normalized(roundPrompt(1)) && ++hashes === 2) replaceBoundRoot(f);
       return result;
     };
-    let discarded: any;
-    try { discarded = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice }); }
+    let rejected: any;
+    try { rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice }); }
     finally { subtle.digest = original; }
-    // The outer first-lineage discard masks the inner submission refusal.
-    // Its existing result and one-read recovery policy are intentionally unchanged.
-    expect(discarded).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    // Without a native current-submission pin, a first-lineage match cannot
+    // mask the failed submission check or authorize a remount certificate.
+    expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+      submissionFirstFailure: { stage: 'observe_digest', sequence: 1 } });
     expect(state.revoked).toBe(true); expect(record.remount).toBeNull(); expect(f.send.clicks).toBe(1);
     return { f, state, record };
   };
 
-  test('first finite submission failure survives a masked cross-root discard and later revoked inspection', async () => {
-    const { f, state, record } = await maskedFirstSubmissionFailure();
+  test('first finite submission failure survives a rejected cross-root read and later revoked inspection', async () => {
+    const { f, state, record } = await firstSubmissionFailureWithoutNativePin();
     const cache = f.world.__computaGeminiSubmissionFailures, retained = cache.get(state);
     expect(Object.isFrozen(retained.bundle)).toBe(true);
     expect(Object.isFrozen(retained.bundle.digestDiagnostic)).toBe(true);
@@ -421,7 +511,7 @@ describe('Gemini per-submission ownership', () => {
 
   test('first-failure cache cannot follow foreign state record document owner or malformed finite data', async () => {
     for (const fault of ['state', 'transferredState', 'record', 'document', 'owner', 'canonical', 'fingerprint', 'malformed', 'unknownMap']) {
-      const { f, state, record } = await maskedFirstSubmissionFailure();
+      const { f, state, record } = await firstSubmissionFailureWithoutNativePin();
       const cache = f.world.__computaGeminiSubmissionFailures, retained = cache.get(state);
       if (fault === 'state' || fault === 'transferredState') {
         const replacement = { ...state }; f.world.__computaGeminiSubmissionState = replacement;
@@ -668,7 +758,7 @@ describe('Gemini per-submission ownership', () => {
   });
 
   test('query heading omission requires actual semantic and clipped CSS facts rather than its class', async () => {
-    for (const fault of ['class', 'role', 'position', 'box', 'overflow', 'clip', 'moved', 'duplicate']) {
+    for (const fault of ['class', 'role', 'position', 'overflow', 'clip', 'partialRect', 'partialInset', 'moved', 'duplicate']) {
       const { f, shapes, styles } = queryFixture(); const send = f.send.onClick!;
       const text = await stage(f, 1);
       f.send.onClick = () => {
@@ -678,8 +768,10 @@ describe('Gemini per-submission ownership', () => {
         else if (fault === 'moved') { query.children.splice(0, 1); query.children.splice(1, 0, heading); }
         else if (fault === 'duplicate') query.append(heading.cloneNode(true));
         else styles.set(heading, { ...clippedStyle,
-          ...(fault === 'position' ? { position: 'relative' } : {}), ...(fault === 'box' ? { width: '2px' } : {}),
-          ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}) });
+          ...(fault === 'position' ? { position: 'relative' } : {}),
+          ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}),
+          ...(fault === 'partialRect' ? { clip: 'rect(0px, 1px, 1px, 0px)', clipPath: 'none' } : {}),
+          ...(fault === 'partialInset' ? { clip: 'auto', clipPath: 'inset(49%)' } : {}) });
         expect(rows.length).toBeGreaterThan(0);
       };
       const result = await submitThenInspect(f, 1, text);
@@ -696,6 +788,51 @@ describe('Gemini per-submission ownership', () => {
       f.send.onClick = () => { send(); styles.set(shapes.at(-1)!.heading, { ...clippedStyle,
         ...(clipping === 'rect' ? { clip: 'rect(0px 0px 0px 0px)', clipPath: 'none' } : { clip: 'auto' }) }); };
       expect((await finishRound(f, 1)).submissionProof.fingerprint).toBe(await fingerprint(roundPrompt(1)));
+    }
+  });
+
+  for (const clipping of ['rect', 'inset']) {
+    test(`fully clipped non-one-pixel query headings retain exact payload proof with ${clipping} clipping`, async () => {
+      const { f, shapes, styles } = queryFixture(), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send();
+        // Synthetic dimensions exercise the guard; live diagnostics only established onePixelBox=false.
+        styles.set(shapes.at(-1)!.heading, { ...clippedStyle, width: '12px', height: '24px',
+          ...(clipping === 'rect' ? { clipPath: 'none' } : { clip: 'auto' }) });
+      };
+      const first = await finishRound(f, 1);
+      expect(first.firstUserFingerprint).toBe(await fingerprint(roundPrompt(1)));
+      const diagnostic = JSON.parse(first.debugStructure);
+      expect(diagnostic.descendants.find((node: any) => node.classes.includes('cdk-visually-hidden')))
+        .toMatchObject({ headingSemantic: true, absolutePosition: true, onePixelBox: false, overflowHidden: true,
+          rectClipped: clipping === 'rect', insetClipped: clipping === 'inset' });
+      const second = await finishRound(f, 2);
+      expect(second.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(second.submissionProof).toEqual({ sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) });
+      expect(f.send.clicks).toBe(2);
+    });
+  }
+
+  test('non-one-pixel headings cannot admit visible partial interactive or altered query payloads', async () => {
+    for (const fault of ['visible', 'partialRect', 'partialInset', 'tabindex', 'editable', 'button', 'payload']) {
+      const { f, shapes, styles, textNode } = queryFixture(), send = f.send.onClick!;
+      const text = await stage(f, 1);
+      f.send.onClick = () => {
+        send(); const { heading, rows } = shapes[0];
+        styles.set(heading, { ...clippedStyle, width: '12px', height: '24px', clipPath: 'none',
+          ...(fault === 'visible' ? { clip: 'auto' } : {}),
+          ...(fault === 'partialRect' ? { clip: 'rect(0px, 12px, 1px, 0px)' } : {}),
+          ...(fault === 'partialInset' ? { clip: 'auto', clipPath: 'inset(49%)' } : {}) });
+        if (fault === 'tabindex') heading.values.tabindex = '0';
+        else if (fault === 'editable') heading.values.contenteditable = 'true';
+        else if (fault === 'button') heading.append(new Element('BUTTON'));
+        else if (fault === 'payload') rows[0].replaceChildren(textNode('ALTERED'));
+        Object.defineProperty(f.userBody!, 'innerText', { configurable: true, get: () => text });
+      };
+      const result = await submitThenInspect(f, 1, text);
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      expect(result.firstUserVerified).not.toBe(true); expect(result.submissionProof).toBeUndefined();
+      expect(f.send.clicks).toBe(1);
     }
   });
 
@@ -737,7 +874,7 @@ describe('Gemini per-submission ownership', () => {
       const text = await stage(f, 2);
       const rejected = await withDigestMutation(f, 2, 'send_claimed', () => {
         const { heading, rows } = shapes[1];
-        if (fault === 'css') styles.set(heading, { ...clippedStyle, width: '2px' });
+        if (fault === 'css') styles.set(heading, { ...clippedStyle, clip: 'rect(0px, 1px, 1px, 0px)', clipPath: 'none' });
         else if (fault === 'replace') { const span = rows[0].children[0]; span.replaceChildren(textNode('ALTERED')); }
         else { const node = rows[0].children[0].children[0]; (node as any).data += fault === 'space' ? '\u00a0' : fault === 'format' ? '\u200b' : 'X'; node.text = (node as any).data; }
       }, () => submitThenInspect(f, 2, text));
@@ -987,6 +1124,122 @@ describe('Gemini per-submission ownership', () => {
 
   const nativePins = async (...sequences: number[]) => Promise.all(sequences.map(async sequence => ({ sequence,
     fingerprint: await fingerprint(roundPrompt(sequence)) })));
+
+  const verifiedFirst = async () => {
+    const q = queryFixture(true), bound = await finishRound(q.f, 1);
+    installObservedModelPicker(q.f, provider, Element).selected('3.1 Pro');
+    const args = { ...fields(1), expectedUserCounts: [1], expectedSubmissionProofs: [bound.submissionProof],
+      expectedModelChoice: { key: '3.1 Pro', label: '3.1 Pro' } };
+    return { ...q, bound, args };
+  };
+  const mutateFirstReadDigest = async (mutate: (hash: number) => void, operation: () => Promise<any>) => {
+    const subtle: any = crypto.subtle, original = subtle.digest;
+    let hashes = 0;
+    subtle.digest = async (algorithm: any, data: any) => {
+      const digest = await original.call(subtle, algorithm, data);
+      // Hash 1 verifies first lineage; hash 2 verifies its current submission.
+      // Hash 3, when admitted, verifies the complete replacement body.
+      if (new TextDecoder().decode(data) === normalized(roundPrompt(1))) mutate(++hashes);
+      return digest;
+    };
+    try { const result = await operation(); expect(hashes).toBeGreaterThanOrEqual(2); return result; }
+    finally { subtle.digest = original; }
+  };
+
+  test.each(['inspect', 'verifyModel'])('verified first query remount during submission digest discards %s before fresh proof', async action => {
+    const { f, styles, bound, args } = await verifiedFirst();
+    const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified, events = f.composer.events.length;
+    let replaced: ReturnType<typeof replaceBoundRoot> | undefined;
+    const discard = await mutateFirstReadDigest(hash => {
+      if (hash === 2) replaced = replaceBoundRoot(f, styles);
+    }, () => f.run(action, args));
+    expect(discard).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(discard.submissionProof).toBeUndefined(); expect(discard.text).toBeUndefined();
+    expect(record.root).toBe(replaced!.oldRoot); expect(record.body).toBe(replaced!.oldBody);
+    expect(record.remount).toEqual({ previousRoot: replaced!.oldRoot, previousBody: replaced!.oldBody,
+      root: replaced!.root, body: replaced!.body });
+    expect(state.revoked).toBe(false);
+    const fresh = await f.run('inspect', args);
+    expect(fresh).toMatchObject({ firstUserFingerprint: bound.firstUserFingerprint, submissionProof: bound.submissionProof });
+    expect(record.root).toBe(replaced!.root); expect(record.body).toBe(replaced!.body); expect(record.remount).toBeNull();
+    expect(f.send.clicks).toBe(1); expect(f.composer.events.length).toBe(events);
+    expect(f.messages.querySelectorAll('user-query')).toHaveLength(1);
+  });
+
+  test.each(['body', 'marker', 'bodyOnly', 'count', 'owner', 'document', 'mode', 'firstNonce', 'recordNonce',
+    'nativePin', 'firstPin', 'recordFingerprint', 'recordCanonical', 'record', 'pending'])
+    ('first submission digest remount preserves refusal for %s', async fault => {
+    const { f, styles, textNode, args } = await verifiedFirst();
+    const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified, events = f.composer.events.length;
+    if (fault === 'nativePin') args.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+    const denied = await mutateFirstReadDigest(hash => {
+      if (hash !== 2) return;
+      if (fault === 'bodyOnly') {
+        const old: Element = record.body, parent = old.parentElement!, copy = old.cloneNode(true);
+        parent.children[parent.children.indexOf(old)] = copy; copy.parentElement = parent; old.connected = false;
+      } else {
+        const replaced = replaceBoundRoot(f, styles);
+        if (fault === 'body') replaced.body.querySelector('p.query-text-line')!.replaceChildren(textNode(' ALTERED '));
+        if (fault === 'marker') replaced.body.querySelectorAll('p.query-text-line').at(-1)!
+          .replaceChildren(textNode(' Computa session marker: ' + marker(2) + ' '));
+      }
+      if (fault === 'count') f.appendUser('UNAUTHORIZED EXTRA USER');
+      if (fault === 'owner') f.world.__computaModelOwner = '00000000-0000-0000-0000-000000000000';
+      if (fault === 'document') f.document.URL += '/foreign';
+      if (fault === 'mode') f.temporary(false);
+      if (fault === 'firstNonce') f.world.__computaModelFirstPromptContext.marker = marker(2);
+      if (fault === 'recordNonce') record.marker = marker(2);
+      if (fault === 'firstPin') f.world.__computaModelFirstProof.fingerprint = '0'.repeat(64);
+      if (fault === 'recordFingerprint') record.fingerprint = '0'.repeat(64);
+      if (fault === 'recordCanonical') record.canonical += ' ALTERED';
+      if (fault === 'record') state.lastVerified = { ...record };
+      if (fault === 'pending') state.pending = { sequence: 2, phase: 'send_claimed' };
+    }, () => f.run('verifyModel', args));
+    expect(denied).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(denied.submissionProof).toBeUndefined(); expect(record.remount).toBeNull();
+    expect(f.send.clicks).toBe(1); expect(f.composer.events.length).toBe(events);
+  });
+
+  test.each(['body', 'remount', 'record', 'pending', 'nonce', 'owner', 'route', 'mode'])
+    ('first submission replacement hash cannot certify a crossed %s', async fault => {
+    const { f, styles, textNode, args } = await verifiedFirst();
+    const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified;
+    let replaced: ReturnType<typeof replaceBoundRoot> | undefined, reachedReplacement = false;
+    const denied = await mutateFirstReadDigest(hash => {
+      if (hash === 2) replaced = replaceBoundRoot(f, styles);
+      if (hash !== 3) return;
+      reachedReplacement = true;
+      if (fault === 'body') replaced!.body.querySelector('p.query-text-line')!.replaceChildren(textNode(' ALTERED '));
+      if (fault === 'remount') replaceBoundRoot(f, styles, replaced!.root);
+      if (fault === 'record') state.lastVerified = { ...record };
+      if (fault === 'pending') state.pending = { sequence: 2, phase: 'send_claimed' };
+      if (fault === 'nonce') record.marker = marker(2);
+      if (fault === 'owner') f.world.__computaModelOwner = '00000000-0000-0000-0000-000000000000';
+      if (fault === 'route') f.document.URL += '/foreign';
+      if (fault === 'mode') f.temporary(false);
+    }, () => f.run('verifyModel', args));
+    expect(reachedReplacement).toBe(true);
+    expect(denied).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(denied.submissionProof).toBeUndefined(); expect(record.remount).toBeNull(); expect(f.send.clicks).toBe(1);
+  });
+
+  test.each([2, 3])('superseded first submission read at hash %i cannot install a remount certificate', async supersedeAt => {
+    const { f, styles, args } = await verifiedFirst();
+    const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified;
+    const failures = f.world.__computaGeminiSubmissionFailures;
+    let reachedSupersession = false;
+    const denied = await mutateFirstReadDigest(hash => {
+      if (hash === 2) replaceBoundRoot(f, styles);
+      if (hash === supersedeAt) {
+        reachedSupersession = true;
+        f.world.__computaGeminiReadInvocation = Object.freeze({ operationID: 'newer-operation' });
+      }
+    }, () => f.run('verifyModel', args));
+    expect(reachedSupersession).toBe(true);
+    expect(denied).toEqual({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(state.revoked).toBe(false); expect(record.remount).toBeNull();
+    expect(f.world.__computaGeminiSubmissionFailures).toBe(failures); expect(f.send.clicks).toBe(1);
+  });
 
   const verifiedFive = async () => {
     const q = queryFixture(true);

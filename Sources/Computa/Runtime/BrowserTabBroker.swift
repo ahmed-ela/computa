@@ -1816,7 +1816,130 @@ actor BrowserTabSessionBroker {
         for offset in 0..<(groups.map(\.count).max() ?? 0) {
             for group in groups where offset < group.count { ordered.append(group[offset]) }
         }
+        if scopeNodeID == nil, trimmedQuery?.isEmpty != false {
+            var prefix = [BrowserTabElement]()
+            let panel = overviewControlPanel(elements: elements, nodes: sourceNodes, captured: document.nodes)
+            if let panel {
+                var context = panel.context
+                if let node = context.nodeID.flatMap({ sourceNodes[$0] }) {
+                    context.contentScope = contentScope(of: node, nodes: sourceNodes)
+                    context.contentKind = contentKind(of: node, nodes: sourceNodes)
+                    context.recordPath = recordPath(of: node, nodes: sourceNodes, ordinals: recordOrdinals)
+                }
+                prefix = [context, panel.controls[0]]
+            }
+            // Observed listbox/menu choices can cover a field. Do not bury all
+            // of them behind long interleaved body text. This bounded prefix
+            // changes only read order; it infers no association or authority.
+            let choices = elements.filter { overviewChoice($0, nodes: sourceNodes) }.prefix(4)
+            if let choice = choices.first, !prefix.contains(choice) { prefix.append(choice) }
+            if !prefix.isEmpty,
+               let sample = ordered.first(where: { [4, 5].contains(overviewCategory($0) ?? -1) }) {
+                prefix.append(sample)
+            }
+            for choice in choices.dropFirst() where !prefix.contains(choice) { prefix.append(choice) }
+            if let panel {
+                for control in panel.controls.dropFirst() where !prefix.contains(control) { prefix.append(control) }
+            }
+            for element in prefix {
+                if let index = ordered.firstIndex(of: element) { ordered.remove(at: index) }
+            }
+            ordered = prefix + ordered
+        }
         return ElementSelection(elements: ordered, omittedInputNodeCount: omittedInputNodeCount)
+    }
+
+    /// Complete unique physical ancestry only. A role, label, or ARIA ownership
+    /// claim alone cannot promote an unrelated, hidden, or unsupported choice.
+    private func overviewChoice(_ element: BrowserTabElement, nodes: [String: BrowserDocumentNode]) -> Bool {
+        guard element.isEnabled, element.supportsPress, let id = element.nodeID, var current = nodes[id] else { return false }
+        let role = current.role.lowercased()
+        let scope: String
+        switch role {
+        case "option": scope = "listbox"
+        case "menuitem", "menuitemcheckbox", "menuitemradio": scope = "menu"
+        default: return false
+        }
+        var seen = Set<String>(), scopeSeen = false
+        for _ in 0..<128 {
+            guard !current.isIgnored, let currentID = current.nodeID,
+                  nodes[currentID] == current, seen.insert(currentID).inserted else { return false }
+            // The capture marks a passive named DIV group disabled to withhold
+            // wrapper input. That is not subtree disablement: actual disabled
+            // DOM ancestors also disable the leaf, already rejected above.
+            let passiveLayout = currentID != id && current.role.lowercased() == "group"
+                && current.isExplicitlyNamedContainer && current.isReadOnly && current.isPressUnsupported
+                && !current.isEditable && !current.isDOMClickable && !current.isFocusablePointer
+            guard !current.isDisabled || passiveLayout else { return false }
+            if currentID != id {
+                let ancestorRole = current.role.lowercased()
+                if ancestorRole == scope {
+                    guard !scopeSeen else { return false }
+                    scopeSeen = true
+                } else if ["option", "listbox", "menu", "menubar", "menuitem", "menuitemcheckbox", "menuitemradio",
+                           "navigation", "banner", "complementary", "contentinfo"].contains(ancestorRole) { return false }
+            }
+            guard let parentID = current.parentNodeID else { return scopeSeen }
+            guard let parent = nodes[parentID] else { return false }
+            current = parent
+        }
+        return false
+    }
+
+    /// Associate only a small observed semantic panel around the first
+    /// source-prioritized control with complete captured ancestry. This is neither focus nor completeness
+    /// evidence, and never changes a node's input capabilities or provenance.
+    private func overviewControlPanel(elements: [BrowserTabElement], nodes: [String: BrowserDocumentNode],
+                                      captured: [BrowserDocumentNode])
+        -> (context: BrowserTabElement, controls: [BrowserTabElement])? {
+        func semanticControl(_ element: BrowserTabElement) -> Bool {
+            overviewCategory(element) == 0 && (element.supportsPress || element.supportsSetText)
+        }
+        guard let first = elements.first(where: { $0.isEnabled && semanticControl($0) }),
+              let firstID = first.nodeID, var current = nodes[firstID] else { return nil }
+        var ancestors = Set<String>()
+        var candidate: BrowserDocumentNode?
+        var complete = false
+        for _ in 0..<128 {
+            guard !current.isIgnored, let id = current.nodeID, nodes[id] == current,
+                  ancestors.insert(id).inserted else { return nil }
+            let role = current.role.lowercased()
+            guard !["navigation", "banner", "complementary", "contentinfo"].contains(role) else { return nil }
+            if candidate == nil, id != firstID,
+               ["dialog", "alertdialog", "form"].contains(role)
+                || (id != firstID && current.isExplicitlyNamedContainer && ["group", "region"].contains(role)
+                    && !current.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                candidate = current
+            }
+            guard let parentID = current.parentNodeID else { complete = true; break }
+            guard let parent = nodes[parentID] else { return nil }
+            current = parent
+        }
+        guard complete, let candidate, let candidateID = candidate.nodeID,
+              let context = browserElement(from: candidate, index: 0),
+              !candidate.isEditable, !context.supportsPress, !context.supportsSetText else { return nil }
+        let byParent = Dictionary(grouping: captured.filter { $0.parentNodeID != nil }, by: { $0.parentNodeID! })
+        var pending = [candidateID], descendants = Set<String>()
+        while let id = pending.popLast() {
+            guard descendants.insert(id).inserted, descendants.count <= 33,
+                  let node = nodes[id], !node.isIgnored,
+                  Set(node.childNodeIDs).count == node.childNodeIDs.count else { return nil }
+            let children = byParent[id] ?? []
+            guard children.allSatisfy({ child in
+                guard let childID = child.nodeID else { return false }
+                return nodes[childID] == child
+            }) else { return nil }
+            let childIDs = Set(node.childNodeIDs + children.compactMap(\.nodeID))
+            for childID in childIDs {
+                guard let child = nodes[childID], child.parentNodeID == id else { return nil }
+                pending.append(childID)
+            }
+        }
+        let controls = elements.filter { element in
+            element.nodeID.map { descendants.contains($0) } == true && semanticControl(element)
+        }
+        guard (2...8).contains(controls.count), controls.first?.nodeID == firstID else { return nil }
+        return (context, controls)
     }
 
     private func overviewCategory(_ element: BrowserTabElement) -> Int? {
@@ -2373,7 +2496,7 @@ actor BrowserTabSessionBroker {
             lines.append("region_changed_candidate marks a captured noneditable text container, not authorization or success. For region_changed use that container's index, not its StaticText child; parent_index refers only to this snapshot. Fresh preflight still applies.")
         }
         if nextCursor != nil {
-            lines.append("Continue with cursor only, including remaining field fragments. UTF-8 ranges refer to the original captured field; href_fragment is not a complete destination. Indices apply only to this snapshot; use snapshot_id + element_index to read an observed subtree.")
+            lines.append("Continue with cursor only if needed evidence is missing, including remaining field fragments. Use relevant observed controls without exhausting pagination. UTF-8 ranges refer to the original captured field; href_fragment is not a complete destination. Indices apply only to this snapshot; use snapshot_id + element_index to read an observed subtree.")
         }
         if retainedObservation {
             lines.append("This is a page/subtree of the retained observation (maximum age 120 seconds), not a new live tree. Actions revalidate the exact target before input.")
@@ -2426,13 +2549,13 @@ actor BrowserTabSessionBroker {
         }
         if elements.contains(where: { !$0.recordPath.isEmpty }) { lines.append(Self.recordPathGuidance) }
         lines.append(contentsOf: rows)
-        if nextCursor != nil { lines.append("Continue with cursor only for remaining captured fields/rows.") }
+        if nextCursor != nil { lines.append("Continue with cursor only if needed evidence is missing; relevant shown controls can be used now.") }
         return lines.joined(separator: "\n")
     }
 
     private static let recordPathGuidance = "RECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes."
 
-    private static let incompleteCaptureRecovery = "CAPTURE_LIMIT source incomplete; cursors cover captured rows only. For missing controls, fresh overview without query/cursor. Unresolved capture is not relay/access failure. Never replay input."
+    private static let incompleteCaptureRecovery = "CAPTURE_LIMIT source incomplete; cursors cover captured rows only. Use relevant shown controls. For missing controls, one fresh overview without query/cursor; avoid unchanged reads. Unresolved capture is not relay/access failure. Never replay input."
 
     private func quote(_ value: String) -> String {
         var result = "\""

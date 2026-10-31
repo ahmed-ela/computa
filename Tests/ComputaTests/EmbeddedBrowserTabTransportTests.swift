@@ -10,6 +10,712 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testCoveringOptionGuidanceRequiresStrictFiniteEvidenceAndPreservesFailureCategory() throws {
+        let valid: [String: Any] = ["reason":"foreign_hit", "centerX":"inside", "centerY":"inside", "hitTag":"div", "hitRole":"option", "relation":"other"]
+        func detail(_ hit: [String: Any]?, stage: String = "initial_hit_test", code: String = "element_obstructed") -> String {
+            var fields: [String: Any] = ["version":1, "operation":"fill", "stage":stage, "code":code]
+            if let hit { fields["hitTest"] = hit }
+            return BrowserActionFailureDiagnostic.decode(["browserActionFailure":fields], operation:"fill")?.publicFailureDetail
+                ?? BrowserActionFailureDiagnostic.genericActionFailureDetail
+        }
+        for role in ["option", "listbox"] {
+            for stage in ["initial_hit_test", "focused_hit_test"] {
+                var hit=valid; hit["hitRole"]=role
+                let output=ComputerToolFailureEvidence.text(for:BrowserTabBrokerError.browserUnavailable(detail(hit,stage:stage)),tool:"browser_fill")
+                XCTAssertTrue(output.hasPrefix("The browser tab broker is unavailable: "))
+                XCTAssertTrue(output.contains("\(role == "option" ? "An option" : "A listbox") covers the target at its hit-test point."))
+                XCTAssertTrue(output.contains("No replay is allowed; read the current page controls and popups"))
+                XCTAssertFalse(output.contains("not dispatched")); XCTAssertFalse(output.contains("recipient"))
+                XCTAssertFalse(output.contains("PRIVATE_CANARY"))
+            }
+        }
+        let generic=BrowserActionFailureDiagnostic.genericActionFailureDetail
+        XCTAssertEqual(detail(nil),generic)
+        for alteration: [String: Any] in [["hitRole":"tooltip"], ["hitRole":"PRIVATE_CANARY"], ["hitTag":"PRIVATE_CANARY"],
+                                         ["centerX":"before"], ["centerY":"unknown"], ["relation":"self"],
+                                         ["reason":"rect_nonfinite"], ["reason":"null_hit"], ["centerX":Double.nan],
+                                         ["centerY":Double.infinity], ["label":"PRIVATE_CANARY"]] {
+            var hit=valid;hit.merge(alteration){_,new in new}
+            XCTAssertEqual(detail(hit),generic)
+        }
+        XCTAssertEqual(detail(valid,stage:"value_write"),generic)
+        XCTAssertEqual(detail(valid,code:"unexpected"),generic)
+        let legacy=ComputerToolFailureEvidence.text(for:BrowserTabBrokerError.browserUnavailable(generic),tool:"browser_fill")
+        XCTAssertEqual(legacy,"The browser tab broker is unavailable: " + generic)
+    }
+
+    func testRealWebKitCompactPopupOptionSupportsFreshSelectionThenSubjectAndSyntheticSend() async throws {
+        let session=EmbeddedBrowserSession(persistent:false),window=attachRenderHost(to:session)
+        defer { session.shutdown();window.close() }
+        // The bundled driver permits a same-binary comparison with the prior
+        // capture implementation; fixture oracles never grant action refs.
+        let transport=EmbeddedBrowserTabTransport(session:session)
+        let controller=EmbeddedBrowserToolController(transport:transport)
+        let id=try session.createTab(),view=try XCTUnwrap(session.webView(for:id))
+        let rows=(0..<300).map { "<div role='row'><p>Synthetic background \($0) \(String(repeating:"x",count:1000))</p></div>" }.joined()
+        var popup="<div id='choice' role='option' tabindex='0' onclick='window.selectRecipient()'>Fixture Recipient</div>"
+        for depth in (0..<12).reversed() {
+            let head=(0..<5).map { "<span>Head\(depth)-\($0) </span>" }.joined()
+            let tail=(0..<5).map { "<span>Tail\(depth)-\($0) </span>" }.joined()
+            popup="<div>\(head)\(popup)\(tail)</div>"
+        }
+        popup="<div aria-label='Passive popup layout'>\(popup)</div>"
+        view.loadHTMLString("""
+            <!doctype html><style>
+            #compose{position:fixed;left:20px;top:20px;width:360px;height:230px;background:white;z-index:10}
+            #recipient,#subject,#send{position:fixed;left:30px;width:280px;height:28px}
+            #recipient{top:30px}#subject{top:100px}#send{top:170px}
+            #popup{position:fixed;left:30px;top:100px;width:300px;height:35px;background:white;z-index:20;font:1px sans-serif}
+            #choice{position:fixed;left:30px;top:100px;width:300px;height:35px;background:white;font:14px sans-serif}
+            </style><main aria-label='Inbox'><form><input type='search' aria-label='Site search'></form>\(rows)</main>
+            <form id='compose' aria-label='Synthetic compose' onsubmit='event.preventDefault()'>
+              <input id='recipient' role='combobox' aria-label='Recipients' aria-expanded='false'>
+              <input id='subject' aria-label='Subject'><button type='button' id='send' onclick='window.sendFixture()'>Send fixture</button>
+            </form><div id='popup' role='listbox' aria-label='Recipient choices' hidden>\(popup)</div>
+            <script>
+            window.selected=0;window.subjectInputs=0;window.subjectFocuses=0;window.sends=0;window.inputs=0;
+            const recipient=document.getElementById('recipient'),subject=document.getElementById('subject'),popup=document.getElementById('popup');
+            document.addEventListener('input',()=>window.inputs++);
+            subject.addEventListener('input',()=>window.subjectInputs++);subject.addEventListener('focus',()=>window.subjectFocuses++);
+            recipient.addEventListener('input',()=>{popup.hidden=false;recipient.setAttribute('aria-expanded','true');});
+            window.selectRecipient=()=>{window.selected++;recipient.value='synthetic@example.test';recipient.setAttribute('aria-expanded','false');popup.remove();};
+            window.sendFixture=()=>{if(window.selected===1&&recipient.value==='synthetic@example.test'&&subject.value==='Hi'){
+              window.sends++;document.getElementById('compose').innerHTML='<h1>Synthetic send recorded</h1><p>Fixture receipt only</p>';
+            }};</script>
+            """,baseURL:URL(string:"http://localhost:8123/popup-fixture"))
+        try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_tabs",arguments:Data("{}".utf8))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_bind",arguments:JSONSerialization.data(withJSONObject:["tab_id":id.uuidString]))
+        var read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        var recipientFill=try inputReference(read,label:"Recipients",fill:true);recipientFill["text"]="synthetic"
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:recipientFill))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        var subjectFill=try inputReference(read,label:"Subject",fill:true);subjectFill["text"]="Hi"
+        do {
+            _ = try await controller.executeResult(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:subjectFill))
+            XCTFail("A covering option must still reject Subject fill without an input receipt")
+        } catch {
+            XCTAssertTrue(error is BrowserTabBrokerError)
+            let text=ComputerToolFailureEvidence.text(for:error,tool:"browser_fill")
+            XCTAssertTrue(text.hasPrefix("The browser tab broker is unavailable: "))
+            XCTAssertTrue(text.contains("An option covers the target at its hit-test point."))
+            XCTAssertTrue(text.contains("No replay is allowed"));XCTAssertFalse(text.contains("not dispatched"))
+        }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.stage,.initialHitTest)
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.hitTest?.hitRole,.option)
+        let blocked=try await script(view,"return {selected:window.selected,subjectInputs:window.subjectInputs,subjectFocuses:window.subjectFocuses,sends:window.sends,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:blocked) as? [String:Int],
+            ["selected":0,"subjectInputs":0,"subjectFocuses":0,"sends":0,"inputs":1])
+
+        // A default compact first page, without a label query or cursor, must
+        // supply the option and its actual issued click reference to the model.
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let optionRow=try XCTUnwrap(read.split(separator:"\n").first { $0.hasPrefix("#") && $0.contains("label=\"Fixture Recipient\"") },
+            "The compact first page must publish the observed covering option without a guessed query or continuation")
+        XCTAssertTrue(optionRow.contains("actions=[\"AXPress\"]"));XCTAssertTrue(optionRow.contains("click_ref=\""))
+        XCTAssertTrue(read.contains("source_truncated=1"));XCTAssertLessThanOrEqual(read.utf8.count,16_384)
+        let capture=try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertEqual(capture.stopReason,.byteBudget);XCTAssertLessThanOrEqual(capture.estimatedBytes,220_000)
+        XCTAssertGreaterThan(try XCTUnwrap(capture.scheduling).partialPanels,0)
+        XCTAssertLessThan(try XCTUnwrap(capture.scheduling).discoverySlots,4_096)
+        let stale=reference(in:optionRow)
+        _ = try await script(view,"const old=document.getElementById('choice');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:stale))
+            XCTFail("Publication cannot authorize an identical replacement")
+        } catch { }
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let covered=try inputReference(read,label:"Fixture Recipient")
+        _ = try await script(view,"const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;background:white;z-index:999';document.body.append(cover);return true;")
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:covered))
+            XCTFail("An observed option cannot bypass the current hit-test")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementObstructed)
+        _ = try await script(view,"document.getElementById('cover').remove();return true;")
+        let noSelection=try await script(view,"return {selected:window.selected,sends:window.sends};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:noSelection) as? [String:Int],["selected":0,"sends":0])
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:JSONSerialization.data(withJSONObject:inputReference(read,label:"Fixture Recipient")))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        subjectFill=try inputReference(read,label:"Subject",fill:true);subjectFill["text"]="Hi"
+        _ = try await controller.execute(taskKey:"popup",tool:"browser_fill",arguments:JSONSerialization.data(withJSONObject:subjectFill))
+        read=try await controller.execute(taskKey:"popup",tool:"browser_read",arguments:Data("{}".utf8))
+        let send=try JSONSerialization.data(withJSONObject:inputReference(read,label:"Send fixture"))
+        let result=try await controller.executeResult(taskKey:"popup",tool:"browser_click",arguments:send)
+        let reply=try XCTUnwrap(JSONSerialization.jsonObject(with:Data(result.response.utf8)) as? [String:Any])
+        XCTAssertEqual(reply["dispatched"] as? Bool,true);XCTAssertEqual(reply["no_replay"] as? Bool,true)
+        XCTAssertEqual(reply["result_verified"] as? Bool,false,"Displayed synthetic receipt is not external delivery proof")
+        XCTAssertTrue(result.response.contains("Synthetic send recorded"))
+        let finished=try await script(view,"return {selected:window.selected,subjectInputs:window.subjectInputs,subjectFocuses:window.subjectFocuses,sends:window.sends,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:finished) as? [String:Int],
+            ["selected":1,"subjectInputs":1,"subjectFocuses":1,"sends":1,"inputs":2])
+        do {
+            _ = try await controller.execute(taskKey:"popup",tool:"browser_click",arguments:send)
+            XCTFail("The consumed Send reference cannot replay")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError,.staleSnapshot) }
+        _ = await controller.shutdown()
+        XCTAssertNotNil(session.webView(for:id),"Borrowed human tab must be retained after release")
+    }
+
+    func testFooterDiscoveryRetainsDeepDialogControlBeyondCompactProbe() async throws {
+        try await verifyDeepFooterDiscovery(dialog:true)
+    }
+
+    func testFooterDiscoveryRetainsDeepFormControlBeyondCompactProbe() async throws {
+        try await verifyDeepFooterDiscovery(dialog:false)
+    }
+
+    private func verifyDeepFooterDiscovery(dialog:Bool) async throws {
+        let session=EmbeddedBrowserSession(persistent:false),window=attachRenderHost(to:session)
+        defer { session.shutdown();window.close() }
+        // Use the bundled resource so the exact same binary can qualify the
+        // immutable prior driver and candidate without replacing source files.
+        let transport=EmbeddedBrowserTabTransport(session:session)
+        let id=try session.createTab(),view=try XCTUnwrap(session.webView(for:id))
+        let rows=(0..<300).map { "<div role='row'><p>Synthetic background \($0) \(String(repeating:"x",count:1000))</p></div>" }.joined()
+        var footer="<div id='footer' role='toolbar'><button type='button' id='confirm' onclick='window.clicks++'>Confirm footer</button></div>"
+        for depth in (0..<12).reversed() {
+            let head=(0..<5).map { "<span>Head\(depth)-\($0) </span>" }.joined()
+            let tail=(0..<5).map { "<span>Tail\(depth)-\($0) </span>" }.joined()
+            footer="<div>\(head)\(footer)\(tail)</div>"
+        }
+        let tag=dialog ? "div" : "form",role=dialog ? " role='dialog'" : ""
+        view.loadHTMLString("""
+            <!doctype html><style>#panel{position:fixed;right:16px;top:16px;width:360px;max-height:700px;overflow:auto;background:white;z-index:10;font:12px sans-serif}#panel span{font-size:10px}</style>
+            <main aria-label='Inbox'><form><input type='search' aria-label='Site search'></form>\(rows)</main>
+            <\(tag) id='panel'\(role) aria-label='Synthetic panel'><input id='recipient' aria-label='Recipients'>\(footer)</\(tag)>
+            <script>window.clicks=0;window.inputs=0;document.addEventListener('input',()=>window.inputs++);</script>
+            """,baseURL:URL(string:"http://localhost:8123/deep-footer-\(dialog)"))
+        try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
+        let available=try await transport.target(id:id.uuidString),target=try XCTUnwrap(available)
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        _ = try await script(view,"document.getElementById('recipient').focus();return true;")
+        let generation=session.documentGeneration(for:id)
+        let raw=try await transport.observe(target:target)
+        let diagnostics=try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated);XCTAssertEqual(diagnostics.stopReason,.byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes,220_000);XCTAssertLessThanOrEqual(raw.nodes.count,3_000)
+        XCTAssertLessThanOrEqual(diagnostics.visited,20_001)
+        let scheduling=try XCTUnwrap(diagnostics.scheduling)
+        XCTAssertGreaterThan(scheduling.partialPanels,0,"The compact panel probe must exhaust its unchanged64 slots")
+        XCTAssertLessThan(scheduling.discoverySlots,4_096)
+        XCTAssertEqual(diagnostics.discovery?.limitReached,false)
+        let action=try XCTUnwrap(raw.nodes.first { $0.name=="Confirm footer" },
+            "An already-discovered visible footer control beyond64 panel slots must survive the220KB capture budget")
+        let toolbar=try XCTUnwrap(raw.nodes.first { $0.role=="toolbar" })
+        let panel=try XCTUnwrap(raw.nodes.first { $0.name=="Synthetic panel" })
+        XCTAssertEqual(panel.role,dialog ? "dialog" : "form")
+        XCTAssertEqual(action.parentNodeID,toolbar.nodeID)
+        XCTAssertEqual(toolbar.parentNodeID,panel.nodeID,"Unnamed layout wrappers do not invent semantic ancestors")
+        XCTAssertTrue(toolbar.childNodeIDs.contains(try XCTUnwrap(action.nodeID)))
+        XCTAssertTrue(panel.childNodeIDs.contains(try XCTUnwrap(toolbar.nodeID)))
+        XCTAssertTrue(action.isDOMClickable);XCTAssertFalse(action.isDisabled)
+        let oracle=try await script(view,"""
+            const action=document.getElementById('confirm'),rect=action.getBoundingClientRect();
+            return {nodes:document.getElementById('panel').querySelectorAll('*').length,
+              physicalParent:action.parentElement.id,rendered:rect.width>0&&rect.height>0&&getComputedStyle(action).visibility==='visible',
+              clicks:window.clicks,inputs:window.inputs};
+            """)
+        let independent=try XCTUnwrap(JSONSerialization.jsonObject(with:oracle) as? [String:Any])
+        XCTAssertGreaterThan(try XCTUnwrap(independent["nodes"] as? Int),128)
+        XCTAssertEqual(independent["physicalParent"] as? String,"footer");XCTAssertEqual(independent["rendered"] as? Bool,true)
+        XCTAssertEqual(independent["clicks"] as? Int,0);XCTAssertEqual(independent["inputs"] as? Int,0)
+        _ = try await script(view,"const old=document.getElementById('confirm');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await transport.press(target:target,backendNodeID:XCTUnwrap(action.backendNodeID),document:raw,permit:BrowserMutationPermit())
+            XCTFail("Discovery priority cannot grant an old reference to an identical replacement")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementChanged)
+        var fresh=try await transport.observe(target:target)
+        var current=try XCTUnwrap(fresh.nodes.first { $0.name=="Confirm footer" })
+        _ = try await script(view,"const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;background:white;z-index:9999';document.body.append(cover);return true;")
+        do {
+            try await transport.press(target:target,backendNodeID:XCTUnwrap(current.backendNodeID),document:fresh,permit:BrowserMutationPermit())
+            XCTFail("Discovery priority cannot bypass the current hit-test")
+        } catch { }
+        XCTAssertEqual(transport.actionFailureDiagnosticForTesting?.code,.elementObstructed)
+        _ = try await script(view,"document.getElementById('cover').remove();return true;")
+        fresh=try await transport.observe(target:target)
+        current=try XCTUnwrap(fresh.nodes.first { $0.name=="Confirm footer" })
+        try await transport.press(target:target,backendNodeID:XCTUnwrap(current.backendNodeID),document:fresh,permit:BrowserMutationPermit())
+        let effects=try await script(view,"return {clicks:window.clicks,inputs:window.inputs};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with:effects) as? [String:Int],["clicks":1,"inputs":0])
+        XCTAssertEqual(session.documentGeneration(for:id),generation)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    func testHitTestDiagnosticClosedSchemaRelationshipsAndLegacyCompatibility() throws {
+        let valid: [String: Any] = ["reason":"foreign_hit", "centerX":"inside", "centerY":"inside", "hitTag":"div", "hitRole":"listbox", "relation":"other"]
+        func envelope(_ hit: Any, stage: String = "initial_hit_test", code: String = "element_obstructed") -> [String: Any] {
+            ["browserActionFailure":["version":1,"operation":"fill","stage":stage,"code":code,"hitTest":hit]]
+        }
+        let shapes: [[String: Any]] = [
+            valid,
+            ["reason":"rect_nonfinite","centerX":"unknown","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"],
+            ["reason":"rect_nonpositive","centerX":"inside","centerY":"inside","hitTag":"input","hitRole":"textbox","relation":"self"],
+            ["reason":"outside_viewport","centerX":"before","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"],
+            ["reason":"null_hit","centerX":"inside","centerY":"inside","hitTag":"none","hitRole":"none","relation":"none"]
+        ]
+        for shape in shapes { XCTAssertNotNil(BrowserActionFailureDiagnostic.decode(envelope(shape), operation: "fill")) }
+        XCTAssertNotNil(BrowserActionFailureDiagnostic.decode(envelope(valid, stage:"focused_hit_test"), operation:"fill"))
+        for stage in ["initial_revalidation", "focus", "value_write"] {
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(valid,stage:stage),operation:"fill"))
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(valid,code:"unexpected"),operation:"fill"))
+        for key in valid.keys {
+            for bad in ["PRIVATE_CANARY", 1, true, NSNull()] as [Any] {
+                var invalid=valid; invalid[key]=bad
+                XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(invalid),operation:"fill"),key)
+            }
+            var missing=valid;missing.removeValue(forKey:key)
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(missing),operation:"fill"),key)
+        }
+        for alteration: [String: Any] in [["hitTag":"none"], ["relation":"none"], ["relation":"self"], ["relation":"descendant"],
+                                        ["reason":"null_hit"], ["reason":"outside_viewport"], ["text":"PRIVATE_CANARY"], ["rect":[1,2,3,4]]] {
+            var invalid=valid;invalid.merge(alteration){ _,new in new }
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(invalid),operation:"fill"))
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(envelope(NSNull()),operation:"fill"))
+        let legacy: [String: Any] = ["browserActionFailure":["version":1,"operation":"fill","stage":"initial_hit_test","code":"element_obstructed"]]
+        let old = try XCTUnwrap(BrowserActionFailureDiagnostic.decode(legacy,operation:"fill"))
+        XCTAssertNil(old.hitTest)
+        let oldJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        XCTAssertNil(oldJSON["hitTest"], "Legacy logs retain their exact key set")
+        let maximum = BrowserActionFailureDiagnostic(operation:.fill,stage:.focusedHitTest,code:.elementObstructed,
+            hitTest:.init(reason:.rectNonpositive,centerX:.unknown,centerY:.unknown,hitTag:.textarea,hitRole:.alertdialog,relation:.descendant))
+        let bytes = try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID:UUID(),generation:UUID(),failure:maximum))
+        XCTAssertLessThanOrEqual(bytes.count,512)
+        XCTAssertFalse(String(decoding:bytes,as:UTF8.self).contains("PRIVATE"))
+        print("browserHitTestMaximumEncoding bytes=\(bytes.count)")
+    }
+
+    func testHitTestDiagnosticFindsRecipientOverlayBeforeSubjectFocus() async throws {
+        let body = """
+            <input id='recipient' aria-label='Recipients' style='position:fixed;left:20px;top:20px;width:200px;height:24px'>
+            <input id='subject' aria-label='Subject' style='position:fixed;left:20px;top:80px;width:200px;height:24px'>
+            <script>window.inputs=0;window.changes=0;window.subjectFocuses=0;
+            document.addEventListener('input',()=>window.inputs++);document.addEventListener('change',()=>window.changes++);
+            document.getElementById('subject').addEventListener('focus',()=>window.subjectFocuses++);
+            document.getElementById('recipient').addEventListener('input',()=>{
+              const cover=document.createElement('div');cover.id='cover';cover.setAttribute('role','listbox');
+              cover.style='position:fixed;left:20px;top:80px;width:220px;height:36px;z-index:999;background:white';document.body.append(cover);
+            });</script>
+            """
+        let (session,transport,view,target) = try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let first=try await transport.observe(target:target)
+        let recipient=try XCTUnwrap(first.nodes.first { $0.name=="Recipients" })
+        try await transport.setText(target:target,backendNodeID:XCTUnwrap(recipient.backendNodeID),text:"synthetic@example.test",document:first,permit:BrowserMutationPermit())
+        let fresh=try await transport.observe(target:target)
+        let subject=try XCTUnwrap(fresh.nodes.first { $0.name=="Subject" })
+        XCTAssertTrue(subject.isEditable);XCTAssertFalse(subject.isDisabled)
+        let oracle=try await script(view,"const r=document.getElementById('subject').getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2).id;")
+        XCTAssertEqual(oracle,Data("\"cover\"".utf8))
+        try await assertHitTestRejection(transport,target:target,field:subject,document:fresh,stage:.initialHitTest,
+            reason:.foreignHit,tag:.div,role:.listbox,relation:.other,x:.inside,y:.inside)
+        let state=try await script(view,"return {value:document.getElementById('subject').value,focus:window.subjectFocuses,inputs:window.inputs,changes:window.changes,active:document.activeElement.id};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:state) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,0)
+        XCTAssertEqual(fields["inputs"] as? Int,1);XCTAssertEqual(fields["changes"] as? Int,1)
+        XCTAssertEqual(fields["active"] as? String,"recipient")
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    func testHitTestDiagnosticClassifiesFixedOffscreenFieldWithoutFocusing() async throws {
+        let body="""
+            <input id='field' aria-label='Subject' style='position:fixed;left:-2048px;top:40px;width:200px;height:24px'>
+            <script>window.focuses=0;window.inputs=0;document.getElementById('field').addEventListener('focus',()=>window.focuses++);document.addEventListener('input',()=>window.inputs++);</script>
+            """
+        let (session,transport,view,target)=try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let observed=try await transport.observe(target:target)
+        let field=try XCTUnwrap(observed.nodes.first { $0.name=="Subject" })
+        XCTAssertTrue(field.isEditable)
+        try await assertHitTestRejection(transport,target:target,field:field,document:observed,stage:.initialHitTest,
+            reason:.outsideViewport,tag:.none,role:.none,relation:.none,x:.before,y:.inside)
+        let effects=try await script(view,"return {value:document.getElementById('field').value,focus:window.focuses,input:window.inputs};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:effects) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,0);XCTAssertEqual(fields["input"] as? Int,0)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    func testHitTestDiagnosticRetainsSecondGuardAfterFocusCreatesOverlay() async throws {
+        let body="""
+            <input id='field' aria-label='Subject' style='position:fixed;left:20px;top:80px;width:200px;height:24px'>
+            <script>window.focuses=0;window.inputs=0;window.changes=0;
+            document.addEventListener('input',()=>window.inputs++);document.addEventListener('change',()=>window.changes++);
+            document.getElementById('field').addEventListener('focus',()=>{window.focuses++;
+              const cover=document.createElement('div');cover.setAttribute('role','tooltip');
+              cover.style='position:fixed;left:20px;top:80px;width:220px;height:36px;z-index:999;background:white';document.body.append(cover);
+            });</script>
+            """
+        let (session,transport,view,target)=try await semanticReadinessFixture(body:body)
+        let window=attachRenderHost(to:session);defer { session.shutdown();window.close() }
+        let lifetime=BrowserTabLifetime();try await transport.acquireRendering(target:target,lifetime:lifetime)
+        let observed=try await transport.observe(target:target)
+        let field=try XCTUnwrap(observed.nodes.first { $0.name=="Subject" })
+        try await assertHitTestRejection(transport,target:target,field:field,document:observed,stage:.focusedHitTest,
+            reason:.foreignHit,tag:.div,role:.tooltip,relation:.other,x:.inside,y:.inside)
+        let effects=try await script(view,"return {value:document.getElementById('field').value,focus:window.focuses,input:window.inputs,change:window.changes};")
+        let fields=try XCTUnwrap(JSONSerialization.jsonObject(with:effects) as? [String:Any])
+        XCTAssertEqual(fields["value"] as? String,"");XCTAssertEqual(fields["focus"] as? Int,1)
+        XCTAssertEqual(fields["input"] as? Int,0);XCTAssertEqual(fields["change"] as? Int,0)
+        lifetime.revoke();await transport.releaseRendering(target:target,lifetime:lifetime)
+    }
+
+    private func assertHitTestRejection(_ transport:EmbeddedBrowserTabTransport,target:BrowserTarget,field:BrowserDocumentNode,
+        document:BrowserDocumentObservation,stage:BrowserActionFailureDiagnostic.Stage,reason:BrowserActionFailureDiagnostic.HitTest.Reason,
+        tag:BrowserActionFailureDiagnostic.HitTest.Tag,role:BrowserActionFailureDiagnostic.HitTest.Role,
+        relation:BrowserActionFailureDiagnostic.HitTest.Relation,x:BrowserActionFailureDiagnostic.HitTest.Axis,y:BrowserActionFailureDiagnostic.HitTest.Axis,
+        file:StaticString = #filePath,line:UInt = #line) async throws {
+        do {
+            try await transport.setText(target:target,backendNodeID:XCTUnwrap(field.backendNodeID),text:"MUST_NOT_APPEAR",document:document,permit:BrowserMutationPermit())
+            XCTFail("The hit-test guard must retain its original rejection",file:file,line:line)
+        } catch {
+            let detail = (role == .option || role == .listbox) && reason == .foreignHit && x == .inside && y == .inside
+                ? "The built-in action could not be confirmed. \(role == .option ? "An option" : "A listbox") covers the target at its hit-test point. No replay is allowed; read the current page controls and popups before choosing another action with a fresh observed reference."
+                : "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+            XCTAssertEqual(error as? BrowserTabBrokerError,.browserUnavailable(detail),file:file,line:line)
+        }
+        let diagnostic=try XCTUnwrap(transport.actionFailureDiagnosticForTesting,file:file,line:line)
+        XCTAssertEqual(diagnostic.stage,stage,file:file,line:line);XCTAssertEqual(diagnostic.code,.elementObstructed,file:file,line:line)
+        let hit=try XCTUnwrap(diagnostic.hitTest,file:file,line:line)
+        XCTAssertEqual(hit.reason,reason,file:file,line:line);XCTAssertEqual(hit.hitTag,tag,file:file,line:line)
+        XCTAssertEqual(hit.hitRole,role,file:file,line:line);XCTAssertEqual(hit.relation,relation,file:file,line:line)
+        XCTAssertEqual(hit.centerX,x,file:file,line:line);XCTAssertEqual(hit.centerY,y,file:file,line:line)
+        let log=try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID:UUID(),generation:UUID(),failure:diagnostic))
+        XCTAssertLessThanOrEqual(log.count,512,file:file,line:line)
+        XCTAssertFalse(String(decoding:log,as:UTF8.self).contains("MUST_NOT_APPEAR"),file:file,line:line)
+    }
+
+    func testActionFailureDiagnosticStrictFiniteEnvelopeAndBoundedEncoding() throws {
+        let pressOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.pressPrecheck, .pressDispatch, .constraintFeedback]
+        let fillOnly: Set<BrowserActionFailureDiagnostic.Stage> = [.focus, .focusedRevalidation, .focusConfirmation, .focusedHitTest, .valueWrite, .inputEvent, .changeEvent]
+        var maximum = 0
+        for operation in BrowserActionFailureDiagnostic.Operation.allCases {
+            for stage in BrowserActionFailureDiagnostic.Stage.allCases where stage != .unknown {
+                for code in BrowserActionFailureDiagnostic.Code.allCases {
+                    let fields: [String: Any] = ["version": 1, "operation": operation.rawValue, "stage": stage.rawValue, "code": code.rawValue]
+                    let decoded = BrowserActionFailureDiagnostic.decode(["browserActionFailure": fields], operation: operation.rawValue)
+                    if operation == .press ? fillOnly.contains(stage) : pressOnly.contains(stage) {
+                        XCTAssertNil(decoded); continue
+                    }
+                    let valid = try XCTUnwrap(decoded)
+                    XCTAssertEqual(valid.operation, operation); XCTAssertEqual(valid.stage, stage); XCTAssertEqual(valid.code, code)
+                    let record = BrowserActionFailureLogRecord(tabID: UUID(), generation: UUID(), failure: valid)
+                    let bytes = try JSONEncoder().encode(record); maximum = max(maximum, bytes.count)
+                    XCTAssertLessThanOrEqual(bytes.count, 512)
+                    let outer = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                    XCTAssertEqual(Set(outer.keys), ["kind", "tabID", "generation", "failure"])
+                    XCTAssertEqual(outer["kind"] as? String, "browser_action_failure_v1")
+                }
+            }
+        }
+        let valid: [String: Any] = ["version": 1, "operation": "fill", "stage": "focused_revalidation", "code": "element_changed"]
+        for (key, value) in [("version", true as Any), ("version", 1.5 as Any), ("version", "1" as Any),
+                             ("operation", "PRIVATE_CANARY" as Any), ("stage", "PRIVATE_CANARY" as Any),
+                             ("stage", "unknown" as Any), ("stage", "press_dispatch" as Any),
+                             ("code", "PRIVATE_CANARY" as Any), ("code", NSNull() as Any), ("text", "PRIVATE_CANARY" as Any)] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": bad], operation: "fill"), key)
+        }
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": missing], operation: "fill"), key)
+        }
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid, "dispatched": true], operation: "fill"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid], operation: "press"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": valid], operation: "PRIVATE_CANARY"))
+        XCTAssertNil(BrowserActionFailureDiagnostic.decode(["browserActionFailure": NSNull()], operation: "fill"))
+        print("browserActionFailureMaximumEncoding bytes=\(maximum)")
+    }
+
+    func testActionFailureEnvelopeKeepsUnknownDispatchAndNeverLeaksPrivateErrors() async throws {
+        let known = "return {browserActionFailure:{version:1,operation:'fill',stage:'input_event',code:'unexpected'}};"
+        let cases = [
+            ("before", known, "", BrowserActionFailureDiagnostic.Stage.inputEvent),
+            ("after", "document.getElementById('field').value='PRIVATE_WRITTEN_VALUE';" + known, "PRIVATE_WRITTEN_VALUE", .inputEvent),
+            ("malformed", "return {browserActionFailure:{version:1,operation:'fill',stage:'PRIVATE_STAGE',code:'PRIVATE_ERROR',text:'PRIVATE_TEXT'}};", "", .unknown),
+            ("mixed_success", "return {dispatched:true,browserActionFailure:{version:1,operation:'fill',stage:'input_event',code:'unexpected'}};", "", .unknown),
+            ("exception", "throw new Error('PRIVATE_ERROR_WITH_EMAIL_AND_SECRET');", "", .unknown)
+        ]
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js"), encoding: .utf8)
+        for (name, statement, expectedValue, expectedStage) in cases {
+            let (session, _, view, target) = try await semanticReadinessFixture(body: "<input id='field' aria-label='Subject'>")
+            defer { session.shutdown() }
+            let transport = EmbeddedBrowserTabTransport(session: session, script: "if(input.operation==='fill'){\(statement)}\n" + source)
+            let observation = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observation.nodes.first { $0.name == "Subject" })
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "PRIVATE_REQUESTED_VALUE",
+                                         document: observation, permit: BrowserMutationPermit())
+                XCTFail("A driver failure must never return an input receipt: \(name)")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."), name)
+                XCTAssertFalse(error.localizedDescription.contains("PRIVATE_"), name)
+                XCTAssertFalse(error.localizedDescription.contains("not dispatched"), name)
+            }
+            let diagnostic = try XCTUnwrap(transport.actionFailureDiagnosticForTesting)
+            XCTAssertEqual(diagnostic.operation, .fill); XCTAssertEqual(diagnostic.stage, expectedStage)
+            XCTAssertEqual(diagnostic.code, .unexpected)
+            let log = try JSONEncoder().encode(BrowserActionFailureLogRecord(tabID: UUID(), generation: UUID(), failure: diagnostic))
+            XCTAssertLessThanOrEqual(log.count, 512)
+            XCTAssertFalse(String(decoding: log, as: UTF8.self).contains("PRIVATE_"))
+            let value = try await script(view, "return document.getElementById('field').value;")
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: value, options: [.fragmentsAllowed]) as? String, expectedValue,
+                           "The same unconfirmed error applies both before and after an actual value write: \(name)")
+        }
+    }
+
+    func testActionFailureDiagnosticIdentifiesRevalidationBeforeAndAfterFocus() async throws {
+        for focused in [false, true] {
+            let body = """
+                <input id='field' aria-label='Subject'><script>
+                window.focusEvents=0;window.inputEvents=0;
+                document.getElementById('field').addEventListener('focus',()=>{
+                  window.focusEvents++;\(focused ? "document.getElementById('field').setAttribute('aria-label','Changed subject');" : "")
+                });
+                document.addEventListener('input',()=>window.inputEvents++);
+                </script>
+                """
+            let (session, transport, view, target) = try await semanticReadinessFixture(body: body)
+            defer { session.shutdown() }
+            let observed = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observed.nodes.first { $0.name == "Subject" })
+            if !focused { _ = try await script(view, "document.getElementById('field').setAttribute('aria-label','Changed subject');return true;") }
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "PRIVATE_REQUESTED_VALUE",
+                                         document: observed, permit: BrowserMutationPermit())
+                XCTFail("Changed field metadata must still reject")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."))
+            }
+            let diagnostic = try XCTUnwrap(transport.actionFailureDiagnosticForTesting)
+            XCTAssertEqual(diagnostic.stage, focused ? .focusedRevalidation : .initialRevalidation)
+            XCTAssertEqual(diagnostic.code, .elementChanged)
+            let state = try await script(view, "return {value:document.getElementById('field').value,focus:window.focusEvents,input:window.inputEvents};")
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: state) as? [String: Any])
+            XCTAssertEqual(fields["value"] as? String, ""); XCTAssertEqual(fields["input"] as? Int, 0)
+            XCTAssertEqual(fields["focus"] as? Int, focused ? 1 : 0)
+        }
+    }
+
+    func testOpposingPriorityDialogBeforeFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: true, panelFirst: true)
+    }
+
+    func testOpposingPriorityDialogAfterFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: true, panelFirst: false)
+    }
+
+    func testOpposingPriorityNamedPanelBeforeFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: false, panelFirst: true)
+    }
+
+    func testOpposingPriorityNamedPanelAfterFormRetainsControlsAndExpandedFields() async throws {
+        try await verifyOpposingPriorityPanel(dialog: false, panelFirst: false)
+    }
+
+    private func verifyOpposingPriorityPanel(dialog: Bool, panelFirst: Bool) async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = attachRenderHost(to: session)
+        defer { session.shutdown(); window.close() }
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let paragraphs = (0..<300).map { "<p>Synthetic record \($0): \(String(repeating: "x", count: 1_000))</p>" }.joined()
+        let background = "<form aria-label='Background records'>\(paragraphs)</form>"
+        let panel = """
+        <div id="panel" aria-label="Synthetic panel"\(dialog ? " role='dialog'" : "")>
+          <h2>New message</h2><div><div>
+            <button type="button" id="action" onclick="window.expandPanel()">Full screen</button>
+            <button type="button" onclick="window.closes++">Save &amp; close</button>
+          </div></div>
+        </div>
+        """
+        view.loadHTMLString("""
+            <!doctype html><main aria-label="Fixture root">\(panelFirst ? panel + background : background + panel)</main>
+            <script>
+            window.actions=0;window.closes=0;window.sends=0;window.inputEvents=0;
+            document.addEventListener('input',()=>window.inputEvents++);
+            window.expandPanel=()=>{
+              window.actions++;
+              document.getElementById('panel').innerHTML='<h2>New message</h2>'
+                +Array.from({length:100},(_,i)=>'<span>Panel detail '+i+'</span>').join('')
+                +'<input type="email" aria-label="Recipients"><input aria-label="Subject">'
+                +'<div contenteditable="true" aria-label="Message body"></div>'
+                +'<button type="button" onclick="window.sends++">Send</button>';
+            };
+            </script>
+            """, baseURL: URL(string: "http://localhost:8123/opposing-\(dialog)-\(panelFirst)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let lifetime = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        let generation = session.documentGeneration(for: id)
+        let raw = try await transport.observe(target: target)
+        let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated)
+        XCTAssertEqual(diagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(diagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 224_096)
+        let root = try XCTUnwrap(raw.nodes.first { $0.name == "Fixture root" })
+        let capturedPanel = try XCTUnwrap(raw.nodes.first { $0.name == "Synthetic panel" })
+        let capturedBackground = try XCTUnwrap(raw.nodes.first { $0.name == "Background records" })
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Full screen" },
+            "Capturing the panel root alone must not let the competing form consume its controls' budget")
+        let close = try XCTUnwrap(raw.nodes.first { $0.name == "Save & close" })
+        let expectedOrder = panelFirst ? [capturedPanel, capturedBackground] : [capturedBackground, capturedPanel]
+        XCTAssertEqual(root.childNodeIDs, try expectedOrder.map { try XCTUnwrap($0.nodeID) })
+        XCTAssertEqual(capturedPanel.parentNodeID, root.nodeID)
+        XCTAssertEqual(action.parentNodeID, close.parentNodeID, "Nested control wrappers retain their real ancestry")
+        XCTAssertTrue(action.isDOMClickable)
+        XCTAssertTrue(close.isDOMClickable)
+        XCTAssertFalse(capturedPanel.isDOMClickable)
+        let untouched = try await script(view, "return {actions:window.actions,closes:window.closes,sends:window.sends,inputs:window.inputEvents};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+                       ["actions": 0, "closes": 0, "sends": 0, "inputs": 0])
+
+        let task = "opposing-\(dialog)-\(panelFirst)"
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: task, processIdentifier: 42, target: target)
+        let before = try await broker.snapshot(taskKey: task, binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let oldAction = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Full screen" })
+        _ = try await script(view, "const old=document.getElementById('action');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await broker.perform(taskKey: task, binding: before.binding, snapshot: before.snapshot,
+                                     elementIndex: oldAction.index, action: "AXPress")
+            XCTFail("Identical replacement controls must not inherit a previously observed action reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .elementNotFound) }
+        let fresh = try await broker.snapshot(taskKey: task, binding: before.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let currentAction = try XCTUnwrap(fresh.snapshot.elements.first { $0.label == "Full screen" })
+        try await broker.perform(taskKey: task, binding: fresh.binding, snapshot: fresh.snapshot,
+                                 elementIndex: currentAction.index, action: "AXPress")
+
+        let expanded = try await transport.observe(target: target)
+        let expandedDiagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(expanded.sourceTruncated)
+        XCTAssertEqual(expandedDiagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(expandedDiagnostics.estimatedBytes, 224_096)
+        XCTAssertEqual(expanded.nodes.filter(\.isEditable).map(\.name), ["Recipients", "Subject", "Message body"])
+        let send = try XCTUnwrap(expanded.nodes.first { $0.name == "Send" })
+        XCTAssertTrue(send.isDOMClickable)
+        let finalState = try await script(view, """
+            return {actions:window.actions,closes:window.closes,sends:window.sends,inputs:window.inputEvents,
+              expandedChildren:document.getElementById('panel').children.length,
+              fieldFocused:document.activeElement.matches('input,[contenteditable]')};
+            """)
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: finalState) as? [String: Any])
+        XCTAssertEqual(state["actions"] as? Int, 1, "Exactly one freshly observed Full screen control was pressed")
+        XCTAssertEqual(state["closes"] as? Int, 0)
+        XCTAssertEqual(state["sends"] as? Int, 0)
+        XCTAssertEqual(state["inputs"] as? Int, 0)
+        XCTAssertGreaterThan(try XCTUnwrap(state["expandedChildren"] as? Int), 64)
+        XCTAssertEqual(state["fieldFocused"] as? Bool, false, "Expanded fields must be discoverable without autofocus")
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        try await broker.revoke(taskKey: task, binding: fresh.binding)
+        lifetime.revoke(); await transport.releaseRendering(target: target, lifetime: lifetime)
+    }
+
+    func testGlobalCaptureFrontierRetainsLaterDialogAfterFocusedInboxBranch() async throws {
+        try await verifyGlobalCaptureFrontier(focused: true)
+    }
+
+    func testGlobalCaptureFrontierRetainsLaterNamedPanelAfterEarlierForm() async throws {
+        try await verifyGlobalCaptureFrontier(focused: false)
+    }
+
+    private func verifyGlobalCaptureFrontier(focused: Bool) async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = attachRenderHost(to: session)
+        defer { session.shutdown(); window.close() }
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let paragraphs = (0..<300).map { "<p>Synthetic record \($0): \(String(repeating: "x", count: 1_000))</p>" }.joined()
+        let branch = focused ? "div" : "form", panelRole = focused ? " role='dialog'" : ""
+        view.loadHTMLString("""
+            <!doctype html><main aria-label="Fixture root"><\(branch) aria-label="Primary region">
+            <button type="button" id="search" onclick="window.searches++">Search</button>\(paragraphs)</\(branch)>
+            <div\(panelRole) aria-label="Synthetic panel"><p>Panel context</p>
+            <button type="button" id="action" onclick="window.actions++">Full screen</button></div></main>
+            <script>window.searches=0;window.actions=0;window.inputEvents=0;document.addEventListener('input',()=>window.inputEvents++);</script>
+            """, baseURL: URL(string: "http://localhost:8123/frontier-\(focused ? "focus" : "form")"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString), target = try XCTUnwrap(available)
+        let lifetime = BrowserTabLifetime()
+        try await transport.acquireRendering(target: target, lifetime: lifetime)
+        if focused {
+            let focusedID = try await script(view, "document.getElementById('search').focus();return document.activeElement.id;")
+            XCTAssertEqual(focusedID, Data(#""search""#.utf8))
+        }
+        let generation = session.documentGeneration(for: id)
+        let raw = try await transport.observe(target: target)
+        let diagnostics = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertTrue(raw.sourceTruncated)
+        XCTAssertEqual(diagnostics.stopReason, .byteBudget)
+        XCTAssertLessThanOrEqual(diagnostics.visited, 20_000)
+        XCTAssertLessThanOrEqual(diagnostics.emitted, 3_000)
+        XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 224_096, "Prioritization must not increase the existing220KB capture budget")
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Full screen" },
+                                  "A discovered later panel must not be starved by a higher/equal-priority ancestor's bulk text")
+        let panel = try XCTUnwrap(raw.nodes.first { $0.name == "Synthetic panel" })
+        let primary = try XCTUnwrap(raw.nodes.first { $0.name == "Primary region" })
+        let root = try XCTUnwrap(raw.nodes.first { $0.name == "Fixture root" })
+        let text = try XCTUnwrap(raw.nodes.first { $0.name == "Panel context" })
+        XCTAssertEqual(root.childNodeIDs, [try XCTUnwrap(primary.nodeID), try XCTUnwrap(panel.nodeID)],
+                       "Priority visitation must preserve actual sibling order in the published ancestry")
+        XCTAssertEqual(panel.parentNodeID, root.nodeID)
+        XCTAssertEqual(action.parentNodeID, panel.nodeID)
+        XCTAssertEqual(text.parentNodeID, panel.nodeID)
+        XCTAssertEqual(panel.childNodeIDs, [try XCTUnwrap(text.nodeID), try XCTUnwrap(action.nodeID)])
+        XCTAssertTrue(action.isDOMClickable)
+        XCTAssertFalse(panel.isDOMClickable)
+        XCTAssertFalse(panel.isEditable)
+        let untouched = try await script(view, "return {searches:window.searches,actions:window.actions,inputs:window.inputEvents};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+                       ["searches": 0, "actions": 0, "inputs": 0], "Discovery/capture must never execute page input")
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "frontier", processIdentifier: 42, target: target)
+        let before = try await broker.snapshot(taskKey: "frontier", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let beforeAction = try XCTUnwrap(before.snapshot.elements.first { $0.label == "Full screen" })
+        _ = try await script(view, "let old=document.getElementById('action');old.replaceWith(old.cloneNode(true));return true;")
+        do {
+            try await broker.perform(taskKey: "frontier", binding: before.binding, snapshot: before.snapshot,
+                                     elementIndex: beforeAction.index, action: "AXPress")
+            XCTFail("An identical replacement must not inherit the prior captured action reference")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .elementNotFound) }
+        let after = try await broker.snapshot(taskKey: "frontier", binding: before.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(query: "Full screen", view: .all))
+        let currentAction = try XCTUnwrap(after.snapshot.elements.first { $0.label == "Full screen" })
+        try await broker.perform(taskKey: "frontier", binding: after.binding, snapshot: after.snapshot,
+                                 elementIndex: currentAction.index, action: "AXPress")
+        let actions = try await script(view, "return window.actions;")
+        XCTAssertEqual(actions, Data("1".utf8), "Only the separately authorized current reference may act once")
+        try await broker.revoke(taskKey: "frontier", binding: after.binding)
+        lifetime.revoke(); await transport.releaseRendering(target: target, lifetime: lifetime)
+    }
+
+    private func attachRenderHost(to session: EmbeddedBrowserSession) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_024, height: 768),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+        window.contentView = host
+        session.installModelRenderHost(host)
+        return window
+    }
+
     func testDocumentChangeWaitIgnoresLoadedChooserThenSettlesOneDelayedClickNavigation() async throws {
         let destination = try HeldBrowserNavigationFixture(body: "<!doctype html><main><h1>Mailbox ready</h1></main>")
         let destinationURL = try await destination.start()
@@ -224,6 +930,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let nextServer = try HeldBrowserNavigationFixture(body: body), nextURL = try await nextServer.start()
         defer { firstServer.stop(); nextServer.stop() }
         let session = EmbeddedBrowserSession(persistent: false), transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         func page(_ result: EmbeddedBrowserToolExecution) throws -> String {
@@ -373,6 +1081,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
 
     func testRealWebKitReadScopeUsesCommittedDocumentAndIgnoresSameDocumentURLChanges() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -412,6 +1122,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         });</script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -467,6 +1179,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         \(controls)</main><script>window.first=0;window.other=0;</script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -524,6 +1238,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         """
         let session = EmbeddedBrowserSession(persistent: false)
         let transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -572,6 +1288,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         </script></body>
         """
         let session = EmbeddedBrowserSession(persistent: false)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: EmbeddedBrowserTabTransport(session: session))
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -722,19 +1440,21 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {
         let html = """
         <!doctype html><html><body><main>
-        <div role="gridcell"><span role="link" tabindex="0" id="link"
+        <div role="gridcell" aria-label="Shared fixture title"><span role="link" tabindex="0" id="link"
           onclick="window.clicks=(window.clicks||0)+1;document.getElementById('result').textContent='Opened fixture';">Shared fixture title</span></div>
         <p id="result">Unopened fixture</p></main></body></html>
         """
         func reference(_ read: String, role: String) throws -> [String: Any] {
             let row = try XCTUnwrap(read.split(separator: "\n").first {
                 $0.hasPrefix("#") && $0.contains("semantic_role=\"\(role)\"")
-            })
+            }, read)
             return self.reference(in: row)
         }
         for change in ["unchanged", "disabled", "replaced"] {
             let session = EmbeddedBrowserSession(persistent: false)
             let transport = EmbeddedBrowserTabTransport(session: session)
+            let renderWindow = attachRenderHost(to: session)
+            defer { renderWindow.close() }
             let controller = EmbeddedBrowserToolController(transport: transport)
             defer { session.shutdown() }
             let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -748,6 +1468,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 arguments: Data(#"{"view":"content"}"#.utf8))
             let container = try reference(content, role: "gridcell")
             let row = try XCTUnwrap(content.split(separator: "\n").first { $0.contains("semantic_role=\"gridcell\"") })
+            XCTAssertTrue(row.contains("label=\"Shared fixture title\""), "The passive wrapper and actionable child deliberately share a label")
             XCTAssertTrue(content.contains("Defaults enabled=true settable=false actions=[]"))
             XCTAssertFalse(row.contains("click_ref=")); XCTAssertFalse(row.contains("fill_ref="))
             XCTAssertFalse(row.contains("enabled=false"))
@@ -1004,6 +1725,112 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         }
     }
 
+    func testNativeInputUnderContentEditableUsesItsValuePropertyAndPreservesItsChildren() async throws {
+        try await verifyNativeValueUnderContentEditable("input")
+    }
+
+    func testNativeTextareaUnderContentEditableUsesItsValuePropertyAndPreservesDefaultValue() async throws {
+        try await verifyNativeValueUnderContentEditable("textarea")
+    }
+
+    func testNativeSelectUnderContentEditableUsesItsValuePropertyAndPreservesOptions() async throws {
+        try await verifyNativeValueUnderContentEditable("select")
+    }
+
+    func testActualContentEditableStillUsesItsRenderedTextAndDispatchesOneEventPair() async throws {
+        try await verifyNativeValueUnderContentEditable("contenteditable")
+    }
+
+    private func verifyNativeValueUnderContentEditable(_ kind: String) async throws {
+        let (session, transport, view, target, window) = try await nativeValueFixture(kind)
+        defer { session.shutdown(); window.close() }
+        let beforeData = try await script(view, "return window.nativeValueAudit();")
+        let before = try XCTUnwrap(JSONSerialization.jsonObject(with: beforeData) as? [String: Any])
+        XCTAssertEqual(before["contentEditable"] as? Bool, true, "Real WebKit must exercise inherited editability: \(kind)")
+        XCTAssertEqual(before["value"] as? String, "prior-value", kind)
+        let observed = try await transport.observe(target: target)
+        let field = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture field" })
+        XCTAssertTrue(field.isEditable, kind)
+        XCTAssertEqual(field.value, "prior-value", "Observed native value must not be replaced by inherited contenteditable text: \(kind)")
+        try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "next-value",
+            document: observed, permit: BrowserMutationPermit())
+        let afterData = try await script(view, "return window.nativeValueAudit();")
+        let after = try XCTUnwrap(JSONSerialization.jsonObject(with: afterData) as? [String: Any])
+        XCTAssertEqual(after["value"] as? String, "next-value", "Successful fill must update the actual native value property: \(kind)")
+        if kind != "contenteditable" {
+            XCTAssertEqual(after["text"] as? String, before["text"] as? String, "Native fill must not replace input/textarea/select children: \(kind)")
+            XCTAssertEqual(after["defaultValue"] as? String, before["defaultValue"] as? String, kind)
+            XCTAssertEqual(after["options"] as? [String], before["options"] as? [String], kind)
+        } else {
+            XCTAssertEqual(after["text"] as? String, "next-value")
+        }
+        let events = try XCTUnwrap(after["events"] as? [[String: Any]])
+        XCTAssertEqual(events.compactMap { $0["type"] as? String }, ["input", "change"], kind)
+        XCTAssertEqual(events.compactMap { $0["value"] as? String }, ["next-value", "next-value"], kind)
+        XCTAssertTrue(events.allSatisfy { $0["focused"] as? Bool == true }, kind)
+        let fresh = try await transport.observe(target: target)
+        XCTAssertEqual(fresh.nodes.first { $0.name == "Fixture field" }?.value, "next-value", kind)
+    }
+
+    func testInheritedContentEditableCannotGrantNativeUnsupportedSecureOrReadOnlyFieldsInputAuthority() async throws {
+        for kind in ["file", "checkbox", "password", "readonly", "disabled"] {
+            let (session, transport, view, target, window) = try await nativeValueFixture(kind)
+            defer { session.shutdown(); window.close() }
+            let beforeData = try await script(view, "return window.nativeValueAudit();")
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: beforeData) as? [String: Any])
+            XCTAssertEqual(before["contentEditable"] as? Bool, true, kind)
+            let observed = try await transport.observe(target: target)
+            let field = try XCTUnwrap(observed.nodes.first { $0.name == "Fixture field" })
+            XCTAssertTrue(field.isReadOnly || field.isDisabled || !field.isEditable, kind)
+            if ["file", "checkbox", "password"].contains(kind) { XCTAssertNil(field.value, kind) }
+            do {
+                try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "MUST_NOT_APPEAR",
+                    document: observed, permit: BrowserMutationPermit())
+                XCTFail("Inherited editability cannot authorize native \(kind) input")
+            } catch { }
+            let afterData = try await script(view, "return window.nativeValueAudit();")
+            let after = try XCTUnwrap(JSONSerialization.jsonObject(with: afterData) as? [String: Any])
+            XCTAssertEqual(after["value"] as? String, before["value"] as? String, kind)
+            XCTAssertEqual(after["text"] as? String, before["text"] as? String, kind)
+            XCTAssertTrue(try XCTUnwrap(after["events"] as? [Any]).isEmpty, kind)
+        }
+    }
+
+    private func nativeValueFixture(_ kind: String) async throws
+        -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget, NSWindow) {
+        let markup: String
+        switch kind {
+        case "textarea": markup = "<textarea id='field' aria-label='Fixture field'>default-value</textarea>"
+        case "select": markup = "<select id='field' aria-label='Fixture field'><option value='prior-value'>Prior option</option><option value='next-value'>Next option</option></select>"
+        case "contenteditable": markup = "<div id='field' aria-label='Fixture field' role='textbox' contenteditable='true'>prior-value</div>"
+        case "file", "checkbox", "password": markup = "<input id='field' aria-label='Fixture field' role='textbox' type='\(kind)'>"
+        case "readonly", "disabled": markup = "<input id='field' aria-label='Fixture field' type='text' \(kind)>"
+        default: markup = "<input id='field' aria-label='Fixture field' type='text' value='default-value'>"
+        }
+        let session = EmbeddedBrowserSession(persistent: false), window = attachRenderHost(to: session)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        let inherited = kind == "contenteditable" ? "" : "contenteditable='true'"
+        view.loadHTMLString("""
+            <!doctype html><main><div \(inherited)>\(markup)</div></main><script>
+            const field=document.getElementById('field'), native=field.tagName!=='DIV', events=[];
+            if(native && field.type!=='file') field.value='prior-value';
+            const value=()=>native ? field.value : field.innerText;
+            for(const type of ['input','change']) document.addEventListener(type,event=>{
+              if(event.target===field)events.push({type,value:value(),focused:document.activeElement===field});
+            });
+            window.nativeValueAudit=()=>({contentEditable:field.isContentEditable,value:value(),text:field.textContent,
+              defaultValue:field.defaultValue ?? null,options:field.options ? Array.from(field.options).map(option=>option.value) : [],events});
+            </script>
+            """, baseURL: URL(string: "http://localhost:8123/native-value-\(kind)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        try await transport.acquireRendering(target: target, lifetime: BrowserTabLifetime())
+        return (session, transport, view, target, window)
+    }
+
     func testUnicodeRoleOverByteLimitPreservesBoundedUsableObservation() async throws {
         let role=String(repeating:"界",count:40)
         XCTAssertLessThan(role.utf16.count,100)
@@ -1017,8 +1844,15 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let available=try await transport.target(id:id.uuidString)
         let target=try XCTUnwrap(available), observation=try await transport.observe(target:target)
         XCTAssertTrue(observation.sourceTruncated)
-        let limited=try XCTUnwrap(observation.nodes.first { $0.name=="Unicode role" })
+        let text=try XCTUnwrap(observation.nodes.first { $0.name=="Unicode role" })
+        XCTAssertEqual(text.role,"statictext")
+        let parentID=try XCTUnwrap(text.parentNodeID)
+        let limited=try XCTUnwrap(observation.nodes.first { $0.nodeID==parentID })
         XCTAssertEqual(limited.role,"generic")
+        XCTAssertEqual(limited.name,"")
+        XCTAssertTrue(limited.childNodeIDs.contains(try XCTUnwrap(text.nodeID)))
+        XCTAssertFalse(text.isEditable)
+        XCTAssertFalse(text.isDOMClickable)
         XCTAssertFalse(limited.isEditable)
         XCTAssertFalse(limited.isDOMClickable)
         XCTAssertTrue(observation.nodes.contains { $0.role=="button" && $0.name=="Continue" })
@@ -1038,8 +1872,15 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let available=try await transport.target(id:id.uuidString)
         let target=try XCTUnwrap(available), observation=try await transport.observe(target:target)
         XCTAssertTrue(observation.sourceTruncated)
-        let limited=try XCTUnwrap(observation.nodes.first { $0.name=="Expanded role" })
+        let text=try XCTUnwrap(observation.nodes.first { $0.name=="Expanded role" })
+        XCTAssertEqual(text.role,"statictext")
+        let parentID=try XCTUnwrap(text.parentNodeID)
+        let limited=try XCTUnwrap(observation.nodes.first { $0.nodeID==parentID })
         XCTAssertEqual(limited.role,"generic")
+        XCTAssertEqual(limited.name,"")
+        XCTAssertTrue(limited.childNodeIDs.contains(try XCTUnwrap(text.nodeID)))
+        XCTAssertFalse(text.isEditable)
+        XCTAssertFalse(text.isDOMClickable)
         XCTAssertFalse(limited.isEditable)
         XCTAssertFalse(limited.isDOMClickable)
         let normal=try XCTUnwrap(observation.nodes.first { $0.role=="button" && $0.name=="Continue" })
@@ -1053,6 +1894,8 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     func testRealWebKitPopupLinkIsReadableWithoutOfferingAnUndispatchablePress() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let transport = EmbeddedBrowserTabTransport(session: session)
+        let renderWindow = attachRenderHost(to: session)
+        defer { renderWindow.close() }
         let controller = EmbeddedBrowserToolController(transport: transport)
         defer { session.shutdown() }
         let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
@@ -1271,8 +2114,12 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             && !$0.isDOMClickable && !$0.isEditable && !$0.isFocusablePointer && $0.isPressUnsupported })
         XCTAssertFalse(messages.contains { $0.name.contains("Sender") || $0.name.contains("pdf") },
                        "The passive wrapper's label is not an aggregate of its messages or attachments")
-        let unnamed = try XCTUnwrap(raw.nodes.first { $0.role == "group" && $0.name == "Unlabeled existing group" })
-        XCTAssertFalse(unnamed.isExplicitlyNamedContainer, "Existing descendant-name fallback does not establish a named record")
+        let unnamedBody = try XCTUnwrap(raw.nodes.first { $0.role == "statictext" && $0.name == "Unlabeled existing group" })
+        let unnamed = try XCTUnwrap(raw.nodes.first { $0.nodeID == unnamedBody.parentNodeID })
+        XCTAssertEqual(unnamed.role, "group")
+        XCTAssertEqual(unnamed.name, "", "A structural container must not duplicate its descendant's text as a label")
+        XCTAssertEqual(unnamed.childNodeIDs, [unnamedBody.nodeID], "The readable child retains the actual structural ancestor")
+        XCTAssertFalse(unnamed.isExplicitlyNamedContainer, "Descendant text does not establish an explicitly named record")
         let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
         let binding = try await broker.bindBorrowed(taskKey: "named-records", processIdentifier: 42, target: target)
         let content = try await broker.snapshot(taskKey: "named-records", binding: binding,
@@ -1369,6 +2216,202 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         }
     }
 
+    func testCSSHiddenAncestorAllowsExplicitlyVisibleControlsWithoutExposingHiddenMetadata() async throws {
+        try await verifyCSSVisibilityOverride("hidden")
+    }
+
+    func testCSSCollapsedAncestorAllowsExplicitlyVisibleControlsWithoutExposingHiddenMetadata() async throws {
+        try await verifyCSSVisibilityOverride("collapse")
+    }
+
+    private func verifyCSSVisibilityOverride(_ visibility: String) async throws {
+        let (session, transport, view, target, window) = try await cssVisibilityFixture(visibility)
+        defer { session.shutdown(); window.close() }
+        let oracle = try await script(view, """
+            const parent=document.getElementById('toolbar'), action=document.getElementById('action');
+            return {parent:getComputedStyle(parent).visibility, child:getComputedStyle(action).visibility,
+              childHasBox:action.getClientRects().length>0,
+              inherited:getComputedStyle(document.getElementById('inherited')).visibility};
+            """)
+        let shape = try XCTUnwrap(JSONSerialization.jsonObject(with: oracle) as? [String: Any])
+        XCTAssertEqual(shape["parent"] as? String, visibility)
+        XCTAssertEqual(shape["child"] as? String, "visible")
+        XCTAssertEqual(shape["childHasBox"] as? Bool, true)
+        XCTAssertEqual(shape["inherited"] as? String, visibility)
+        let raw = try await transport.observe(target: target)
+        let action = try XCTUnwrap(raw.nodes.first { $0.name == "Visible child action" },
+            "WebKit renders a visibility:visible descendant even while its ancestor remains \(visibility)")
+        let field = try XCTUnwrap(raw.nodes.first { $0.name == "Visible child field" })
+        XCTAssertTrue(action.isDOMClickable); XCTAssertTrue(field.isEditable)
+        let toolbar = try XCTUnwrap(raw.nodes.first { $0.nodeID == action.parentNodeID })
+        let fieldParent = try XCTUnwrap(raw.nodes.first { $0.nodeID == field.parentNodeID })
+        XCTAssertEqual(toolbar.role, "toolbar"); XCTAssertEqual(fieldParent.role, "textbox")
+        for row in [toolbar, fieldParent] {
+            XCTAssertTrue(row.isIgnored); XCTAssertTrue(row.isDisabled); XCTAssertTrue(row.isReadOnly)
+            XCTAssertFalse(row.isDOMClickable); XCTAssertFalse(row.isEditable)
+            XCTAssertEqual(row.name, ""); XCTAssertNil(row.value)
+        }
+        XCTAssertFalse(raw.nodes.contains { $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        let untouched = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,hiddenClicks:window.hiddenClicks};")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: untouched) as? [String: Int],
+            ["clicks": 0, "inputs": 0, "hiddenClicks": 0])
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "css-\(visibility)", processIdentifier: 42, target: target)
+        let all = try await broker.snapshot(taskKey: "css-\(visibility)", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        XCTAssertFalse(all.snapshot.elements.contains { $0.label.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        let observedAction = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Visible child action" })
+        try await broker.perform(taskKey: "css-\(visibility)", binding: all.binding, snapshot: all.snapshot,
+            elementIndex: observedAction.index, action: "AXPress")
+        let fresh = try await broker.snapshot(taskKey: "css-\(visibility)", binding: all.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let observedField = try XCTUnwrap(fresh.snapshot.elements.first { $0.label == "Visible child field" })
+        try await broker.setText(taskKey: "css-\(visibility)", binding: fresh.binding, snapshot: fresh.snapshot,
+            elementIndex: observedField.index, text: "synthetic@example.test")
+        let content = try await broker.snapshot(taskKey: "css-\(visibility)", binding: fresh.binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .content))
+        XCTAssertTrue(content.snapshot.elements.contains { $0.label == "Visible body" })
+        for excluded in ["Visible child action", "VISIBLE_CONTROL_TEXT", "synthetic@example.test"] {
+            XCTAssertFalse(content.snapshot.elements.contains { $0.label.contains(excluded) || ($0.value ?? "").contains(excluded) },
+                "Ignored semantic ancestors must retain body-versus-control scope: \(excluded)")
+        }
+        let effects = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,hiddenClicks:window.hiddenClicks,value:document.getElementById('field').value};")
+        let final = try XCTUnwrap(JSONSerialization.jsonObject(with: effects) as? [String: Any])
+        XCTAssertEqual(final["clicks"] as? Int, 1); XCTAssertEqual(final["inputs"] as? Int, 1)
+        XCTAssertEqual(final["hiddenClicks"] as? Int, 0)
+        XCTAssertEqual(final["value"] as? String, "synthetic@example.test")
+        try await broker.revoke(taskKey: "css-\(visibility)", binding: content.binding)
+    }
+
+    func testCSSVisibilityOverrideCannotBypassCurrentHideObstructionOrChangedParent() async throws {
+        let (session, transport, view, target, window) = try await cssVisibilityFixture("hidden")
+        defer { session.shutdown(); window.close() }
+        var observed = try await transport.observe(target: target)
+        var action = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child action" })
+        _ = try await script(view, "document.getElementById('action').style.visibility='hidden'; return true;")
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(action.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            XCTFail("A currently hidden child cannot use a formerly visible reference")
+        } catch { }
+        _ = try await script(view, "document.getElementById('action').style.visibility='visible'; return true;")
+        observed = try await transport.observe(target: target)
+        let field = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child field" })
+        _ = try await script(view, "const cover=document.createElement('div');cover.id='cover';cover.style='position:fixed;inset:0;z-index:9999;background:white';document.body.append(cover);return true;")
+        do {
+            try await transport.setText(target: target, backendNodeID: XCTUnwrap(field.backendNodeID), text: "MUST_NOT_APPEAR", document: observed, permit: BrowserMutationPermit())
+            XCTFail("The inherited visibility fix cannot bypass the real hit-test")
+        } catch { }
+        _ = try await script(view, "document.getElementById('cover').remove(); return true;")
+        observed = try await transport.observe(target: target)
+        action = try XCTUnwrap(observed.nodes.first { $0.name == "Visible child action" })
+        _ = try await script(view, "const parent=document.getElementById('toolbar'), replacement=parent.cloneNode(false); parent.before(replacement); replacement.append(document.getElementById('action')); return true;")
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(action.backendNodeID), document: observed, permit: BrowserMutationPermit())
+            XCTFail("A physical child moved to a new hidden semantic parent needs a fresh reference")
+        } catch { }
+        let effects = try await script(view, "return {clicks:window.clicks,inputs:window.inputs,value:document.getElementById('field').value};")
+        let final = try XCTUnwrap(JSONSerialization.jsonObject(with: effects) as? [String: Any])
+        XCTAssertEqual(final["clicks"] as? Int, 0); XCTAssertEqual(final["inputs"] as? Int, 0)
+        XCTAssertEqual(final["value"] as? String, "")
+    }
+
+    func testCSSHiddenStructureAloneCannotEstablishSemanticReadiness() async throws {
+        let body = """
+        <div role="toolbar" aria-label="EXCLUDED_TOOLBAR" style="visibility:hidden">
+          <button>EXCLUDED_ACTION</button><span style="visibility:visible"></span>
+        </div>
+        """
+        let (session, transport, view, target) = try await semanticReadinessFixture(body: body, timeoutMS: 80)
+        defer { session.shutdown() }
+        let pending = Task { try await transport.observeForRead(target: target) }
+        try await waitForSemanticObserver(view)
+        let observed = try await pending.value
+        XCTAssertEqual(observed.semanticReadiness, .emptyAtDeadline)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") || ($0.value ?? "").contains("EXCLUDED_") })
+        XCTAssertFalse(observed.nodes.contains { $0.isDOMClickable || $0.isEditable })
+        XCTAssertFalse(observed.sourceTruncated, "CSS suppression is not a source-budget limit")
+    }
+
+    func testCSSHiddenStructureWithoutVisibleDescendantsDoesNotConsumeCaptureOutputBudget() async throws {
+        let hidden = "<div role='button' aria-label='EXCLUDED_HIDDEN' style='visibility:hidden'>EXCLUDED_BODY</div>"
+        let body = "<main>" + String(repeating: hidden, count: 700)
+            + "<div role='toolbar' style='visibility:hidden'><button style='visibility:visible'>Later visible action</button></div></main>"
+        let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let observed = try await transport.observe(target: target)
+        let action = try XCTUnwrap(observed.nodes.first { $0.name == "Later visible action" })
+        let parent = try XCTUnwrap(observed.nodes.first { $0.nodeID == action.parentNodeID })
+        XCTAssertEqual(parent.role, "toolbar"); XCTAssertTrue(parent.isIgnored)
+        XCTAssertFalse(observed.sourceTruncated, "Unrendered leaves must not starve later visible content by spending output bytes")
+        XCTAssertLessThan(observed.nodes.count, 12)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") })
+        let diagnostic = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        XCTAssertEqual(diagnostic.stopReason, .none)
+        XCTAssertLessThan(diagnostic.estimatedBytes, 10_000)
+    }
+
+    func testDiscoveryDiagnosticsDistinguishBoundedPanelStatesWithoutReadingHiddenText() async throws {
+        let body = """
+        <main>
+          <form><button>Rendered fixture action</button></form>
+          <div role="dialog" style="display:none">EXCLUDED_DISPLAY<form></form></div>
+          <div role="dialog" hidden style="display:block">EXCLUDED_HARD<form></form></div>
+          <div role="dialog" style="visibility:hidden">EXCLUDED_VISIBILITY
+            <button style="visibility:visible">Visible override</button>
+          </div>
+          <div role="dialog" style="display:contents"><p>Boxless fixture text</p></div>
+        </main>
+        """
+        let (session, transport, _, target) = try await semanticReadinessFixture(body: body)
+        defer { session.shutdown() }
+        let observed = try await transport.observe(target: target)
+        let diagnostic = try XCTUnwrap(transport.captureDiagnosticsForTesting)
+        let discovery = try XCTUnwrap(diagnostic.discovery)
+        XCTAssertEqual(discovery.panelsByState, [1, 1, 1, 1, 1])
+        XCTAssertEqual(discovery.prunedSubtrees, 2, "Only outer-walk encountered hard exclusions are counted; their descendants remain unvisited")
+        XCTAssertFalse(discovery.limitReached)
+        XCTAssertFalse(observed.nodes.contains { $0.name.contains("EXCLUDED_") })
+        XCTAssertTrue(observed.nodes.contains { $0.name == "Visible override" && $0.isDOMClickable })
+        let encoded = try JSONEncoder().encode(diagnostic)
+        XCTAssertLessThanOrEqual(encoded.count, 768)
+        let text = String(decoding: encoded, as: UTF8.self)
+        for privateText in ["EXCLUDED_", "fixture", "Visible override", "localhost"] {
+            XCTAssertFalse(text.contains(privateText))
+        }
+    }
+
+    private func cssVisibilityFixture(_ visibility: String) async throws
+        -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget, NSWindow) {
+        let session = EmbeddedBrowserSession(persistent: false), window = attachRenderHost(to: session)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString("""
+            <!doctype html><main><p>Visible body</p>
+            <div id="toolbar" role="toolbar" aria-label="EXCLUDED_TOOLBAR_LABEL" style="visibility:\(visibility)">
+              EXCLUDED_HIDDEN_TEXT<button id="action" style="visibility:visible" onclick="window.clicks++">Visible child action</button>
+              <button id="inherited" onclick="window.hiddenClicks++">EXCLUDED_INHERITED_ACTION</button>
+            </div>
+            <div role="button" aria-label="EXCLUDED_CONTROL_LABEL" style="visibility:\(visibility)" onclick="window.hiddenClicks++">
+              <span style="visibility:visible">VISIBLE_CONTROL_TEXT</span>
+            </div>
+            <div role="textbox" aria-label="EXCLUDED_FIELD_LABEL" style="visibility:\(visibility)">
+              EXCLUDED_HIDDEN_VALUE<input id="field" aria-label="Visible child field" style="visibility:visible">
+            </div>
+            <div style="display:none"><button style="visibility:visible">EXCLUDED_DISPLAY_NONE_ACTION</button></div>
+            <div hidden style="display:block"><button style="visibility:visible">EXCLUDED_HIDDEN_ATTRIBUTE_ACTION</button></div>
+            <div inert><button style="visibility:visible">EXCLUDED_INERT_ACTION</button></div>
+            <div aria-hidden="true"><button style="visibility:visible">EXCLUDED_ARIA_HIDDEN_ACTION</button></div>
+            </main><script>window.clicks=0;window.inputs=0;window.hiddenClicks=0;
+            document.addEventListener('input',()=>window.inputs++);</script>
+            """, baseURL: URL(string: "http://localhost:8123/css-\(visibility)"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        try await transport.acquireRendering(target: target, lifetime: BrowserTabLifetime())
+        return (session, transport, view, target, window)
+    }
+
     func testDisplayContentsTraversalDoesNotExposeHiddenAriaHiddenOrInertDescendants() async throws {
         let body = """
         <main><p>VISIBLE_CONTROL_BODY</p>
@@ -1459,14 +2502,16 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
             XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 1_000_000)
             XCTAssertGreaterThan(diagnostics.viewportWidth, 0); XCTAssertGreaterThan(diagnostics.viewportHeight, 0)
             if name == "byte-budget" {
-                XCTAssertGreaterThan(diagnostics.estimatedBytes, 220_000)
+                XCTAssertGreaterThan(diagnostics.estimatedBytes, 200_000)
+                XCTAssertLessThanOrEqual(diagnostics.estimatedBytes, 220_000,
+                    "Atomic visible-row and ancestry reservation stops before crossing the existing byte budget")
                 XCTAssertEqual(diagnostics.frames + diagnostics.shadowRoots + diagnostics.oversizedRoles + diagnostics.clippedFields, 0)
             } else {
                 XCTAssertEqual(diagnostics.frames, 1); XCTAssertEqual(diagnostics.shadowRoots, 1)
                 XCTAssertEqual(diagnostics.oversizedRoles, 1); XCTAssertEqual(diagnostics.clippedFields, 1)
             }
             let encoded = try JSONEncoder().encode(diagnostics)
-            XCTAssertLessThan(encoded.count, 512)
+            XCTAssertLessThanOrEqual(encoded.count, 768)
             let text = String(decoding: encoded, as: UTF8.self)
             XCTAssertFalse(text.contains("Fixture")); XCTAssertFalse(text.contains("http"))
             var invalid = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])

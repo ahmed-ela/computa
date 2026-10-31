@@ -342,6 +342,78 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         XCTAssertNotNil(fixture.lease.diagnostic(zero))
     }
 
+    func testPreparationDiagnosticsDistinguishAbsentSilentRejectedAndTimedOutObservers() async throws {
+        let cases: [(name: String, arm: String?, outcome: String, armed: Bool)] = [
+            ("absent", nil, "observer_unavailable", false),
+            ("silent", "return {armed:true};", "armed", true),
+            ("unsupported", """
+                window.webkit.messageHandlers[config.handlerName].postMessage({version:1,kind:'diagnostic',
+                  correlationID:binding.correlationID,sequence:binding.sequence,inputSHA256:binding.inputSHA256,
+                  reason:'runtime_unsupported',calls:0,instances:0});
+                return {armed:false};
+                """, "page_rejected", false),
+            ("exception", "throw new Error('PRIVATE_OBSERVER_EXCEPTION');", "evaluation_failed", false),
+            ("timeout", "return new Promise(() => {});", "timed_out", false),
+        ]
+        for item in cases {
+            let browser = EmbeddedBrowserSession(persistent: false)
+            defer { browser.shutdown() }
+            browser.setChatGPTResponseCompletionSourceForTesting(item.arm.map { arm in """
+                (() => {
+                  const config = __COMPUTA_COMPLETION_CONFIG__;
+                  Object.defineProperty(window, config.key, {value:Object.freeze({
+                    arm(binding) { \(arm) }, stop() {} })});
+                })();
+                """ } ?? "")
+            let tabID = try browser.createUnloadedModelTabForTesting()
+            let view = try XCTUnwrap(browser.webView(for: tabID)), owner = UUID().uuidString
+            try browser.installModelChangeSignal(tabID: tabID, ownerToken: owner,
+                world: .world(name: "computa-observer-preparation-test"))
+            view.loadHTMLString("<p id='ready'>Local observer fixture</p>", baseURL: URL(string: "https://chatgpt.com/"))
+            let loadDeadline = ContinuousClock.now + .seconds(10)
+            while ContinuousClock.now < loadDeadline {
+                if !view.isLoading, (try? await completionPage(view, "return !!document.getElementById('ready');")) == Data("true".utf8) { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let generation = try XCTUnwrap(browser.documentGeneration(for: tabID))
+            let armed = await browser.prepareChatGPTResponseCompletion(tabID: tabID, view: view, ownerToken: owner,
+                generation: generation, sequence: 1, outboundSHA256: EmbeddedWebModelTransport.promptFingerprint("x"),
+                outboundUTF8Bytes: 1, deadline: .now + .seconds(5))
+            XCTAssertEqual(armed, item.armed, item.name)
+            let diagnostic = try XCTUnwrap(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+                ownerToken: owner, generation: generation, sequence: 1), item.name)
+            XCTAssertEqual(Set(diagnostic.keys), ["outcome", "reason", "calls", "instances", "signal"])
+            XCTAssertEqual(diagnostic["outcome"] as? String, item.outcome, item.name)
+            if item.name == "unsupported" {
+                XCTAssertEqual(diagnostic["reason"] as? String, "runtime_unsupported")
+                XCTAssertEqual(diagnostic["calls"] as? Int, 0)
+                XCTAssertEqual(diagnostic["instances"] as? Int, 0)
+            } else {
+                for key in ["reason", "calls", "instances"] { XCTAssertTrue(diagnostic[key] is NSNull, item.name + key) }
+            }
+            XCTAssertTrue(diagnostic["signal"] is NSNull)
+            XCTAssertNil(browser.chatGPTResponseCompletionReceipt(tabID: tabID, view: view, ownerToken: owner,
+                generation: generation, sequence: 1), "Diagnostic evidence cannot publish a response")
+            XCTAssertNil(browser.chatGPTResponseFailureReceipt(tabID: tabID, view: view, ownerToken: owner,
+                generation: generation, sequence: 1), "Silence is not a terminal failure receipt")
+            for (otherOwner, otherGeneration, otherSequence) in [(UUID().uuidString, generation, 1),
+                (owner, UUID(), 1), (owner, generation, 2)] {
+                XCTAssertNil(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+                    ownerToken: otherOwner, generation: otherGeneration, sequence: otherSequence))
+            }
+            browser.revokeChatGPTResponseCompletion(tabID: tabID, ownerToken: owner)
+            XCTAssertEqual(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+                ownerToken: owner, generation: generation, sequence: 1)?["outcome"] as? String, item.outcome,
+                "Revocation preserves finite historical diagnostics without reviving authority")
+            let encoded = String(decoding: try JSONSerialization.data(withJSONObject: diagnostic), as: UTF8.self)
+            for secret in ["PRIVATE", owner, "correlationID", "inputSHA256", "https:", "text"] { XCTAssertFalse(encoded.contains(secret)) }
+            XCTAssertLessThan(encoded.utf8.count, 256)
+            browser.stop(tabID: tabID)
+            XCTAssertNil(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+                ownerToken: owner, generation: generation, sequence: 1), "Navigation cannot reuse old diagnostics")
+        }
+    }
+
     func testMainWorldDiagnosticDeliveryCannotRevokeWakeOrRenewAnOwnedTerminal() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
@@ -415,6 +487,19 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
         XCTAssertEqual(try browser.modelChangeRevision(for: tabID), revision)
         XCTAssertEqual(receipt(), terminal, "Real WK delivery cannot revoke or replace the owned terminal")
         XCTAssertEqual(browser.documentGeneration(for: tabID), generation)
+        let observer = try XCTUnwrap(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+            ownerToken: owner, generation: generation, sequence: 1))
+        XCTAssertEqual(observer["outcome"] as? String, "armed")
+        XCTAssertEqual(observer["signal"] as? String, "terminal")
+        XCTAssertEqual(observer["reason"] as? String, "input_hash", "Foreign and malformed packets cannot replace diagnostics")
+        XCTAssertEqual(observer["calls"] as? Int, 1)
+        let cancelled = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            XCTAssertEqual(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+                ownerToken: owner, generation: generation, sequence: 1)?["signal"] as? String, "terminal")
+            XCTAssertNil(receipt(), "Cancellation can retain diagnostic facts but never receipt authority")
+        }
+        await cancelled.value
         try await Task.sleep(until: deadline, clock: .continuous)
         XCTAssertNil(receipt(), "Diagnostics cannot renew the original lease deadline")
         _ = try await completionPage(view, """
@@ -424,6 +509,20 @@ final class ChatGPTResponseCompletionTests: XCTestCase {
             """)
         XCTAssertNil(receipt(), "Even a valid late diagnostic cannot revive an expired receipt")
         XCTAssertEqual(try browser.modelChangeRevision(for: tabID), revision)
+        let rearmed = await browser.prepareChatGPTResponseCompletion(tabID: tabID, view: view, ownerToken: owner,
+            generation: generation, sequence: 1, outboundSHA256: sha, outboundUTF8Bytes: 20, deadline: .now + .seconds(2))
+        XCTAssertTrue(rearmed)
+        _ = try await completionPage(view, """
+            const {version,correlationID,sequence,inputSHA256} = window.fixtureTerminal;
+            return window.fixturePostCompletion({version,kind:'diagnostic',correlationID,sequence,inputSHA256,
+              reason:'expired',calls:2,instances:1});
+            """)
+        _ = try await completionPage(view, "return window.fixtureCompletionArm.sequence;")
+        let fresh = try XCTUnwrap(browser.chatGPTResponseObserverDiagnostic(tabID: tabID, view: view,
+            ownerToken: owner, generation: generation, sequence: 1))
+        XCTAssertTrue(fresh["reason"] is NSNull, "A previous same-sequence lease cannot populate new diagnostics")
+        XCTAssertTrue(fresh["signal"] is NSNull)
+        XCTAssertNil(receipt())
     }
 
     private func completionPage(_ view: WKWebView, _ body: String) async throws -> Data {

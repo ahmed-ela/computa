@@ -388,6 +388,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedPendingModelVerification = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
+        var loggedModelMismatch = false
         var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
@@ -490,11 +491,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
     #if DEBUG
     enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
+    struct ModelValidationObservationForTesting: Codable, Sendable {
+        enum Action: String, Codable, Sendable { case inspect, submit, verifyModel, verifyProductMode, other }
+        let action: Action
+        let enforceModel: Bool
+        let allowPending: Bool
+        let recheck: Bool
+        let pending: Bool
+        let evidencePresent: Bool
+    }
+    private var modelValidationObserverForTesting: (@MainActor (ModelValidationObservationForTesting) -> Void)?
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -502,6 +514,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var completionObserverDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var userCountDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var rendererGuardDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
@@ -602,6 +616,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         routeDiscardDiagnosticsObserverForTesting = observer
     }
 
+    func setBoundCertificateDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        boundCertificateDiagnosticsObserverForTesting = observer
+    }
+
     /// Exercise the ordinary full-model observation without the running-answer
     /// optimization. This read cannot insert, submit, or select a model.
     func inspectWithFullModelForTesting(sessionToken: String) async throws -> [String: Any] {
@@ -617,6 +635,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserStructureEmissionObserverForTesting(_ observer: (@MainActor (Bool, String) -> Void)?) {
         firstUserStructureEmissionObserverForTesting = observer
+    }
+
+    func setModelValidationObserverForTesting(_ observer: (@MainActor (ModelValidationObservationForTesting) -> Void)?) {
+        modelValidationObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -637,6 +659,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setResponseProgressDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         responseProgressDiagnosticObserverForTesting = observer
+    }
+
+    func setCompletionObserverDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        completionObserverDiagnosticObserverForTesting = observer
+    }
+
+    func setUserCountDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        userCountDiagnosticObserverForTesting = observer
     }
 
     func setRendererGuardDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -1919,7 +1949,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard session.temporary, session.modelChoice != nil else { throw Failure.modelUnverified }
                 let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                 if selected["pending"] as? Bool != true {
-                    session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                    session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
                     session.modelSelectionVerified = true
                     _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                     session.state = "ready"
@@ -1937,7 +1967,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             session.modelSelectionRequested = true
                             let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                             if selected["pending"] as? Bool != true {
-                                session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                                session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
                                 session.modelSelectionVerified = true
                                 _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                                 session.state = "ready"
@@ -1959,7 +1989,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                             guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
                         }
-                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session)
+                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session, action: "discoverModels")
                         session.modelSelectionVerified = true
                         _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                         session.state = "ready"
@@ -1984,7 +2014,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                count(observed, "userCount") == session.sequence,
                (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
                (observed["text"] as? String)?.isEmpty == true,
-               (try? validatedModelEvidence(observed, session: session)) != nil {
+               (try? validatedModelEvidence(observed, session: session, action: "inspect")) != nil {
                 throw Failure.responseStreamFailed(failureCandidate.reason)
             }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
@@ -2024,7 +2054,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if completedRendererFailure(proven), proven["modelVerificationPending"] == nil,
                        let original = observed["text"] as? String, let current = proven["text"] as? String,
                        original.utf8.elementsEqual(current.utf8),
-                       (try? validatedModelEvidence(proven, session: session)) != nil {
+                       (try? validatedModelEvidence(proven, session: session, action: "inspect")) != nil {
                         await captureArmedRendererFailureDiagnostic(session, deadline: deadline)
                         throw Failure.responseRenderingFailed
                     }
@@ -2308,6 +2338,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         responseProgressDiagnosticObserverForTesting?(safe)
         #endif
         Self.inspectionLog.error("responseProgressDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
+        let observer: Any
+        if documentCurrent, let generation {
+            observer = browser.chatGPTResponseObserverDiagnostic(tabID: session.tabID, view: session.view,
+                ownerToken: session.token, generation: generation, sequence: session.sequence).map { $0 as Any } ?? NSNull()
+        } else { observer = NSNull() }
+        let completionRecord: [String: Any] = ["kind": "chatgpt_completion_observer_v1",
+            "sequence": session.sequence, "armed": session.completionObserverArmed, "observation": observer]
+        if let bytes = try? JSONSerialization.data(withJSONObject: completionRecord, options: .sortedKeys), bytes.count <= 512 {
+            let safe = String(decoding: bytes, as: UTF8.self)
+            #if DEBUG
+            completionObserverDiagnosticObserverForTesting?(safe)
+            #endif
+            Self.inspectionLog.error("completionObserverDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
+        }
         // Same admitted read and exact current generation as the progress cache.
         // Separate metadata keeps response-progress-v1 and error policy unchanged.
         if inspectionCurrent, let notice = cached?.responseNotice {
@@ -2593,13 +2637,61 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+    static func sanitizedUserCountDiagnostic(_ raw: Any?, action: String) -> String? {
+        let flags = ["topFrame", "urlMatches", "originMatches", "ownerMatches", "expectedCountMatches"]
+        let baseKeys = Set(flags + ["kind", "stage", "action", "entryUserCount", "currentUserCount", "expectedUserCounts"])
+        let gapFlags = ["boundRootPresent", "boundBodyPresent", "boundRootConnected", "boundBodyConnected"]
+        let gapKeys = Set(gapFlags + ["gapDisposition"])
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == baseKeys || Set(value.keys) == baseKeys.union(gapKeys),
+              value["kind"] as? String == "chatgpt_user_count_v1",
+              value["action"] as? String == action, firstUserDiagnosticActions.contains(action),
+              let stage = value["stage"] as? String,
+              ["action_precheck", "repeated_submit", "entry", "preparation_final_read", "outer_final_read"].contains(stage) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_user_count_v1", "stage": stage, "action": action]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for key in ["entryUserCount", "currentUserCount"] {
+            if value[key] is NSNull { safe[key] = NSNull() }
+            else {
+                guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...10_000).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        if value["expectedUserCounts"] is NSNull { safe["expectedUserCounts"] = NSNull() }
+        else {
+            guard let rawCounts = value["expectedUserCounts"] as? [Any], (1...2).contains(rawCounts.count) else { return nil }
+            let counts = rawCounts.compactMap { ComputerToolArgumentContract.exactInt64($0) }
+            guard counts.count == rawCounts.count, Set(counts).count == counts.count,
+                  counts.allSatisfy({ (0...10_000).contains($0) }) else { return nil }
+            safe["expectedUserCounts"] = counts
+        }
+        if value["gapDisposition"] != nil {
+            guard let disposition = value["gapDisposition"] as? String,
+                  ["not_attempted", "not_eligible", "waiting", "returned", "rejected", "expired", "clock_failed"].contains(disposition) else { return nil }
+            for key in gapFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+                safe[key] = flag
+            }
+            guard safe["boundRootConnected"] as? Bool != true || safe["boundRootPresent"] as? Bool == true,
+                  safe["boundBodyConnected"] as? Bool != true || safe["boundBodyPresent"] as? Bool == true else { return nil }
+            safe["gapDisposition"] = disposition
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
         "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
     private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "mutation_scan_overflow",
         "mutation_uninspectable", "product_history_ambiguous", "group_overflow", "work_overflow",
         "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
     private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
-    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts + ["productMutationHistogram"]
+    private static let productMutationFailureKeys = ["productMutationFailureRule", "productMutationFailureNodeKind"]
+    private static let productProofDiagnosticKeys = ["productProofFailure"] + productMutationCounts
+        + ["productMutationHistogram"] + productMutationFailureKeys
     private static let firstUserInitialExpansionFlags = ["initialExpansionSucceeded", "initialExpansionCanonicalMatches",
         "initialExpansionRootSame", "initialExpansionBodySame", "initialExpansionOldRootConnected",
         "initialExpansionOldBodyConnected", "initialExpansionDeadlineLive"]
@@ -2622,7 +2714,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var safe: [String: Any] = [:]
         if value["boundRouteStage"] != nil {
             guard let stage = value["boundRouteStage"] as? String,
-                  ["body_hash", "model_read", "replacement_hash", "other"].contains(stage),
+                  ["body_hash", "model_read", "replacement_hash", "finalization_hash", "other"].contains(stage),
                   let count = value["boundRouteEdges"] as? NSNumber, CFGetTypeID(count) != CFBooleanGetTypeID(),
                   [0.0, 1.0, 2.0].contains(count.doubleValue),
                   let pending = firstUserDiagnosticBool(value["boundRoutePending"]) else { return nil }
@@ -2637,6 +2729,156 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe[key] = label
         }
         return safe
+    }
+
+
+    private static let boundCertificateFlags = ["receiptPresent", "receiptNodesMatch", "receiptRetained",
+        "awaitingNativeRefresh", "refreshClaimed", "expectedModelPresent", "deferModelVerification"]
+    private static let boundCertificateRouteRules: Set<String> = Set([
+        "none", "not_attempted", "return_result", "return_remount", "return_awaiting",
+        "return_unclaimed", "return_grant", "return_receipt", "return_retained", "return_document",
+        "return_owner", "return_root", "return_body", "return_old_root", "return_old_body",
+        "body_count", "body_root_connected", "body_connected", "body_identity", "body_canonical",
+        "candidate_missing", "candidate_current", "bound", "provisional", "initial_route",
+        "pending_private", "recovery_shape", "unconsumed_route", "route_budget", "model_failure",
+        "context_failure", "outcome", "clicked", "deadline_finite", "deadline_expired",
+        "action", "bound_permission", "refresh_permission", "suppressed", "binding_permission",
+        "expansion_permission", "provisional_permission", "frame", "provider", "origin",
+        "document", "owner", "global_owner", "lease_missing", "lease_current",
+        "from_url", "url_unchanged", "state_missing", "state_current", "state_revoked",
+        "state_document", "state_owner", "state_marker", "pending", "last_verified",
+        "record_phase", "record_sequence", "record_document", "record_owner", "receipt_claim",
+        "receipt_identity", "receipt_missing", "receipt_unexpected", "old_root_pin", "old_body_pin",
+        "old_root_connected", "old_body_connected", "new_root_identity", "new_body_identity", "submitted",
+        "submission_count", "prompt", "marker", "expanded_text", "record_canonical",
+        "record_fingerprint", "candidate_fingerprint", "native_fingerprint", "private_fingerprint", "private_marker",
+        "native_marker", "submission_sequence", "submission_marker", "record_marker", "submission_pins",
+        "state_model", "expected_model", "expansion_model", "product", "temporary",
+        "model_pins", "conversation_identity", "conversation_route", "conversation_url"])
+        .union(boundCertificateModelPinRules)
+    private static let boundCertificateModelPinRules: Set<String> = [
+        "model_pin_missing", "model_pin_owner", "model_pin_document", "model_pin_invalidated",
+        "model_selection_missing", "model_selection_key", "model_trigger_identity", "model_trigger_missing", "model_trigger_disabled",
+        "model_duplicate", "model_conflicting", "model_indicator", "model_selection_ambiguous", "model_navigation_ambiguous",
+        "model_header_power", "model_slider_power", "model_checked_family",
+        "model_remount_previous_missing", "model_remount_previous_connected", "model_remount_trigger_count",
+        "model_remount_trigger_missing", "model_remount_trigger_disabled", "model_remount_closed_presentation",
+        "model_remount_header_power", "model_remount_product", "model_remount_temporary", "model_remount_pending_completed",
+        "model_remount_pending_header", "model_remount_pin_changed", "model_remount_pending_replaced"]
+    private static let boundCertificateLabels: [String: Set<String>] = [
+        "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
+        "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
+                 "receipt_body", "receipt_old_root", "receipt_old_body", "rendered", "fingerprint", "route_guard"],
+        "contextFailure": ["not_checked", "none", "frame", "provider", "origin", "owner", "user_count", "submission",
+            "submission_count", "marker", "prompt", "private_pin", "product", "temporary", "root", "body",
+            "conversation_route", "conversation_identity", "url"],
+        "observedError": ["none", "document_changed", "conversation_changed", "first_user_observation_replaced",
+            "model_selection_unverified", "product_mode_unverified", "temporary_mode_unverified", "other"],
+        "phase": ["absent", "prepared", "send_claimed", "verified", "other"]]
+
+    /// Closed finite first-failure facts, never model or ownership authority.
+    static func sanitizedBoundCertificateDiagnostic(_ raw: Any?, provider: Provider) -> [String: Any]? {
+        let ordinaryKeys = Set(boundCertificateFlags + Array(boundCertificateLabels.keys) + ["kind", "routeRule"])
+        guard provider == .chatgpt, let value = raw as? [String: Any],
+              value["kind"] as? String == "chatgpt_bound_certificate_v1",
+              ordinaryKeys.isSubset(of: Set(value.keys)),
+              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState"])),
+              let routeRule = value["routeRule"] as? String, boundCertificateRouteRules.contains(routeRule) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_bound_certificate_v1", "routeRule": routeRule]
+        if let invalidation = value["modelPinInvalidation"] {
+            guard routeRule == "model_pin_invalidated", let projected = sanitizedModelPinInvalidation(invalidation) else { return nil }
+            safe["modelPinInvalidation"] = projected
+        }
+        if let state = value["modelPinState"] {
+            guard boundCertificateModelPinRules.contains(routeRule), let projected = sanitizedModelPinState(state) else { return nil }
+            safe["modelPinState"] = projected
+        }
+        for key in boundCertificateFlags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, labels) in boundCertificateLabels {
+            guard let label = value[key] as? String, labels.contains(label) else { return nil }
+            safe[key] = label
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
+              bytes.count <= 960 else { return nil }
+        return safe
+    }
+
+    private static func sanitizedModelPinState(_ raw: Any) -> [String: Any]? {
+        let flags = ["triggerPresent", "pinHeaderPresent"]
+        let counts = ["triggerCount", "triggerCandidateCount"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + counts) else { return nil }
+        var safe: [String: Any] = [:]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for key in counts {
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                  (0...256).contains(number.doubleValue) else { return nil }
+            safe[key] = number.intValue
+        }
+        return safe
+    }
+
+    private static func sanitizedModelPinInvalidation(_ raw: Any) -> [String: Any]? {
+        let sources: [String: Set<String>] = [
+            "header_replaced": ["header_tracking", "remount_context", "provisional_context", "unknown"],
+            "header_mutation": ["pinned_header", "remount_header", "provisional_header", "unknown"],
+            "semantic_mutation": ["semantic_observer", "deferred_model", "unknown"], "other": ["unknown"]]
+        guard let value = raw as? [String: Any], let reason = value["reason"] as? String,
+              let allowedSources = sources[reason] else { return nil }
+        var safe: [String: Any] = ["reason": reason]
+        if let rawSource = value["source"] {
+            guard let source = rawSource as? String, allowedSources.contains(source) else { return nil }
+            safe["source"] = source
+        }
+        let source = safe["source"] as? String
+        let baseKeys = Set(safe.keys)
+        if Set(value.keys) == baseKeys { return safe }
+        if reason == "header_mutation" {
+            guard Set(value.keys) == baseKeys.union(["stage", "rule"]), let stage = value["stage"] as? String,
+                  ["current", "records", "reconstruction", "character_data", "removed", "added", "child_list"].contains(stage),
+                  let rule = value["rule"] as? String,
+                  ["current_power", "record_limit", "child_nodes_limit", "reconstruction_limit", "ancestry_limit",
+                   "old_text_limit", "new_text_limit", "old_power", "new_power", "node_missing", "node_limit", "depth_limit", "text_limit",
+                   "children_limit", "candidate_limit", "aggregate_limit", "power", "provisional_old", "provisional_current", "provisional_child"].contains(rule) else { return nil }
+            safe["stage"] = stage; safe["rule"] = rule; return safe
+        }
+        if reason == "header_replaced" || reason == "semantic_mutation" && value["stage"] != nil {
+            let rules: [String: Set<String>] = reason == "header_replaced" ? [
+                "header_tracking": ["trigger_identity"], "remount_context": ["previous_connected", "trigger_identity"],
+                "provisional_context": ["pin_current", "pin_owner", "pin_document", "global_owner", "document", "frame", "origin",
+                    "selection_identity", "selection_family", "selection_power", "previous_connected", "header_identity", "trigger_count",
+                    "trigger_identity", "trigger_enabled", "closed_presentation", "header_power", "header_presentation", "duplicate",
+                    "conflicting", "indicator", "selection_ambiguous", "navigation_ambiguous", "slider_power", "checked_family"]]
+                : ["deferred_model": ["header_power", "slider_power", "checked_family"]]
+            guard Set(value.keys) == baseKeys.union(["stage", "rule"]), let stage = value["stage"] as? String,
+                  let rule = value["rule"] as? String, rules[stage]?.contains(rule) == true,
+                  source == nil || source == "unknown" || source == stage else { return nil }
+            safe["stage"] = stage; safe["rule"] = rule; return safe
+        }
+        let flags = ["nodeConnected", "attributePresent", "currentMatches", "oldMatches"]
+        guard reason == "semantic_mutation", Set(value.keys) == baseKeys.union(flags + ["attribute"]),
+              source == nil || source == "unknown" || source == "semantic_observer",
+              let attribute = value["attribute"] as? String, ["aria-valuenow", "aria-checked"].contains(attribute) else { return nil }
+        safe["attribute"] = attribute
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        return safe
+    }
+
+    /// Remove even malformed/foreign diagnostics before observation processing.
+    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+        let raw = observed.removeValue(forKey: "boundCertificateDiagnostic")
+        guard let safe = sanitizedBoundCertificateDiagnostic(raw, provider: provider),
+              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys) else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     // A certified route transition discards the adapter result before ordinary
@@ -2656,6 +2898,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if var recovery = sanitizedRecoveryLifecycle(value["recoveryLifecycleDiagnostic"]) {
             recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
             records.append(recovery)
+        }
+        if let certificate = sanitizedBoundCertificateDiagnostic(value["boundCertificateDiagnostic"], provider: provider) {
+            records.append(certificate)
         }
         if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
            let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
@@ -2749,6 +2994,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard safe["productProofFailure"] != nil, productMutationCounts.allSatisfy({ safe[$0] != nil }),
                   let histogram = sanitizedProductMutationHistogram(rawHistogram) else { return nil }
             safe["productMutationHistogram"] = histogram
+        }
+        if productMutationFailureKeys.contains(where: { value[$0] != nil }) {
+            guard safe["productProofFailure"] as? String == "mutation_uninspectable",
+                  productMutationCounts.allSatisfy({ safe[$0] != nil }),
+                  let rule = value["productMutationFailureRule"] as? String,
+                  ["record_shape", "node_shape", "children_shape", "ancestry_cycle", "label_bounds", "read_exception"].contains(rule),
+                  let nodeKind = value["productMutationFailureNodeKind"] as? String,
+                  ["element", "text", "comment", "document", "fragment", "other", "missing"].contains(nodeKind) else { return nil }
+            safe["productMutationFailureRule"] = rule
+            safe["productMutationFailureNodeKind"] = nodeKind
         }
         return safe
     }
@@ -3359,6 +3614,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
         let firstFailure = session.terminalFailure == nil
         let recorded = recordedWebsiteBlocker(failure, session: session)
+        if failure == .humanVerificationRequired(.gemini) {
+            browser.captureGeminiCAPTCHA(tabID: session.tabID, view: session.view, trigger: .transport)
+        }
         if action == "inspect", phase == "before", failure == .humanVerificationRequired(.gemini) {
             enrollGeminiPostBlockDiagnostic(session, firstFailure: firstFailure)
         }
@@ -4077,8 +4335,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     result.setTimeout(timeout)
                     guard result.isPending else { return }
+                    var pageInput = input
+                    if provider == .chatgpt, action == "inspect" {
+                        // A negative-only wall-clock fence for an adapter wait.
+                        // Sample wall time first and round down so dispatch
+                        // overhead cannot extend the existing native deadline.
+                        // ContinuousClock timeout/cancellation remain authoritative.
+                        let epochMilliseconds = Date().timeIntervalSince1970 * 1_000
+                        let remaining = (evaluationDeadline - .now).components
+                        let remainingMilliseconds = max(0, min(30_000,
+                            Double(remaining.seconds) * 1_000 + Double(remaining.attoseconds) / 1e15))
+                        pageInput["evaluationDeadlineEpochMilliseconds"] = Int64((epochMilliseconds + remainingMilliseconds).rounded(.down))
+                    }
                     session.providerAdapterEverDispatched = true
-                    session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
+                    session.view.callAsyncJavaScript(script, arguments: ["input": pageInput], in: nil, in: world) { reply in
                         switch reply {
                         case .success(let value):
                             do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
@@ -4204,6 +4474,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        if let certificate = Self.removeBoundCertificateDiagnostic(from: &observed, provider: provider) {
+            // This existing finite diagnostic channel also covers later spent
+            // reads and cleanup. The record cannot enter response validation.
+            Self.inspectionLog.error("firstUserRecoveryLifecycle sequence=\(session.sequence) \(certificate, privacy: .public)")
+            #if DEBUG
+            boundCertificateDiagnosticsObserverForTesting?(certificate)
+            #endif
+        }
         let rendererWork = observed.removeValue(forKey: "rendererWorkDiagnostic")
         if let rendererWorkExpiry, Date().timeIntervalSince1970 < rendererWorkExpiry {
             session.rendererWorkDiagnostic = Self.sanitizedRendererWorkDiagnostic(rendererWork).map {
@@ -4213,6 +4491,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Strip this content-free diagnostic before any observation can contribute
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
+        let userCountDiagnostic = Self.sanitizedUserCountDiagnostic(observed.removeValue(forKey: "userCountDiagnostic"), action: action)
         if provider == .chatgpt, action == "inspect" {
             session.completionMatchDiagnostic = completionDiagnostic
         }
@@ -4265,7 +4544,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch error {
             case "product_mode_unverified": throw Failure.productModeUnverified
             case "model_unverified": throw Failure.modelUnverified
-            case "model_mismatch": throw Failure.modelMismatch
+            case "model_mismatch":
+                logModelMismatch(observed, session: session, action: action, stage: "adapter_error")
+                throw Failure.modelMismatch
             case "model_unavailable": throw Failure.modelUnavailable
             case "acknowledged_user_append":
                 // A read-only picker observation can cross the DOM append for
@@ -4327,6 +4608,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
+                if provider == .chatgpt, observed["detail"] as? String == "user_count", let userCountDiagnostic {
+                    #if DEBUG
+                    userCountDiagnosticObserverForTesting?(userCountDiagnostic)
+                    #endif
+                    Self.inspectionLog.error("userCountDiagnostic provider=chatgpt action=\(action, privacy: .public) sequence=\(session.sequence) \(userCountDiagnostic, privacy: .public)")
+                }
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
                     // Freeze only the original returned read after the existing
                     // callback ownership/generation/route checks, before throw.
@@ -4357,7 +4644,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
             case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
-            case "website_verification_required": throw recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
+            case "website_verification_required":
+                let failure = recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
+                if provider == .gemini {
+                    browser.captureGeminiCAPTCHA(tabID: session.tabID, view: session.view, trigger: .transport)
+                }
+                throw failure
             case "website_usage_limit":
                 if action == "inspect", session.state == "loading", session.documentGeneration == nil,
                    session.sequence == 0, session.confirmedUsers == 0,
@@ -4747,6 +5039,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                               preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
                                               preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                                               maximumWait: Duration) async throws {
+        #if DEBUG
+        modelValidationObserverForTesting?(.init(action: .init(rawValue: action) ?? .other,
+            enforceModel: enforceModel, allowPending: allowPendingChatGPTModelVerification, recheck: recheck,
+            pending: observed["modelVerificationPending"] as? Bool == true, evidencePresent: observed["modelEvidence"] != nil))
+        #endif
         if observed["modelVerificationPending"] != nil {
             guard observed["modelVerificationPending"] as? Bool == true,
                   allowPendingChatGPTModelVerification, session.provider == .chatgpt,
@@ -4761,7 +5058,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return
         }
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
-            let evidence = try validatedModelEvidence(observed, session: session)
+            let evidence = try validatedModelEvidence(observed, session: session, action: action)
             // A native await can cross a model change without navigation. Read
             // the fixed proof again, rather than accepting the earlier result.
             if recheck, action != "verifyModel" {
@@ -4769,34 +5066,88 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // acknowledges it. Only inspect may bind that exact lineage;
                 // a fresh model-only read cannot acquire an unbound message.
                 let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyModel"
+                // This branch requires fresh positive evidence below; a deferred
+                // continuity read cannot satisfy that contract. The ordinary
+                // pending branch above remains available for running responses.
                 let fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
                                            refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
                                            recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                           allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                           allowPendingChatGPTModelVerification: false,
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)
-                let currentEvidence = try validatedModelEvidence(fresh, session: session)
-                guard evidence.isSameResolvedSelection(as: currentEvidence) else { throw Failure.modelMismatch }
+                let currentEvidence = try validatedModelEvidence(fresh, session: session, action: freshAction)
+                guard evidence.isSameResolvedSelection(as: currentEvidence) else {
+                    logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
+                    throw Failure.modelMismatch
+                }
             }
             session.modelEvidence = evidence
         }
     }
 
-    private func validatedModelEvidence(_ observation: [String: Any], session: Session) throws -> WebsiteModelEvidence {
+    private func validatedModelEvidence(_ observation: [String: Any], session: Session, action: String = "other") throws -> WebsiteModelEvidence {
         let current: WebsiteModelEvidence
         do { current = try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
-        catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
+        catch WebsiteModelEvidence.Failure.mismatch {
+            logModelMismatch(observation, session: session, action: action, stage: "evidence_validation")
+            throw Failure.modelMismatch
+        }
         catch { throw Failure.modelUnverified }
-        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else { throw Failure.modelMismatch }
+        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
+            logModelMismatch(observation, session: session, action: action, stage: "pinned_selection")
+            throw Failure.modelMismatch
+        }
         return current
+    }
+
+    /// Diagnostic-only projection. Unknown strings never become log content;
+    /// these fields cannot supply model evidence or alter the rejection path.
+    static func sanitizedGeminiModelMismatchDiagnostic(stage: String, action: String, sequence: Int,
+                                                       expected: Any?, pinned: Any?, observed: Any?) -> [String: Any]? {
+        guard ["adapter_error", "evidence_validation", "pinned_selection", "after_await"].contains(stage),
+              (0...1_000).contains(sequence) else { return nil }
+        func identity(_ raw: Any?) -> [String: String]? {
+            guard let value = raw as? [String: Any], Set(value.keys) == ["key", "label"],
+                  let key = value["key"] as? String, let label = value["label"] as? String,
+                  key == label, key.utf8.count <= 120,
+                  key.range(of: #"^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$"#, options: .regularExpression) != nil,
+                  WebsiteModelChoice(provider: "gemini", key: key, label: label).isValid else { return nil }
+            return ["key": key, "label": label]
+        }
+        let value = observed as? [String: Any]
+        let rawSelected = value?["selected"]
+        let rawResponse = value?["response"] as? [String: Any]
+        let responseIdentity = rawResponse.map { ["key": $0["key"] ?? NSNull(), "label": $0["label"] ?? NSNull()] }
+        let actions = ["inspect", "verifyModel", "selectModel", "discoverModels", "enableTemporary", "prepare", "insert", "sendReady", "submit", "stop", "cleanup"]
+        let result: [String: Any] = [
+            "kind": "gemini_model_mismatch", "stage": stage, "action": actions.contains(action) ? action : "other",
+            "sequence": sequence, "expectedPresent": expected != nil, "pinnedPresent": pinned != nil,
+            "evidencePresent": observed != nil, "selectedPresent": rawSelected != nil,
+            "responsePresent": value?["response"] != nil,
+            "expected": identity(expected) as Any? ?? NSNull(), "pinned": identity(pinned) as Any? ?? NSNull(),
+            "observedSelected": identity(rawSelected) as Any? ?? NSNull(),
+            "observedResponse": identity(responseIdentity) as Any? ?? NSNull(),
+        ]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: result), bytes.count <= 2_048 else { return nil }
+        return result
+    }
+
+    private func logModelMismatch(_ observation: [String: Any], session: Session, action: String, stage: String) {
+        guard session.provider == .gemini, !session.loggedModelMismatch else { return }
+        let expected = session.modelChoice.map { ["key": $0.key, "label": $0.label] }
+        let pinned = session.modelEvidence.map { ["key": $0.selected.key, "label": $0.selected.label] }
+        guard let diagnostic = Self.sanitizedGeminiModelMismatchDiagnostic(stage: stage, action: action,
+            sequence: session.sequence, expected: expected, pinned: pinned, observed: observation["modelEvidence"]) else { return }
+        session.loggedModelMismatch = true
+        logModelDiagnostic(["modelDiagnostic": diagnostic], session: session)
     }
 
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
         let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
                                      "proofPresent", "proofInvalidated", "chatClickClaimed"]
-        let optional = Set(productProofDiagnosticKeys)
+        let optional = Set(productProofDiagnosticKeys).union(["markerDiagnostic"])
         guard let value = raw as? [String: Any],
               required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
@@ -4810,6 +5161,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var safe: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": count.intValue]
         for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
             guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
+        }
+        if let rawMarker = value["markerDiagnostic"] {
+            guard let marker = rawMarker as? [String: Any],
+                  Set(marker.keys) == ["version", "activeForms", "candidateOverflow", "recognized", "enabled", "proofSource"],
+                  let version = marker["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+                  version.doubleValue == 1,
+                  let active = marker["activeForms"] as? NSNumber, CFGetTypeID(active) != CFBooleanGetTypeID(),
+                  (0...16).contains(active.intValue), active.doubleValue == Double(active.intValue) else { return nil }
+            var projected: [String: Any] = ["version": 1, "activeForms": active.intValue]
+            for key in ["candidateOverflow", "recognized", "enabled"] {
+                guard let flag = boolean(marker[key]) else { return nil }; projected[key] = flag
+            }
+            if marker["proofSource"] is NSNull { projected["proofSource"] = NSNull() }
+            else {
+                guard let source = marker["proofSource"] as? String,
+                      WebsiteProductModeEvidence.Source(rawValue: source) != nil else { return nil }
+                projected["proofSource"] = source
+            }
+            safe["markerDiagnostic"] = projected
         }
         guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
         safe.merge(productDiagnostic) { _, projected in projected }
@@ -4858,7 +5228,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
-        guard session.provider == .chatgpt else { return await performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }
+        // Cleanup must finish its own fresh ownership proof even when its
+        // caller is cancelled. Share one bounded cleanup task and receipt for
+        // every provider; performFinish retains all provider ownership checks.
         if let task = finishingTasks[session.token] { return await task.value }
         if let closed = closedSessions[session.token] { return closed.receipt }
         let work = Task { @MainActor in await self.performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }

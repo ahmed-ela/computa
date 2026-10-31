@@ -3108,6 +3108,118 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           noSelection(f, picker);
         }
       });
+      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant') => {
+        const { f, picker } = setup(false, { closedCompositeHeader: composite, resetToPowerOnClose: true });
+        picker.selected('Instant'); await f.run('inspect');
+        const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+        if (attribute === 'property') picker.trigger.disabled = true;
+        else picker.trigger.values[attribute] = attribute === 'aria-disabled' ? 'true' : '';
+        picker.trigger.values['data-state'] = 'closed';
+        const clocks: { milliseconds: number; expire: () => void }[] = [];
+        let registered!: () => void;
+        const registration = new Promise<void>(resolve => { registered = resolve; });
+        f.window.webkit.messageHandlers.computaModelClock = { postMessage: (body: any) => new Promise(resolve => {
+          clocks.push({ milliseconds: body.milliseconds, expire: () => resolve(true) }); registered();
+        }) };
+        const pending = f.run('selectModel', { modelChoice: choice(requested),
+          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+        await Promise.race([registration, pending.then((result: any) => {
+          throw new Error('Disabled initial picker returned before readiness wait: ' + result.error);
+        })]);
+        expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1_800);
+        const wake = (records?: any[]) => { for (const observer of [...f.observers]) observer.callback(records || [
+          { type: 'attributes', target: picker.trigger, attributeName: 'disabled', oldValue: '' }]); };
+        const enable = () => { picker.trigger.disabled = false; delete picker.trigger.values.disabled; delete picker.trigger.values['aria-disabled']; wake(); };
+        return { f, picker, form, clocks, pending, wake, enable };
+      };
+      test('disabled initial picker waits without input then proves Instant from the complete current picker', async () => {
+        for (const composite of [false, true]) for (const attribute of ['disabled', 'aria-disabled', 'property']) {
+          const x = await pendingDisabledHeader(composite, attribute); x.enable();
+          const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Instant'));
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedDisabled: true, outcome: 'recognized', reason: null });
+          expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+        }
+      });
+
+      test('disabled initial picker enables before the existing mutable power selection can run', async () => {
+        const x = await pendingDisabledHeader(true, 'property', 'High');
+        expect(arrows(x.picker)).toHaveLength(0); x.enable();
+        const result = await x.pending;
+        expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('High'));
+        expect(result.modelEvidence.chatSelection.power.key).toBe('high');
+        expect(arrows(x.picker)).toHaveLength(2);
+        expect(x.picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+        expect(x.f.composer.textContent).toBe(''); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+      });
+      test('disabled initial picker timeout has zero effects and cannot start another selection clock', async () => {
+        const x = await pendingDisabledHeader(); x.f.advanceTime(1_801); x.clocks[0].expire();
+        const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedDisabled: true, outcome: 'rejected', reason: 'deadline' });
+        x.enable();
+        expect((await x.f.run('selectModel', { modelChoice: choice('Instant') })).error).toBe('model_unverified');
+        expect(x.clocks).toHaveLength(1); expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+      });
+      test('disabled initial picker enabling late spends the remaining original proof deadline', async () => {
+        const x = await pendingDisabledHeader(); x.f.advanceTime(1_700); x.picker.trigger.onClick = () => {};
+        x.enable(); await microtasks();
+        expect(x.clocks).toHaveLength(2); expect(x.clocks[1].milliseconds).toBeLessThanOrEqual(100);
+        x.f.advanceTime(101); x.clocks[1].expire();
+        const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+      });
+      test('disabled initial picker wake rejects changed page header trigger form and attempt state', async () => {
+        for (const condition of ['unknown', 'power', 'replacement', 'owner', 'route', 'origin', 'frame', 'form',
+          'hidden', 'inert', 'label', 'popup', 'duplicate', 'open', 'pin', 'action', 'work']) {
+          const x = await pendingDisabledHeader();
+          if (condition === 'unknown') x.picker.primary.text = 'PRIVATE_UNKNOWN_HEADER';
+          if (condition === 'power') x.picker.selected('High');
+          if (condition === 'replacement') x.picker.replaceTrigger();
+          if (condition === 'owner') x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER';
+          if (condition === 'route') x.f.document.URL = 'https://chatgpt.com/c/unowned';
+          if (condition === 'origin') x.f.location.origin = 'https://example.invalid';
+          if (condition === 'frame') x.f.window.top = {};
+          if (condition === 'form') { const other = new Node('FORM'); other.append(x.picker.trigger); x.f.body.append(other); }
+          if (condition === 'hidden') x.picker.trigger.values.hidden = '';
+          if (condition === 'inert') x.picker.trigger.values.inert = '';
+          if (condition === 'label') x.picker.trigger.values['aria-label'] = 'Unknown picker';
+          if (condition === 'popup') x.picker.trigger.values['aria-haspopup'] = 'listbox';
+          if (condition === 'duplicate') x.f.body.append(new Node('BUTTON', { ...x.picker.trigger.values }));
+          if (condition === 'open') x.picker.trigger.values['aria-expanded'] = 'true';
+          if (condition === 'pin') x.f.world.__computaChatPresetPin = {};
+          if (condition === 'action') x.f.world.__computaModelSelection.powerEvents = 1;
+          if (condition === 'work') { x.f.workMode.values['aria-pressed'] = 'true'; x.f.chatMode.values['aria-pressed'] = 'false'; }
+          x.wake(); x.picker.primary.text = 'Thinking effort\n\nInstant'; x.enable();
+          const result = await x.pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+      });
+      test('disabled readiness never applies to unknown generic discovery readonly or retained selections', async () => {
+        for (const condition of ['unknown', 'generic', 'discovery', 'readonly', 'retained']) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
+          if (condition === 'retained') expect((await f.run('selectModel', { modelChoice: choice('Instant') })).selected).toBe(true);
+          const opens = picker.trigger.clicks;
+          if (condition === 'unknown') picker.primary.text = 'PRIVATE_UNKNOWN_HEADER';
+          if (condition === 'generic') picker.primary.text = 'Thinking effort';
+          picker.trigger.disabled = true;
+          let clocks = 0;
+          f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run(condition === 'discovery' ? 'discoverModels' : condition === 'readonly' ? 'verifyModel' : 'selectModel',
+            { modelChoice: choice('Instant'), ...(condition === 'readonly' ? { expectedModelChoice: choice('Instant') } : {}),
+              operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic?.chatHeader?.readiness).toBeUndefined();
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+      });
+
       const pendingEmptyHeader = async (generic = false) => {
         const { f, picker } = setup(false, { closedGenericHeader: generic, resetToPowerOnClose: true });
         picker.selected('Instant'); picker.primary.text = '';

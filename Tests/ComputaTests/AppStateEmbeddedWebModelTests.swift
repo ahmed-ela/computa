@@ -297,6 +297,115 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         XCTAssertTrue(browser.savedHumanVerificationProviders.isEmpty)
     }
 
+    func testSuccessfulHumanRecoverySatisfiesQueuedScopedManualRefreshWithoutAnotherDiscovery() async throws {
+        try await assertSuccessfulRecoverySatisfiesQueuedManualRefresh(allProviders: false)
+    }
+
+    func testSuccessfulHumanRecoverySatisfiesOnlyItsProviderInQueuedGlobalManualRefresh() async throws {
+        try await assertSuccessfulRecoverySatisfiesQueuedManualRefresh(allProviders: true)
+    }
+
+    private func assertSuccessfulRecoverySatisfiesQueuedManualRefresh(allProviders: Bool) async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        browser.recordHumanVerificationRequired(provider: "gemini")
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        var held: CheckedContinuation<[WebsiteModelChoice], Error>?
+        var reads: [String] = []
+        let automaticChoice = WebsiteModelChoice(provider: "gemini", key: "automatic-fixture", label: "Automatic Gemini choice")
+        let manualChoice = WebsiteModelChoice(provider: "gemini", key: "manual-fixture", label: "Manual Gemini choice")
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { provider in
+                reads.append(provider)
+                if provider == "gemini" {
+                    if reads.filter({ $0 == "gemini" }).count == 1 {
+                        return try await withCheckedThrowingContinuation { held = $0 }
+                    }
+                    return [manualChoice]
+                }
+                return Self.choices(provider)
+            })
+        state.refreshWebsiteModelsIfNeeded()
+        let (humanID, _) = try await healthyHumanPage(browser)
+        try await waitUntil { held != nil }
+        let manual = Task {
+            if allProviders { await state.refreshWebsiteModels() }
+            else { await state.refreshWebsiteModels(provider: "gemini") }
+        }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == (allProviders ? 3 : 1) }
+        // Model production discovery's successful cleanup/checkpoint clearance.
+        // This fixture does not grant that authority to injected catalog data.
+        browser.clearHumanVerificationRequired(provider: "gemini")
+        held?.resume(returning: [automaticChoice]); held = nil
+        await manual.value
+        XCTAssertEqual(reads, allProviders ? ["gemini", "chatgpt", "claude"] : ["gemini"],
+                       "An equivalent completed recovery must satisfy the pending same-provider refresh")
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [automaticChoice])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+        XCTAssertNil(state.websiteModelsError)
+        XCTAssertFalse(state.websiteModelsRefreshing)
+        XCTAssertNil(browser.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertEqual(browser.humanVerificationRecoveryReports["gemini"]?.phase, .verified)
+        XCTAssertEqual(browser.tabs.map(\.id), [humanID])
+        XCTAssertEqual(runtime.submissions, 0)
+
+        await state.refreshWebsiteModels(provider: "gemini")
+        XCTAssertEqual(reads.filter { $0 == "gemini" }.count, 2,
+                       "A later explicit refresh is a new request, not a cached recovery result")
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [manualChoice])
+    }
+
+    func testFailedOrChangedHumanRecoveryCannotConsumeQueuedManualRefresh() async throws {
+        for fault in ["discovery", "cleanup", "catalog", "checkpoint", "closed", "toolMutation"] {
+            let browser = EmbeddedBrowserSession(persistent: false)
+            defer { browser.shutdown() }
+            browser.recordHumanVerificationRequired(provider: "gemini")
+            let preferences = isolatedTestPreferences()
+            WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+            let runtime = EmbeddedConfigurationRuntime(browser: browser)
+            var held: CheckedContinuation<[WebsiteModelChoice], Error>?
+            var reads = 0
+            let manualChoice = WebsiteModelChoice(provider: "gemini", key: "manual-fixture", label: "Manual Gemini choice")
+            let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
+                websiteModelDiscovery: { provider in
+                    XCTAssertEqual(provider, "gemini")
+                    reads += 1
+                    if reads == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
+                    return [manualChoice]
+                })
+            state.refreshWebsiteModelsIfNeeded()
+            let (humanID, _) = try await healthyHumanPage(browser)
+            try await waitUntil { held != nil }
+            let manual = Task { await state.refreshWebsiteModels(provider: "gemini") }
+            try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == 1 }
+            if fault == "discovery" || fault == "cleanup" {
+                held?.resume(throwing: fault == "cleanup"
+                    ? EmbeddedWebModelTransport.Failure.discoveryCleanupFailed
+                    : EmbeddedWebModelTransport.Failure.modelUnverified)
+            } else {
+                browser.clearHumanVerificationRequired(provider: "gemini")
+                if fault == "checkpoint" { browser.recordHumanVerificationRequired(provider: "gemini") }
+                if fault == "closed" { browser.closeTab(humanID) }
+                if fault == "toolMutation" {
+                    _ = try browser.prepareToolMutation(tabID: humanID,
+                        generation: XCTUnwrap(browser.documentGeneration(for: humanID)))
+                }
+                held?.resume(returning: fault == "catalog" ? [] : Self.choices("gemini"))
+            }
+            held = nil
+            await manual.value
+            XCTAssertEqual(reads, 2, "The manual request must survive \(fault)")
+            XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [manualChoice])
+            XCTAssertEqual(runtime.submissions, 0)
+            XCTAssertTrue(state.websiteModelRefreshIntentsForTesting.isEmpty)
+            if ["discovery", "cleanup", "checkpoint"].contains(fault) {
+                XCTAssertNotNil(browser.savedHumanVerificationCheckpointIDs["gemini"])
+            }
+        }
+    }
+
     func testExplicitManualRefreshSurvivesARevokedPausedAutomaticRecovery() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

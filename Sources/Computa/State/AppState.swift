@@ -318,6 +318,11 @@ final class AppState {
         await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
     }
 
+    func refreshWebsiteModels(provider: String) async {
+        guard WebsiteModelCatalog.providers.contains(provider), canRefreshWebsiteModels else { return }
+        await refreshWebsiteModels(providers: [provider], retryBlocked: true)
+    }
+
     private var humanWebsiteRecoveryIsIdle: Bool {
         !cookieMaintenanceOnlyLaunch && !isShuttingDown && !approvalGateBlocksInteraction && activeTurnTaskIDs.isEmpty
             && !tasks.contains(where: { $0.status == .running })
@@ -447,6 +452,15 @@ final class AppState {
                     self.retireWebsiteModelSelections()
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .verified, reason: .healthyHumanDocument)
+                        // A verified recovery can satisfy an overlapping manual
+                        // refresh without creating another provider page. Keep
+                        // the request if its human source or idle state changed.
+                        if intent.retryBlocked, self.canRefreshWebsiteModels,
+                           self.browserSession.isHumanVerificationRecoverySourceCurrentAfterDiscovery(candidate) {
+                            self.websiteModelRefreshIntents.removeAll {
+                                $0.provider == provider && $0.retryBlocked && $0.candidate == nil
+                            }
+                        }
                     }
                 } catch is CancellationError {
                     if let candidate = intent.candidate {
@@ -1213,6 +1227,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        browserSession.observeGeminiCookieShutdownRequested()
         queuedDispatchProfiles.removeAll()
         updateWebsitePrewarming()
         websiteModelRefreshTask?.cancel()
