@@ -43,8 +43,11 @@ function fixture() {
           expect(verified).toBe(true);
           expect(command.slice(0, 6)).toEqual(["gh", "api", "--method", "PATCH", `repos/${repo}/releases/123`, "--input"]);
           const update = JSON.parse(await readFile(command[6], "utf8"));
-          expect(Object.keys(update).sort()).toEqual(["body", "draft", "make_latest", "prerelease"]);
-          expect(update).toMatchObject({ draft: false, prerelease: true, make_latest: "false" });
+          expect(Object.keys(update).sort()).toEqual(["body", "draft", "make_latest", "prerelease", "tag_name"]);
+          expect(update).toMatchObject({ tag_name: tag, draft: false, prerelease: true, make_latest: "false" });
+          // Model the observed draft metadata update: an omitted tag may
+          // expose GitHub's internal placeholder instead of retaining it.
+          release.tag_name = update.tag_name ?? "untagged-fixture";
           release.body = update.body;
           release.draft = update.draft; release.prerelease = update.prerelease;
           if (failure === "postcondition") release.prerelease = false;
