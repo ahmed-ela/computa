@@ -209,6 +209,50 @@ harness. Its one test tab was closed, no prior task was replayed, and the old
 cleanup warning remains unconfirmed. Build347 still requires installation and
 fresh per-model harness qualification before it can be called reliable.
 
+Build347 was then Developer ID signed and installed from source
+`ea8d3a84b0b968ed840cea423cd33e5930240727`. The signed main and runtime's code/data
+matched the original build; only signature-related fields and runtime integrity
+metadata changed. The installed main and all resources matched the signed receipt.
+
+| Build347 fresh marker | Result | Native duration |
+| --- | --- | --- |
+| Sonnet 5 | Accepted refusal of the relay instructions; expected marker absent | 7.225 s |
+| Haiku 5.5 | Exact marker, model/ownership and closed cleanup verified | 4.375 s |
+| Sonnet 5.5 | Exact marker, model/ownership and closed cleanup verified | 7.830 s |
+| Sonnet 4.6 | Exact marker, model/ownership and closed cleanup verified | 5.679 s |
+
+All four were single-dispatch, zero-tool tasks with completed website responses
+and closed cleanup. Sonnet 5's transport completed correctly, but its marker test
+failed. It explicitly rejected the claimed Computa identity and tool relay. The
+literal-request presentation alone therefore did not solve that model's behavior.
+Unused exact-task diagnostics were archived and disarmed; no failed task was replayed.
+These marker results do not qualify browser, terminal or file-edit workflows.
+
+## Candidate 348: remove residual identity reassignment
+
+The review found two app-owned templates still beginning "You are Computa":
+the runtime's base instructions, sent through website thread/start and resume,
+and the model catalog's fallback instruction template. The earlier outer/developer
+wording changes had not changed those sources. This is a confirmed instruction
+contradiction; whether correcting it resolves Sonnet 5's refusal requires a fresh test.
+
+Both templates now describe Computa as the local host application, retain the
+provider's identity and governing rules, and distinguish proposed host work from
+execution proved by matching host outputs. The base instruction suffix is unchanged
+and the full base remains within its existing 1,024-byte limit at 988 bytes.
+No user/history payload, tool schema, permission, parsing, retry or ownership rule
+changes. Validation and installed live qualification of this candidate remain pending.
+
+Seven targeted native tests then passed, covering the real website thread/start
+contract across providers and access modes, catalog capabilities, the base-size
+limit, evidence instructions and native bridge compatibility. The initial routing
+run and a diagnostic rerun failed before thread/start because local test-only Bun
+discovery resolved the installed executable to `bun.exe`, not the required `bun`.
+A byte-verified private copy supplied through `MACTOPUS_TEST_BUN` resolved that
+fixture dependency; the original failed logs remain retained. Production interpreter
+discovery, permissions and assertions were not relaxed. Live build348 qualification
+still remains pending.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and

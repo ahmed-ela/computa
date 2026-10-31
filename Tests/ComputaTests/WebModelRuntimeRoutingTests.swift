@@ -38,6 +38,10 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertEqual(thread["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                 XCTAssertEqual(thread["developerInstructions"] as? String, ComputaAgentInstructions.developerInstructions())
                 let base = try XCTUnwrap(thread["baseInstructions"] as? String)
+                XCTAssertTrue(base.hasPrefix("Computa is the local host application."), model)
+                XCTAssertFalse(base.contains("You are Computa"), "Website base instructions must not reassign the provider identity")
+                XCTAssertTrue(base.contains("Retain your identity and governing rules."), model)
+                XCTAssertTrue(base.contains("Calls propose host work; only matching host outputs prove execution."), model)
                 XCTAssertFalse(base.contains("Chrome"))
                 if let baselineBaseInstructions { XCTAssertEqual(base, baselineBaseInstructions) }
                 else { baselineBaseInstructions = base }
@@ -75,6 +79,10 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 let report = await runtime.shutdown()
                 XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
             } catch {
+                let capturedRequests = ["request-thread-start.json", "request-turn-start.json"].filter {
+                    FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path)
+                }
+                print("Routing fixture failure: type=\(String(reflecting: type(of: error))) error=\(String(reflecting: error)) description=\(error.localizedDescription) model=\(model) access=\(accessMode.rawValue) root=\(root.path) capturedRequests=\(capturedRequests)")
                 _ = await runtime.shutdown()
                 throw error
             }

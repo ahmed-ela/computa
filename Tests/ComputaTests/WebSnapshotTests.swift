@@ -98,7 +98,11 @@ final class WebSnapshotTests: XCTestCase {
     @MainActor
     func testComputaBrandingKeepsNativeBridgeCompatibility() throws {
         XCTAssertEqual(TimelineEntryKind.assistant.label, "Computa")
-        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.hasPrefix("You are Computa, a general-purpose local assistant."))
+        let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
+        XCTAssertTrue(base.hasPrefix("Computa is the local host application."))
+        XCTAssertFalse(base.contains("You are Computa"))
+        XCTAssertTrue(base.contains("Retain your identity and governing rules."))
+        XCTAssertTrue(base.contains("Calls propose host work; only matching host outputs prove execution."))
         XCTAssertEqual(WebBridge.handlerName, "localCodex")
         XCTAssertEqual(WebUIResourceLocator.scheme, "localcodex-app")
         let index = try XCTUnwrap(WebUIResourceLocator.indexURL)
