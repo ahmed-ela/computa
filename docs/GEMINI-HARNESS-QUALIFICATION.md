@@ -6,18 +6,23 @@ one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
 Current status (October 31): build332, source `05d364f`, is installed and audited.
-CAPTCHA investigation takes priority over all-model qualification. The latest
-fresh 3.1 Pro marker passed in 9.101 seconds. After an ordinary same-build restart,
-the next owned task failed in 1.124 seconds before selection or submission. The
-working Inspector sequence then captured a normal human navigation returning a
-302 redirect to Google's 429 challenge. Both responses had current Dates and
-no-store headers. One approved navigation with Disable Caches visually checked
-also received a newly dated 302/429. This argues against a simple stale local
-redirect, but does not identify Google's trigger. The initial redirected
-request's refined Cookie header remains unavailable. Cookie totals immediately
-before shutdown matched those at restart; a preceding one-cookie count reduction
-had already occurred before exit. No browser-version cause or CAPTCHA-prevention
-fix has been established. All temporary developer/cache settings were restored.
+CAPTCHA investigation takes priority over all-model qualification. After one
+specifically approved CAPTCHA completion, the direct website marker passed;
+another direct marker passed after restart, followed by an owned 3.1 Pro marker
+after a second restart. The owned task completed in 11.158 seconds with one
+verified submission, exact answer, zero tools and confirmed cleanup. A future
+exemption-cookie candidate remained present at both startups. This is bounded
+recovery evidence on the unchanged build, not a CAPTCHA-prevention fix.
+
+The preceding failure capture remains relevant: normal human navigation returned
+a 302 redirect to Google's 429 challenge with current Dates and no-store headers.
+One navigation with Disable Caches visually checked also received a newly dated
+302/429. This argues against a simple stale local redirect. Initial
+redirected-request cookie metrics remain unavailable, and earlier count changes
+did not demonstrate restart loss.
+No browser-version, hidden-session or prompt-interaction trigger has been
+established. Developer/cache settings are restored, and the latest comparison
+kept Inspector off and default cache behavior throughout.
 Earlier staged/installed statements below describe historical evidence, not the
 current installation.
 
@@ -1065,3 +1070,72 @@ Evidence: `captcha332-lifecycle/inspector-loaded-recovery-oct31.json`,
 `response332-controlled-restart-d.json` and matching cookie receipts, including
 `cookie-timeline332-pre-restart-d-shutdown.json`. All paths are relative to the
 local qualification evidence root, with lifecycle records under its named folder.
+
+### October 31: approved recovery passes foreground and owned restart comparison
+
+The user approved completion of the challenge currently displayed in the human
+Gemini test tab, followed by the prepared bounded comparison. The checkbox
+cleared without an image-selection step. Native callbacks captured human Gemini
+HTTP 200 at 09:15:29 UTC and a separate model-role HTTP 200 at 09:15:31 UTC,
+followed by model closure. The latter is consistent with the separately counted
+automatic recovery catalog probe; it preceded the direct prompt. Thus the
+baseline's request history was not exclusively foreground navigation.
+
+Cookie callbacks now contained one future exemption candidate with over one hour
+remaining, applicable in each of the seven fixed scopes. Earlier C/D runs had
+zero exemption candidates. Completing the challenge changed provider/browser
+state, so this is a new baseline rather than an isolated change to interaction
+style. The scopes overlap and do not imply seven distinct cookies.
+
+| Case | Path | Startup to first Gemini action | Verified result |
+| --- | --- | --- | --- |
+| E | Direct website after approved recovery | Existing process | UI-selected 3.1 Pro, exact marker, one submission |
+| F | Direct website after ordinary restart | 125.331 seconds to navigation | Human HTTP 200, UI-selected 3.1 Pro, exact marker, one submission |
+| G | Owned task after second ordinary restart | 126.873 seconds to dispatch | Model HTTP 200, verified 3.1 Pro, exact marker, 11.158 seconds, zero tools, closed cleanup |
+
+F and G each began with only an initialized human `about:blank` document; no
+earlier Gemini visit or owned task occurred in either process. Inspector remained
+off and cache behavior unchanged. F's initial and settled cookie samples, and
+G's initial, settled and model-closure samples, all retained the future candidate
+and unchanged aggregate counts. This disproves mandatory complete loss on every
+restart, but does not establish cookie identity or actual transmission. The
+roughly two-minute startup delays are comparable, not identical, to D's failed
+120.975-second run; request order, elapsed time and server state still differ.
+
+G's independent native review confirmed the exact prompt and answer, one
+submission, stable website model evidence, session/runtime/document identity,
+both ownership fingerprints and the matching saved release receipt. Its HTTP 200
+callback directly joins the ownership journal's document generation. E/F marker
+answers and model selection are website UI evidence. Their 21.460/11.998-second
+observation upper bounds must not be compared with G's native duration as a
+latency benchmark. F's native
+response capture ended before its final answer/release observations, which are
+retained separately as UI evidence.
+
+E/F temporary views were released by verified navigation to `about:blank` after
+their answers; this does not claim server-side deletion. No new CAPTCHA appeared,
+no additional challenge was completed, and no uncertain prompt was replayed.
+The comparison used its prepared limits: two direct submissions, one owned task,
+two restarts and one specifically approved CAPTCHA completion. The three user
+tabs were restored by 09:29:27 UTC; no temporary developer settings were enabled.
+
+Both paths working on unchanged code after recovery does not identify why the
+prior challenge was issued, prove prevention, or qualify browser/terminal/file
+tools. No production patch is justified by these successes alone. Root-cause
+investigation remains open; an isolated foreground-versus-owned failure was not
+reproduced under this fresh verification state.
+
+A read-only identity check also found no installed bundle-version mismatch:
+Safari 26.5 and system WebKit both report build `21624.2.5.11.4`. The shared
+configuration retains WebKit's platform/engine prefix and adds Safari product
+tokens only when those exact builds match, plus `Computa/0.7.0`. Human and model
+views use that same configuration path. This source/bundle check is not a live
+wire-header capture and does not rule out provider compatibility or risk scoring.
+
+Evidence: `captcha332-lifecycle/foreground-comparison-plan.json`,
+`foreground-e/{plan,outcome,view-release}.json`, `foreground-f/{plan,outcome}.json`,
+`marker-g/{plan,restart,dispatch}.json`, its native capture directory,
+`response332-approved-captcha-foreground-e-full-window.json`,
+`response332-foreground-f.json`, `response332-marker-g-navigation.json` and the
+matching cookie timelines. Lifecycle subpaths are relative to that named folder;
+response/cookie receipts are at the local qualification evidence root.
