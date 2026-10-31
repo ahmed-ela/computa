@@ -63,7 +63,28 @@ supply completion. After the final awaited model proof, a synchronous check
 requires the same latest answer, physical control and response text; changes
 withdraw completion until a fresh read can establish it.
 
-Candidate342 installed/live qualification remains pending.
+Signed build342, source `edd3a0e1f966a723cca27107d50faf7fbf8e72b7`, passed 113
+adapter tests (1,670 assertions) and six native tests. Its installed fresh Sonnet
+5.5 check reached verified completion but failed strict envelope parsing after
+4.516 seconds with `malformed_website_reply/invalid_json`. No tools ran; the saved
+closed cleanup receipt followed failure by 76 ms. This is a preserved failure,
+not a model qualification pass.
+
+The captured extraction diagnostic found one code body containing valid JSON of
+type `message`, but returned `outside_content`. The website's language caption
+had changed from `text-text-500 font-small pb-0` to
+`text-secondary text-caption-regular font-sans pb-0`. The unrecognized caption
+also prevented exclusion of the code block's Copy control, contaminating the
+rendered reply. A separate direct Incognito control exposed the `json code`
+container, exact `json` caption, Copy to clipboard control and completed literal
+JSON in Accessibility. Its tab was closed. No Inspector settings were enabled.
+
+## Candidate 343: current code-block caption
+
+The next repair recognizes the observed caption structure while retaining exact
+`json` text, a single leaf caption/control and PRE/CODE, strict code-wrapper scope,
+whole-answer outside-prose rejection and literal JSON/envelope validation.
+Installed/live qualification remains pending.
 
 ## Qualification contract
 

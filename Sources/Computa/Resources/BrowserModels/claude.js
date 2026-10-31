@@ -1863,7 +1863,7 @@ function modelResponseExtraction(answer) {
   const chrome = new Set();
   if (wrapper && wrapper !== answer && answer.contains(wrapper)
     && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
-    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0')].filter(node =>
+    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
       modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
     const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
       .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));

@@ -11078,6 +11078,75 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeLiteralCodeCaptionPreservesStrictEnvelopesAndRejectsSurroundingProse() async throws {
+        let message = #"{"type":"message","text":"Fixture reply"}"#
+        let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf \"fixture\""}}]}"#
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "claude-native-fixture", "input": "Read the code fixture", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]]]))
+        for scenario in ["legacy", "current_message", "current_tool", "outside_prose"] {
+            let reply = scenario == "current_tool" || scenario == "outside_prose" ? tool : message
+            let captionClass = scenario == "legacy" ? "text-text-500 font-small pb-0" : "text-secondary text-caption-regular font-sans pb-0"
+            let page = Self.providerPage(.claude).replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                const wrapper=document.createElement('div'); wrapper.className='relative border-border-400';
+                const controls=document.createElement('div'); controls.className='absolute right-0 h-8 px-2 items-center inline-flex';
+                const codeCopy=document.createElement('button');
+                codeCopy.className='cds-reset relative isolate inline-flex shrink-0 items-center';
+                codeCopy.setAttribute('aria-label','Copy to clipboard');
+                const icon=document.createElement('span'); icon.textContent='\u{E000}'; codeCopy.appendChild(icon); controls.appendChild(codeCopy);
+                const caption=document.createElement('div'); caption.className=\(try matchedProbeJSON(captionClass)); caption.textContent='json';
+                const pre=document.createElement('pre'); const code=document.createElement('code');
+                code.textContent=\(try matchedProbeJSON(reply)); pre.appendChild(code); wrapper.append(controls,caption,pre);
+                body.replaceChildren(wrapper);
+                if (\(scenario == "outside_prose")) { const prose=document.createElement('p'); prose.textContent='Authored surrounding prose'; body.appendChild(prose); }
+                document.getElementById('messages').appendChild(turn);
+                """)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.claude)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read the code fixture"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            let text = try XCTUnwrap(complete["text"] as? String)
+            let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+            let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
+            XCTAssertEqual(structure["literalCodeValidJSON"] as? Bool, true, scenario)
+            let physical = try await evaluate(view, """
+                const body=document.querySelector('[data-perf-reply-text]');
+                return {raw:body.querySelector('code').textContent, rendered:body.innerText,
+                  codeCount:body.querySelectorAll('code').length, preCount:body.querySelectorAll('pre').length};
+                """) as? [String: Any]
+            XCTAssertEqual(physical?["raw"] as? String, reply)
+            XCTAssertNotEqual(physical?["rendered"] as? String, reply, "Website chrome must remain in the actual rendered text")
+            XCTAssertEqual(physical?["codeCount"] as? Int, 1); XCTAssertEqual(physical?["preCount"] as? Int, 1)
+            if scenario == "outside_prose" {
+                XCTAssertEqual(structure["selectedExtraction"] as? String, "rendered_fallback")
+                XCTAssertEqual(structure["extractionReason"] as? String, "outside_content")
+                XCTAssertTrue(text.contains("Authored surrounding prose"))
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                }
+            } else {
+                XCTAssertEqual(structure["selectedExtraction"] as? String, "raw_code", scenario)
+                XCTAssertEqual(text, reply, scenario)
+                let decoded = try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)
+                if scenario == "current_tool" {
+                    guard case let .toolCalls(calls) = decoded else { return XCTFail("Expected the unchanged strict tool envelope") }
+                    XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls.first?.name, "exec_command")
+                    XCTAssertEqual(calls.first?.argumentsJSON, #"{"cmd":"printf \"fixture\""}"#)
+                } else { XCTAssertEqual(decoded, .message("Fixture reply")) }
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))

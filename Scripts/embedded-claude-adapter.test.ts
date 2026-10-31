@@ -7,14 +7,16 @@ const outbound = prompt + "\n\n" + markerLine;
 
 defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
 
-function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
+const claudeCodeCaptionClasses = ["text-text-500 font-small pb-0", "text-secondary text-caption-regular font-sans pb-0"] as const;
+
+function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string, captionClasses: string = claudeCodeCaptionClasses[0]) {
   f.answer.text = ""; f.answer.children = [];
   const wrapper = new Element("DIV", { class: "relative border-border-400" });
   const container = new Element("DIV", { class: "absolute right-0 h-8 px-2 items-center inline-flex" });
   const control = new Element("BUTTON", { class: "cds-reset relative isolate inline-flex shrink-0 items-center" });
   const content = new Element("SPAN", { class: "inline-flex min-w-0 items-center gap-1" });
   const icon = new Element("SPAN", {}, "\uE056"); content.append(icon); control.append(content); container.append(control);
-  const label = new Element("DIV", { class: "text-text-500 font-small pb-0" }, "json");
+  const label = new Element("DIV", { class: captionClasses }, "json");
   const pre = new Element("PRE"), code = new Element("CODE", {}, raw); pre.append(code);
   wrapper.append(container, label, pre); f.answer.append(wrapper);
   Object.defineProperty(f.answer, "innerText", { get: () => "\uE056\njson\n" + raw });
@@ -249,13 +251,13 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
-  test("observed Claude code chrome admits only its literal sole JSON envelope", async () => {
-    for (const envelope of [
+  test("current and legacy Claude code captions admit only their literal sole JSON envelope", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const envelope of [
       { type: "message", text: 'It\'s "quoted" C:\\tmp\\path\nnext line' },
       { type: "tool_calls", calls: [{ name: "exec_command", arguments: { cmd: 'printf "literal\\n"\nprintf "It\'s quoted"' } }] },
     ]) {
       const f = fixture(provider, { userPrompt: prompt }), raw = "\n" + JSON.stringify(envelope) + "\n";
-      observedClaudeCodeBlock(f, raw);
+      observedClaudeCodeBlock(f, raw, captionClasses);
       const result = await f.run();
       expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("\uE056"); expect(result.text).not.toContain("json\n");
@@ -264,8 +266,8 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
-  test("Claude code chrome does not excuse mismatched structure or authored content", async () => {
-    for (const change of [
+  test("current and legacy Claude code captions do not excuse mismatched structure or authored content", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const change of [
       (f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.values.class = "relative border-other"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "font-small pb-0"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "JSON"; },
@@ -282,8 +284,33 @@ describe("embedded Claude fixed adapter", () => {
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.code.text = '{"type":"message","text":"invalid "quote""}'; },
     ]) {
       const f = fixture(provider, { userPrompt: prompt }), raw = '{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"literal"}}]}';
-      const block = observedClaudeCodeBlock(f, raw); change(f, block);
+      const block = observedClaudeCodeBlock(f, raw, captionClasses); change(f, block);
       expect((await f.run()).text).toBe("\uE056\njson\n" + raw);
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("caption alternatives reject class near misses, hidden labels, duplicates and nonliteral language text", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const change of [
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary text-caption-regular pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-caption-regular font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary text-caption-regular font-sans"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-text-500 text-caption-regular font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary font-small pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.hidden = ""; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values["aria-hidden"] = "true"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.inert = ""; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "json prose"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "JSON"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.append(new Element("DIV", { class: claudeCodeCaptionClasses[1] }, "json")); },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.append(new Element("DIV", {}, "json")); },
+    ]) {
+      const f = fixture(provider, { userPrompt: prompt }), raw = '{"type":"message","text":"Exact bytes"}';
+      const block = observedClaudeCodeBlock(f, raw, captionClasses); change(block);
+      const result = await f.run();
+      expect(result.text).toBe("\uE056\njson\n" + raw);
+      expect(result.completionEvidence.codeStructure).toMatchObject({ selectedExtraction: "rendered_fallback", extractionReason: "outside_content" });
       expect(f.send.clicks).toBe(0);
     }
   });
