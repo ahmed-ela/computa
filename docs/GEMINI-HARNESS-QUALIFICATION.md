@@ -855,6 +855,64 @@ with unchanged sources. These results qualify the local diagnostic only;
 installed Google callback capture and CAPTCHA prevention remain unproven.
 
 Evidence: `native332-focused`, `native332-final` and the source-bound build/audit
-receipts in the same local evidence directory. Build331 remains installed while
-the current-tab Inspector reproduction approval is pending; staging build332
-must not be described as installation or live qualification.
+receipts in the same local evidence directory. At staging, build331 remained
+installed while current-tab Inspector reproduction approval was pending;
+staging alone did not establish installation or live qualification.
+
+### October 31: bounded inspection and captured restart response
+
+The approved inspection of build 331's current normal Gemini tab captured two
+address navigations and one ordinary reload between 07:27:43 and 07:28:52 UTC.
+All three were explicitly Source Network, HTTP 200, with zero document redirects,
+current response Dates, no-cache/no-store/max-age=0/must-revalidate, a past
+Expires date and no Age header. Each outgoing Cookie header was present but
+omitted the exemption name; none of these responses set that name. Three native
+navigation samples also contained zero exemption candidates in all seven scopes.
+The initial Inspector accessibility list showed only older virtualized rows;
+filtering revealed the three new requests. An intervening computer-use timeout
+was recovered by rebinding and checking the current UI, without another request.
+
+One harmless prompt was then sent directly in a temporary website chat. Gemini's
+visible Pro mode returned the exact requested marker. This is direct website
+evidence, not verified selection of the app's specific 3.1 Pro choice or harness
+qualification. The later answer observation is an upper time bound, not a
+generation latency measurement. No CAPTCHA appeared or was completed. Preserve
+Log, Safari's developer preference and the tab's inspection permission were all
+restored off, and Inspector/chooser windows closed by 07:34:11 UTC.
+
+Diagnostic build 332, source `05d364f`, was subsequently installed with complete
+source/resource/executable/version/signature audits and a preserved rollback
+build. Inspector remained off. The first normal Gemini navigation after this
+update returned a native HTTP 200 callback and reached the composer. Its response
+metadata was captured automatically with the correct human-tab identity. Cookie
+samples before any provider navigation and afterward both contained zero
+exemption candidates. Fresh owned-session marker A then passed in 9.332 seconds with
+verified 3.1 Pro selection, one verified submission, the exact answer, zero tools
+and saved closed/not_created cleanup. Its native response callback was 200 and
+its document generation matched the ownership journal.
+
+An ordinary restart of the same installed build reproduced the failure. With
+only a blank human tab created beforehand, the first owned provider navigation
+for marker B received HTTP 429 at Google www/sorry at 07:45:10 UTC. The response Date
+was in the up-to-one-minute bucket and its cache metadata indicated no-cache,
+no-store and must-revalidate. The native observer saw a redirect before any
+Gemini document commit. The task failed in 0.977 seconds before model selection or prompt
+submission, with zero tools and saved closed cleanup. Initial, challenge and
+closure cookie samples all contained zero exemption candidates in all seven
+scopes, which does not distinguish this failure from marker A's success.
+
+This captures an actual challenge response rather than only a saved application
+error. Its attribution is the exact process, model role and single-task window;
+the pre-submission journal lacks a document generation for a direct join. Native
+callbacks still do not prove outgoing-cookie inclusion, network/cache source or
+the initiating redirect's cache policy. These results establish current
+observability and another recurrence, not a root-cause fix or CAPTCHA prevention.
+Further inference attempts stopped. Inspection of a separate blank human test
+tab for one contemporaneous navigation was requested, with no CAPTCHA-completion
+authorization inferred.
+
+Local evidence: `captcha331-lifecycle/inspector-bounded-oct31.json`,
+`cookie-timeline331-bounded-inspection.json`, `artifact332-installed-audit.json`,
+`captcha332-lifecycle/restarts.json`, both marker capture directories and their
+independent reviews, `response332-postrestart.json`, `response332-marker-a.json`,
+`response332-marker-b.json`, and the matching `cookie-timeline332-*` receipts.
