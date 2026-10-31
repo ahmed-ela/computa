@@ -250,8 +250,46 @@ run and a diagnostic rerun failed before thread/start because local test-only Bu
 discovery resolved the installed executable to `bun.exe`, not the required `bun`.
 A byte-verified private copy supplied through `MACTOPUS_TEST_BUN` resolved that
 fixture dependency; the original failed logs remain retained. Production interpreter
-discovery, permissions and assertions were not relaxed. Live build348 qualification
-still remains pending.
+discovery, permissions and assertions were not relaxed. The installed build348
+results below qualify only the explicitly recorded checks.
+
+Developer ID signed build348 was installed from source
+`d94ad4f94e7f8499d716316e993b7a6803fbc069`, with source/signature/resource receipts
+and unchanged executable payloads after signing. Its fresh Sonnet 5 marker still
+returned an explicit refusal of the tool-harness framing after 6.254 seconds.
+Model, ownership, completion and closed cleanup all verified; zero tools ran.
+The instruction contradiction is removed, but that model remains unqualified.
+
+The first Haiku workflow attempt on build348 was invalidated by the operator's
+multiline text-entry method: the first paragraph was submitted and the remaining
+two paragraphs became queued messages. The frozen full-prompt baseline therefore
+matched no task. The separate partial-task evidence records zero tools, no verified
+website submission and closed cleanup. Its finite selection diagnostic saw Haiku
+5.5 selected but could not verify that the picker popup had closed. Concurrent
+input makes this unsuitable for attributing a new production regression.
+The queued fragments were removed without resuming, the fixture server was
+stopped, its receipt ledger remained empty and protected fixture files were
+unchanged. This attempt has no qualification verdict; it is not a passing or
+failed full workflow. Future controlled multiline inputs must use paste and
+verify the entire draft before the single explicit Send.
+
+A fresh Haiku 5.5 workflow on build348 used the complete pasted prompt and one
+explicit Send. It completed in 92.261 seconds across 12 verified website
+inferences, each with verified selection, ownership, completion and closed
+cleanup. The independent local fixture audit passed: only the intended function
+changed, all six protected tests passed after the edit, the correct reference was
+submitted once, the unpredictable receipt was returned, and the task-created
+browser tab closed. The browser inventory was empty before and after the task;
+the exact local fixture server was stopped afterward.
+
+This was not an error-free run. The initial pre-fix test failure is retained, and
+one `exec_command` call supplied empty arguments and was rejected for missing
+`cmd` before execution. A later correctly formed call completed the tests. The
+workflow succeeded, but the recovered argument-schema defect remains under
+investigation; it is not a clean reliability pass. Sonnet 5.5 and Sonnet 4.6
+workflow qualification on build348 remains pending, and Sonnet 5 remains
+unqualified after its explicit refusal. These draft-PR results do not alter the
+public build346 package.
 
 ## Qualification contract
 
