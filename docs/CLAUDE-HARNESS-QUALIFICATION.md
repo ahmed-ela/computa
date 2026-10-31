@@ -9,7 +9,7 @@ These account-specific observations are not model qualification results.
 
 Signed installed Computa 0.7.0 (340), source
 `b8ffe5794793633c1f362e0db28cb8310d0b530d`, sent one fresh Sonnet 5.5 marker task.
-Website selection and first-message ownership verified before submission. Within
+Website selection and first-message ownership verified at submission acknowledgment. Within
 about three seconds the native adapter saw one answer, 63 text bytes and
 `busy=false`, but no scoped Copy controls and `answerComplete=false`.
 The turn failed at its five-minute deadline after 301.305 seconds; no final
@@ -172,6 +172,9 @@ trusted-context boundaries, permissions/tool choice, refusal envelopes and
 strict malformed-response rejection. Exact old quota diagnostics remain readable;
 near misses and changed metadata are rejected.
 
+Signed build345, source `b1cfe31b385054d01a58eda3683dae0a12781315`, passed
+all 11 clean-source, identity/version, signature and exact-resource checks. Its
+artifact is retained locally; it is not installed, published or notarized.
 Build345 is a review candidate. Keep the live-tested build344 installed until
 Claude's allowance permits fresh qualification of the presentation follow-up.
 No claim is made that build345 is installed or that all Claude models are reliable.
