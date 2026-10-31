@@ -311,9 +311,87 @@ All 106 response-codec tests passed. The first instruction run caught a seven-by
 prompt-budget overflow; the wording was shortened by 40 bytes without raising
 the limit, and all 62 instruction tests then passed. New coverage spans the three
 website providers, plain and namespaced tools, allowed and disabled tool choices,
-required command arguments and legitimate empty schemas. Live build349 workflow
-qualification remains pending. Sonnet 5's explicit refusal is a separate
-limitation, with no remaining identity contradiction established by inspection.
+required command arguments and legitimate empty schemas. Sonnet 5's explicit
+refusal is a separate limitation, with no remaining identity contradiction
+established by inspection.
+
+### Installed build349 workflows (October 31, 2026)
+
+Developer ID signed build349 was installed from
+`358294e2db9b67a34e42d43d02f47497a6fcff7f`. All 11 clean-source build checks and
+10 signing-derivative checks passed; installed executable and resource hashes
+matched the signed artifact. Two earlier signing attempts failed with confirmed
+`ENOSPC` while writing the bundled runtime's code signature. Removing verified
+generated duplicates and test products freed enough space for signing; no source
+or signing-policy change was needed. Those failed attempts remain in the private
+evidence. This build was not published and does not replace public build346.
+
+| Website model | Elapsed | Result |
+| --- | ---: | --- |
+| Haiku 5.5 | 88.158 s | Completed the local fixture across 12 verified, closed website sessions and 11 tool calls. Recovered from one nonexistent working directory; no empty-arguments call occurred. |
+| Sonnet 5.5 | 54.823 s | Completed the local fixture across nine verified, closed website sessions and eight tool calls, with no observed returned tool errors. |
+| Sonnet 4.6 | 39.640 s | Completed the code edit, six tests and reference command. The fifth website inference hit the account quota before any browser action; cleanup was unconfirmed. |
+| Sonnet 5 | Not run on build349 | Its build348 marker returned a verified refusal. A fresh build349 marker remains pending after the account quota resets. |
+
+For both completed workflows, independent checks confirmed a function-only edit,
+unchanged protected tests/data, six passing tests, one form submission, an exact
+unpredictable receipt read and returned in the final answer, and closure of the
+task-created tab. The ordinary browser inventory was empty afterward. Haiku's
+wrong-directory call failed before process creation; its subsequent valid call
+succeeded and its final answer disclosed the correction. This is bounded
+workflow evidence, not repeated-run or cross-model reliability proof.
+
+Sonnet 4.6 had four accepted responses with verified model, ownership, completion
+and closed cleanup, and five successful tool calls. Its fifth submitted session
+reported `website_usage_limit`, then `cleanup_unverified` 71 ms later. No browser
+call, form POST, receipt or final answer occurred. All three fixture servers were
+stopped and the failed task was not replayed. The concrete quota reset time was
+not retained; all further Claude requests stopped.
+
+The quota-cleanup failure remains unresolved. Bounded diagnostics recorded one
+physical Incognito header and exit control, with neither strictly visible while
+the background was inert. The native cleanup first inspects the page and uses
+the adapter's quota-only `stop` proof after a usage-limit error. Existing logs
+redact the failing action and do not record whether the quota surface remained
+recognized, an unrelated dialog was present, or the mode controls still met
+their eligibility checks. They establish a temporary-mode proof rejection, but
+not its exact cause. The earlier banner fix therefore cannot be claimed to
+resolve every live quota-cleanup transition.
+
+Private evidence is retained under `evidence/haiku55-workflow349-f/`,
+`evidence/sonnet55-workflow349-f/` and `evidence/sonnet46-workflow349-f/`, with
+independent workflow reviews, native traces, frozen fixtures, UI captures and
+the bounded quota-cleanup log. Sonnet 4.6 remains partially tested, Sonnet 5
+remains unqualified, and this PR remains a draft.
+
+### Candidate build350: capture the failed temporary-mode proof
+
+The next candidate records the actual temporary-mode decision, including the
+action, quota surface counts, eligible mode-control counts, unrelated-dialog
+result, Incognito query result and a finite rejection reason. Fields skipped by
+an early return remain unknown. Quota observations explicitly distinguish the
+`stop` check from an earlier classification, so an earlier read cannot be
+mistaken for current page state. A later diagnostic read cannot replace the
+captured decision.
+
+The native layer accepts only a fixed schema of finite labels, bounded counts
+and booleans. Records are size-limited and each session has a small observation
+budget with reserved failure and cleanup slots. No page text, account details,
+URLs or response bodies are added. These diagnostics do not change quota
+classification, model/ownership checks, cleanup admission or retries. Build350
+has not been installed or published; the running app remains build349, and the
+public release remains build346. The exact live cleanup cause still requires
+evidence from a future naturally occurring failure.
+
+All 875 provider-adapter tests passed (39,515 assertions). Both changed Swift
+files parsed successfully. An exact-source standalone Foundation harness
+compiled and ran the native sanitizer, record splitter, action allowlist and
+logging budget with four regression cases and 2,023 assertions; the largest
+finite proof record was 415 bytes under the unchanged 960-byte cap. This was not
+an app/XCTest integration run. Independent review confirmed the native cleanup
+path remained byte-identical and all JavaScript verification predicates remained
+equivalent. Tests cover private/unknown fields, malformed types, bounded counts,
+reserved failure slots and a page changing during diagnostic extraction.
 
 ## Qualification contract
 

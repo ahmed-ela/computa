@@ -381,7 +381,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedCodeResponseCount: Int?
         var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
-        var lastQuotaDiagnostic: [String]?
+        var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
         // Running observations retain negative pins, but never claim a fresh picker proof.
@@ -517,6 +517,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             guard value != last, progressRecords < 2 else { return false }
             last = value; progressRecords += 1
+            return true
+        }
+    }
+    /// At most five observations per owned session. Progress cannot consume
+    /// either the first failure or the cleanup stop proof's reserved slot.
+    /// These records never affect provider gates or cleanup authority.
+    struct QuotaDiagnosticLogBudget {
+        private var last: [String]?
+        private var lastAction: String?
+        private var progressRecords = 0
+        private var failureRecorded = false
+        private var stopRecorded = false
+
+        mutating func admit(_ records: [String], action: String, force: Bool) -> Bool {
+            if action == "stop" {
+                guard !stopRecorded else { return false }
+                stopRecorded = true
+            } else if force {
+                guard !failureRecorded else { return false }
+                failureRecorded = true
+            } else {
+                guard records != last || action != lastAction, progressRecords < 3 else { return false }
+                progressRecords += 1
+            }
+            last = records; lastAction = action
             return true
         }
     }
@@ -2598,6 +2623,41 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             counts[key] = count
         }
         safe["mode"] = counts
+        if let rawProof = value["temporaryProof"] {
+            if rawProof is NSNull {
+                safe["temporaryProof"] = NSNull()
+            } else {
+                let keys: Set<String> = ["kind", "action", "quotaObservationSource", "quotaPopupCount", "quotaBannerCount", "quotaSurfaceCount",
+                    "bannerUpgradeLinkCount", "physicalMode", "separatePhysicalDialog", "eligibleExitCount",
+                    "eligibleHeaderCount", "incognitoQuery", "verified", "reason"]
+                guard let proof = rawProof as? [String: Any], Set(proof.keys) == keys,
+                      proof["kind"] as? String == "claude_temporary_proof_v1",
+                      let rawAction = proof["action"] as? String, let action = quotaDiagnosticAction(rawAction),
+                      let observationSource = proof["quotaObservationSource"] as? String,
+                      ["stop_check", "preceding_check", "not_evaluated"].contains(observationSource),
+                      let reason = proof["reason"] as? String,
+                      ["multiple_quota_surfaces", "separate_dialog", "incognito_query", "exit_count", "header_count", "verified"].contains(reason)
+                else { return nil }
+                var projected: [String: Any] = ["kind": "claude_temporary_proof_v1", "action": action,
+                                              "quotaObservationSource": observationSource, "reason": reason]
+                for (key, limit) in [("quotaPopupCount", 1), ("quotaBannerCount", 1), ("quotaSurfaceCount", 2),
+                                     ("bannerUpgradeLinkCount", 1_000), ("eligibleExitCount", 1_000), ("eligibleHeaderCount", 1_000)] {
+                    if proof[key] is NSNull { projected[key] = NSNull() }
+                    else {
+                        guard let count = boundedCount(proof, key, limit: limit) else { return nil }
+                        projected[key] = count
+                    }
+                }
+                for key in ["physicalMode", "verified", "separatePhysicalDialog", "incognitoQuery"] {
+                    if ["separatePhysicalDialog", "incognitoQuery"].contains(key), proof[key] is NSNull { projected[key] = NSNull() }
+                    else {
+                        guard let boolean = flag(proof, key) else { return nil }
+                        projected[key] = boolean
+                    }
+                }
+                safe["temporaryProof"] = projected
+            }
+        }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
         return String(decoding: bytes, as: UTF8.self)
     }
@@ -2610,6 +2670,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let nodes = summary.removeValue(forKey: section) as? [[String: Any]] ?? []
             records += nodes.enumerated().map { ["section": section, "index": $0.offset, "node": $0.element] }
         }
+        if let proof = summary.removeValue(forKey: "temporaryProof") {
+            records.insert(["section": "temporaryProof", "proof": proof], at: 0)
+        }
         var result: [String] = []
         for record in [summary] + records {
             guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), bytes.count <= 960 else { return nil }
@@ -2618,12 +2681,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return result
     }
 
+    static func quotaDiagnosticAction(_ action: String) -> String? {
+        ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit", "stop",
+         "discoverModels", "selectModel", "modelDiagnostic", "verifyModel"].contains(action) ? action : nil
+    }
+
     private func logQuotaDiagnostic(_ raw: String, session: Session, action: String, force: Bool = false) {
-        guard let records = Self.quotaStructureDiagnosticRecords(raw, provider: session.provider),
-              force || session.lastQuotaDiagnostic != records else { return }
-        session.lastQuotaDiagnostic = records
+        guard let safeAction = Self.quotaDiagnosticAction(action),
+              let records = Self.quotaStructureDiagnosticRecords(raw, provider: session.provider),
+              session.quotaDiagnosticLog.admit(records, action: safeAction, force: force) else { return }
         for (index, record) in records.enumerated() {
-            Self.inspectionLog.error("quotaStructure action=\(action) sequence=\(session.sequence) index=\(index) \(record, privacy: .public)")
+            Self.inspectionLog.error("quotaStructure action=\(safeAction, privacy: .public) sequence=\(session.sequence) index=\(index) \(record, privacy: .public)")
         }
     }
 

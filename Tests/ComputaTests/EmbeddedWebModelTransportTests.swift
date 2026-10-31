@@ -11927,6 +11927,121 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(forged), provider: .claude))
     }
 
+    private func quotaProofDiagnosticFixture() -> (source: [String: Any], proof: [String: Any]) {
+        let proof: [String: Any] = ["kind": "claude_temporary_proof_v1", "action": "stop", "quotaObservationSource": "stop_check",
+            "quotaPopupCount": 0, "quotaBannerCount": 1, "quotaSurfaceCount": 1, "bannerUpgradeLinkCount": 1_000,
+            "physicalMode": true, "separatePhysicalDialog": false, "eligibleExitCount": 1,
+            "eligibleHeaderCount": 1, "incognitoQuery": true, "verified": true, "reason": "verified"]
+        let source: [String: Any] = ["kind": "quota_structure", "provider": "claude",
+            "headings": [], "controls": [], "popupAncestors": [], "support": [], "bannerParents": [],
+            "mode": ["headerTotal": 1, "headerVisible": 0, "headerPhysical": 1,
+                     "exitTotal": 1, "exitVisible": 0, "exitPhysical": 1]]
+        return (source, proof)
+    }
+
+    func testQuotaTemporaryProofDiagnosticsPreserveFiniteFactsAndUnknownsInSeparateRecords() throws {
+        let fixture = quotaProofDiagnosticFixture()
+        func records(_ value: [String: Any]) throws -> [String] {
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+            return try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(raw, provider: .claude))
+        }
+        XCTAssertEqual(try records(fixture.source).count, 1, "Older diagnostics remain supported")
+        var source = fixture.source
+        source["temporaryProof"] = NSNull()
+        var projected = try records(source)
+        XCTAssertEqual(projected.count, 2)
+        let unknown = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+        XCTAssertTrue(unknown["proof"] is NSNull, "No evaluated proof must not become a negative proof")
+        let actions = ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit", "stop",
+                       "discoverModels", "selectModel", "modelDiagnostic", "verifyModel"]
+        let reasons = ["multiple_quota_surfaces", "separate_dialog", "incognito_query", "exit_count", "header_count", "verified"]
+        for action in actions {
+            XCTAssertEqual(EmbeddedWebModelTransport.quotaDiagnosticAction(action), action)
+            for reason in reasons {
+                for observation in ["stop_check", "preceding_check", "not_evaluated"] {
+                    var proof = fixture.proof
+                    proof["action"] = action; proof["reason"] = reason; proof["quotaObservationSource"] = observation
+                    source["temporaryProof"] = proof; source["prompt"] = "private_canary"
+                    projected = try records(source)
+                    XCTAssertEqual(projected.count, 2)
+                    XCTAssertTrue(projected.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+                    let summary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[0].utf8)) as? [String: Any])
+                    XCTAssertNil(summary["temporaryProof"], "Proof must not crowd out the existing summary")
+                    let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+                    XCTAssertEqual(entry["section"] as? String, "temporaryProof")
+                    XCTAssertEqual(entry["proof"] as? NSDictionary, proof as NSDictionary)
+                }
+            }
+        }
+        var proof = fixture.proof
+        for key in ["quotaPopupCount", "quotaBannerCount", "quotaSurfaceCount", "bannerUpgradeLinkCount",
+                    "separatePhysicalDialog", "eligibleExitCount", "eligibleHeaderCount", "incognitoQuery"] {
+            proof[key] = NSNull()
+        }
+        proof["physicalMode"] = false; proof["verified"] = false
+        proof["quotaObservationSource"] = "not_evaluated"
+        source["temporaryProof"] = proof
+        projected = try records(source)
+        let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+        XCTAssertEqual(entry["proof"] as? NSDictionary, proof as NSDictionary,
+                       "An unevaluated predicate remains null, never an observed zero or false")
+    }
+
+    func testQuotaTemporaryProofDiagnosticsRejectPrivateFieldsAndInvalidTypes() throws {
+        let fixture = quotaProofDiagnosticFixture()
+        func rejected(_ proof: Any) throws {
+            var source = fixture.source; source["temporaryProof"] = proof
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: source), as: UTF8.self)
+            XCTAssertNil(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(raw, provider: .claude))
+        }
+        for value: Any in ["private_canary", 1, true, []] { try rejected(value) }
+        for key in fixture.proof.keys {
+            var proof = fixture.proof; proof.removeValue(forKey: key); try rejected(proof)
+        }
+        var proof = fixture.proof; proof["prompt"] = "private_canary"; try rejected(proof)
+        for key in ["kind", "action", "reason", "quotaObservationSource"] {
+            proof = fixture.proof; proof[key] = "private_canary"; try rejected(proof)
+        }
+        for (key, limit) in [("quotaPopupCount", 1), ("quotaBannerCount", 1), ("quotaSurfaceCount", 2),
+                             ("bannerUpgradeLinkCount", 1_000), ("eligibleExitCount", 1_000), ("eligibleHeaderCount", 1_000)] {
+            for value: Any in [-1, limit + 1, 0.5, true, "private_canary"] {
+                proof = fixture.proof; proof[key] = value; try rejected(proof)
+            }
+        }
+        for key in ["physicalMode", "verified", "separatePhysicalDialog", "incognitoQuery"] {
+            for value: Any in [0, 1, "private_canary"] {
+                proof = fixture.proof; proof[key] = value; try rejected(proof)
+            }
+        }
+        for key in ["physicalMode", "verified"] {
+            proof = fixture.proof; proof[key] = NSNull(); try rejected(proof)
+        }
+        for value in ["private_canary", "stop\nprivate_canary", "STOP", " stop", "", "cleanup"] {
+            XCTAssertNil(EmbeddedWebModelTransport.quotaDiagnosticAction(value))
+        }
+    }
+
+    func testQuotaDiagnosticBudgetReservesFailureAndStopAfterProgressIsExhausted() {
+        var budget = EmbeddedWebModelTransport.QuotaDiagnosticLogBudget()
+        for index in 0..<3 {
+            XCTAssertTrue(budget.admit(["shape\(index)"], action: "inspect", force: false))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: false))
+        }
+        XCTAssertFalse(budget.admit(["another"], action: "inspect", force: false))
+        XCTAssertTrue(budget.admit(["shape2"], action: "inspect", force: true), "Failure cannot be starved by progress")
+        XCTAssertFalse(budget.admit(["another failure"], action: "prepare", force: true))
+        XCTAssertTrue(budget.admit(["shape2"], action: "stop", force: true), "The actual cleanup proof has a separate reserved slot")
+        for index in 0..<100 {
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: false))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: true))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "stop", force: true))
+        }
+        var stoppedFirst = EmbeddedWebModelTransport.QuotaDiagnosticLogBudget()
+        XCTAssertTrue(stoppedFirst.admit(["stop"], action: "stop", force: false))
+        XCTAssertFalse(stoppedFirst.admit(["changed"], action: "stop", force: true))
+        XCTAssertTrue(stoppedFirst.admit(["failure"], action: "prepare", force: true))
+    }
+
     func testInsertionDifferenceDiagnosticsAllowOnlyFiniteIndexAndUnicodeScalars() {
         XCTAssertEqual(EmbeddedWebModelTransport.insertionDifferenceDiagnostic([
             "firstDifference": 42, "actualScalar": 160, "expectedScalar": 32, "rawPrompt": "private_canary"
