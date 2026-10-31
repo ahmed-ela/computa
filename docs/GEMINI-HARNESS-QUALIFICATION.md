@@ -28,6 +28,10 @@ public IPv6 egress at one diagnostic destination in Computa and Codex. Two real
 WebKit loopback tests also passed for transmitted headers, cookie eligibility
 and redirect counts through the unchanged human/model factories. These narrow
 checks do not establish Google's actual request routing or challenge trigger.
+One later controlled owned marker also passed after a third restart, 35 minutes
+54 seconds after recovery, in 8.508 seconds with verified selection and cleanup.
+The retained future-cookie metadata was unchanged. This extends the observed
+recovery period; intervening native follow-ups prevent isolating verification age.
 Earlier staged/installed statements below describe historical evidence, not the
 current installation.
 
@@ -1209,3 +1213,31 @@ Evidence: `network332-system-snapshot.json`, `network332-tailscale-status.json`,
 `initial-request-loopback332/{test.log,result.json}` at the local evidence root.
 Cloudflare describes the diagnostic endpoint in its
 [endpoint documentation](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/).
+
+### October 31: later verification-age restart check
+
+After the network audit, a separate bounded plan allowed one ordinary restart
+and one fresh owned marker H on the unchanged installed build. No running task
+or unsent draft was visible, and the current three user-tab URLs were preserved.
+The old PID exited normally. The new process loaded only `about:blank` before
+dispatch; Inspector stayed off and no cache/network setting changed.
+
+H started 128.338 seconds after launch and 2,153.791 seconds after the recovery
+human HTTP 200. It completed in 8.508 seconds with the exact marker, one verified
+3.1 Pro submission, zero tools, stable ownership and a saved closed cleanup
+receipt. Its model HTTP 200 document generation directly joins the ownership
+journal. Initial, settled and model-closure cookie metadata all retained the
+same aggregate matrix, including one future candidate with over one hour left
+in each applicable scope. Independent review verified the joins and capture
+hashes. User tabs were restored by 09:52:30 UTC.
+
+No challenge appeared or was completed. This is a third successful restart
+after the single approved recovery, on unchanged production code. It does not
+isolate cookie age because four native follow-up turns occurred since G, and
+does not explain the earlier failures. Further passing markers cannot establish
+a prevention fix; the next discriminating evidence must accompany a recurrence,
+before clearing its challenge or losing the failing request/page state.
+
+Evidence: `captcha332-lifecycle/older-verification-h-plan.json`,
+`marker-h/{plan,restart,dispatch,restoration}.json`, its native capture directory,
+`response332-marker-h.json` and `cookie-timeline332-marker-h.json`.
