@@ -166,7 +166,9 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
         : "The app notarization ticket and Gatekeeper assessment passed. DMG notarization is separate.\n")
       + "Compiled app source identity, clean-Mac installation and live model/task qualification remain maintainer checks; see the release notes above.\n";
     const updatePath = join(stage, "verified-release.json");
-    await writeFile(updatePath, JSON.stringify({ body: notes, draft: false, prerelease: true, make_latest: "false" }), { flag: "wx" });
+    // Explicitly retain the verified tag when publishing a draft; do not rely
+    // on GitHub's implicit handling of an internal untagged draft name.
+    await writeFile(updatePath, JSON.stringify({ tag_name: tag, body: notes, draft: false, prerelease: true, make_latest: "false" }), { flag: "wx" });
     // Keep the mutation bound to the verified ID too; resolving the tag again
     // could publish a replacement draft created after the final snapshot.
     await context.run(["gh", "api", "--method", "PATCH", `${apiRoot}/${releasePath}`, "--input", updatePath]);
