@@ -5,7 +5,7 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current status (October 30): build331 is installed and audited. CAPTCHA
+Current status (October 31): build331 is installed and audited. CAPTCHA
 investigation takes priority over all-model qualification. Approved inspection
 captured one normal Gemini network response with HTTP 200 and no exemption cookie
 in its outgoing Cookie header. A subsequent owned task verified its submission
@@ -13,7 +13,9 @@ but timed out without an answer; the first normal Gemini navigation after an
 ordinary same-build restart then showed CAPTCHA again. The earlier run also
 challenged while a future cookie candidate survived restart. Simple cookie loss
 does not explain that earlier run; no browser-version cause has been established.
-The rejection trigger and permanent prevention remain unproven. Earlier
+Approved inspection the following day captured another successful network
+response on the same process, but the earlier blocked request's headers were
+unavailable. The rejection trigger and permanent prevention remain unproven. Earlier
 staged/installed statements below describe historical evidence, not the current
 installation.
 
@@ -770,7 +772,7 @@ The first normal Gemini navigation at 13:26:34 displayed an unchecked CAPTCHA;
 the challenge-settled callback at 13:26:35 also contained zero candidates.
 No model prompt or CAPTCHA action was dispatched after restart. The user's
 four original tabs were restored and the challenged Gemini tab left selected.
-Inspection of this new tab requires a new approval and is pending. The next
+Inspection of this new tab required a new approval, received the following day. The next
 causal boundary is the blocked request's outgoing cookie-name presence and
 explicit response/cache provenance, rather than another speculative cache or
 cookie change.
@@ -782,3 +784,36 @@ Local evidence: `captcha331-lifecycle/inspector-current-recovery.json`,
 `cookie-timeline331-*` receipts under the October 29 qualification evidence
 directory. The prematurely bounded pre-tab collector's empty result is retained
 separately from the later successful blank-tab initial capture.
+
+### October 31: approved inspection of the new tab
+
+The same installed build331 and process91508 remained running, with the same
+normal Gemini tab showing the old unchecked challenge. After the user approved
+temporary inspection, one user-dispatched navigation to Gemini `/app` at
+06:19:52 UTC reached its composer. Inspector explicitly reported Source Network,
+HTTP200 and zero redirects. Its response Date matched the navigation, with
+`Cache-Control: no-cache, no-store, max-age=0, must-revalidate`, `Pragma: no-cache`,
+a past Expires date and no Age header. The actual outgoing Cookie header was
+present but lacked the exemption-cookie name; the response did not set that
+name. Caching remained enabled, and no CAPTCHA action or model prompt was sent.
+
+The historical blocked `/app` resource listed unknown status and source,
+"No request headers" and "No response headers." Those fields are unavailable
+historical evidence, not proof that the request lacked cookies or never reached
+the network. This successful request cannot reconstruct that blocked chain.
+Three shared-store lifecycle snapshots during the inspection window contained
+zero exemption candidates across all seven scopes, without rejected records or
+explicit gaps. These events lack tab attribution and do not exclude automatic
+recovery/discovery activity.
+
+Inspector and its app-selection window were closed. Safari's developer setting,
+the exact Gemini tab's inspection permission and Preserve Log were restored to
+their original off states by 06:21:53 UTC. No source or browser setting was
+changed to produce the recovery. The overnight interval remains an uncontrolled
+factor, so this is another bounded recovery observation, not a root-cause fix,
+CAPTCHA-prevention result or model-task qualification.
+
+Evidence: `captcha331-lifecycle/inspector-oct31-recovery.json` and
+`cookie-timeline331-oct31-inspected-navigation.json` in the same local evidence
+directory. The missing blocked request boundary still needs to be captured
+during a recurrence before choosing a production change.
