@@ -1955,6 +1955,45 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+// Diagnostic only: explain the existing completion guard without granting
+// completion from a missing, renamed, moved, hidden or disabled control.
+function modelCompletionStructure(answer, message, article) {
+  // Diagnostics must never turn an otherwise valid adapter read into a failure.
+  try {
+    const count = nodes => Math.min(nodes.length, 1_000);
+    const scoped = selector => article ? [...article.querySelectorAll(selector)] : null;
+    const copies = scoped('[data-testid="message-actions"] button[data-testid="action-bar-copy"][aria-label="Copy"]');
+    const streaming = message?.getAttribute('data-is-streaming');
+    const ancestors = [];
+    for (let node = answer?.parentElement; node && ancestors.length < 4; node = node.parentElement) {
+      const tag = node.tagName.toLowerCase(), role = node.getAttribute('role');
+      const descendants = selector => count(node.querySelectorAll(selector));
+      ancestors.push({ depth: ancestors.length + 1,
+        tag: ['div', 'section', 'article', 'main', 'form', 'body', 'html'].includes(tag) ? tag : 'other',
+        role: role === null ? 'none' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation'].includes(role) ? role : 'other',
+        isAssistantMessage: node.getAttribute('data-testid') === 'assistant-message',
+        assistantDescendants: descendants('[data-testid="assistant-message"]'),
+        replyBodyDescendants: descendants('[data-perf-reply-text]'),
+        actionBars: descendants('[data-testid="message-actions"]'),
+        copyTestIDButtons: descendants('button[data-testid="action-bar-copy"]'),
+        copyLabelButtons: descendants('button[aria-label="Copy"]'),
+        exactCopyButtons: descendants('button[data-testid="action-bar-copy"][aria-label="Copy"]') });
+      if (['body', 'html'].includes(tag)) break;
+    }
+    return { kind: 'claude_completion_shape_v1', answerPresent: !!answer, messagePresent: !!message,
+      messageStreamingState: !message ? null : streaming === null ? 'absent'
+        : ['true', 'false'].includes(streaming) ? streaming : 'other',
+      articlePresent: !!article, articleIsMessage: article ? article === message : null,
+      articleAssistantDescendants: article ? count(scoped('[data-testid="assistant-message"]')) : null,
+      articleReplyBodies: article ? count(scoped('[data-perf-reply-text]')) : null,
+      articleActionBars: article ? count(scoped('[data-testid="message-actions"]')) : null,
+      articleCopyTestIDButtons: article ? count(scoped('[data-testid="message-actions"] button[data-testid="action-bar-copy"]')) : null,
+      articleCopyLabelButtons: article ? count(scoped('[data-testid="message-actions"] button[aria-label="Copy"]')) : null,
+      articleExactCopyButtons: copies ? count(copies) : null,
+      articleVisibleCopies: copies ? count(copies.filter(modelVisible)) : null,
+      articleEnabledCopies: copies ? count(copies.filter(modelEnabled)) : null, ancestors };
+  } catch { return null; }
+}
 // Website UI labels may split/reset whitespace; message bytes never use this.
 function modelQuotaLabel(text) { return (text || '').replace(/\s+/g, ' ').trim(); }
 function modelUsageLimitPopup() {
@@ -2299,7 +2338,8 @@ async function providerPageAction() {
     responseCount: answers.length, userCount: ownedUserCount, firstUserIdentity, firstUserFingerprint,
     firstUserVerified: ownedUserCount > 0, firstUserMarkerVerified: ownedUserCount > 0,
     busy, interrupted, text: modelResponseText(answer, responseExtraction).slice(0, 220_001),
-    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: 0, logicalAnswers: answers.length,
+    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer, responseExtraction),
+      claudeCompletionStructure: modelCompletionStructure(answer, message, article), modernMarkers: 0, logicalAnswers: answers.length,
       scopedCopies, enabledCopies, depth: -1 } };
   if (action === 'inspect') {
     const signIn = !composer && [...document.querySelectorAll('a, button')].filter(modelVisible)

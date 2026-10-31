@@ -379,6 +379,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedReadinessStages: Set<Bool> = []
         var loggedCodeSequence: Int?
         var loggedCodeResponseCount: Int?
+        var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
         var lastQuotaDiagnostic: [String]?
         var modelSelectionRequested = false
@@ -489,6 +490,36 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let pending: Bool, busy: Bool, answerComplete: Bool, ownershipPending: Bool, composer: Bool, temporary: Bool, temporaryActionAvailable: Bool
         let modernMarkers: Int, logicalAnswers: Int, scopedCopies: Int, enabledCopies: Int, depth: Int
     }
+
+    /// Diagnostic-only budget: two changed progress shapes, a reserved first
+    /// idle-incomplete shape, and one completion per acknowledged submission.
+    /// Old observations cannot renew it; unknown busy state is not idle.
+    struct ClaudeCompletionDiagnosticLogBudget {
+        private var sequence = 0
+        private var last: String?
+        private var progressRecords = 0
+        private var idleRecorded = false
+        private var completed = false
+
+        @MainActor mutating func admit(_ value: String, sequence current: Int, busy: Bool?, complete: Bool) -> Bool {
+            guard (1...EmbeddedWebModelTransport.maximumTurnSubmissions).contains(current), current >= sequence else { return false }
+            if current != sequence {
+                sequence = current; last = nil; progressRecords = 0; idleRecorded = false; completed = false
+            }
+            guard !completed else { return false }
+            if complete {
+                completed = true; last = value
+                return true
+            }
+            if busy == false, !idleRecorded {
+                idleRecorded = true; last = value
+                return true
+            }
+            guard value != last, progressRecords < 2 else { return false }
+            last = value; progressRecords += 1
+            return true
+        }
+    }
     #if DEBUG
     enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
     struct ModelValidationObservationForTesting: Codable, Sendable {
@@ -507,6 +538,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
+    private var claudeCompletionDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -618,6 +650,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setBoundCertificateDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         boundCertificateDiagnosticsObserverForTesting = observer
+    }
+
+    func setClaudeCompletionDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        claudeCompletionDiagnosticsObserverForTesting = observer
     }
 
     /// Exercise the ordinary full-model observation without the running-answer
@@ -2247,6 +2283,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let evidence = observed["completionEvidence"] as? [String: Any] ?? [:]
         let responseCount = count(observed, "responseCount")
+        if session.provider == .claude, !session.isDiscovery, session.submitted,
+           session.state == "running", session.acknowledgedSendSequence == session.sequence,
+           sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+           browser.documentGeneration(for: session.tabID) == (session.documentGeneration ?? session.initialDocumentGeneration),
+           responseCount > session.baseline,
+           let records = Self.sanitizedClaudeCompletionStructure(evidence["claudeCompletionStructure"], provider: session.provider),
+           session.claudeCompletionDiagnosticLog.admit(records.joined(separator: "\n"), sequence: session.sequence,
+               busy: Self.firstUserDiagnosticBool(observed["busy"]), complete: Self.firstUserDiagnosticBool(observed["answerComplete"]) == true) {
+            let busy = Self.firstUserDiagnosticBool(observed["busy"]).map { $0 ? "true" : "false" } ?? "unknown"
+            for record in records {
+                Self.inspectionLog.info("claudeCompletionShape sequence=\(session.sequence) responses=\(responseCount) busy=\(busy, privacy: .public) \(record, privacy: .public)")
+                #if DEBUG
+                claudeCompletionDiagnosticsObserverForTesting?(record)
+                #endif
+            }
+        }
         if observed["answerComplete"] as? Bool == true,
            !(observed["text"] as? String ?? "").isEmpty,
            session.loggedCodeSequence != session.sequence || session.loggedCodeResponseCount != responseCount,
@@ -2280,6 +2332,89 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard signature != session.lastInspection else { return }
         session.lastInspection = signature
         Self.inspectionLog.info("inspection responses=\(signature.responses) users=\(signature.users) sequence=\(signature.sequence) pending=\(signature.pending) busy=\(signature.busy) answerComplete=\(signature.answerComplete) textBytes=\(signature.textBytes) ownershipPending=\(signature.ownershipPending) composer=\(signature.composer) temporary=\(signature.temporary) temporaryActionAvailable=\(signature.temporaryActionAvailable) modernMarkers=\(signature.modernMarkers) logicalAnswers=\(signature.logicalAnswers) scopedCopies=\(signature.scopedCopies) enabledCopies=\(signature.enabledCopies) depth=\(signature.depth)")
+    }
+
+    /// Closed completion-landmark metadata only. It cannot authorize a response
+    /// and intentionally distinguishes an absent scope from observed zero counts.
+    static func sanitizedClaudeCompletionStructure(_ raw: Any?, provider: Provider) -> [String]? {
+        let flags = ["answerPresent", "messagePresent", "articlePresent"]
+        let counts = ["articleAssistantDescendants", "articleReplyBodies", "articleActionBars",
+            "articleCopyTestIDButtons", "articleCopyLabelButtons", "articleExactCopyButtons",
+            "articleVisibleCopies", "articleEnabledCopies"]
+        let keys = Set(flags + counts + ["kind", "messageStreamingState", "articleIsMessage", "ancestors"])
+        guard provider == .claude, let source = raw as? [String: Any], Set(source.keys) == keys,
+              source["kind"] as? String == "claude_completion_shape_v1" else { return nil }
+        var safe: [String: Any] = ["kind": "claude_completion_shape_v1"]
+        for key in flags {
+            guard let value = firstUserDiagnosticBool(source[key]) else { return nil }
+            safe[key] = value
+        }
+        let answer = safe["answerPresent"] as? Bool == true
+        let message = safe["messagePresent"] as? Bool == true
+        let article = safe["articlePresent"] as? Bool == true
+        guard answer || (!message && !article) else { return nil }
+        if message {
+            guard let value = source["messageStreamingState"] as? String,
+                  ["absent", "true", "false", "other"].contains(value) else { return nil }
+            safe["messageStreamingState"] = value
+        } else {
+            guard source["messageStreamingState"] is NSNull else { return nil }
+            safe["messageStreamingState"] = NSNull()
+        }
+        if article {
+            guard let same = firstUserDiagnosticBool(source["articleIsMessage"]), !same || message else { return nil }
+            safe["articleIsMessage"] = same
+            var values: [String: Int64] = [:]
+            for key in counts {
+                guard let value = ComputerToolArgumentContract.exactInt64(source[key]), (0...1_000).contains(value) else { return nil }
+                values[key] = value
+                safe[key] = value
+            }
+            guard let enabled = values["articleEnabledCopies"], let visible = values["articleVisibleCopies"],
+                  let exact = values["articleExactCopyButtons"], let testID = values["articleCopyTestIDButtons"],
+                  let label = values["articleCopyLabelButtons"], enabled <= visible, visible <= exact,
+                  exact <= testID, exact <= label else { return nil }
+        } else {
+            for key in counts + ["articleIsMessage"] {
+                guard source[key] is NSNull else { return nil }
+                safe[key] = NSNull()
+            }
+        }
+        guard let ancestors = source["ancestors"] as? [[String: Any]], ancestors.count <= 4,
+              answer || ancestors.isEmpty else { return nil }
+        let ancestorCounts = ["assistantDescendants", "replyBodyDescendants", "actionBars",
+            "copyTestIDButtons", "copyLabelButtons", "exactCopyButtons"]
+        let ancestorKeys = Set(ancestorCounts + ["depth", "tag", "role", "isAssistantMessage"])
+        var shapes = [safe]
+        for (index, ancestor) in ancestors.enumerated() {
+            guard Set(ancestor.keys) == ancestorKeys,
+                  ComputerToolArgumentContract.exactInt64(ancestor["depth"]) == Int64(index + 1),
+                  let tag = ancestor["tag"] as? String,
+                  ["div", "section", "article", "main", "form", "body", "html", "other"].contains(tag),
+                  let role = ancestor["role"] as? String,
+                  ["none", "article", "group", "main", "log", "feed", "region", "presentation", "other"].contains(role),
+                  let isMessage = firstUserDiagnosticBool(ancestor["isAssistantMessage"]),
+                  !["body", "html"].contains(tag) || index == ancestors.count - 1 else { return nil }
+            var row: [String: Any] = ["kind": "claude_completion_ancestor_v1", "depth": index + 1,
+                "tag": tag, "role": role, "isAssistantMessage": isMessage]
+            var values: [String: Int64] = [:]
+            for key in ancestorCounts {
+                guard let value = ComputerToolArgumentContract.exactInt64(ancestor[key]), (0...1_000).contains(value) else { return nil }
+                values[key] = value
+                row[key] = value
+            }
+            guard let exact = values["exactCopyButtons"], let testID = values["copyTestIDButtons"],
+                  let label = values["copyLabelButtons"], exact <= testID, exact <= label else { return nil }
+            shapes.append(row)
+        }
+        // Separate short records avoid Unified Logging truncation. The budget
+        // applies to the whole observation, never separately to each ancestor.
+        var records: [String] = []
+        for shape in shapes {
+            guard let data = try? JSONSerialization.data(withJSONObject: shape, options: .sortedKeys), data.count <= 960 else { return nil }
+            records.append(String(decoding: data, as: UTF8.self))
+        }
+        return records
     }
 
     /// Missing optional observations remain unknown. Malformed values cannot

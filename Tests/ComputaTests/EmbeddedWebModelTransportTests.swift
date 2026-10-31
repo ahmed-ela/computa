@@ -10853,6 +10853,153 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertFalse(gemini.accepts("https://gemini.google.com/u/foreign/app"))
     }
 
+    private static var claudeCompletionShapeFixture: [String: Any] {
+        ["kind": "claude_completion_shape_v1", "answerPresent": true, "messagePresent": true,
+         "messageStreamingState": "false", "articlePresent": true, "articleIsMessage": false,
+         "articleAssistantDescendants": 1, "articleReplyBodies": 1, "articleActionBars": 1,
+         "articleCopyTestIDButtons": 1, "articleCopyLabelButtons": 1, "articleExactCopyButtons": 1,
+         "articleVisibleCopies": 1, "articleEnabledCopies": 1,
+         "ancestors": [["depth": 1, "tag": "div", "role": "none", "isAssistantMessage": true,
+             "assistantDescendants": 0, "replyBodyDescendants": 1, "actionBars": 0,
+             "copyTestIDButtons": 0, "copyLabelButtons": 0, "exactCopyButtons": 0]]]
+    }
+
+    func testClaudeCompletionShapeRejectsPrivateMalformedAndUnboundedMetadata() throws {
+        let valid = Self.claudeCompletionShapeFixture
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(valid, provider: .claude))
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE") })
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(valid, provider: .gemini))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(valid, provider: .chatgpt))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(NSNull(), provider: .claude))
+        var privateField = valid; privateField["text"] = "PRIVATE_REPLY"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(privateField, provider: .claude))
+        for (key, value): (String, Any) in [("kind", "PRIVATE_KIND"), ("messageStreamingState", "PRIVATE_ATTRIBUTE"),
+            ("messageStreamingState", NSNull()), ("articleIsMessage", 1), ("answerPresent", 1),
+            ("articlePresent", "false"), ("messagePresent", false), ("answerPresent", false),
+            ("articleExactCopyButtons", 2), ("articleVisibleCopies", 2), ("articleEnabledCopies", 2),
+            ("articleActionBars", -1), ("articleActionBars", 1_001), ("articleActionBars", 1.5),
+            ("articleActionBars", true), ("articleActionBars", "PRIVATE_COUNT")] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(bad, provider: .claude), key)
+        }
+        for key in valid.keys {
+            var bad = valid; bad.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(bad, provider: .claude), key)
+        }
+        let ancestor = try XCTUnwrap((valid["ancestors"] as? [[String: Any]])?.first)
+        for (key, value): (String, Any) in [("url", "https://PRIVATE_URL"), ("tag", "PRIVATE_TAG"),
+            ("role", "PRIVATE_ROLE"), ("isAssistantMessage", 1), ("depth", 0), ("depth", 2),
+            ("depth", true), ("actionBars", -1), ("actionBars", 1_001), ("actionBars", true),
+            ("exactCopyButtons", 1)] {
+            var row = ancestor; row[key] = value
+            var bad = valid; bad["ancestors"] = [row]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(bad, provider: .claude), key)
+        }
+        var bad = valid; bad["ancestors"] = Array(repeating: ancestor, count: 5)
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(bad, provider: .claude))
+        var body = ancestor; body["tag"] = "body"
+        var second = ancestor; second["depth"] = 2
+        bad["ancestors"] = [body, second]
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(bad, provider: .claude))
+    }
+
+    func testClaudeCompletionShapeKeepsAbsentScopeUnknownAndEachSaturatedRecordSmall() throws {
+        var missing = Self.claudeCompletionShapeFixture
+        missing["articlePresent"] = false
+        for key in Array(missing.keys) where key.hasPrefix("article") && key != "articlePresent" { missing[key] = NSNull() }
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(missing, provider: .claude))
+        let base = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[0].utf8)) as? [String: Any])
+        XCTAssertTrue(base["articleActionBars"] is NSNull)
+        XCTAssertTrue(base["articleExactCopyButtons"] is NSNull)
+        missing["articleActionBars"] = 0
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(missing, provider: .claude))
+        missing["articleActionBars"] = NSNull(); missing["answerPresent"] = false; missing["messagePresent"] = false
+        missing["messageStreamingState"] = NSNull(); missing["ancestors"] = [[String: Any]]()
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(missing, provider: .claude))
+        missing["messageStreamingState"] = "absent"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(missing, provider: .claude))
+
+        var saturated = Self.claudeCompletionShapeFixture
+        for key in Array(saturated.keys) where key.hasPrefix("article") && !["articlePresent", "articleIsMessage"].contains(key) { saturated[key] = 1_000 }
+        saturated["messageStreamingState"] = "absent"
+        saturated["ancestors"] = (1...4).map { depth -> [String: Any] in
+            ["depth": depth, "tag": "section", "role": "presentation", "isAssistantMessage": false,
+             "assistantDescendants": 1_000, "replyBodyDescendants": 1_000, "actionBars": 1_000,
+             "copyTestIDButtons": 1_000, "copyLabelButtons": 1_000, "exactCopyButtons": 1_000]
+        }
+        let bounded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedClaudeCompletionStructure(saturated, provider: .claude))
+        XCTAssertEqual(bounded.count, 5)
+        XCTAssertTrue(bounded.allSatisfy { $0.utf8.count <= 960 })
+    }
+
+    func testClaudeCompletionDiagnosticBudgetReservesIdleAndCompletionAfterStreamingExhaustion() {
+        var budget = EmbeddedWebModelTransport.ClaudeCompletionDiagnosticLogBudget()
+        XCTAssertFalse(budget.admit("a", sequence: 0, busy: true, complete: false))
+        XCTAssertTrue(budget.admit("a", sequence: 1, busy: true, complete: false))
+        XCTAssertFalse(budget.admit("a", sequence: 1, busy: true, complete: false))
+        XCTAssertTrue(budget.admit("b", sequence: 1, busy: true, complete: false))
+        XCTAssertFalse(budget.admit("c", sequence: 1, busy: true, complete: false))
+        XCTAssertFalse(budget.admit("d", sequence: 1, busy: nil, complete: false))
+        // Stop can disappear without changing the completion-landmark shape.
+        XCTAssertTrue(budget.admit("b", sequence: 1, busy: false, complete: false))
+        XCTAssertFalse(budget.admit("b", sequence: 1, busy: false, complete: false))
+        XCTAssertFalse(budget.admit("new idle", sequence: 1, busy: false, complete: false))
+        XCTAssertTrue(budget.admit("b", sequence: 1, busy: false, complete: true))
+        XCTAssertFalse(budget.admit("later", sequence: 1, busy: false, complete: true))
+        XCTAssertFalse(budget.admit("later", sequence: 1, busy: true, complete: false))
+        XCTAssertTrue(budget.admit("next", sequence: 2, busy: false, complete: false))
+        XCTAssertFalse(budget.admit("old", sequence: 1, busy: true, complete: false))
+        XCTAssertTrue(budget.admit("next", sequence: 2, busy: false, complete: true))
+        XCTAssertFalse(budget.admit("outside", sequence: EmbeddedWebModelTransport.maximumTurnSubmissions + 1, busy: false, complete: true))
+    }
+
+    func testClaudeCompletionDiagnosticsPrecedeCompletionWithoutAdmittingMissingControls() async throws {
+        let page = Self.providerPage(.claude).replacingOccurrences(of: "actions.setAttribute('data-testid', 'message-actions')",
+            with: "actions.setAttribute('data-testid', 'fixture-changed-actions')")
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setClaudeCompletionDiagnosticsObserverForTesting { diagnostics.append($0) }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertTrue(diagnostics.isEmpty)
+        let prompt = "PRIVATE_CLAUDE_COMPLETION_FIXTURE"
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let deadline = ContinuousClock.now + .seconds(10)
+        while diagnostics.isEmpty, ContinuousClock.now < deadline {
+            let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observedRevision)
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "running")
+            if diagnostics.isEmpty { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: deadline) }
+        }
+        XCTAssertFalse(diagnostics.isEmpty)
+        XCTAssertTrue(diagnostics.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE") && !$0.contains("Fixture reply") })
+        let shapes = try diagnostics.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        XCTAssertTrue(shapes.contains { $0["kind"] as? String == "claude_completion_shape_v1" && $0["articleActionBars"] as? Int == 0 })
+        XCTAssertTrue(shapes.contains { $0["kind"] as? String == "claude_completion_ancestor_v1" && $0["exactCopyButtons"] as? Int == 1 })
+        let beforeCompletion = diagnostics.count
+        _ = try await evaluate(view, "document.querySelector('[data-testid=fixture-changed-actions]').setAttribute('data-testid', 'message-actions'); return true;")
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        XCTAssertGreaterThan(diagnostics.count, beforeCompletion)
+        XCTAssertLessThanOrEqual(diagnostics.count, 20)
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, [prompt])
+        let inputs = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+        XCTAssertEqual(inputs, 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))

@@ -755,6 +755,99 @@ describe("embedded Claude fixed adapter", () => {
     expect(await f.run()).toMatchObject({ answerComplete: false });
   });
 
+  test("completion diagnostics distinguish a missing article from zero scoped controls without accepting it", async () => {
+    const f = fixture(provider, { userPrompt: prompt });
+    delete f.article.values.role;
+    const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+    expect(observed.answerComplete).toBe(false);
+    expect(shape).toMatchObject({ answerPresent: true, messagePresent: true, messageStreamingState: "false",
+      articlePresent: false, articleIsMessage: null, articleAssistantDescendants: null,
+      articleReplyBodies: null, articleActionBars: null, articleExactCopyButtons: null,
+      articleVisibleCopies: null, articleEnabledCopies: null });
+    expect(shape.ancestors[0]).toMatchObject({ depth: 1, tag: "div", role: "none", isAssistantMessage: true,
+      assistantDescendants: 0, replyBodyDescendants: 1, actionBars: 0, exactCopyButtons: 0 });
+    expect(shape.ancestors[1]).toMatchObject({ depth: 2, role: "none", isAssistantMessage: false,
+      assistantDescendants: 1, actionBars: 1, copyTestIDButtons: 1, copyLabelButtons: 1, exactCopyButtons: 1 });
+    expect(shape.ancestors).toHaveLength(4);
+  });
+
+  test("completion diagnostics distinguish self scopes, changed action bars and changed Copy labels", async () => {
+    for (const variant of ["self", "bar", "testid", "label"] as const) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (variant === "self") f.response.values.role = "article";
+      if (variant === "bar") f.controls.values["data-testid"] = "changed";
+      if (variant === "testid") f.copy.values["data-testid"] = "changed";
+      if (variant === "label") f.copy.values["aria-label"] = "changed";
+      const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+      expect(observed.answerComplete).toBe(false);
+      expect(shape.articleIsMessage).toBe(variant === "self");
+      expect(shape.articleAssistantDescendants).toBe(variant === "self" ? 0 : 1);
+      expect(shape.articleActionBars).toBe(["self", "bar"].includes(variant) ? 0 : 1);
+      expect(shape.articleExactCopyButtons).toBe(0);
+      expect(shape.articleCopyTestIDButtons).toBe(variant === "label" ? 1 : 0);
+      expect(shape.articleCopyLabelButtons).toBe(variant === "testid" ? 1 : 0);
+      expect(shape.ancestors[1].exactCopyButtons).toBe(["self", "bar"].includes(variant) ? 1 : 0);
+    }
+  });
+
+  test("completion diagnostics preserve visibility, enabled and streaming distinctions", async () => {
+    for (const variant of ["hidden", "disabled", "streaming", "absent", "other", "complete"] as const) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (variant === "hidden") f.copy.values.hidden = "";
+      if (variant === "disabled") f.copy.disabled = true;
+      if (variant === "streaming") f.response.values["data-is-streaming"] = "true";
+      if (variant === "absent") delete f.response.values["data-is-streaming"];
+      if (variant === "other") f.response.values["data-is-streaming"] = "PRIVATE_STREAMING_STATE";
+      const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+      expect(observed.answerComplete).toBe(variant === "complete");
+      expect(shape.articleExactCopyButtons).toBe(1);
+      expect(shape.articleVisibleCopies).toBe(variant === "hidden" ? 0 : 1);
+      expect(shape.articleEnabledCopies).toBe(["hidden", "disabled"].includes(variant) ? 0 : 1);
+      expect(shape.messageStreamingState).toBe(variant === "streaming" ? "true" : ["absent", "other"].includes(variant) ? variant : "false");
+      expect(JSON.stringify(shape)).not.toContain("PRIVATE");
+    }
+  });
+
+  test("completion diagnostics retain absent-answer unknowns and never leak arbitrary ancestor attributes", async () => {
+    const empty = fixture(provider);
+    const missing = (await empty.run()).completionEvidence.claudeCompletionStructure;
+    expect(missing).toMatchObject({ answerPresent: false, messagePresent: false, messageStreamingState: null,
+      articlePresent: false, articleIsMessage: null, articleActionBars: null, ancestors: [] });
+    const f = fixture(provider, { userPrompt: prompt });
+    f.response.tagName = "PRIVATE_ELEMENT"; f.response.values.role = "PRIVATE_ROLE";
+    f.response.values.id = "PRIVATE_ID"; f.response.values.class = "PRIVATE_CLASS";
+    f.copy.values["data-private-url"] = "https://PRIVATE_URL";
+    const shape = (await f.run()).completionEvidence.claudeCompletionStructure;
+    expect(shape.ancestors[0]).toMatchObject({ tag: "other", role: "other" });
+    expect(JSON.stringify(shape)).not.toContain("PRIVATE");
+  });
+
+  test("completion diagnostic counts and ancestor walks are bounded without changing completion", async () => {
+    const f = fixture(provider, { userPrompt: prompt });
+    for (let index = 0; index < 1_005; index++) f.controls.append(new Element("BUTTON", { "aria-label": "Copy", "data-testid": "action-bar-copy" }));
+    const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+    expect(observed.answerComplete).toBe(true);
+    expect(shape.articleExactCopyButtons).toBe(1_000);
+    expect(shape.articleVisibleCopies).toBe(1_000); expect(shape.articleEnabledCopies).toBe(1_000);
+    expect(shape.ancestors).toHaveLength(4);
+    expect(shape.ancestors[1].exactCopyButtons).toBe(1_000);
+  });
+
+  test("an unavailable optional completion diagnostic cannot fail or complete an adapter read", async () => {
+    for (const disabled of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt }); f.copy.disabled = disabled;
+      const query = f.response.querySelectorAll.bind(f.response);
+      f.response.querySelectorAll = selector => {
+        if (selector === 'button[data-testid="action-bar-copy"]') throw new Error("diagnostic-only fixture exception");
+        return query(selector);
+      };
+      const observed = await f.run();
+      expect(observed.answerComplete).toBe(!disabled);
+      expect(observed.completionEvidence.claudeCompletionStructure).toBeNull();
+      expect(observed.text).toBe('{"type":"message","text":"OK"}');
+    }
+  });
+
   test("streaming or a visible Stop response prevents premature completion", async () => {
     const f = fixture(provider, { userPrompt: prompt }); f.stop.connected = true;
     expect(await f.run()).toMatchObject({ busy: true, answerComplete: false });
