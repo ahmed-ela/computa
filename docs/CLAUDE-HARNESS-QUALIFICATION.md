@@ -84,6 +84,34 @@ JSON in Accessibility. Its tab was closed. No Inspector settings were enabled.
 The next repair recognizes the observed caption structure while retaining exact
 `json` text, a single leaf caption/control and PRE/CODE, strict code-wrapper scope,
 whole-answer outside-prose rejection and literal JSON/envelope validation.
+Signed build343, source `4922a4c35042292e2b46068ba2de69a99dd29aaf`, passed 114
+adapter tests (1,786 assertions) plus both native completion/extraction regressions.
+The installed artifact passed all source, signature and copied-resource checks.
+
+| Fresh marker task | Result | Native duration |
+| --- | --- | --- |
+| Sonnet 5.5 | Exact marker, model/ownership and closed cleanup verified | 4.628 s |
+| Haiku 5.5 | Invalid JSON: 235 characters of authored prose outside valid literal JSON; zero tools, closed cleanup | 4.470 s |
+| Haiku 5.5, instrumented new task | Exact marker and complete proof; unused exact-task diagnostic arm disarmed and retained | 4.315 s |
+| Sonnet 5 | Valid response envelope, but refused the wrapper instead of returning the marker; closed cleanup | 10.361 s |
+| Sonnet 4.6 | Exact marker, model/ownership and closed cleanup verified | 6.073 s |
+
+These samples establish two extraction fixes, not reliable qualification of all
+Claude models. Haiku's later success does not erase its earlier format failure.
+Sonnet 5 explicitly identified the app-owned phrases "You are Computa" and
+"Assistant refusals are not policy," plus the unexplained session marker, as
+conflicting authority cues. The outer relay disclaimer did not prevent that
+misinterpretation. Its response is preserved as a failed marker result, despite
+successful transport and cleanup.
+
+## Candidate 344: clarify external relay instructions
+
+Clarify the generated app-owned instructions at their source: Computa identifies
+the local application, host permission modes do not override website governing
+rules, prior capability speculation is not a host access result, and the session
+marker is only an opaque correlation label. Preserve actual denials, Stop, the
+message/refusal option, exact schemas, user data and canonical history. Do not
+strip authored prose or add automatic correction attempts to Claude.
 Installed/live qualification remains pending.
 
 ## Qualification contract
