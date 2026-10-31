@@ -951,3 +951,36 @@ message subview was not restored, and no mail action was taken.
 Local evidence: `captcha332-lifecycle/inspector-blank-failure-oct31.json`,
 `response332-approved-blank-navigation.json` and
 `cookie-timeline332-approved-blank-navigation.json`.
+
+### October 31: local control isolates the failed recording sequence
+
+Two disposable standalone WebKit apps used nonpersistent storage, one retained
+native view and an identical loopback fixture server. Both permitted one explicit
+navigation through a 302 redirect to synthetic 429 HTML, then one explicit fetch
+returning 200. No provider or user-profile request was made. Inspector's Network
+tab used Preserve Log on and Disable Caches off in both arms.
+
+Arm A matched Computa's untouched new-tab construction: a WebKit view existed
+but no document had been loaded before Inspector attachment. Server and native
+receipts proved the redirect and final response; the page also confirmed the
+fetch. Inspector recorded zero resources throughout. Closing and reattaching
+Inspector after the page loaded revealed only historical document placeholders
+without status, source or request headers.
+
+Arm B completed a local `about:blank` document before Inspector attachment.
+The subsequent fixture navigation appeared with GET, HTTP 429, Source Network,
+the initial request headers, the 302 redirect response and final response
+headers. The later fetch appeared with HTTP 200. Server receipts independently
+confirmed exactly one request to each fixture path, and the native view remained
+inspectable with nonpersistent storage in both arms.
+
+This single paired control supports initializing a document before Inspector
+attachment, or attaching to an already-loaded human test document, for the next
+capture. It reproduces a recording failure independently of Google and Computa's
+adapter logic. It does not establish the exact WebKit defect, a process swap or
+the Google rejection trigger. App identities, ephemeral ports and execution
+times necessarily differed. No production navigation or verification behavior
+was changed. Inspector/chooser windows were closed, Preserve Log and Safari's
+developer setting restored off, both fixture apps quit and their loopback
+servers stopped. Local source, build, native/server and UI receipts are retained
+under `inspector-local332` and `inspector-local332b`.
