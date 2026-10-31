@@ -5,19 +5,19 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current status (October 31): build331 is installed and audited. CAPTCHA
-investigation takes priority over all-model qualification. Approved inspection
-captured one normal Gemini network response with HTTP 200 and no exemption cookie
-in its outgoing Cookie header. A subsequent owned task verified its submission
-but timed out without an answer; the first normal Gemini navigation after an
-ordinary same-build restart then showed CAPTCHA again. The earlier run also
-challenged while a future cookie candidate survived restart. Simple cookie loss
-does not explain that earlier run; no browser-version cause has been established.
-Approved inspection the following day captured another successful network
-response on the same process, but the earlier blocked request's headers were
-unavailable. The rejection trigger and permanent prevention remain unproven. Earlier
-staged/installed statements below describe historical evidence, not the current
-installation.
+Current status (October 31): build332, source `05d364f`, is installed and audited.
+CAPTCHA investigation takes priority over all-model qualification. One fresh
+owned 3.1 Pro marker task passed; after an ordinary same-build restart, the next
+fresh task received a captured HTTP 429 challenge before submission. A separately
+approved normal-tab navigation on that process reproduced HTTP 429. Inspector
+retained no request records for that first navigation from about:blank, so the
+outgoing cookie header and initial redirect source remain unknown. Successful
+normal network responses without the exemption-cookie name and an earlier
+challenge with a future native cookie candidate are both retained. Simple
+candidate loss or expiry does not explain that earlier failure; no browser-version
+cause or CAPTCHA prevention fix has been established. Both developer settings
+were restored off. Earlier staged/installed statements below describe historical
+evidence, not the current installation.
 
 ## Ownership failure and repair
 
@@ -916,3 +916,38 @@ Local evidence: `captcha331-lifecycle/inspector-bounded-oct31.json`,
 `captcha332-lifecycle/restarts.json`, both marker capture directories and their
 independent reviews, `response332-postrestart.json`, `response332-marker-a.json`,
 `response332-marker-b.json`, and the matching `cookie-timeline332-*` receipts.
+
+### October 31: approved blank-tab navigation reproduces the challenge
+
+The user approved temporary inspection of the existing blank human tab and one
+normal navigation to Gemini, without CAPTCHA completion. Web Inspector was
+attached before the address submission at 08:09:57 UTC. Network was selected,
+Preserve Log enabled and Disable Caches left off. The tab reached Google's
+unusual-traffic page with an unchecked CAPTCHA. The native callback at
+08:09:58 UTC captured HTTP 429 on Google www/sorry, with the exact human tab and
+current generation, a recent Date bucket and no-cache/no-store/must-revalidate.
+The native cookie sample had zero exemption candidates in all seven scopes.
+
+Inspector's title followed the navigation, but the unfiltered Network view
+contained zero resources and zero transferred bytes; filtering for the initial
+Gemini URL also returned no records. Preserve Log was visually confirmed on.
+No request headers or initial redirect source were available. An empty Inspector
+recording does not establish that no requests or redirects occurred, and native
+cookie metadata is not an outgoing-header observation. The recording gap itself
+requires investigation before another live capture is useful.
+
+This reproduces the challenge in a normal human tab on the same process roughly
+25 minutes after the owned-task failure. It weakens an explanation confined to
+the model view but does not rule out an earlier model request affecting shared
+browser or server state. Request order, time and startup state remain confounded.
+No prompt, reload, CAPTCHA completion or uncertain action replay occurred.
+
+Preserve Log, Safari's developer preference and the Computa tab's inspection
+permission were restored off and visually verified by 08:11:49 UTC. Inspector
+and the app/device chooser were closed. ChatGPT, both Kimi tabs and Gmail's Sent
+folder were restored, with ChatGPT selected. The earlier individual Gmail
+message subview was not restored, and no mail action was taken.
+
+Local evidence: `captcha332-lifecycle/inspector-blank-failure-oct31.json`,
+`response332-approved-blank-navigation.json` and
+`cookie-timeline332-approved-blank-navigation.json`.
