@@ -35,7 +35,11 @@ function observedClaudeQuota(f: ReturnType<typeof fixture>, inert = true) {
   return { background, dialog, heading, upgrade, plans, dismiss };
 }
 
-function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM") {
+function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM", inert = false) {
+  if (inert) {
+    const background = new Element("DIV", { inert: "", "aria-hidden": "true" });
+    background.append(...f.body.children); f.body.children = []; f.body.append(background);
+  }
   const container = new Element("DIV"), warning = new Element("SPAN");
   const support = new Element("A", { href: "https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits" }, "messages");
   warning.append(new Element("#text", {}, "You are out of free "), support, new Element("#text", {}, " until " + clock));
@@ -602,6 +606,87 @@ describe("embedded Claude fixed adapter", () => {
     expect(fresh.world.__computaModelFirstProof).toBeUndefined();
   });
 
+  test("a submitted quota banner permits only read-only cleanup of the pinned physical Incognito mode", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); const before = await f.run();
+    const banner = observedClaudeBanner(f, "11:40 PM", true); f.stop.connected = true;
+    for (const action of ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit"])
+      expect(await f.run(action, { prompt: outbound })).toEqual({ error: "website_usage_limit" });
+    expect(await f.run("stop")).toMatchObject({ usageLimited: true, temporary: true, busy: false, stopped: false,
+      firstUserVerified: true, firstUserFingerprint: before.firstUserFingerprint, firstUserMarkerVerified: true, userCount: 1 });
+    expect(f.composer.innerText).toBe(""); expect(f.document.activeElement).toBeNull();
+    for (const control of [f.stop, f.send, f.exit, f.toggle, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+  });
+
+  test("quota banner cleanup cannot establish ownership or accept changed first-message proof", async () => {
+    const unbound = fixture(provider, { userPrompt: prompt }); observedClaudeBanner(unbound, "11:40 PM", true);
+    expect(await unbound.run()).toEqual({ error: "website_usage_limit" });
+    expect(await unbound.run("stop")).toMatchObject({ error: "conversation_changed", detail: "first_user_message" });
+    expect(unbound.world.__computaModelFirstProof).toBeUndefined();
+    for (const mutation of ["body", "identity", "owner", "count", "fingerprint", "marker", "url", "document"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const originalURL = f.document.URL, banner = observedClaudeBanner(f, "11:40 PM", true);
+      const overrides: Record<string, unknown> = {};
+      if (mutation === "body") f.userBody!.text += " changed";
+      if (mutation === "identity") f.userRoot!.parentElement!.values.id = "replacement-id";
+      if (mutation === "owner") f.world.__computaModelOwner = "foreign";
+      if (mutation === "count") overrides.expectedUserCounts = [0];
+      if (mutation === "fingerprint") overrides.expectedFirstUserFingerprint = "f".repeat(64);
+      if (mutation === "marker") overrides.expectedFirstUserMarker = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      if (mutation === "url") { f.document.URL = f.origin + "/chat/foreign?incognito"; overrides.expectedURL = originalURL; }
+      if (mutation === "document") f.window.top = {};
+      expect(["conversation_changed", "document_changed"]).toContain((await f.run("stop", overrides)).error);
+      for (const control of [f.send, f.stop, f.exit, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    }
+  });
+
+  test("quota cleanup requires one physical Incognito exit and header outside quota, authored and dialog scopes", async () => {
+    for (const kind of ["banner", "popup"]) {
+      for (const mutation of ["missing-exit", "hidden-exit", "missing-header", "hidden-header", "wrong-header", "no-incognito",
+        "duplicate-exit", "duplicate-header", "authored-header", "quota-header", "quota-exit", "dialog-header"]) {
+        const f = fixture(provider, { userPrompt: prompt }); await f.run();
+        const surface = kind === "banner" ? observedClaudeBanner(f, "11:40 PM", true).container : observedClaudeQuota(f).dialog;
+        if (mutation === "missing-exit") f.exit.connected = false;
+        if (mutation === "hidden-exit") f.exit.values.hidden = "";
+        if (mutation === "missing-header") f.badge.connected = false;
+        if (mutation === "hidden-header") f.badge.values.visibility = "hidden";
+        if (mutation === "wrong-header") f.badge.text = "Regular chat";
+        if (mutation === "no-incognito") f.document.URL = f.origin + "/new";
+        if (mutation === "duplicate-exit") f.exit.parentElement!.append(f.exit.cloneNode(true));
+        if (mutation === "duplicate-header") f.header.parentElement!.append(f.header.cloneNode(true));
+        if (["authored-header", "quota-header", "quota-exit", "dialog-header"].includes(mutation)) {
+          const node = mutation === "quota-exit" ? f.exit : f.header;
+          node.parentElement!.children = node.parentElement!.children.filter(child => child !== node);
+          if (mutation === "authored-header") f.answer.append(node);
+          else if (mutation === "dialog-header") { const dialog = new Element("DIV", { role: "dialog" }); dialog.append(node); f.body.append(dialog); }
+          else surface.append(node);
+        }
+        expect((await f.run("stop")).error).toBe("temporary_mode_unverified");
+        for (const control of [f.send, f.stop, f.exit]) expect(control.clicks).toBe(0);
+        for (const control of surface.querySelectorAll("button, a")) expect(control.clicks).toBe(0);
+      }
+    }
+  });
+
+  test("unknown, ambiguous or authored banner surfaces cannot authorize hidden-mode cleanup", async () => {
+    for (const mutation of ["support", "upgrade", "text", "hidden", "duplicate-support", "duplicate-upgrade", "duplicate-banner", "popup-too", "authored"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const banner = observedClaudeBanner(f, "11:40 PM", true);
+      if (mutation === "support") banner.support.values.href += "?extra=1";
+      if (mutation === "upgrade") banner.upgrade.values.href += "&extra=1";
+      if (mutation === "text") banner.warning.children[2].text = " until someday";
+      if (mutation === "hidden") banner.container.values.hidden = "";
+      if (mutation === "duplicate-support") banner.container.append(banner.support.cloneNode(true));
+      if (mutation === "duplicate-upgrade") banner.container.append(banner.upgrade.cloneNode(true));
+      if (mutation === "duplicate-banner") f.body.append(banner.container.cloneNode(true));
+      if (mutation === "popup-too") observedClaudeQuota(f, false);
+      if (mutation === "authored") {
+        f.body.children = f.body.children.filter(node => node !== banner.container); f.answer.append(banner.container);
+      }
+      expect((await f.run("stop")).error).toBe("temporary_mode_unverified");
+      for (const control of [f.send, f.stop, f.exit, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    }
+  });
+
   test("only an empty initial quota inspection emits the exact abort receipt for owned native cleanup", async () => {
     for (const popup of [false, true]) {
       const f = fixture(provider);
@@ -694,10 +779,12 @@ describe("embedded Claude fixed adapter", () => {
 
   test("a banner alone cannot inspect mode indicators through an unrelated modal", async () => {
     const f = fixture(provider, { userPrompt: prompt }); await f.run(); observedClaudeBanner(f);
+    const modal = unrelatedClaudeDialog(f, { "aria-modal": "true" });
     f.header.values.inert = ""; f.exit.values["aria-hidden"] = "true";
     expect(await f.run()).toEqual({ error: "website_usage_limit" });
     expect(await f.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
     expect(f.send.clicks).toBe(0); expect(f.exit.clicks).toBe(0);
+    expect(modal.dismiss.clicks).toBe(0);
   });
 
   test("quota diagnostics reveal clock, control-tag and private-use categories without broadening classification", async () => {

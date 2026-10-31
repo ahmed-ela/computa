@@ -2057,11 +2057,11 @@ function modelUsageLimitBanner() {
   const urlOf = node => { try { return new URL(node.getAttribute('href'), document.URL); } catch { return null; } };
   const support = [...document.querySelectorAll('a[href]')].filter(node => modelVisible(node) && !node.closest(messages)
     && urlOf(node)?.href === 'https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits');
-  if (support.length !== 1) return false;
+  if (support.length !== 1) return null;
   let container = support[0].parentElement;
   for (let depth = 0; container && depth < 8; depth++, container = container.parentElement) {
     if (['body', 'html'].includes(container.tagName.toLowerCase()) || container.closest(messages)
-      || container.querySelector(messages)) return false;
+      || container.querySelector(messages)) return null;
     const upgrades = [...container.querySelectorAll('a[href]')].filter(node => {
       const url = urlOf(node);
       return modelVisible(node) && !node.closest(messages) && url?.origin === 'https://claude.ai' && !url.username && !url.password
@@ -2079,11 +2079,12 @@ function modelUsageLimitBanner() {
         && /^You are out of free messages until (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)$/.test(
           modelQuotaLabel(parts.map(child => child === support[0] ? 'messages' : child.textContent || '').join('')));
     });
-    if (text && upgrades.length) return upgrades.length === 1 && modelVisible(container);
+    if (text && upgrades.length) return upgrades.length === 1 && modelVisible(container) ? container : null;
   }
-  return false;
+  return null;
 }
-function modelUsageLimited() { return !!modelUsageLimitPopup() || modelUsageLimitBanner(); }
+function modelUsageLimitSurfaces() { return [modelUsageLimitPopup(), modelUsageLimitBanner()].filter(Boolean); }
+function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0; }
 function modelQuotaDiagnostic() {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];
@@ -2166,20 +2167,27 @@ function modelVisibleDialog(blockingOnly = false) {
       || node.tagName.toLowerCase() === 'dialog' && node.getAttribute('open') !== null));
 }
 function modelTemporaryVerified() {
-  // A known quota dialog makes the background inert. Cleanup may inspect its
-  // already-rendered mode indicators, while every interactive lookup stays strict.
-  const popup = input.action === 'stop' && modelUsageLimitPopup();
-  const visible = popup
-    ? node => !!node && node.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden'
-    : modelVisible;
+  // The observed quota popup or banner can leave the background inert. Only
+  // cleanup may read its physical mode indicators; interactive reads stay strict.
+  const surfaces = input.action === 'stop' ? modelUsageLimitSurfaces() : [];
+  if (surfaces.length > 1) return false;
+  const quota = surfaces[0];
+  const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden';
   const outside = '[data-testid="assistant-message"], [data-testid="user-message"], dialog, [role="dialog"], [aria-modal="true"]';
-  const exit = [...document.querySelectorAll('button[aria-label="Exit incognito"]')].find(node => visible(node)
-    && !node.closest(outside) && (!popup || !popup.contains(node)));
+  // A known banner cannot explain a separate unrelated dialog. Do not use its
+  // presence to read through that other surface, even if the mode is still drawn.
+  if (quota && [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"]')].some(node => physical(node)
+    && !node.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
+    && !node.contains(quota) && !quota.contains(node))) return false;
+  const visible = quota ? physical : modelVisible;
+  const eligible = node => visible(node) && !node.closest(outside) && (!quota || !quota.contains(node));
+  const exits = [...document.querySelectorAll('button[aria-label="Exit incognito"]')].filter(eligible);
+  const headers = [...document.querySelectorAll('.animate-incognito-header-in span')].filter(node => eligible(node)
+    && (node.textContent || '').trim() === 'Incognito chat');
   const url = new URL(document.URL);
-  return !!exit && url.searchParams.has('incognito') && url.searchParams.get('incognito') === ''
-    && [...document.querySelectorAll('.animate-incognito-header-in span')].some(node => visible(node)
-      && !node.closest(outside) && (!popup || !popup.contains(node))
-      && (node.textContent || '').trim() === 'Incognito chat');
+  return url.searchParams.has('incognito') && url.searchParams.get('incognito') === ''
+    && (quota ? exits.length === 1 && headers.length === 1 : exits.length > 0 && headers.length > 0);
 }
 function modelURLAllowed() {
   try {

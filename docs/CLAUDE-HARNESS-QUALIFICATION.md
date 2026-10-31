@@ -179,6 +179,36 @@ Build345 is a review candidate. Keep the live-tested build344 installed until
 Claude's allowance permits fresh qualification of the presentation follow-up.
 No claim is made that build345 is installed or that all Claude models are reliable.
 
+## Candidate 347: quota-banner cleanup
+
+The saved build344 failure exposed a local cleanup mismatch in addition to the
+external account quota. Its exact quota banner was recognized, and both Incognito
+indicators remained physically rendered, but the quota surface made the background
+inert or accessibility-hidden. Cleanup allowed physical mode inspection for the
+recognized quota popup only, so the banner variant could not establish temporary
+mode. The original failed task and unconfirmed receipt remain preserved.
+
+The adapter now identifies either exact quota surface for cleanup only. It
+requires one unambiguous surface and one physical Incognito header/exit pair,
+outside authored messages, quota content and dialog scopes. A separate unknown
+dialog, ambiguous surfaces, missing mode, changed ownership or changed first-user
+proof still prevents cleanup. Normal readiness, Send, response acceptance and
+quota admission remain strict. The quota cleanup path does not click any page
+control; native code closes only its already-owned view after all proofs pass.
+
+Validation: all 871 embedded-provider JavaScript adapter tests passed, with
+38,422 assertions. Three real-WebKit native tests passed, including the submitted
+banner's valid cleanup and seven rejected mode/ownership/ambiguity cases, plus
+the existing popup and empty initial-banner paths. Human tabs were preserved;
+blocked attempts did not add input, focus, Send or quota-control clicks.
+
+A separate fresh Sonnet 4.6 Incognito marker returned the exact requested text
+on October 31 after the earlier quota failure. This establishes current direct
+website readiness, not qualification of the presentation follow-up or the local
+harness. Its one test tab was closed, no prior task was replayed, and the old
+cleanup warning remains unconfirmed. Build347 still requires installation and
+fresh per-model harness qualification before it can be called reliable.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and

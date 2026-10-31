@@ -11258,6 +11258,94 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeSubmittedQuotaBannerCleanupRequiresOwnedIncognitoAndFirstMessageProof() async throws {
+        for scenario in ["valid", "missing_mode", "missing_fingerprint", "route_drift", "unknown_modal",
+                         "duplicate_exit", "duplicate_header", "ambiguous_surfaces"] {
+            let fixture = try Fixture(page: Self.providerPage(.claude))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Keep the owned banner task"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64, scenario)
+            if scenario == "missing_fingerprint" {
+                // Fault injection removes a verified private pin; it never
+                // fabricates ownership or changes the native cleanup result.
+                let removed = try await evaluate(view, """
+                    const proof = globalThis.__computaModelFirstProof;
+                    if (!proof || typeof proof.fingerprint !== 'string') return false;
+                    delete proof.fingerprint; return proof.fingerprint === undefined;
+                    """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1")) as? Bool
+                XCTAssertEqual(removed, true)
+            }
+            _ = try await evaluate(view, """
+                const scenario = \(try matchedProbeJSON(scenario));
+                if (scenario === 'missing_mode') document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                if (scenario === 'duplicate_exit') document.body.appendChild(document.querySelector('button[aria-label="Exit incognito"]').cloneNode(true));
+                if (scenario === 'duplicate_header') document.body.appendChild(document.querySelector('.animate-incognito-header-in').cloneNode(true));
+                const background = document.createElement('div'); background.id = 'fixture-quota-background';
+                while (document.body.firstChild) background.appendChild(document.body.firstChild);
+                background.setAttribute('inert', ''); background.setAttribute('aria-hidden', 'true');
+                document.body.appendChild(background);
+                // The same exact official banner already exercised by the
+                // initial-page quota test now covers a submitted conversation.
+                const banner = document.createElement('div');
+                banner.innerHTML = \(try matchedProbeJSON(Self.claudeQuotaBannerMarkup));
+                document.body.appendChild(banner.firstElementChild);
+                if (scenario === 'unknown_modal' || scenario === 'ambiguous_surfaces') {
+                    const dialog = document.createElement('div');
+                    const title = document.createElement('h1');
+                    if (scenario === 'unknown_modal') {
+                        dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+                        title.textContent = 'Unrelated account notice';
+                    } else title.textContent = 'Your free messages return at 11:40 PM';
+                    dialog.appendChild(title);
+                    for (const label of scenario === 'unknown_modal' ? ['Dismiss'] : ['See all plans', 'Not now']) {
+                        const button = document.createElement('button'); button.textContent = label; dialog.appendChild(button);
+                    }
+                    document.body.appendChild(dialog);
+                }
+                if (scenario === 'route_drift') history.replaceState({}, '', '/settings?incognito');
+                window.fixtureQuotaClicks = 0; window.fixtureQuotaFocusCount = 0;
+                document.addEventListener('click', event => {
+                    if (event.target instanceof Element && event.target.closest('button, a, [role="button"]')) window.fixtureQuotaClicks++;
+                }, true);
+                document.getElementById('fixture-editor').addEventListener('focus', () => { window.fixtureQuotaFocusCount++; });
+                return true;
+                """)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not send through a quota banner"])
+                XCTFail("A quota banner or lost ownership must prevent another Send: \(scenario)")
+            } catch {
+                if ["missing_fingerprint", "route_drift"].contains(scenario) {
+                    XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure, scenario)
+                } else {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude), scenario)
+                }
+            }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let mayClose = scenario == "valid"
+            XCTAssertEqual(finished["text"] as? String, complete["text"] as? String, scenario)
+            XCTAssertEqual(finished["cleanup"] as? String, mayClose ? "not_created" : "failed", scenario)
+            if mayClose { XCTAssertNil(fixture.browser.webView(for: tabID)) }
+            else { XCTAssertTrue(fixture.browser.webView(for: tabID) === view, scenario) }
+            // Retaining this fixture reference permits a final read after the
+            // owned view is detached; no action is dispatched through it.
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Keep the owned banner task"], scenario)
+            for (variable, expected) in [("fixtureInputCount", 1), ("fixtureQuotaFocusCount", 0), ("fixtureQuotaClicks", 0)] {
+                let count = try await evaluate(view, "return window.\(variable);") as? Int
+                XCTAssertEqual(count, expected, "Send and cleanup cannot interact with the quota surface: \(scenario)")
+            }
+            try await assertHumanTabIntact(fixture, retaining: mayClose ? nil : tabID)
+        }
+    }
+
     func testClaudeInitialQuotaBannerAbortsBeforeFocusOrSendAndClosesOnlyFreshOwnedTab() async throws {
         let fixture = try Fixture(page: Self.freshClaudeQuotaBannerPage)
         defer { fixture.shutdown() }
@@ -16746,12 +16834,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    private static var freshClaudeQuotaBannerPage: String {
-        let banner = #"""
+    private static var claudeQuotaBannerMarkup: String {
+        #"""
         <div id="fixture-quota-banner"><p>You are out of free <a data-fixture-quota-link href="https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits"><span>messages</span><span hidden>private_canary accessibility suffix</span></a> until 11:40 PM</p><a data-fixture-quota-link href="https://claude.ai/upgrade?hide_free=true&amp;from=ratelimit">Upgrade</a></div>
         """#
+    }
+
+    private static var freshClaudeQuotaBannerPage: String {
         return providerPage(.claude)
-            .replacingOccurrences(of: #"<div id="messages"></div>"#, with: banner + #"<div id="messages"></div>"#)
+            .replacingOccurrences(of: #"<div id="messages"></div>"#, with: claudeQuotaBannerMarkup + #"<div id="messages"></div>"#)
             .replacingOccurrences(of: "window.fixtureGeneration = 'initial'; window.fixtureReady = true;", with: """
                 window.fixtureFocusCount = 0; window.fixtureQuotaClicks = 0;
                 editor.addEventListener('focus', () => { window.fixtureFocusCount++; });

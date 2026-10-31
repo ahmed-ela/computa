@@ -5584,7 +5584,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 catch {
                     guard let failure = error as? Failure, case .usageLimited(let provider) = failure,
                           provider == session.provider, session.submitted, session.firstUserFingerprint != nil else { throw error }
-                    // Only the fixed adapter's exact quota modal can expose
+                    // Only the fixed adapter's exact quota surface can expose
                     // physical temporary indicators for cleanup. The ordinary
                     // first-message and session proofs remain mandatory.
                     observed = try await page(session, action: "stop", allowBlockedProvider: true)
