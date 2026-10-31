@@ -14,6 +14,11 @@ On October 8, signed installed build34's human Google search and Gemini composer
 
 ## Discovery and selector
 
+The composer and Settings model-refresh buttons are temporarily commented out.
+The refresh component, native actions and automatic discovery remain available
+in code; the explicit refresh paths described below are not currently exposed by
+those buttons.
+
 After the privileged app UI and its background render host are ready, `AppState` reuses cached choices and starts one bounded discovery pass only for providers without a saved catalog. Opening or relaunching the app with all three catalogs cached makes no discovery page requests. The task composer refreshes only its selected website provider: **Refresh Gemini models** reads Gemini without probing ChatGPT or Claude. The Settings-wide **Refresh website models** action still explicitly refreshes all providers. Unknown or malformed provider-scoped bridge messages are rejected instead of becoming an all-provider refresh. Both paths retain the idle, readiness, discovery, cleanup and unchanged-checkpoint checks. Equivalent refresh requests share an in-flight pass. An explicit recovery request can extend a startup pass, but it retains its own recovery authority instead of being silently consumed by an already-running non-recovery startup read. Each provider receives at most one pending equivalent intent; a distinct explicit recovery can require a second sequential read. Each requested provider is inspected sequentially in an app-owned background `WKWebView` using the provider's configured sign-in profile. These pages are excluded from the human tab strip; the background-session ownership and cleanup rules still apply.
 
 The fixed provider adapters inspect the actual picker and close menus they opened. They do not populate choices from marketing documentation, an API catalog, or an assistant's self-description. Gemini and Claude advertise enabled model-family leaves; their thinking and effort controls remain separate. ChatGPT instead advertises the five observed Chat powers: **Instant, Medium, High, Extra High and Pro**. Work and Sol are excluded from this Chat contract. Disabled controls, upgrades, descriptions, ambiguous identities and unsupported menu shapes cannot establish availability.

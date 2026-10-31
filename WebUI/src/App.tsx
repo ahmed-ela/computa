@@ -14,7 +14,7 @@ import {
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
 import { ReviewPanel } from './ReviewPanel';
-import { ModelLabel, ModelSelector, WebsiteModelsRefresh } from './ModelSelector';
+import { ModelLabel, ModelSelector } from './ModelSelector';
 import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
@@ -598,8 +598,10 @@ function Composer({
               disabled={!task.modelSelectable}
               onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
             />
+            {/* Model refresh controls are temporarily hidden; retain the component for later restoration.
             <WebsiteModelsRefresh model={task.model} canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing}
               onRefresh={post} />
+            */}
           </div>
           <div className="composer-right">
             <span className="send-shortcut" title="Enter sends · Shift+Enter inserts a newline"><kbd>↵</kbd></span>
@@ -909,7 +911,9 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
             <div className="setting-row"><span><strong>Website models</strong><small>Choices come from your signed-in ChatGPT, Gemini and Claude menus.</small></span>
+              {/* Model refresh controls are temporarily hidden; retain the component for later restoration.
               <WebsiteModelsRefresh canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing} onRefresh={post} />
+              */}
             </div>
             {snapshot.websiteModelsError && <p className="model-note" role="status">{snapshot.websiteModelsError}</p>}
             <div className="setting-row"><span><strong>API providers</strong><small>Connect Cerebras or another provider and load its available models.</small></span>
