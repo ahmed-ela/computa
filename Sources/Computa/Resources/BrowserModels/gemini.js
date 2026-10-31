@@ -823,7 +823,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
     // Temporary-page hydration can leave the exact visible model trigger
-    // disabled while its recognized power label is already rendered. Wait only
+    // disabled while a recognized placeholder power label is rendered. Wait only
     // in this first, effect-free mutable selection and spend its original clock.
     // Enabling authorizes a fresh full picker read, never model proof by itself.
     const disabled = node => !!node && (node.disabled === true || node.getAttribute('disabled') !== null
@@ -831,14 +831,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     const closedShape = current => !current.topMenu && current.allMenus.length === 0
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
-    const disabledPower = websiteChatHeaderPresentation(initial.trigger?.innerText).power;
+    const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
-      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledPower
+      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
       && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
       && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
       && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
       const form = trigger.closest('form');
-      headerExpected = disabledPower;
+      // No selection has been observed yet. Hydration may replace this
+      // canonical placeholder with another canonical remembered preset;
+      // neither disabled value can pin or authorize a model selection.
       headerReadiness = { startedDisabled: true, outcome: 'waiting', reason: null };
       readStage = 'initial_trigger_disabled_wait';
       let rejected = null;
@@ -855,7 +857,6 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
-        if (power.key !== disabledPower.key) return reject('state_changed');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
@@ -868,9 +869,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
       initial = state();
-      // The wait has ended. The existing mutable picker flow may now change
-      // power intentionally; its normal proof-lock boundary owns those checks.
-      headerExpected = null;
+      // The newly enabled current header starts the ordinary full picker proof.
+      // Its associated Power and checked family still must independently agree.
       headerReadiness.outcome = 'recognized'; readStage = 'initial_trigger_ready';
     }
     // Only the first mutable selection may observe an empty, still-hydrating

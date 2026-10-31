@@ -9454,6 +9454,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     func testChatGPTInitialDisabledPickerAfterOwnedTemporaryWaitsForEnableThenVerifiesInstantOnce() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        try await assertInitialDisabledPickerHydration(choice: choice)
+    }
+
+    func testChatGPTInitialDisabledPickerHydratesRememberedPowerBeforeFullMediumProofAndSend() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+        for rememberedPower in [1, 2] {
+            try await assertInitialDisabledPickerHydration(choice: choice, rememberedPower: rememberedPower,
+                expectedPowerInputs: rememberedPower - 1)
+        }
+    }
+
+    private func assertInitialDisabledPickerHydration(choice: WebsiteModelChoice, rememberedPower: Int? = nil,
+                                                     expectedPowerInputs: Int = 0) async throws {
         let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
         defer { fixture.shutdown() }
         var diagnostics: [String] = []
@@ -9499,8 +9512,28 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(before?["header"] as? String, "Thinking effort Instant")
         XCTAssertEqual(before?["temporary"] as? Int, 1)
         for key in ["opens", "selections", "powerInputs", "inputs", "sends"] { XCTAssertEqual(before?[key] as? Int, 0, key) }
-        _ = try await evaluate(view, "document.dispatchEvent(new Event('fixture-enable-picker')); return true;")
+        if let rememberedPower {
+            _ = try await evaluate(view, """
+                const value = \(rememberedPower);
+                window.fixtureChatPowerThumb.setAttribute('aria-valuenow', String(value));
+                document.getElementById('fixture-model-header').lastElementChild.textContent =
+                  ['Instant', 'Medium', 'High', 'Extra High', 'Pro'][value];
+                document.dispatchEvent(new Event('fixture-enable-picker')); return true;
+                """)
+        } else {
+            _ = try await evaluate(view, "document.dispatchEvent(new Event('fixture-enable-picker')); return true;")
+        }
         _ = try await preparation.value
+        let prepared = try await evaluate(view, """
+            return {power: Number(window.fixtureChatPowerThumb.getAttribute('aria-valuenow')),
+              powerInputs: window.fixturePowerKeyEvents, familyReads: window.fixtureModelFamilyOpenCount,
+              inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};
+            """) as? [String: Int]
+        XCTAssertEqual(prepared?["power"], choice.key == "chat/latest/medium" ? 1 : 0)
+        XCTAssertEqual(prepared?["powerInputs"], expectedPowerInputs)
+        XCTAssertGreaterThan(prepared?["familyReads"] ?? 0, 0)
+        XCTAssertEqual(prepared?["inputs"], 0)
+        XCTAssertEqual(prepared?["sends"], 0)
         let readiness = try diagnostics.compactMap { line -> [String: Any]? in
             let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
@@ -9542,8 +9575,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0])
     }
 
-    func testChatGPTInitialDisabledPickerRejectsIdentityOwnerRouteAndHeaderDriftWithoutActions() async throws {
-        for mutation in ["identity", "owner", "route", "header_restore"] {
+    func testChatGPTInitialDisabledPickerRejectsIdentityOwnerAndRouteDriftWithoutActions() async throws {
+        for mutation in ["identity", "owner", "route"] {
             let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
             let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
             defer { fixture.shutdown() }
@@ -9580,11 +9613,6 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 const trigger = document.getElementById('fixture-model-trigger');
                 if ('\(mutation)' === 'identity') trigger.replaceWith(trigger.cloneNode(true));
                 if ('\(mutation)' === 'route') history.replaceState({}, '', '/?temporary-chat=true&fixture-route-changed=1');
-                if ('\(mutation)' === 'header_restore') {
-                  const label = document.getElementById('fixture-model-header');
-                  const children = [...label.childNodes];
-                  label.textContent = 'High'; label.replaceChildren(...children);
-                }
                 document.dispatchEvent(new Event('fixture-enable-picker')); return true;
                 """)
             do {

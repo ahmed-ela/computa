@@ -3237,6 +3237,42 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         }
       });
 
+      test('disabled initial placeholder can hydrate any remembered preset before fresh picker proof', async () => {
+        for (const remembered of ['Instant', 'Medium', 'High', 'Extra High', 'Pro']) {
+          const x = await pendingDisabledHeader(true, 'property', 'Medium');
+          x.picker.selected(remembered);
+          x.wake([{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker.primary,
+            textContent: x.picker.primary.text }, oldValue: 'Thinking effort\n\nInstant' }]);
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+          x.enable();
+          const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Medium'));
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelEvidence.chatSelection.power.label).toBe('Medium');
+          const start = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].indexOf(remembered);
+          expect(arrows(x.picker)).toHaveLength(Math.abs(start - 1));
+          expect(arrows(x.picker).every((event: any) => event.key === (start < 1 ? 'ArrowRight' : 'ArrowLeft'))).toBe(true);
+          expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedDisabled: true, outcome: 'recognized', reason: null });
+        }
+      });
+
+      test('a hydrated enabled header cannot replace contradictory or missing associated Power proof', async () => {
+        for (const condition of ['disagreement', 'missing']) {
+          const x = await pendingDisabledHeader(true, 'property', 'Medium');
+          x.picker.selected('Medium');
+          if (condition === 'disagreement') x.picker.slider.values['aria-valuenow'] = '0';
+          else x.picker.slider.values['aria-valuemax'] = '5';
+          x.enable();
+          if (condition === 'missing') {
+            await microtasks(); x.f.advanceTime(1_801); x.clocks.at(-1)!.expire();
+          }
+          const result = await x.pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.f.world.__computaChatPresetPin).toBeUndefined(); noSelection(x.f, x.picker);
+          expect(x.picker.trigger.clicks).toBe(1);
+        }
+      });
+
       test('disabled initial picker enables before the existing mutable power selection can run', async () => {
         const x = await pendingDisabledHeader(true, 'property', 'High');
         preserveOpenPowerHeader(x.picker);
@@ -3278,11 +3314,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
       });
       test('disabled initial picker wake rejects changed page header trigger form and attempt state', async () => {
-        for (const condition of ['unknown', 'power', 'replacement', 'owner', 'route', 'origin', 'frame', 'form',
+        for (const condition of ['unknown', 'replacement', 'owner', 'route', 'origin', 'frame', 'form',
           'hidden', 'inert', 'label', 'popup', 'duplicate', 'open', 'pin', 'action', 'work']) {
           const x = await pendingDisabledHeader();
           if (condition === 'unknown') x.picker.primary.text = 'PRIVATE_UNKNOWN_HEADER';
-          if (condition === 'power') x.picker.selected('High');
           if (condition === 'replacement') x.picker.replaceTrigger();
           if (condition === 'owner') x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER';
           if (condition === 'route') x.f.document.URL = 'https://chatgpt.com/c/unowned';
