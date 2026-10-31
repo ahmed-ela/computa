@@ -31,7 +31,10 @@ const options: ModelOption[] = [
   { id: 'browser/chatgpt/choice/pro', label: 'ChatGPT / Fixture Pro · Built-in browser', detail: 'Observed choice', highMemory: false, available: true },
   { id: 'browser/gemini/choice/fast', label: 'Gemini / Fixture Fast · Built-in browser', detail: 'Observed choice', highMemory: false, available: true },
   { id: 'browser/claude/choice/old', label: 'Claude / Fixture Old · Built-in browser', detail: 'Refresh after sign-in; never substitute', highMemory: false, available: false },
+  { id: 'browser/gemini', label: 'Gemini / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
+  { id: 'browser/claude', label: 'Claude / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
 ];
+const selectableOptions = [options[1], options[2], options[3], options[4]];
 const selector = (model = options[1].id, label = 'Task model', disabled = false) => renderToStaticMarkup(h(ModelSelector, {
   options, model, label, disabled, onSelect: () => {},
 })).html;
@@ -44,7 +47,7 @@ describe('website model selectors', () => {
       expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes['aria-label'])
         .toBe(`${label}: ChatGPT / Fixture Fast`);
       const names = await textBySelector(html, '.model-option-name');
-      expect(names).toEqual([modelOptionLabel(options[1]), ...options.map(modelOptionLabel)]);
+      expect(names).toEqual([modelOptionLabel(options[1]), ...selectableOptions.map(modelOptionLabel)]);
       const providerText = (await textBySelector(html, '.sr-only')).join(' ');
       for (const provider of ['ChatGPT', 'Gemini', 'Claude']) expect(providerText).toContain(provider);
       expect(names.join(' ')).not.toContain('Built-in browser');
@@ -60,7 +63,7 @@ describe('website model selectors', () => {
     expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes['aria-label'])
       .toBe('Task model: Gemini / Fixture Fast');
     expect(elements.filter((element) => element.attributes.role === 'option').map((element) => element.attributes['data-value']))
-      .toEqual(options.map((option) => option.id));
+      .toEqual(selectableOptions.map((option) => option.id));
     expect((await textBySelector(html, '.model-option-name')).filter((name) => name === 'Fixture Fast')).toHaveLength(3);
   });
 
@@ -89,15 +92,16 @@ describe('website model selectors', () => {
       .toBe('true');
   });
 
-  test('saved local models stay readable in the trigger but remain absent from the choices', async () => {
+  test('saved local and website-default models stay readable but remain absent from the choices', async () => {
     const local = { id: 'local/saved-model', label: 'Local / Saved model · MLX', detail: 'Saved local selection', highMemory: false };
-    for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model']]) {
+    for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model'],
+      ['browser/chatgpt', 'Website default'], ['browser/gemini', 'Website default'], ['browser/claude', 'Website default']]) {
       const html = renderToStaticMarkup(h(ModelSelector, { options: [...options, local], model, label: 'Task model', onSelect: () => {} })).html;
       expect((await textBySelector(html, '.model-option-name'))[0]).toBe(name);
       const elements = await parsedElements(html);
       expect(elements.find((element) => element.attributes['data-select-value'])?.attributes['data-select-value']).toBe(model);
       expect(elements.filter((element) => element.attributes.role === 'option').map((element) => element.attributes['data-value']))
-        .toEqual(options.map((option) => option.id));
+        .toEqual(selectableOptions.map((option) => option.id));
     }
   });
 
@@ -129,7 +133,7 @@ describe('website model selectors', () => {
     const disabled = selector(options[1].id, 'Task model', true);
     expect(disabled).toContain('data-select-disabled="true"');
     const items = (await parsedElements(disabled)).filter((element) => element.attributes.role === 'option');
-    expect(items).toHaveLength(options.length);
+    expect(items).toHaveLength(selectableOptions.length);
     expect(items.every((element) => element.attributes['aria-disabled'] === 'true')).toBe(true);
     const idle = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, onRefresh: () => {} })).html;
     const running = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, refreshing: true, onRefresh: () => {} })).html;

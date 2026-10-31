@@ -24,10 +24,12 @@ export function ModelLabel({ model, option }: { model: string; option?: ModelOpt
   </span>;
 }
 
-// Temporarily hide local inference choices in every picker. Keep their catalog,
-// saved selections and runtime support intact so this can be reversed later.
+const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude']);
+
+// Offer specific website/API models only. Keep hidden local/default selections
+// and runtime support intact without silently substituting a different model.
 function isVisibleModel(model: string): boolean {
-  return model.startsWith('browser/') || model.startsWith('api/');
+  return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
 }
 
 export function ModelSelector({ options, model, label, disabled = false, className,
