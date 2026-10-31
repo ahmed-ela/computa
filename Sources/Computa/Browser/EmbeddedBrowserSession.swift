@@ -111,6 +111,11 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
     @ObservationIgnored private var geminiCookieObservationRequests = 0
     @ObservationIgnored private var geminiCookieTimeline: GeminiVerificationCookieTimeline?
+    @ObservationIgnored private var geminiResponseObservationClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var geminiResponseObservationInstants: [ContinuousClock.Instant] = []
+    #if DEBUG
+    @ObservationIgnored private var geminiResponseObserverForTesting: (@MainActor (String) -> Void)?
+    #endif
     @ObservationIgnored private var cacheIdentity: EmbeddedBrowserCacheIdentity?
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
@@ -194,6 +199,8 @@ final class EmbeddedBrowserSession {
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
+        var geminiResponseObservationGeneration: UUID?
+        var geminiResponseObservationsInGeneration = 0
         var preparedDocumentNavigation = false
         // Native lifecycle facts can defer an untouched initial inspection,
         // but never grant adapter, document, or recovery authority.
@@ -2759,6 +2766,50 @@ final class EmbeddedBrowserSession {
         if selectedTabID == tabID { errorMessage = message }
     }
 
+    /// A small callback-time sample, not a complete redirect trace. WebKit's
+    /// response-policy callback supplies neither a navigation token nor cache
+    /// provenance or the outgoing Cookie header. No observation affects policy.
+    fileprivate func observeGeminiNavigationResponse(_ response: URLResponse, isMainFrame: Bool,
+                                                     view: WKWebView, tabID: UUID) {
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view else { return }
+        let generation = entry.tab.documentGeneration
+        if entry.geminiResponseObservationGeneration != generation {
+            entry.geminiResponseObservationGeneration = generation
+            entry.geminiResponseObservationsInGeneration = 0
+        }
+        guard entry.geminiResponseObservationsInGeneration < 2 else { return }
+        let instant = geminiResponseObservationClock()
+        geminiResponseObservationInstants.removeAll { instant - $0 >= .seconds(60) }
+        guard geminiResponseObservationInstants.count < 12,
+              let snapshot = GeminiNavigationResponseDiagnostic.project(response: response, now: Date()),
+              let data = snapshot.logData() else { return }
+        let sample = entry.geminiResponseObservationsInGeneration + 1
+        let role = entry.isToolOwned ? "tool" : entry.isModelOwned ? "model" : "human"
+        let message = "geminiNavigationResponse tab=\(tabID.uuidString.lowercased()) generation=\(generation.uuidString.lowercased()) role=\(role) sample=\(sample) \(String(decoding: data, as: UTF8.self))"
+        guard message.utf8.count <= 1_000 else { return }
+        entry.geminiResponseObservationsInGeneration = sample
+        geminiResponseObservationInstants.append(instant)
+        Self.inferencePrewarmLog.notice("\(message, privacy: .public)")
+        #if DEBUG
+        geminiResponseObserverForTesting?(message)
+        #endif
+    }
+
+    #if DEBUG
+    func setGeminiNavigationResponseObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        geminiResponseObserverForTesting = observer
+    }
+
+    func setGeminiNavigationResponseClockForTesting(_ clock: @escaping @MainActor () -> ContinuousClock.Instant) {
+        geminiResponseObservationClock = clock
+    }
+
+    func observeGeminiNavigationResponseForTesting(response: URLResponse, isMainFrame: Bool,
+                                                  view: WKWebView, tabID: UUID) {
+        observeGeminiNavigationResponse(response, isMainFrame: isMainFrame, view: view, tabID: tabID)
+    }
+    #endif
+
     fileprivate func started(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         // A native load/reload invalidates synchronously, before WebKit starts it.
@@ -3291,7 +3342,11 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             guard let url = navigationResponse.response.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
             try EmbeddedBrowserURLPolicy.validateNavigation(url,
                 isMainFrame: navigationResponse.isForMainFrame, mainDocumentURL: webView.url)
-            if navigationResponse.isForMainFrame { session?.protectPendingConversation(webView, tabID: tabID, url: url) }
+            if navigationResponse.isForMainFrame {
+                session?.observeGeminiNavigationResponse(navigationResponse.response, isMainFrame: true,
+                                                         view: webView, tabID: tabID)
+                session?.protectPendingConversation(webView, tabID: tabID, url: url)
+            }
         } catch {
             deny(error.localizedDescription, view: webView)
             decisionHandler(.cancel)

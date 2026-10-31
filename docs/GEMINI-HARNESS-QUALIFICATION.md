@@ -817,3 +817,44 @@ Evidence: `captcha331-lifecycle/inspector-oct31-recovery.json` and
 `cookie-timeline331-oct31-inspected-navigation.json` in the same local evidence
 directory. The missing blocked request boundary still needs to be captured
 during a recurrence before choosing a production change.
+
+### Build332 candidate: preserve final-response metadata
+
+Delayed Inspector attachment twice captured a later recovery while the earlier
+blocked resource exposed no response metadata. Build332 adds a synchronous,
+read-only sample at the existing native navigation-response policy callback,
+before the unchanged admission and navigation decisions. It records only fixed
+Gemini `/app` or Google `/sorry` route classes, HTTP status and conservative
+finite projections of Cache-Control, Date, Age and Expires. It never reads or
+logs Cookie, Set-Cookie, Location, response bodies or arbitrary header fields.
+Unsupported or malformed metadata remains unknown.
+
+The context identifies the current physical view and document generation at
+callback time. WebKit supplies no navigation token at this boundary, so it does
+not establish the exact redirect-hop identity. The record explicitly leaves
+request cookies, redirect-chain completeness and network/cache source unknown.
+Final challenge-page cache headers cannot establish the preceding Gemini
+redirect's policy. This diagnostic fills the final-document status gap; it is
+not a CAPTCHA-prevention fix or a substitute for contemporaneous Inspector
+evidence of the complete blocked request chain.
+
+Sampling is capped at two records per current document generation and twelve
+per rolling sixty seconds across the browser session. The fixed JSON projection
+is capped at768bytes and the entire event at1,000bytes. Missing samples must not
+be interpreted as an unchanged page or absence of a request. The diagnostic
+does not navigate, retry, clear verification state, mutate cookies, enable
+Inspector or change an allow/cancel decision.
+
+All16 new local tests passed, covering privacy canaries, unknown values,
+current-view/closed-view checks, generation limits and staggered rolling-budget
+boundaries. An independent local nonpersistent WebKit fixture observed the final
+429 response after a302 redirect; it does not claim all redirect responses are
+exposed. An actual XCTest log capture accepted38 events with no malformed records
+and a maximum544bytes. The complete targeted verification cohort passed153 tests
+with unchanged sources. These results qualify the local diagnostic only;
+installed Google callback capture and CAPTCHA prevention remain unproven.
+
+Evidence: `native332-focused`, `native332-final` and the source-bound build/audit
+receipts in the same local evidence directory. Build331 remains installed while
+the current-tab Inspector reproduction approval is pending; staging build332
+must not be described as installation or live qualification.

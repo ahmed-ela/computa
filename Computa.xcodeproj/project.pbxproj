@@ -91,6 +91,7 @@
 		412FC093AA5755A73C8273A4 /* AppStateApprovalResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5161D7047CBBD6AFB7ED2E9C /* AppStateApprovalResolutionTests.swift */; };
 		415E9DB82B36422A97D3B6CD /* libAutomationCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FCF509556E10944F89843A76 /* libAutomationCore.a */; };
 		4276E3953B4CB07954471A93 /* GeminiVerificationCookieDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 380F348E873B25EE3426A71D /* GeminiVerificationCookieDiagnostic.swift */; };
+		B845655E4BECDE029BFD97E5 /* GeminiNavigationResponseDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B6EC1A92AA49D171E22F3CD /* GeminiNavigationResponseDiagnostic.swift */; };
 		429EED9AD3EFF203FDECAD4A /* RuntimeIsolationTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6093374C0110F4F6F7B12E3C /* RuntimeIsolationTransportTests.swift */; };
 		44E2E13EC3EA95C3026976B5 /* libAutomationCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FCF509556E10944F89843A76 /* libAutomationCore.a */; };
 		453BA9317E7A2D9A06983408 /* AppStateQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06BD1134FA0B69188B27C1E3 /* AppStateQueueTests.swift */; };
@@ -273,6 +274,8 @@
 		E2BFF38EAE81D6A5CAD873D8 /* CompactionAssistantEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F258DE40F9456A012F09157E /* CompactionAssistantEvidence.swift */; };
 		E43AFB4AB8DF6D8AB9BCDD02 /* ChatGPTTemporaryCookieRetirement.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF8582EA08341ECDA2B04723 /* ChatGPTTemporaryCookieRetirement.swift */; };
 		E4A91D3377E16104A3E5E652 /* GeminiVerificationCookieDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27B7F822057C73ACDB1D49EE /* GeminiVerificationCookieDiagnosticTests.swift */; };
+		503F0AED9A16B7250D46C697 /* GeminiNavigationResponseObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF5A144E64AC841A37143AC /* GeminiNavigationResponseObservationTests.swift */; };
+		8AFC4C436E4442B5010CEA34 /* GeminiNavigationResponseDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0570F66B9B93C8A6867266B /* GeminiNavigationResponseDiagnosticTests.swift */; };
 		E56C40D95B03FE8E989DAC5C /* AppStateContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B9CE5B30872CB898140DB /* AppStateContextTests.swift */; };
 		E5CC511287354CAF03FC1FB3 /* SemanticObservationProgressTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF7681D4B3BCEAE52EDD4F06 /* SemanticObservationProgressTracker.swift */; };
 		E70CFDADECE3DB4848A34F4C /* WebsiteModelEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55B3AAB542679D65C34828CF /* WebsiteModelEvidence.swift */; };
@@ -378,6 +381,8 @@
 		25F15F1AC9272C949A9C8AAF /* WebsitePromptProjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsitePromptProjectionTests.swift; sourceTree = "<group>"; };
 		2641BD12D1783210850510A6 /* PermissionInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionInspector.swift; sourceTree = "<group>"; };
 		27B7F822057C73ACDB1D49EE /* GeminiVerificationCookieDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiVerificationCookieDiagnosticTests.swift; sourceTree = "<group>"; };
+		FCF5A144E64AC841A37143AC /* GeminiNavigationResponseObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiNavigationResponseObservationTests.swift; sourceTree = "<group>"; };
+		F0570F66B9B93C8A6867266B /* GeminiNavigationResponseDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiNavigationResponseDiagnosticTests.swift; sourceTree = "<group>"; };
 		27F040918C8C9606387E0D20 /* ChatGPTInferenceCookieStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTInferenceCookieStoreTests.swift; sourceTree = "<group>"; };
 		28B4B4A035D544E9E6EFC525 /* WebsiteRequestFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteRequestFixtureTests.swift; sourceTree = "<group>"; };
 		2944FF18817B3C9306476D88 /* EmbeddedBrowserIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedBrowserIdentityTests.swift; sourceTree = "<group>"; };
@@ -397,6 +402,7 @@
 		315A9BA947976DE816490BF3 /* APIRejectedRequestCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIRejectedRequestCapture.swift; sourceTree = "<group>"; };
 		34741DA89EDA1C845074EC90 /* ComputerInputControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerInputControllerTests.swift; sourceTree = "<group>"; };
 		380F348E873B25EE3426A71D /* GeminiVerificationCookieDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiVerificationCookieDiagnostic.swift; sourceTree = "<group>"; };
+		9B6EC1A92AA49D171E22F3CD /* GeminiNavigationResponseDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiNavigationResponseDiagnostic.swift; sourceTree = "<group>"; };
 		3845D5540F336651198B2695 /* ScreenshotCoordinateMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotCoordinateMapper.swift; sourceTree = "<group>"; };
 		38A8F723E63F8649373E23BD /* ChatGPTTemporaryConversationCookies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTTemporaryConversationCookies.swift; sourceTree = "<group>"; };
 		395D6115E5010A9302D99306 /* WebsiteSessionCleanupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteSessionCleanupTests.swift; sourceTree = "<group>"; };
@@ -745,6 +751,7 @@
 				EEBD18662D62FB7B8D89AFFB /* EmbeddedHumanVerificationStore.swift */,
 				FC29668EF1A1DD81F7339742 /* EmbeddedWebModelTransport.swift */,
 				380F348E873B25EE3426A71D /* GeminiVerificationCookieDiagnostic.swift */,
+				9B6EC1A92AA49D171E22F3CD /* GeminiNavigationResponseDiagnostic.swift */,
 				5460F5FF060F75BE1FC834C4 /* GeminiVerificationCookieTimeline.swift */,
 				13601D50E0945E6A90E9D242 /* GeminiVerificationCookieTimelineLog.swift */,
 				55B3AAB542679D65C34828CF /* WebsiteModelEvidence.swift */,
@@ -842,6 +849,8 @@
 				FDEC391C1ED23BF3D36E9CD8 /* FileEditingHarnessTests.swift */,
 				7CBD355FCCEA070C8807969A /* FixtureBunExecutableTests.swift */,
 				27B7F822057C73ACDB1D49EE /* GeminiVerificationCookieDiagnosticTests.swift */,
+				FCF5A144E64AC841A37143AC /* GeminiNavigationResponseObservationTests.swift */,
+				F0570F66B9B93C8A6867266B /* GeminiNavigationResponseDiagnosticTests.swift */,
 				8DC4B225D979F7B9515C2024 /* GeminiVerificationCookieObservationTests.swift */,
 				B801C26C9CDAF9774DE7B806 /* GeminiVerificationCookieTimelineLogTests.swift */,
 				1C605E1714A5D906E626AA4A /* GeminiVerificationCookieTimelineSessionTests.swift */,
@@ -1367,6 +1376,7 @@
 				9750D9AE96E16673989B3850 /* FileReviewModels.swift in Sources */,
 				3CDD01FEF3A3C1948CF65997 /* FixtureBunExecutable.swift in Sources */,
 				4276E3953B4CB07954471A93 /* GeminiVerificationCookieDiagnostic.swift in Sources */,
+				B845655E4BECDE029BFD97E5 /* GeminiNavigationResponseDiagnostic.swift in Sources */,
 				6B95E12C597AB913161B8527 /* GeminiVerificationCookieTimeline.swift in Sources */,
 				7C90904436DC078285E57A9F /* GeminiVerificationCookieTimelineLog.swift in Sources */,
 				F4FD694B7BF59DE7DE507AB2 /* HeadlessMLXServer.swift in Sources */,
@@ -1499,6 +1509,8 @@
 				9C1C08FF47F7F14A02BF23E8 /* FixtureBunExecutableTests.swift in Sources */,
 				B0C0900216BD824991665FC9 /* GPTOSSReasoningHistoryTests.swift in Sources */,
 				E4A91D3377E16104A3E5E652 /* GeminiVerificationCookieDiagnosticTests.swift in Sources */,
+				503F0AED9A16B7250D46C697 /* GeminiNavigationResponseObservationTests.swift in Sources */,
+				8AFC4C436E4442B5010CEA34 /* GeminiNavigationResponseDiagnosticTests.swift in Sources */,
 				8AB8B0B442FE05E43F9183E1 /* GeminiVerificationCookieObservationTests.swift in Sources */,
 				6FF5F95D03CBD483C91A0470 /* GeminiVerificationCookieTimelineLogTests.swift in Sources */,
 				9F3B778D12D8C41373221F9F /* GeminiVerificationCookieTimelineSessionTests.swift in Sources */,
