@@ -291,6 +291,30 @@ workflow qualification on build348 remains pending, and Sonnet 5 remains
 unqualified after its explicit refusal. These draft-PR results do not alter the
 public build346 package.
 
+### Required tool arguments (build349)
+
+The recovered Haiku call contained an explicit empty object. The response codec
+and event stream preserve arguments; the native parser rejected the missing
+`cmd` before command execution and returned a model-visible error. The following
+inference supplied a valid command. Raw accepted website text was not retained,
+so the original website bytes cannot be independently reconstructed.
+
+The response handoff nevertheless contained a concrete instruction defect: a
+copyable function-call example with empty arguments, even for required-field
+tools. Build349 removes executable function examples and describes their shape
+in prose, requiring arguments to satisfy the offered schema. Custom literal
+examples, canonical request data, tool choices, namespaces, legitimate
+argumentless calls and native validation/recovery remain unchanged. No new
+retry or schema-repair path was added.
+
+All 106 response-codec tests passed. The first instruction run caught a seven-byte
+prompt-budget overflow; the wording was shortened by 40 bytes without raising
+the limit, and all 62 instruction tests then passed. New coverage spans the three
+website providers, plain and namespaced tools, allowed and disabled tool choices,
+required command arguments and legitimate empty schemas. Live build349 workflow
+qualification remains pending. Sonnet 5's explicit refusal is a separate
+limitation, with no remaining identity contradiction established by inspection.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and

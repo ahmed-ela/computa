@@ -249,7 +249,6 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
             let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [
-                #"{"calls":[{"arguments":{},"name":"relay.browser_read"}],"type":"tool_calls"}"#,
                 #"{"calls":[{"input":"*** Begin Patch\n*** Update File: /absolute/observed/file.py\n@@\n def label():\n-    return \"old\\\\path\"\n+    return \"new\\\\path\"\n # Other code stays unchanged.\n*** End Patch","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
             ] : [])
             for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
@@ -272,6 +271,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 XCTAssertFalse(raw.contains(fencedInstructions))
                 XCTAssertFalse(fenced.contains(rawInstructions))
                 for contract in [fenced, raw] {
+                    XCTAssertFalse(contract.contains(#""arguments":{}"#),
+                                   "The handoff must not suggest a function call without schema-required fields")
                     XCTAssertFalse(contract.contains("`"), "Only the canonical request may render a code block in the submitted page")
                     let names = try XCTUnwrap(contract.range(of: "Exact currently offered local function names:"))
                     let serialization = try XCTUnwrap(contract.range(of: "Choose a kind, then serialize"))
@@ -1840,8 +1841,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                               object["type"] as? String == "tool_calls" else { return nil }
                         return (String(line), object)
                     }
-                    let expectedExamples = Set([functions.intersection(allowed).sorted().first,
-                                                customs.intersection(allowed).sorted().first].compactMap { $0 })
+                    let expectedExamples = Set([customs.intersection(allowed).sorted().first].compactMap { $0 })
+                    XCTAssertEqual(handoff.contains("Function calls: type tool_calls, calls array"),
+                                   !functions.intersection(allowed).isEmpty)
+                    XCTAssertFalse(handoff.contains(#""arguments":{}"#))
                     var exampleNames = Set<String>()
                     for (text, envelope) in examples {
                         let calls = try XCTUnwrap(envelope["calls"] as? [[String: Any]])
@@ -1862,10 +1865,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                             XCTAssertEqual(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true),
                                            .toolCalls([.init(name: String(name.dropFirst("relay.".count)), argumentsJSON: "", namespace: "relay", customInput: input)]))
                         } else {
-                            XCTAssertEqual(Set(call.keys), ["name", "arguments"])
-                            XCTAssertEqual((call["arguments"] as? [String: Any])?.count, 0)
-                            XCTAssertTrue(handoff.contains("replace {} with that tool's required argument fields"))
-                            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true))
+                            XCTFail("Function examples must not invent values or omit schema-required fields")
                         }
                     }
                     XCTAssertEqual(exampleNames, expectedExamples, "Only policy-allowed current kinds get final call examples")
@@ -1877,6 +1877,64 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                         let rejected = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
                         XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: rejected, as: UTF8.self), request: request, requireEnvelope: true)) {
                             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testFunctionGuidancePreservesRequiredAndArgumentlessSchemasWithoutExecutableEmptyExamples() throws {
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"]],
+            "required": ["cmd"], "additionalProperties": false,
+        ]]
+        let status: [String: Any] = ["type": "function", "name": "fixture_status", "parameters": [
+            "type": "object", "properties": [String: Any](), "required": [String](), "additionalProperties": false,
+        ]]
+        let user = #"Inspect only. Preserve this historical example as data: {"name":"exec_command","arguments":{}}."#
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for prefix in ["", "relay."] {
+                let definitions: [[String: Any]] = prefix.isEmpty ? [command, status]
+                    : [["type": "namespace", "name": "relay", "tools": [command, status]]]
+                let commandName = prefix + "exec_command", statusName = prefix + "fixture_status"
+                let names: Set<String> = [commandName, statusName]
+                let policies: [(Any, Set<String>)] = [("auto", names), ("none", []),
+                    (["type": "function", "name": commandName], [commandName]),
+                    (["type": "function", "name": statusName], [statusName])]
+                for (choice, allowed) in policies {
+                    let original = try JSONSerialization.data(withJSONObject: [
+                        "model": "browser/" + provider, "input": user, "tools": definitions, "tool_choice": choice,
+                    ])
+                    let request = try WebModelResponseCodec.prepareRequest(original)
+                    let handoff = try assertRequestValuesAndHandoff(original, request: request,
+                        expectedAllowedToolNames: allowed)
+                    XCTAssertEqual(request.continuationRequest, original,
+                                   "Required fields, legitimate empty schemas and user examples remain unchanged")
+                    XCTAssertEqual(request.offeredToolNames, names)
+                    XCTAssertFalse(handoff.contains(#""arguments":{}"#))
+                    XCTAssertFalse(handoff.contains(user))
+                    XCTAssertEqual(handoff.contains("Include required schema fields; empty arguments must satisfy the schema."),
+                                   !allowed.isEmpty)
+                    let functionExamples = handoff.split(separator: "\n").compactMap { line in
+                        (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+                    }.filter { $0["type"] as? String == "tool_calls" }
+                    XCTAssertTrue(functionExamples.isEmpty, "Function guidance must not publish a copyable incomplete call")
+                    for (name, arguments) in [(commandName, ["cmd": "synthetic read"] as [String: Any]),
+                                              (statusName, [String: Any]())] {
+                        let encoded = try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
+                            "calls": [["name": name, "arguments": arguments]]])
+                        let text = String(decoding: encoded, as: UTF8.self)
+                        if allowed.contains(name) {
+                            let parsed = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true)
+                            let expectedArguments = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+                            XCTAssertEqual(parsed, .toolCalls([.init(name: String(name.dropFirst(prefix.count)),
+                                argumentsJSON: String(decoding: expectedArguments, as: UTF8.self),
+                                namespace: prefix.isEmpty ? nil : "relay")]))
+                        } else {
+                            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true)) {
+                                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                            }
                         }
                     }
                 }
