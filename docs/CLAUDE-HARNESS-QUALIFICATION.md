@@ -112,7 +112,69 @@ rules, prior capability speculation is not a host access result, and the session
 marker is only an opaque correlation label. Preserve actual denials, Stop, the
 message/refusal option, exact schemas, user data and canonical history. Do not
 strip authored prose or add automatic correction attempts to Claude.
-Installed/live qualification remains pending.
+Signed and installed build344, source `92de0ccf6a9a9e0740e6881ee2d6efe747220572`,
+preserves all artifact/signature/resource checks. Its instruction and codec
+regressions passed across the final targeted runs; the earlier failed test runs
+remain in the private evidence.
+
+| Build344 controlled task | Result | Native duration |
+| --- | --- | --- |
+| Sonnet 5 marker | Invalid JSON inside the literal code block; zero tools, closed cleanup | 7.443 s |
+| Haiku 5.5 code/browser workflow | Failed: one malformed command request, two executed commands, no edit or browser action; fourth response denied relay access and returned prose | 25.461 s |
+| Sonnet 5.5 code/browser workflow | Passed independent fixture grade: only allowed function edited, six tests passed, exact reference and one browser receipt, task tab closed | 58.931 s |
+| Sonnet 4.6 code/browser workflow | Correct edit and six passing tests, then `website_usage_limit`; no browser workflow, final website cleanup unconfirmed | 32.631 s |
+
+Haiku's rejected fourth reply is captured and joined to its own inference,
+model, document and session. The three recorded tool calls include one argument
+parse rejection (`query` instead of `cmd`); only two commands executed. The
+fixture remained broken and its browser ledger empty. All four website sessions
+closed. This failure is model response behavior, not response extraction.
+
+Sonnet 5.5 completed eight tool calls across nine independently verified fresh
+Incognito sessions. Every accepted response retained model/ownership proof and a
+closed cleanup receipt before local dispatch. Its successful workflow shows that
+fresh website sessions do not universally prevent the relay from working; it
+does not establish reliability for the other Claude models.
+The exact task-created browser target also has a persisted native cleanup record
+with `closed: true`, no failures and no pending operation; a subsequent native UI
+inventory was empty. The tool's generic `existing_user_tab_preserved` field alone
+would not have established that task-tab closure.
+
+Sonnet 4.6 exhausted the account's website usage allowance before its browser
+step. The fourth inference's cleanup is unconfirmed; the previous three have
+closed receipts. Live Claude requests stopped at that error. Local fixture
+servers were stopped, evidence retained, and no uncertain task action was replayed.
+The account limit must reset before remaining live qualification can resume.
+The quota admission gate is process-local and has no reset timer. With manual
+model refresh controls hidden, the supported recovery is to wait for the actual
+account reset, restart Computa, and start a fresh authorized task. Restart alone
+does not reset the provider allowance or prove readiness. Preserve the failed
+task and its unconfirmed cleanup; do not replay its uncertain actions.
+
+
+## Candidate 345: literal request presentation
+
+Present Claude's complete request inside one literal code block and suppress
+outer instruction duplicates only when the complete current native contract is
+already present in a trusted instruction field. Preserve decoded request values,
+user/history/tool data, schemas, governing rules, permission checks, response
+parsing and dispatch behavior. Claude does not inherit ChatGPT's single-action
+policy or automatic correction path. This is a bounded presentation experiment;
+live qualification remains blocked by the account quota.
+
+Validation: 189 instruction, codec, request-frame and failure-history tests passed
+on the final source, plus two native quota/checkpoint regressions. The earlier
+169-test run had two new fixture-assertion failures: removing an optional suffix
+left a complete shorter supported native contract. Correcting that negative
+fixture, without changing production behavior, produced the passing full rerun.
+The tests preserve complete decoded values and numeric/string lexemes, exact
+trusted-context boundaries, permissions/tool choice, refusal envelopes and
+strict malformed-response rejection. Exact old quota diagnostics remain readable;
+near misses and changed metadata are rejected.
+
+Build345 is a review candidate. Keep the live-tested build344 installed until
+Claude's allowance permits fresh qualification of the presentation follow-up.
+No claim is made that build345 is installed or that all Claude models are reliable.
 
 ## Qualification contract
 

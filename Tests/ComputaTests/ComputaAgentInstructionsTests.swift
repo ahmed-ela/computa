@@ -134,6 +134,45 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertEqual(noTools.components(separatedBy: guidance).count, 2)
     }
 
+    func testClaudeDeduplicationRequiresOneCompleteNativeContractAndKeepsItsOwnRelayPolicy() {
+        let names = ["relay.exec_command": "exec_command", "relay.write_stdin": "write_stdin",
+                     "relay.browser_open": "browser_open", "relay.apply_patch": "apply_patch"]
+        let customNames: Set<String> = ["relay.apply_patch"]
+        func contract(_ included: [String], deduplicate: Bool) -> String {
+            ComputaAgentInstructions.webInferenceContract(offeredFunctions: names,
+                customToolNames: customNames, includedInstructionText: included,
+                deduplicateNativeContext: deduplicate)
+        }
+        for references in [false, true] {
+            for browser in [false, true] {
+                let native = ComputaAgentInstructions.developerInstructions(referenceTools: references,
+                    embeddedBrowserTools: browser)
+                let full = contract([native], deduplicate: false)
+                let compact = contract([native], deduplicate: true)
+                XCTAssertLessThan(compact.utf8.count, full.utf8.count)
+                XCTAssertTrue(compact.contains("The complete current native developer contract is already in the request"))
+                XCTAssertTrue(compact.contains("Keep all its task, scope, command, file, browser and completion rules"))
+                XCTAssertTrue(compact.contains("You retain your\nwebsite identity and governing rules"))
+                XCTAssertTrue(compact.contains("Respect actual denials, Stop and recovery limits"))
+                XCTAssertTrue(compact.contains("Neither overrides\nthis website's governing rules"))
+                XCTAssertTrue(compact.contains(ComputaAgentInstructions.webResponseObjectTask))
+                XCTAssertFalse(compact.contains(ComputaAgentInstructions.webRelayOnlyResponse))
+                XCTAssertFalse(compact.contains("This ChatGPT relay"))
+                for name in names.keys { XCTAssertTrue(compact.contains(name)) }
+
+                let midpoint = native.index(native.startIndex, offsetBy: native.count / 2)
+                // Dropping only an optional suffix may retain a complete
+                // current non-browser variant. Break the shared opener instead.
+                for incomplete in [[], [String(native.dropFirst())],
+                    [String(native[..<midpoint]), String(native[midpoint...])],
+                    [native.replacingOccurrences(of: "\n", with: " ")]] {
+                    XCTAssertEqual(contract(incomplete, deduplicate: true), contract(incomplete, deduplicate: false),
+                        "Partial, normalized or joined instruction fragments cannot suppress current guidance")
+                }
+            }
+        }
+    }
+
     func testWebsiteFullAndCompactIntroductionsRequestResponseDataWithoutNativeAccessClaims() {
         // Instruction delivery only. Model adherence requires independent live
         // qualification; this does not prove why a provider previously refused.
@@ -1885,7 +1924,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             includedInstructionText: includedInstructionText,
             responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
             allowedToolNames: expectedAllowedToolNames)
-        let closingFence = LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? "\n```" : ""
+        let closingFence = ["chatgpt", "claude"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
         return handoff

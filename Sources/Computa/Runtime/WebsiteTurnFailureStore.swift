@@ -77,8 +77,17 @@ struct WebsiteTurnFailureStore: Sendable {
             default: return nil
             }
             guard let native = try? WebModelServer.errorBody(for: nativeError),
-                  let expected = try? JSONSerialization.jsonObject(with: native) as? [String: Any],
-                  NSDictionary(dictionary: supplied).isEqual(to: expected),
+                  var expected = try? JSONSerialization.jsonObject(with: native) as? [String: Any] else { return nil }
+            if code == "website_usage_limit", var legacyError = expected["error"] as? [String: Any] {
+                // The refresh controls were hidden after this exact historical
+                // message shipped. Retain saved diagnostics without admitting
+                // arbitrary prose, new fields, retry metadata or provider gates.
+                legacyError["message"] = "\(webProvider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+                var legacy = expected
+                legacy["error"] = legacyError
+                if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }
+            }
+            guard NSDictionary(dictionary: supplied).isEqual(to: expected),
                   let sorted = try? JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
             return String(decoding: sorted, as: UTF8.self)
         }

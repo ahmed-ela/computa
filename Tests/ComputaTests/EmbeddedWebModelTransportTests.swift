@@ -4181,7 +4181,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertFalse(failure.localizedDescription.contains("private_canary"))
         for gate in [failure, .signInRequired, .usageLimited(.claude)] {
             XCTAssertTrue(gate.blocksProviderUntilRefresh)
-            XCTAssertTrue(gate.localizedDescription.contains("refresh website models"))
+            if case .usageLimited = gate {
+                XCTAssertTrue(gate.localizedDescription.contains("After your account's limit resets, restart Computa, then start a fresh task"))
+            } else {
+                XCTAssertTrue(gate.localizedDescription.contains("refresh website models"))
+            }
         }
         for localFailure: EmbeddedWebModelTransport.Failure in [.unexpectedPage(.gemini), .modelMismatch, .ownershipFailure(.routeAfter)] {
             XCTAssertFalse(localFailure.blocksProviderUntilRefresh)

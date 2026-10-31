@@ -440,7 +440,8 @@ enum ComputaAgentInstructions {
     /// history, page text, a persisted thread's older instructions or tool output.
     /// Values are local function names; keys are their exact qualified names.
     static func webInferenceContract(offeredFunctions: [String: String], customToolNames: Set<String> = [],
-                                     includedInstructionText: [String] = [], compactNativeContext: Bool = false) -> String {
+                                     includedInstructionText: [String] = [], compactNativeContext: Bool = false,
+                                     deduplicateNativeContext: Bool = false) -> String {
         let names = offeredFunctions.keys.sorted()
         func functions(named localName: String) -> [String] {
             offeredFunctions.filter { $0.value == localName }.keys.sorted()
@@ -454,7 +455,9 @@ enum ComputaAgentInstructions {
         // Only a complete current app-owned developer contract can suppress
         // repeated outer guidance. Similar prose, old versions, user/tool text
         // and fragments joined across messages do not establish this branch.
-        let currentNative = compactNativeContext && [true, false].contains { references in
+        // Claude can omit the same duplicated outer prose without adopting
+        // ChatGPT's separate relay-only guidance or dispatch policy.
+        let currentNative = (compactNativeContext || deduplicateNativeContext) && [true, false].contains { references in
             [true, false].contains { embedded in
                 instructionAlreadyIncluded(developerInstructions(referenceTools: references, embeddedBrowserTools: embedded),
                     in: includedInstructionText)

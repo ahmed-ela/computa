@@ -264,9 +264,12 @@ enum WebModelResponseCodec {
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
-        let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
+        let provider = LocalModelCatalog.webProvider(for: model)
+        let isChatGPT = provider == "chatgpt"
+        let isClaude = provider == "claude"
         let runtimeInstructions = [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
-            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT),
+            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
+            deduplicateNativeContext: isClaude),
             deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
@@ -279,10 +282,10 @@ enum WebModelResponseCodec {
             : originalJSON
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
         let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
-        // Keep ChatGPT's complete request in a literal, unlabelled code block.
-        // The JSON presentation stays byte-exact; the eight fence bytes count
-        // toward admission and the outbound ownership fingerprint.
-        let framedRequestJSON = isChatGPT ? "```\n" + displayJSON + "\n```" : displayJSON
+        // Keep ChatGPT and Claude's complete request in one literal, unlabelled
+        // code block. This changes no JSON values or tool/dispatch policy; the
+        // eight fence bytes count toward admission and ownership fingerprints.
+        let framedRequestJSON = (isChatGPT || isClaude) ? "```\n" + displayJSON + "\n```" : displayJSON
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
             currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability),
