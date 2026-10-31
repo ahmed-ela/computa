@@ -11258,6 +11258,94 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeSubmittedQuotaBannerCleanupRequiresOwnedIncognitoAndFirstMessageProof() async throws {
+        for scenario in ["valid", "missing_mode", "missing_fingerprint", "route_drift", "unknown_modal",
+                         "duplicate_exit", "duplicate_header", "ambiguous_surfaces"] {
+            let fixture = try Fixture(page: Self.providerPage(.claude))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Keep the owned banner task"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64, scenario)
+            if scenario == "missing_fingerprint" {
+                // Fault injection removes a verified private pin; it never
+                // fabricates ownership or changes the native cleanup result.
+                let removed = try await evaluate(view, """
+                    const proof = globalThis.__computaModelFirstProof;
+                    if (!proof || typeof proof.fingerprint !== 'string') return false;
+                    delete proof.fingerprint; return proof.fingerprint === undefined;
+                    """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1")) as? Bool
+                XCTAssertEqual(removed, true)
+            }
+            _ = try await evaluate(view, """
+                const scenario = \(try matchedProbeJSON(scenario));
+                if (scenario === 'missing_mode') document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                if (scenario === 'duplicate_exit') document.body.appendChild(document.querySelector('button[aria-label="Exit incognito"]').cloneNode(true));
+                if (scenario === 'duplicate_header') document.body.appendChild(document.querySelector('.animate-incognito-header-in').cloneNode(true));
+                const background = document.createElement('div'); background.id = 'fixture-quota-background';
+                while (document.body.firstChild) background.appendChild(document.body.firstChild);
+                background.setAttribute('inert', ''); background.setAttribute('aria-hidden', 'true');
+                document.body.appendChild(background);
+                // The same exact official banner already exercised by the
+                // initial-page quota test now covers a submitted conversation.
+                const banner = document.createElement('div');
+                banner.innerHTML = \(try matchedProbeJSON(Self.claudeQuotaBannerMarkup));
+                document.body.appendChild(banner.firstElementChild);
+                if (scenario === 'unknown_modal' || scenario === 'ambiguous_surfaces') {
+                    const dialog = document.createElement('div');
+                    const title = document.createElement('h1');
+                    if (scenario === 'unknown_modal') {
+                        dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+                        title.textContent = 'Unrelated account notice';
+                    } else title.textContent = 'Your free messages return at 11:40 PM';
+                    dialog.appendChild(title);
+                    for (const label of scenario === 'unknown_modal' ? ['Dismiss'] : ['See all plans', 'Not now']) {
+                        const button = document.createElement('button'); button.textContent = label; dialog.appendChild(button);
+                    }
+                    document.body.appendChild(dialog);
+                }
+                if (scenario === 'route_drift') history.replaceState({}, '', '/settings?incognito');
+                window.fixtureQuotaClicks = 0; window.fixtureQuotaFocusCount = 0;
+                document.addEventListener('click', event => {
+                    if (event.target instanceof Element && event.target.closest('button, a, [role="button"]')) window.fixtureQuotaClicks++;
+                }, true);
+                document.getElementById('fixture-editor').addEventListener('focus', () => { window.fixtureQuotaFocusCount++; });
+                return true;
+                """)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not send through a quota banner"])
+                XCTFail("A quota banner or lost ownership must prevent another Send: \(scenario)")
+            } catch {
+                if ["missing_fingerprint", "route_drift"].contains(scenario) {
+                    XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure, scenario)
+                } else {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude), scenario)
+                }
+            }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let mayClose = scenario == "valid"
+            XCTAssertEqual(finished["text"] as? String, complete["text"] as? String, scenario)
+            XCTAssertEqual(finished["cleanup"] as? String, mayClose ? "not_created" : "failed", scenario)
+            if mayClose { XCTAssertNil(fixture.browser.webView(for: tabID)) }
+            else { XCTAssertTrue(fixture.browser.webView(for: tabID) === view, scenario) }
+            // Retaining this fixture reference permits a final read after the
+            // owned view is detached; no action is dispatched through it.
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Keep the owned banner task"], scenario)
+            for (variable, expected) in [("fixtureInputCount", 1), ("fixtureQuotaFocusCount", 0), ("fixtureQuotaClicks", 0)] {
+                let count = try await evaluate(view, "return window.\(variable);") as? Int
+                XCTAssertEqual(count, expected, "Send and cleanup cannot interact with the quota surface: \(scenario)")
+            }
+            try await assertHumanTabIntact(fixture, retaining: mayClose ? nil : tabID)
+        }
+    }
+
     func testClaudeInitialQuotaBannerAbortsBeforeFocusOrSendAndClosesOnlyFreshOwnedTab() async throws {
         let fixture = try Fixture(page: Self.freshClaudeQuotaBannerPage)
         defer { fixture.shutdown() }
@@ -11837,6 +11925,121 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(forged), provider: .claude))
         forged = source; forged["mode"] = ["headerTotal": 1_001]
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(forged), provider: .claude))
+    }
+
+    private func quotaProofDiagnosticFixture() -> (source: [String: Any], proof: [String: Any]) {
+        let proof: [String: Any] = ["kind": "claude_temporary_proof_v1", "action": "stop", "quotaObservationSource": "stop_check",
+            "quotaPopupCount": 0, "quotaBannerCount": 1, "quotaSurfaceCount": 1, "bannerUpgradeLinkCount": 1_000,
+            "physicalMode": true, "separatePhysicalDialog": false, "eligibleExitCount": 1,
+            "eligibleHeaderCount": 1, "incognitoQuery": true, "verified": true, "reason": "verified"]
+        let source: [String: Any] = ["kind": "quota_structure", "provider": "claude",
+            "headings": [], "controls": [], "popupAncestors": [], "support": [], "bannerParents": [],
+            "mode": ["headerTotal": 1, "headerVisible": 0, "headerPhysical": 1,
+                     "exitTotal": 1, "exitVisible": 0, "exitPhysical": 1]]
+        return (source, proof)
+    }
+
+    func testQuotaTemporaryProofDiagnosticsPreserveFiniteFactsAndUnknownsInSeparateRecords() throws {
+        let fixture = quotaProofDiagnosticFixture()
+        func records(_ value: [String: Any]) throws -> [String] {
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+            return try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(raw, provider: .claude))
+        }
+        XCTAssertEqual(try records(fixture.source).count, 1, "Older diagnostics remain supported")
+        var source = fixture.source
+        source["temporaryProof"] = NSNull()
+        var projected = try records(source)
+        XCTAssertEqual(projected.count, 2)
+        let unknown = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+        XCTAssertTrue(unknown["proof"] is NSNull, "No evaluated proof must not become a negative proof")
+        let actions = ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit", "stop",
+                       "discoverModels", "selectModel", "modelDiagnostic", "verifyModel"]
+        let reasons = ["multiple_quota_surfaces", "separate_dialog", "incognito_query", "exit_count", "header_count", "verified"]
+        for action in actions {
+            XCTAssertEqual(EmbeddedWebModelTransport.quotaDiagnosticAction(action), action)
+            for reason in reasons {
+                for observation in ["stop_check", "preceding_check", "not_evaluated"] {
+                    var proof = fixture.proof
+                    proof["action"] = action; proof["reason"] = reason; proof["quotaObservationSource"] = observation
+                    source["temporaryProof"] = proof; source["prompt"] = "private_canary"
+                    projected = try records(source)
+                    XCTAssertEqual(projected.count, 2)
+                    XCTAssertTrue(projected.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+                    let summary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[0].utf8)) as? [String: Any])
+                    XCTAssertNil(summary["temporaryProof"], "Proof must not crowd out the existing summary")
+                    let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+                    XCTAssertEqual(entry["section"] as? String, "temporaryProof")
+                    XCTAssertEqual(entry["proof"] as? NSDictionary, proof as NSDictionary)
+                }
+            }
+        }
+        var proof = fixture.proof
+        for key in ["quotaPopupCount", "quotaBannerCount", "quotaSurfaceCount", "bannerUpgradeLinkCount",
+                    "separatePhysicalDialog", "eligibleExitCount", "eligibleHeaderCount", "incognitoQuery"] {
+            proof[key] = NSNull()
+        }
+        proof["physicalMode"] = false; proof["verified"] = false
+        proof["quotaObservationSource"] = "not_evaluated"
+        source["temporaryProof"] = proof
+        projected = try records(source)
+        let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected[1].utf8)) as? [String: Any])
+        XCTAssertEqual(entry["proof"] as? NSDictionary, proof as NSDictionary,
+                       "An unevaluated predicate remains null, never an observed zero or false")
+    }
+
+    func testQuotaTemporaryProofDiagnosticsRejectPrivateFieldsAndInvalidTypes() throws {
+        let fixture = quotaProofDiagnosticFixture()
+        func rejected(_ proof: Any) throws {
+            var source = fixture.source; source["temporaryProof"] = proof
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: source), as: UTF8.self)
+            XCTAssertNil(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(raw, provider: .claude))
+        }
+        for value: Any in ["private_canary", 1, true, []] { try rejected(value) }
+        for key in fixture.proof.keys {
+            var proof = fixture.proof; proof.removeValue(forKey: key); try rejected(proof)
+        }
+        var proof = fixture.proof; proof["prompt"] = "private_canary"; try rejected(proof)
+        for key in ["kind", "action", "reason", "quotaObservationSource"] {
+            proof = fixture.proof; proof[key] = "private_canary"; try rejected(proof)
+        }
+        for (key, limit) in [("quotaPopupCount", 1), ("quotaBannerCount", 1), ("quotaSurfaceCount", 2),
+                             ("bannerUpgradeLinkCount", 1_000), ("eligibleExitCount", 1_000), ("eligibleHeaderCount", 1_000)] {
+            for value: Any in [-1, limit + 1, 0.5, true, "private_canary"] {
+                proof = fixture.proof; proof[key] = value; try rejected(proof)
+            }
+        }
+        for key in ["physicalMode", "verified", "separatePhysicalDialog", "incognitoQuery"] {
+            for value: Any in [0, 1, "private_canary"] {
+                proof = fixture.proof; proof[key] = value; try rejected(proof)
+            }
+        }
+        for key in ["physicalMode", "verified"] {
+            proof = fixture.proof; proof[key] = NSNull(); try rejected(proof)
+        }
+        for value in ["private_canary", "stop\nprivate_canary", "STOP", " stop", "", "cleanup"] {
+            XCTAssertNil(EmbeddedWebModelTransport.quotaDiagnosticAction(value))
+        }
+    }
+
+    func testQuotaDiagnosticBudgetReservesFailureAndStopAfterProgressIsExhausted() {
+        var budget = EmbeddedWebModelTransport.QuotaDiagnosticLogBudget()
+        for index in 0..<3 {
+            XCTAssertTrue(budget.admit(["shape\(index)"], action: "inspect", force: false))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: false))
+        }
+        XCTAssertFalse(budget.admit(["another"], action: "inspect", force: false))
+        XCTAssertTrue(budget.admit(["shape2"], action: "inspect", force: true), "Failure cannot be starved by progress")
+        XCTAssertFalse(budget.admit(["another failure"], action: "prepare", force: true))
+        XCTAssertTrue(budget.admit(["shape2"], action: "stop", force: true), "The actual cleanup proof has a separate reserved slot")
+        for index in 0..<100 {
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: false))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "inspect", force: true))
+            XCTAssertFalse(budget.admit(["shape\(index)"], action: "stop", force: true))
+        }
+        var stoppedFirst = EmbeddedWebModelTransport.QuotaDiagnosticLogBudget()
+        XCTAssertTrue(stoppedFirst.admit(["stop"], action: "stop", force: false))
+        XCTAssertFalse(stoppedFirst.admit(["changed"], action: "stop", force: true))
+        XCTAssertTrue(stoppedFirst.admit(["failure"], action: "prepare", force: true))
     }
 
     func testInsertionDifferenceDiagnosticsAllowOnlyFiniteIndexAndUnicodeScalars() {
@@ -16746,12 +16949,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    private static var freshClaudeQuotaBannerPage: String {
-        let banner = #"""
+    private static var claudeQuotaBannerMarkup: String {
+        #"""
         <div id="fixture-quota-banner"><p>You are out of free <a data-fixture-quota-link href="https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits"><span>messages</span><span hidden>private_canary accessibility suffix</span></a> until 11:40 PM</p><a data-fixture-quota-link href="https://claude.ai/upgrade?hide_free=true&amp;from=ratelimit">Upgrade</a></div>
         """#
+    }
+
+    private static var freshClaudeQuotaBannerPage: String {
         return providerPage(.claude)
-            .replacingOccurrences(of: #"<div id="messages"></div>"#, with: banner + #"<div id="messages"></div>"#)
+            .replacingOccurrences(of: #"<div id="messages"></div>"#, with: claudeQuotaBannerMarkup + #"<div id="messages"></div>"#)
             .replacingOccurrences(of: "window.fixtureGeneration = 'initial'; window.fixtureReady = true;", with: """
                 window.fixtureFocusCount = 0; window.fixtureQuotaClicks = 0;
                 editor.addEventListener('focus', () => { window.fixtureFocusCount++; });

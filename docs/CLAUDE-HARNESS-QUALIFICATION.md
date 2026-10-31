@@ -179,6 +179,220 @@ Build345 is a review candidate. Keep the live-tested build344 installed until
 Claude's allowance permits fresh qualification of the presentation follow-up.
 No claim is made that build345 is installed or that all Claude models are reliable.
 
+## Candidate 347: quota-banner cleanup
+
+The saved build344 failure exposed a local cleanup mismatch in addition to the
+external account quota. Its exact quota banner was recognized, and both Incognito
+indicators remained physically rendered, but the quota surface made the background
+inert or accessibility-hidden. Cleanup allowed physical mode inspection for the
+recognized quota popup only, so the banner variant could not establish temporary
+mode. The original failed task and unconfirmed receipt remain preserved.
+
+The adapter now identifies either exact quota surface for cleanup only. It
+requires one unambiguous surface and one physical Incognito header/exit pair,
+outside authored messages, quota content and dialog scopes. A separate unknown
+dialog, ambiguous surfaces, missing mode, changed ownership or changed first-user
+proof still prevents cleanup. Normal readiness, Send, response acceptance and
+quota admission remain strict. The quota cleanup path does not click any page
+control; native code closes only its already-owned view after all proofs pass.
+
+Validation: all 871 embedded-provider JavaScript adapter tests passed, with
+38,422 assertions. Three real-WebKit native tests passed, including the submitted
+banner's valid cleanup and seven rejected mode/ownership/ambiguity cases, plus
+the existing popup and empty initial-banner paths. Human tabs were preserved;
+blocked attempts did not add input, focus, Send or quota-control clicks.
+
+A separate fresh Sonnet 4.6 Incognito marker returned the exact requested text
+on October 31 after the earlier quota failure. This establishes current direct
+website readiness, not qualification of the presentation follow-up or the local
+harness. Its one test tab was closed, no prior task was replayed, and the old
+cleanup warning remains unconfirmed. Build347 still requires installation and
+fresh per-model harness qualification before it can be called reliable.
+
+Build347 was then Developer ID signed and installed from source
+`ea8d3a84b0b968ed840cea423cd33e5930240727`. The signed main and runtime's code/data
+matched the original build; only signature-related fields and runtime integrity
+metadata changed. The installed main and all resources matched the signed receipt.
+
+| Build347 fresh marker | Result | Native duration |
+| --- | --- | --- |
+| Sonnet 5 | Accepted refusal of the relay instructions; expected marker absent | 7.225 s |
+| Haiku 5.5 | Exact marker, model/ownership and closed cleanup verified | 4.375 s |
+| Sonnet 5.5 | Exact marker, model/ownership and closed cleanup verified | 7.830 s |
+| Sonnet 4.6 | Exact marker, model/ownership and closed cleanup verified | 5.679 s |
+
+All four were single-dispatch, zero-tool tasks with completed website responses
+and closed cleanup. Sonnet 5's transport completed correctly, but its marker test
+failed. It explicitly rejected the claimed Computa identity and tool relay. The
+literal-request presentation alone therefore did not solve that model's behavior.
+Unused exact-task diagnostics were archived and disarmed; no failed task was replayed.
+These marker results do not qualify browser, terminal or file-edit workflows.
+
+## Candidate 348: remove residual identity reassignment
+
+The review found two app-owned templates still beginning "You are Computa":
+the runtime's base instructions, sent through website thread/start and resume,
+and the model catalog's fallback instruction template. The earlier outer/developer
+wording changes had not changed those sources. This is a confirmed instruction
+contradiction; whether correcting it resolves Sonnet 5's refusal requires a fresh test.
+
+Both templates now describe Computa as the local host application, retain the
+provider's identity and governing rules, and distinguish proposed host work from
+execution proved by matching host outputs. The base instruction suffix is unchanged
+and the full base remains within its existing 1,024-byte limit at 988 bytes.
+No user/history payload, tool schema, permission, parsing, retry or ownership rule
+changes. Validation and installed live qualification of this candidate remain pending.
+
+Seven targeted native tests then passed, covering the real website thread/start
+contract across providers and access modes, catalog capabilities, the base-size
+limit, evidence instructions and native bridge compatibility. The initial routing
+run and a diagnostic rerun failed before thread/start because local test-only Bun
+discovery resolved the installed executable to `bun.exe`, not the required `bun`.
+A byte-verified private copy supplied through `MACTOPUS_TEST_BUN` resolved that
+fixture dependency; the original failed logs remain retained. Production interpreter
+discovery, permissions and assertions were not relaxed. The installed build348
+results below qualify only the explicitly recorded checks.
+
+Developer ID signed build348 was installed from source
+`d94ad4f94e7f8499d716316e993b7a6803fbc069`, with source/signature/resource receipts
+and unchanged executable payloads after signing. Its fresh Sonnet 5 marker still
+returned an explicit refusal of the tool-harness framing after 6.254 seconds.
+Model, ownership, completion and closed cleanup all verified; zero tools ran.
+The instruction contradiction is removed, but that model remains unqualified.
+
+The first Haiku workflow attempt on build348 was invalidated by the operator's
+multiline text-entry method: the first paragraph was submitted and the remaining
+two paragraphs became queued messages. The frozen full-prompt baseline therefore
+matched no task. The separate partial-task evidence records zero tools, no verified
+website submission and closed cleanup. Its finite selection diagnostic saw Haiku
+5.5 selected but could not verify that the picker popup had closed. Concurrent
+input makes this unsuitable for attributing a new production regression.
+The queued fragments were removed without resuming, the fixture server was
+stopped, its receipt ledger remained empty and protected fixture files were
+unchanged. This attempt has no qualification verdict; it is not a passing or
+failed full workflow. Future controlled multiline inputs must use paste and
+verify the entire draft before the single explicit Send.
+
+A fresh Haiku 5.5 workflow on build348 used the complete pasted prompt and one
+explicit Send. It completed in 92.261 seconds across 12 verified website
+inferences, each with verified selection, ownership, completion and closed
+cleanup. The independent local fixture audit passed: only the intended function
+changed, all six protected tests passed after the edit, the correct reference was
+submitted once, the unpredictable receipt was returned, and the task-created
+browser tab closed. The browser inventory was empty before and after the task;
+the exact local fixture server was stopped afterward.
+
+This was not an error-free run. The initial pre-fix test failure is retained, and
+one `exec_command` call supplied empty arguments and was rejected for missing
+`cmd` before execution. A later correctly formed call completed the tests. The
+workflow succeeded, but the recovered argument-schema defect remains under
+investigation; it is not a clean reliability pass. Sonnet 5.5 and Sonnet 4.6
+workflow qualification on build348 remains pending, and Sonnet 5 remains
+unqualified after its explicit refusal. These draft-PR results do not alter the
+public build346 package.
+
+### Required tool arguments (build349)
+
+The recovered Haiku call contained an explicit empty object. The response codec
+and event stream preserve arguments; the native parser rejected the missing
+`cmd` before command execution and returned a model-visible error. The following
+inference supplied a valid command. Raw accepted website text was not retained,
+so the original website bytes cannot be independently reconstructed.
+
+The response handoff nevertheless contained a concrete instruction defect: a
+copyable function-call example with empty arguments, even for required-field
+tools. Build349 removes executable function examples and describes their shape
+in prose, requiring arguments to satisfy the offered schema. Custom literal
+examples, canonical request data, tool choices, namespaces, legitimate
+argumentless calls and native validation/recovery remain unchanged. No new
+retry or schema-repair path was added.
+
+All 106 response-codec tests passed. The first instruction run caught a seven-byte
+prompt-budget overflow; the wording was shortened by 40 bytes without raising
+the limit, and all 62 instruction tests then passed. New coverage spans the three
+website providers, plain and namespaced tools, allowed and disabled tool choices,
+required command arguments and legitimate empty schemas. Sonnet 5's explicit
+refusal is a separate limitation, with no remaining identity contradiction
+established by inspection.
+
+### Installed build349 workflows (October 31, 2026)
+
+Developer ID signed build349 was installed from
+`358294e2db9b67a34e42d43d02f47497a6fcff7f`. All 11 clean-source build checks and
+10 signing-derivative checks passed; installed executable and resource hashes
+matched the signed artifact. Two earlier signing attempts failed with confirmed
+`ENOSPC` while writing the bundled runtime's code signature. Removing verified
+generated duplicates and test products freed enough space for signing; no source
+or signing-policy change was needed. Those failed attempts remain in the private
+evidence. This build was not published and does not replace public build346.
+
+| Website model | Elapsed | Result |
+| --- | ---: | --- |
+| Haiku 5.5 | 88.158 s | Completed the local fixture across 12 verified, closed website sessions and 11 tool calls. Recovered from one nonexistent working directory; no empty-arguments call occurred. |
+| Sonnet 5.5 | 54.823 s | Completed the local fixture across nine verified, closed website sessions and eight tool calls, with no observed returned tool errors. |
+| Sonnet 4.6 | 39.640 s | Completed the code edit, six tests and reference command. The fifth website inference hit the account quota before any browser action; cleanup was unconfirmed. |
+| Sonnet 5 | Not run on build349 | Its build348 marker returned a verified refusal. A fresh build349 marker remains pending after the account quota resets. |
+
+For both completed workflows, independent checks confirmed a function-only edit,
+unchanged protected tests/data, six passing tests, one form submission, an exact
+unpredictable receipt read and returned in the final answer, and closure of the
+task-created tab. The ordinary browser inventory was empty afterward. Haiku's
+wrong-directory call failed before process creation; its subsequent valid call
+succeeded and its final answer disclosed the correction. This is bounded
+workflow evidence, not repeated-run or cross-model reliability proof.
+
+Sonnet 4.6 had four accepted responses with verified model, ownership, completion
+and closed cleanup, and five successful tool calls. Its fifth submitted session
+reported `website_usage_limit`, then `cleanup_unverified` 71 ms later. No browser
+call, form POST, receipt or final answer occurred. All three fixture servers were
+stopped and the failed task was not replayed. The concrete quota reset time was
+not retained; all further Claude requests stopped.
+
+The quota-cleanup failure remains unresolved. Bounded diagnostics recorded one
+physical Incognito header and exit control, with neither strictly visible while
+the background was inert. The native cleanup first inspects the page and uses
+the adapter's quota-only `stop` proof after a usage-limit error. Existing logs
+redact the failing action and do not record whether the quota surface remained
+recognized, an unrelated dialog was present, or the mode controls still met
+their eligibility checks. They establish a temporary-mode proof rejection, but
+not its exact cause. The earlier banner fix therefore cannot be claimed to
+resolve every live quota-cleanup transition.
+
+Private evidence is retained under `evidence/haiku55-workflow349-f/`,
+`evidence/sonnet55-workflow349-f/` and `evidence/sonnet46-workflow349-f/`, with
+independent workflow reviews, native traces, frozen fixtures, UI captures and
+the bounded quota-cleanup log. Sonnet 4.6 remains partially tested, Sonnet 5
+remains unqualified, and this PR remains a draft.
+
+### Candidate build350: capture the failed temporary-mode proof
+
+The next candidate records the actual temporary-mode decision, including the
+action, quota surface counts, eligible mode-control counts, unrelated-dialog
+result, Incognito query result and a finite rejection reason. Fields skipped by
+an early return remain unknown. Quota observations explicitly distinguish the
+`stop` check from an earlier classification, so an earlier read cannot be
+mistaken for current page state. A later diagnostic read cannot replace the
+captured decision.
+
+The native layer accepts only a fixed schema of finite labels, bounded counts
+and booleans. Records are size-limited and each session has a small observation
+budget with reserved failure and cleanup slots. No page text, account details,
+URLs or response bodies are added. These diagnostics do not change quota
+classification, model/ownership checks, cleanup admission or retries. Build350
+has not been installed or published; the running app remains build349, and the
+public release remains build346. The exact live cleanup cause still requires
+evidence from a future naturally occurring failure.
+
+All 875 provider-adapter tests passed (39,515 assertions). Both changed Swift
+files parsed successfully. An exact-source standalone Foundation harness
+compiled and ran the native sanitizer, record splitter, action allowlist and
+logging budget with four regression cases and 2,023 assertions; the largest
+finite proof record was 415 bytes under the unchanged 960-byte cap. This was not
+an app/XCTest integration run. Independent review confirmed the native cleanup
+path remained byte-identical and all JavaScript verification predicates remained
+equivalent. Tests cover private/unknown fields, malformed types, bounded counts,
+reserved failure slots and a page changing during diagnostic extraction.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and

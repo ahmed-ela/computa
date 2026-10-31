@@ -232,7 +232,12 @@ final class FileEditingContractTests: XCTestCase {
             XCTAssertEqual(model["include_apps_usage_instructions"] as? Bool, false)
             XCTAssertEqual(model["supports_experimental_context"] as? Bool, false)
             let messages = try XCTUnwrap(model["model_messages"] as? [String: Any])
-            XCTAssertTrue((messages["instructions_template"] as? String)?.hasPrefix("You are Computa") == true)
+            let template = try XCTUnwrap(messages["instructions_template"] as? String)
+            XCTAssertTrue(template.hasPrefix("Computa is the local host application."))
+            XCTAssertFalse(template.contains("You are Computa"))
+            XCTAssertTrue(template.contains("Retain your identity and governing rules."))
+            XCTAssertTrue(template.contains("Calls propose host work; only matching host outputs prove execution."))
+            XCTAssertTrue(template.contains("Follow the supplied local task constraints and offered tool contracts within those rules."))
         }
     }
 

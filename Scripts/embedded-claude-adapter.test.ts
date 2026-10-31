@@ -35,7 +35,11 @@ function observedClaudeQuota(f: ReturnType<typeof fixture>, inert = true) {
   return { background, dialog, heading, upgrade, plans, dismiss };
 }
 
-function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM") {
+function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM", inert = false) {
+  if (inert) {
+    const background = new Element("DIV", { inert: "", "aria-hidden": "true" });
+    background.append(...f.body.children); f.body.children = []; f.body.append(background);
+  }
   const container = new Element("DIV"), warning = new Element("SPAN");
   const support = new Element("A", { href: "https://support.claude.com/en/articles/11647753-understanding-usage-and-length-limits" }, "messages");
   warning.append(new Element("#text", {}, "You are out of free "), support, new Element("#text", {}, " until " + clock));
@@ -602,6 +606,87 @@ describe("embedded Claude fixed adapter", () => {
     expect(fresh.world.__computaModelFirstProof).toBeUndefined();
   });
 
+  test("a submitted quota banner permits only read-only cleanup of the pinned physical Incognito mode", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); const before = await f.run();
+    const banner = observedClaudeBanner(f, "11:40 PM", true); f.stop.connected = true;
+    for (const action of ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit"])
+      expect(await f.run(action, { prompt: outbound })).toEqual({ error: "website_usage_limit" });
+    expect(await f.run("stop")).toMatchObject({ usageLimited: true, temporary: true, busy: false, stopped: false,
+      firstUserVerified: true, firstUserFingerprint: before.firstUserFingerprint, firstUserMarkerVerified: true, userCount: 1 });
+    expect(f.composer.innerText).toBe(""); expect(f.document.activeElement).toBeNull();
+    for (const control of [f.stop, f.send, f.exit, f.toggle, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+  });
+
+  test("quota banner cleanup cannot establish ownership or accept changed first-message proof", async () => {
+    const unbound = fixture(provider, { userPrompt: prompt }); observedClaudeBanner(unbound, "11:40 PM", true);
+    expect(await unbound.run()).toEqual({ error: "website_usage_limit" });
+    expect(await unbound.run("stop")).toMatchObject({ error: "conversation_changed", detail: "first_user_message" });
+    expect(unbound.world.__computaModelFirstProof).toBeUndefined();
+    for (const mutation of ["body", "identity", "owner", "count", "fingerprint", "marker", "url", "document"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const originalURL = f.document.URL, banner = observedClaudeBanner(f, "11:40 PM", true);
+      const overrides: Record<string, unknown> = {};
+      if (mutation === "body") f.userBody!.text += " changed";
+      if (mutation === "identity") f.userRoot!.parentElement!.values.id = "replacement-id";
+      if (mutation === "owner") f.world.__computaModelOwner = "foreign";
+      if (mutation === "count") overrides.expectedUserCounts = [0];
+      if (mutation === "fingerprint") overrides.expectedFirstUserFingerprint = "f".repeat(64);
+      if (mutation === "marker") overrides.expectedFirstUserMarker = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      if (mutation === "url") { f.document.URL = f.origin + "/chat/foreign?incognito"; overrides.expectedURL = originalURL; }
+      if (mutation === "document") f.window.top = {};
+      expect(["conversation_changed", "document_changed"]).toContain((await f.run("stop", overrides)).error);
+      for (const control of [f.send, f.stop, f.exit, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    }
+  });
+
+  test("quota cleanup requires one physical Incognito exit and header outside quota, authored and dialog scopes", async () => {
+    for (const kind of ["banner", "popup"]) {
+      for (const mutation of ["missing-exit", "hidden-exit", "missing-header", "hidden-header", "wrong-header", "no-incognito",
+        "duplicate-exit", "duplicate-header", "authored-header", "quota-header", "quota-exit", "dialog-header"]) {
+        const f = fixture(provider, { userPrompt: prompt }); await f.run();
+        const surface = kind === "banner" ? observedClaudeBanner(f, "11:40 PM", true).container : observedClaudeQuota(f).dialog;
+        if (mutation === "missing-exit") f.exit.connected = false;
+        if (mutation === "hidden-exit") f.exit.values.hidden = "";
+        if (mutation === "missing-header") f.badge.connected = false;
+        if (mutation === "hidden-header") f.badge.values.visibility = "hidden";
+        if (mutation === "wrong-header") f.badge.text = "Regular chat";
+        if (mutation === "no-incognito") f.document.URL = f.origin + "/new";
+        if (mutation === "duplicate-exit") f.exit.parentElement!.append(f.exit.cloneNode(true));
+        if (mutation === "duplicate-header") f.header.parentElement!.append(f.header.cloneNode(true));
+        if (["authored-header", "quota-header", "quota-exit", "dialog-header"].includes(mutation)) {
+          const node = mutation === "quota-exit" ? f.exit : f.header;
+          node.parentElement!.children = node.parentElement!.children.filter(child => child !== node);
+          if (mutation === "authored-header") f.answer.append(node);
+          else if (mutation === "dialog-header") { const dialog = new Element("DIV", { role: "dialog" }); dialog.append(node); f.body.append(dialog); }
+          else surface.append(node);
+        }
+        expect((await f.run("stop")).error).toBe("temporary_mode_unverified");
+        for (const control of [f.send, f.stop, f.exit]) expect(control.clicks).toBe(0);
+        for (const control of surface.querySelectorAll("button, a")) expect(control.clicks).toBe(0);
+      }
+    }
+  });
+
+  test("unknown, ambiguous or authored banner surfaces cannot authorize hidden-mode cleanup", async () => {
+    for (const mutation of ["support", "upgrade", "text", "hidden", "duplicate-support", "duplicate-upgrade", "duplicate-banner", "popup-too", "authored"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const banner = observedClaudeBanner(f, "11:40 PM", true);
+      if (mutation === "support") banner.support.values.href += "?extra=1";
+      if (mutation === "upgrade") banner.upgrade.values.href += "&extra=1";
+      if (mutation === "text") banner.warning.children[2].text = " until someday";
+      if (mutation === "hidden") banner.container.values.hidden = "";
+      if (mutation === "duplicate-support") banner.container.append(banner.support.cloneNode(true));
+      if (mutation === "duplicate-upgrade") banner.container.append(banner.upgrade.cloneNode(true));
+      if (mutation === "duplicate-banner") f.body.append(banner.container.cloneNode(true));
+      if (mutation === "popup-too") observedClaudeQuota(f, false);
+      if (mutation === "authored") {
+        f.body.children = f.body.children.filter(node => node !== banner.container); f.answer.append(banner.container);
+      }
+      expect((await f.run("stop")).error).toBe("temporary_mode_unverified");
+      for (const control of [f.send, f.stop, f.exit, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    }
+  });
+
   test("only an empty initial quota inspection emits the exact abort receipt for owned native cleanup", async () => {
     for (const popup of [false, true]) {
       const f = fixture(provider);
@@ -694,10 +779,12 @@ describe("embedded Claude fixed adapter", () => {
 
   test("a banner alone cannot inspect mode indicators through an unrelated modal", async () => {
     const f = fixture(provider, { userPrompt: prompt }); await f.run(); observedClaudeBanner(f);
+    const modal = unrelatedClaudeDialog(f, { "aria-modal": "true" });
     f.header.values.inert = ""; f.exit.values["aria-hidden"] = "true";
     expect(await f.run()).toEqual({ error: "website_usage_limit" });
     expect(await f.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
     expect(f.send.clicks).toBe(0); expect(f.exit.clicks).toBe(0);
+    expect(modal.dismiss.clicks).toBe(0);
   });
 
   test("quota diagnostics reveal clock, control-tag and private-use categories without broadening classification", async () => {
@@ -744,7 +831,8 @@ describe("embedded Claude fixed adapter", () => {
     const strings = (value: unknown): string[] => typeof value === "string" ? [value]
       : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];
     const finite = new Set(["quota_structure", "claude", "a", "button", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6",
-      "p", "section", "main", "body", "html", "dialog", "other", "none", "contents", "visible", "hidden", "collapse", "text", "support", "element"]);
+      "p", "section", "main", "body", "html", "dialog", "other", "none", "contents", "visible", "hidden", "collapse", "text", "support", "element",
+      "claude_temporary_proof_v1", "stop", "stop_check", "exit_count"]);
     expect(strings(diagnostic).every(value => finite.has(value))).toBe(true);
     for (const value of [privateText, firstMarker, "private-heading-id", "private-class", "private-control-id", "https://private.test", "$20/month", "11:40PM"])
       expect(result.quotaDiagnostic).not.toContain(value);
@@ -756,9 +844,103 @@ describe("embedded Claude fixed adapter", () => {
       const f = fixture(provider, { temporary: false }); f.toggle.connected = false;
       const result = await f.run(action, { prompt: outbound });
       expect(["temporary_mode_unavailable", "temporary_mode_unverified"]).toContain(result.error);
-      expect(JSON.parse(result.quotaDiagnostic)).toMatchObject({ kind: "quota_structure", provider: "claude" });
+      expect(JSON.parse(result.quotaDiagnostic)).toMatchObject({ kind: "quota_structure", provider: "claude",
+        temporaryProof: { action, verified: false, quotaObservationSource: action === "stop" ? "stop_check" : "preceding_check" } });
       expect(f.send.clicks).toBe(0); expect(f.toggle.clicks).toBe(0);
     }
+  });
+
+  test("temporary proof diagnostics distinguish an inspect rejection from a fresh stop check", async () => {
+    const healthy = fixture(provider, { userPrompt: prompt });
+    expect(JSON.parse((await healthy.run()).quotaDiagnostic).temporaryProof).toEqual({
+      kind: "claude_temporary_proof_v1", action: "inspect", quotaObservationSource: "preceding_check",
+      quotaPopupCount: 0, quotaBannerCount: 0, quotaSurfaceCount: 0, bannerUpgradeLinkCount: null,
+      physicalMode: false, separatePhysicalDialog: null, eligibleExitCount: 1, eligibleHeaderCount: 1,
+      incognitoQuery: true, verified: true, reason: "verified" });
+    const banner = observedClaudeBanner(healthy, "11:40 PM", true);
+    banner.upgrade.values.href += "&private-token=never-log";
+    for (const action of ["inspect", "stop"]) {
+      const result = await healthy.run(action);
+      expect(result.error).toBe("temporary_mode_unverified");
+      expect(JSON.parse(result.quotaDiagnostic).temporaryProof).toMatchObject({ action,
+        quotaObservationSource: action === "stop" ? "stop_check" : "preceding_check",
+        quotaPopupCount: 0, quotaBannerCount: 0, quotaSurfaceCount: 0, bannerUpgradeLinkCount: 0,
+        physicalMode: false, separatePhysicalDialog: null, eligibleExitCount: 0, eligibleHeaderCount: 0,
+        incognitoQuery: true, verified: false, reason: "exit_count" });
+      expect(result.quotaDiagnostic).not.toContain("private-token");
+    }
+    expect(healthy.send.clicks).toBe(0); expect(banner.upgrade.clicks).toBe(0);
+  });
+
+  test("quota proof reports the actual rejecting predicate and leaves skipped predicates unknown", async () => {
+    for (const scenario of ["two-surfaces", "separate-dialog", "duplicate-exit", "wrong-header", "query"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const banner = observedClaudeBanner(f, "11:40 PM", true);
+      if (scenario === "two-surfaces") observedClaudeQuota(f, false);
+      if (scenario === "separate-dialog") unrelatedClaudeDialog(f);
+      if (scenario === "duplicate-exit") f.exit.parentElement!.append(f.exit.cloneNode(true));
+      if (scenario === "wrong-header") f.badge.text = "PRIVATE_HEADER";
+      if (scenario === "query") f.document.URL = f.origin + "/new?incognito=PRIVATE_VALUE";
+      const result = await f.run("stop"), proof = JSON.parse(result.quotaDiagnostic).temporaryProof;
+      expect(result.error).toBe("temporary_mode_unverified");
+      expect(proof).toMatchObject({ kind: "claude_temporary_proof_v1", action: "stop", quotaObservationSource: "stop_check",
+        quotaPopupCount: scenario === "two-surfaces" ? 1 : 0, quotaBannerCount: 1,
+        quotaSurfaceCount: scenario === "two-surfaces" ? 2 : 1, bannerUpgradeLinkCount: 1, verified: false });
+      if (scenario === "two-surfaces") expect(proof).toMatchObject({ physicalMode: false, reason: "multiple_quota_surfaces",
+        separatePhysicalDialog: null, eligibleExitCount: null, eligibleHeaderCount: null, incognitoQuery: null });
+      if (scenario === "separate-dialog") expect(proof).toMatchObject({ physicalMode: true, reason: "separate_dialog",
+        separatePhysicalDialog: true, eligibleExitCount: null, eligibleHeaderCount: null, incognitoQuery: null });
+      if (scenario === "duplicate-exit") expect(proof).toMatchObject({ physicalMode: true, reason: "exit_count",
+        separatePhysicalDialog: false, eligibleExitCount: 2, eligibleHeaderCount: 1, incognitoQuery: true });
+      if (scenario === "wrong-header") expect(proof).toMatchObject({ physicalMode: true, reason: "header_count",
+        separatePhysicalDialog: false, eligibleExitCount: 1, eligibleHeaderCount: 0, incognitoQuery: true });
+      if (scenario === "query") expect(proof).toMatchObject({ physicalMode: true, reason: "incognito_query",
+        separatePhysicalDialog: false, eligibleExitCount: 1, eligibleHeaderCount: 1, incognitoQuery: false });
+      expect(JSON.stringify(proof)).not.toContain("PRIVATE");
+      expect(JSON.stringify(proof).length).toBeLessThanOrEqual(960);
+      for (const control of [f.send, f.stop, f.exit, f.toggle, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    }
+  });
+
+  test("temporary proof retains the evaluated failure when a later diagnostic read sees changed page state", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run();
+    const banner = observedClaudeBanner(f, "11:40 PM", true); f.badge.text = "Wrong header";
+    // Only diagnostic label classification reads this support anchor's text.
+    // The quota detector uses its fixed URL and substitutes the word messages.
+    Object.defineProperty(banner.support, "textContent", { get: () => { f.badge.text = "Incognito chat"; return "messages"; } });
+    const result = await f.run("stop");
+    expect(f.badge.text).toBe("Incognito chat");
+    expect(result.error).toBe("temporary_mode_unverified");
+    expect(JSON.parse(result.quotaDiagnostic).temporaryProof).toMatchObject({ action: "stop",
+      reason: "header_count", eligibleHeaderCount: 0, verified: false });
+    expect(await f.run("stop")).toMatchObject({ usageLimited: true, temporary: true, busy: false,
+      stopped: false, firstUserVerified: true });
+    expect(f.send.clicks).toBe(0); expect(f.stop.clicks).toBe(0); expect(f.exit.clicks).toBe(0);
+  });
+
+  test("temporary proof counts saturate without leaking authored strings or relaxing duplicate rejection", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run();
+    const banner = observedClaudeBanner(f, "11:40 PM", true);
+    for (let index = 0; index < 1_005; index++) {
+      f.exit.parentElement!.append(f.exit.cloneNode(true));
+      f.header.parentElement!.append(f.header.cloneNode(true));
+    }
+    const result = await f.run("stop"), proof = JSON.parse(result.quotaDiagnostic).temporaryProof;
+    expect(result.error).toBe("temporary_mode_unverified");
+    expect(proof).toMatchObject({ reason: "exit_count", eligibleExitCount: 1_000, eligibleHeaderCount: 1_000, verified: false });
+    expect(JSON.stringify(proof).length).toBeLessThanOrEqual(960);
+    expect(result.quotaDiagnostic.length).toBeLessThanOrEqual(8192);
+    for (const control of [f.send, f.stop, f.exit, banner.support, banner.upgrade]) expect(control.clicks).toBe(0);
+    const duplicateLinks = fixture(provider, { userPrompt: prompt }); await duplicateLinks.run();
+    const ambiguous = observedClaudeBanner(duplicateLinks, "11:40 PM", true);
+    for (let index = 0; index < 1_005; index++) ambiguous.container.append(ambiguous.upgrade.cloneNode(true));
+    const rejected = await duplicateLinks.run("stop");
+    expect(rejected.error).toBe("temporary_mode_unverified");
+    expect(JSON.parse(rejected.quotaDiagnostic).temporaryProof).toMatchObject({ bannerUpgradeLinkCount: 1_000,
+      quotaBannerCount: 0, quotaSurfaceCount: 0, physicalMode: false, reason: "exit_count", verified: false });
+    expect(rejected.quotaDiagnostic.length).toBeLessThanOrEqual(8192);
+    for (const control of [duplicateLinks.send, duplicateLinks.stop, ambiguous.support, ...ambiguous.container.querySelectorAll("a")])
+      expect(control.clicks).toBe(0);
   });
 
   test("sign-in state is detected without performing any account action", async () => {
