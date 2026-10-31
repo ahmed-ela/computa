@@ -29,6 +29,36 @@ export interface Context {
 export type FileEntry = { path: string; kind: "file"; sha256: string; size: number; executable: boolean }
   | { path: string; kind: "symlink"; target: string };
 
+// Mirror ComputaRuntimeArtifact's admitted manifest versions. Packaging must
+// reject metadata the installed app cannot load; capabilities confer no signing
+// or integrity exception.
+export function validateRuntimeManifest(value: unknown): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid Agent runtime manifest schema");
+  const runtime = value as Record<string, unknown>;
+  const fields = ["schemaVersion", "runtimeVersion", "sourceCommit", "patchSHA256", "binarySHA256",
+    "binarySize", "platform", "architecture", "executable"];
+  if (runtime.schemaVersion !== 1 && runtime.schemaVersion !== 2) throw new Error("Unsupported Agent runtime manifest schema");
+  if (runtime.schemaVersion === 2) fields.push("capabilities");
+  const keys = Object.keys(runtime);
+  if (keys.length !== fields.length || keys.some(key => !fields.includes(key))) throw new Error("Invalid Agent runtime manifest fields");
+  if (runtime.schemaVersion === 2) {
+    const capabilities = runtime.capabilities;
+    const known = new Set(["threadDynamicToolsV1", "browserLifecycleObservationsV1"]);
+    if (!Array.isArray(capabilities) || capabilities.some(name => typeof name !== "string" || !known.has(name))
+      || new Set(capabilities).size !== capabilities.length) throw new Error("Invalid Agent runtime manifest capabilities");
+  }
+  const digest = (value: unknown) => typeof value === "string" && value.length === 64 && /^[0-9a-f]{64}$/.test(value) && value !== "0".repeat(64);
+  if (typeof runtime.runtimeVersion !== "string" || runtime.runtimeVersion.length > 64
+    || !/^[A-Za-z0-9]/.test(runtime.runtimeVersion) || /[^A-Za-z0-9._+-]/.test(runtime.runtimeVersion)
+    || runtime.sourceCommit !== "4607249e430dac1c961df4dc615beae88e33cec8"
+    || !digest(runtime.patchSHA256) || !digest(runtime.binarySHA256)
+    || typeof runtime.binarySize !== "number" || !Number.isInteger(runtime.binarySize)
+    || runtime.binarySize < 32 || runtime.binarySize > 512 * 1024 * 1024
+    || runtime.platform !== "macos" || runtime.architecture !== "arm64" || runtime.executable !== "codex-app-server") {
+    throw new Error("Invalid Agent runtime manifest metadata");
+  }
+}
+
 export function parseOptions(args: string[]): Options {
   const result: Options = { channel: "notarized", help: false };
   const seen = new Set<string>();
@@ -126,10 +156,12 @@ export async function inspectApp(context: Context, app: string, channel: Options
     throw new Error("The release must declare macOS 14 or later");
   }
   const runtimePath = join(app, "Contents/Resources/AgentRuntime");
-  const runtime = JSON.parse(await readFile(join(runtimePath, "manifest.json"), "utf8"));
+  const runtimeBytes = await readFile(join(runtimePath, "manifest.json"));
+  if (!runtimeBytes.length || runtimeBytes.length > 16 * 1024) throw new Error("Invalid Agent runtime manifest size");
+  const runtime = JSON.parse(runtimeBytes.toString("utf8"));
+  validateRuntimeManifest(runtime);
   const binary = files.find(item => item.path === "Contents/Resources/AgentRuntime/codex-app-server")!;
-  if (runtime.schemaVersion !== 1 || runtime.platform !== "macos" || runtime.architecture !== "arm64"
-    || runtime.executable !== "codex-app-server" || binary.kind !== "file" || runtime.binarySHA256 !== binary.sha256 || runtime.binarySize !== binary.size) {
+  if (binary.kind !== "file" || runtime.binarySHA256 !== binary.sha256 || runtime.binarySize !== binary.size) {
     throw new Error("Agent runtime signature/hash differs from its sealed manifest");
   }
   for (const binaryPath of [join(app, "Contents/MacOS/Computa"), join(runtimePath, "codex-app-server")]) {
@@ -194,8 +226,8 @@ export async function packageRelease(options: Options, context: Context) {
   const manifestText = JSON.stringify(manifest, null, 2) + "\n";
   await writeFile(join(payload, "release-manifest.json"), manifestText, { flag: "wx" });
   const guide = `Computa ${releaseVersion} — Apple Silicon, macOS ${inspected.minimumMacOS}+\n\n`
-    + `Clean Mac: open Install Computa.command and confirm INSTALL. It installs into ~/Applications, downloads private Python/MLX and pinned Qwen 4B (~3.06 GB), then opens the app. Allow about 10 GB free space. No Xcode, Homebrew, Git, Bun or preinstalled Python required.\n\n`
-    + `Already configured: drag Computa.app to Applications, or use the installer for a backed-up update in ~/Applications. Quit Computa and legacy Mactopus first. The installer upgrades a lone Mactopus.app and preserves its old name in the backup; if both names exist, it stops without replacing either. Use the intended app path if both installation locations exist.\n\n`
+    + `Install: quit Computa and legacy Mactopus, then drag Computa.app to Applications and open it. Sign in to a website provider in Computa's built-in browser. After signing in, quit and reopen Computa once to discover verified model choices, then select a specific model. For API models, configure a provider in Settings. Browser and API models need no Python, MLX or model downloads. No Xcode, Homebrew, Git or Bun is required.\n\n`
+    + `Optional legacy local-model setup: Install Computa.command provisions private Python/MLX and pinned Qwen 4B (~3.06 GB) for saved local-model workflows; local models are currently hidden from the selector. It is not required for browser/API use. Confirm INSTALL to install into ~/Applications; allow about 10 GB free space. An existing app is backed up. The installer upgrades a lone Mactopus.app and preserves its old name in the backup; if both names exist, it stops without replacing either. Use the intended app path if both installation locations exist.\n\n`
     + `Channel: ${options.channel}. ${options.channel === "signed-test" ? "Not notarized: macOS may block this test build. Obtain a notarized release for normal distribution." : "The packaged app has a validated notarization ticket; assess/notarize the DMG separately before publishing."}\n`
     + `macOS permissions are separate user actions. No quarantine removal or security bypass is performed. Failed runtime downloads can be retried; prior app backups and model download caches are retained.\n`;
   await writeFile(join(payload, "READ ME.txt"), guide, { flag: "wx" });

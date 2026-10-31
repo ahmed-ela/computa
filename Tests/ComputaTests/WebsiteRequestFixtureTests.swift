@@ -6,12 +6,14 @@ final class WebsiteRequestFixtureTests: XCTestCase {
     func testExactProviderFramePreservesJSONBytesAndRejectsMalformedOrCrossProviderFences() throws {
         let chat = #"{"model":"browser/chatgpt","input":"hello","metadata":{"x":"first","x":"last"}}"#
         let gemini = chat.replacingOccurrences(of: "browser/chatgpt", with: "browser/gemini")
+        let claude = chat.replacingOccurrences(of: "browser/chatgpt", with: "browser/claude")
         func prompt(_ frame: String) -> String {
             "prefix\nCOMPLETE_RESPONSES_REQUEST_JSON:\n" + frame + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\nsuffix"
         }
         XCTAssertEqual(try WebsiteRequestFixture.json(in: prompt("```\n" + chat + "\n```")), Data(chat.utf8))
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: prompt("```\n" + claude + "\n```")), Data(claude.utf8))
         XCTAssertEqual(try WebsiteRequestFixture.json(in: prompt(gemini)), Data(gemini.utf8))
-        for badFrame in [chat, "```json\n" + chat + "\n```", "```\r\n" + chat + "\r\n```",
+        for badFrame in [chat, claude, "```json\n" + chat + "\n```", "```\r\n" + chat + "\r\n```",
                          "````\n" + chat + "\n````", "```\n" + chat, chat + "\n```",
                          " ```\n" + chat + "\n```", "```\n" + chat + "\n``` ",
                          "```\n" + gemini + "\n```"] {
@@ -25,7 +27,7 @@ final class WebsiteRequestFixtureTests: XCTestCase {
 
     func testWorkflowFixtureReadsFencedRequestAndRetainsExactNativeInputValues() throws {
         let input = [["role": "user", "content": "Read café 🌍 and literal \\u0060\n```"]]
-        for model in [syntheticChatGPTModelID, "browser/gemini"] {
+        for model in [syntheticChatGPTModelID, "browser/gemini", "browser/claude"] {
             let raw = try JSONSerialization.data(withJSONObject: ["model": model, "input": input])
             let prepared = try WebModelResponseCodec.prepareRequest(raw)
             let fixture = try InferenceRequest(params: JSONSerialization.data(withJSONObject: ["prompt": prepared.prompt]))

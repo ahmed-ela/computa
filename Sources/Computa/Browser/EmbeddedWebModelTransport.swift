@@ -274,7 +274,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseStreamFailed(let reason): reason == .emptyStream
                 ? "ChatGPT finished its response stream without an answer. No prompt was replayed and no tool calls were released."
                 : "ChatGPT reported an error and ended its response stream without an answer. No prompt was replayed and no tool calls were released."
-            case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+            case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Computa, then start a fresh task."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
             case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. This website inference was not submitted."
@@ -379,6 +379,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedReadinessStages: Set<Bool> = []
         var loggedCodeSequence: Int?
         var loggedCodeResponseCount: Int?
+        var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
         var lastQuotaDiagnostic: [String]?
         var modelSelectionRequested = false
@@ -489,6 +490,36 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let pending: Bool, busy: Bool, answerComplete: Bool, ownershipPending: Bool, composer: Bool, temporary: Bool, temporaryActionAvailable: Bool
         let modernMarkers: Int, logicalAnswers: Int, scopedCopies: Int, enabledCopies: Int, depth: Int
     }
+
+    /// Diagnostic-only budget: two changed progress shapes, a reserved first
+    /// idle-incomplete shape, and one completion per acknowledged submission.
+    /// Old observations cannot renew it; unknown busy state is not idle.
+    struct ClaudeCompletionDiagnosticLogBudget {
+        private var sequence = 0
+        private var last: String?
+        private var progressRecords = 0
+        private var idleRecorded = false
+        private var completed = false
+
+        @MainActor mutating func admit(_ value: String, sequence current: Int, busy: Bool?, complete: Bool) -> Bool {
+            guard (1...EmbeddedWebModelTransport.maximumTurnSubmissions).contains(current), current >= sequence else { return false }
+            if current != sequence {
+                sequence = current; last = nil; progressRecords = 0; idleRecorded = false; completed = false
+            }
+            guard !completed else { return false }
+            if complete {
+                completed = true; last = value
+                return true
+            }
+            if busy == false, !idleRecorded {
+                idleRecorded = true; last = value
+                return true
+            }
+            guard value != last, progressRecords < 2 else { return false }
+            last = value; progressRecords += 1
+            return true
+        }
+    }
     #if DEBUG
     enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
     struct ModelValidationObservationForTesting: Codable, Sendable {
@@ -507,6 +538,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
+    private var claudeCompletionDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -618,6 +650,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setBoundCertificateDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         boundCertificateDiagnosticsObserverForTesting = observer
+    }
+
+    func setClaudeCompletionDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        claudeCompletionDiagnosticsObserverForTesting = observer
     }
 
     /// Exercise the ordinary full-model observation without the running-answer
@@ -2247,6 +2283,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let evidence = observed["completionEvidence"] as? [String: Any] ?? [:]
         let responseCount = count(observed, "responseCount")
+        if session.provider == .claude, !session.isDiscovery, session.submitted,
+           session.state == "running", session.acknowledgedSendSequence == session.sequence,
+           sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+           browser.documentGeneration(for: session.tabID) == (session.documentGeneration ?? session.initialDocumentGeneration),
+           responseCount > session.baseline,
+           let records = Self.sanitizedClaudeCompletionStructure(evidence["claudeCompletionStructure"], provider: session.provider),
+           session.claudeCompletionDiagnosticLog.admit(records.joined(separator: "\n"), sequence: session.sequence,
+               busy: Self.firstUserDiagnosticBool(observed["busy"]), complete: Self.firstUserDiagnosticBool(observed["answerComplete"]) == true) {
+            let busy = Self.firstUserDiagnosticBool(observed["busy"]).map { $0 ? "true" : "false" } ?? "unknown"
+            for record in records {
+                Self.inspectionLog.info("claudeCompletionShape sequence=\(session.sequence) responses=\(responseCount) busy=\(busy, privacy: .public) \(record, privacy: .public)")
+                #if DEBUG
+                claudeCompletionDiagnosticsObserverForTesting?(record)
+                #endif
+            }
+        }
         if observed["answerComplete"] as? Bool == true,
            !(observed["text"] as? String ?? "").isEmpty,
            session.loggedCodeSequence != session.sequence || session.loggedCodeResponseCount != responseCount,
@@ -2280,6 +2332,89 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard signature != session.lastInspection else { return }
         session.lastInspection = signature
         Self.inspectionLog.info("inspection responses=\(signature.responses) users=\(signature.users) sequence=\(signature.sequence) pending=\(signature.pending) busy=\(signature.busy) answerComplete=\(signature.answerComplete) textBytes=\(signature.textBytes) ownershipPending=\(signature.ownershipPending) composer=\(signature.composer) temporary=\(signature.temporary) temporaryActionAvailable=\(signature.temporaryActionAvailable) modernMarkers=\(signature.modernMarkers) logicalAnswers=\(signature.logicalAnswers) scopedCopies=\(signature.scopedCopies) enabledCopies=\(signature.enabledCopies) depth=\(signature.depth)")
+    }
+
+    /// Closed completion-landmark metadata only. It cannot authorize a response
+    /// and intentionally distinguishes an absent scope from observed zero counts.
+    static func sanitizedClaudeCompletionStructure(_ raw: Any?, provider: Provider) -> [String]? {
+        let flags = ["answerPresent", "messagePresent", "articlePresent"]
+        let counts = ["articleAssistantDescendants", "articleReplyBodies", "articleActionBars",
+            "articleCopyTestIDButtons", "articleCopyLabelButtons", "articleExactCopyButtons",
+            "articleVisibleCopies", "articleEnabledCopies"]
+        let keys = Set(flags + counts + ["kind", "messageStreamingState", "articleIsMessage", "ancestors"])
+        guard provider == .claude, let source = raw as? [String: Any], Set(source.keys) == keys,
+              source["kind"] as? String == "claude_completion_shape_v1" else { return nil }
+        var safe: [String: Any] = ["kind": "claude_completion_shape_v1"]
+        for key in flags {
+            guard let value = firstUserDiagnosticBool(source[key]) else { return nil }
+            safe[key] = value
+        }
+        let answer = safe["answerPresent"] as? Bool == true
+        let message = safe["messagePresent"] as? Bool == true
+        let article = safe["articlePresent"] as? Bool == true
+        guard answer || (!message && !article) else { return nil }
+        if message {
+            guard let value = source["messageStreamingState"] as? String,
+                  ["absent", "true", "false", "other"].contains(value) else { return nil }
+            safe["messageStreamingState"] = value
+        } else {
+            guard source["messageStreamingState"] is NSNull else { return nil }
+            safe["messageStreamingState"] = NSNull()
+        }
+        if article {
+            guard let same = firstUserDiagnosticBool(source["articleIsMessage"]), !same || message else { return nil }
+            safe["articleIsMessage"] = same
+            var values: [String: Int64] = [:]
+            for key in counts {
+                guard let value = ComputerToolArgumentContract.exactInt64(source[key]), (0...1_000).contains(value) else { return nil }
+                values[key] = value
+                safe[key] = value
+            }
+            guard let enabled = values["articleEnabledCopies"], let visible = values["articleVisibleCopies"],
+                  let exact = values["articleExactCopyButtons"], let testID = values["articleCopyTestIDButtons"],
+                  let label = values["articleCopyLabelButtons"], enabled <= visible, visible <= exact,
+                  exact <= testID, exact <= label else { return nil }
+        } else {
+            for key in counts + ["articleIsMessage"] {
+                guard source[key] is NSNull else { return nil }
+                safe[key] = NSNull()
+            }
+        }
+        guard let ancestors = source["ancestors"] as? [[String: Any]], ancestors.count <= 4,
+              answer || ancestors.isEmpty else { return nil }
+        let ancestorCounts = ["assistantDescendants", "replyBodyDescendants", "actionBars",
+            "copyTestIDButtons", "copyLabelButtons", "exactCopyButtons"]
+        let ancestorKeys = Set(ancestorCounts + ["depth", "tag", "role", "isAssistantMessage"])
+        var shapes = [safe]
+        for (index, ancestor) in ancestors.enumerated() {
+            guard Set(ancestor.keys) == ancestorKeys,
+                  ComputerToolArgumentContract.exactInt64(ancestor["depth"]) == Int64(index + 1),
+                  let tag = ancestor["tag"] as? String,
+                  ["div", "section", "article", "main", "form", "body", "html", "other"].contains(tag),
+                  let role = ancestor["role"] as? String,
+                  ["none", "article", "group", "main", "log", "feed", "region", "presentation", "other"].contains(role),
+                  let isMessage = firstUserDiagnosticBool(ancestor["isAssistantMessage"]),
+                  !["body", "html"].contains(tag) || index == ancestors.count - 1 else { return nil }
+            var row: [String: Any] = ["kind": "claude_completion_ancestor_v1", "depth": index + 1,
+                "tag": tag, "role": role, "isAssistantMessage": isMessage]
+            var values: [String: Int64] = [:]
+            for key in ancestorCounts {
+                guard let value = ComputerToolArgumentContract.exactInt64(ancestor[key]), (0...1_000).contains(value) else { return nil }
+                values[key] = value
+                row[key] = value
+            }
+            guard let exact = values["exactCopyButtons"], let testID = values["copyTestIDButtons"],
+                  let label = values["copyLabelButtons"], exact <= testID, exact <= label else { return nil }
+            shapes.append(row)
+        }
+        // Separate short records avoid Unified Logging truncation. The budget
+        // applies to the whole observation, never separately to each ancestor.
+        var records: [String] = []
+        for shape in shapes {
+            guard let data = try? JSONSerialization.data(withJSONObject: shape, options: .sortedKeys), data.count <= 960 else { return nil }
+            records.append(String(decoding: data, as: UTF8.self))
+        }
+        return records
     }
 
     /// Missing optional observations remain unknown. Malformed values cannot
@@ -2765,6 +2900,59 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "model_remount_trigger_missing", "model_remount_trigger_disabled", "model_remount_closed_presentation",
         "model_remount_header_power", "model_remount_product", "model_remount_temporary", "model_remount_pending_completed",
         "model_remount_pending_header", "model_remount_pin_changed", "model_remount_pending_replaced"]
+    private static let boundPinDiagnosticRules: Set<String> = [
+        "not_checked", "action", "suppressed", "provisional_permission",
+        "bound_permission_disabled", "binding_permission", "expansion_permission", "native_pin_absent",
+        "provisional_remount", "native_pin_unadopted", "refresh_permission_disabled", "bound_permission",
+        "provisional_permission_disabled", "binding_disabled", "expansion_disabled", "state_current",
+        "submission_context", "record_sequence", "pending_identity", "last_verified_absent",
+        "record_pending_phase", "pending_root_absent", "pending_body_absent", "private_marker",
+        "private_fingerprint", "private_pin_absent", "predecessor_present", "predecessor_current",
+        "predecessor_expanded", "predecessor_context", "predecessor_clicked", "predecessor_canonical",
+        "predecessor_document", "predecessor_owner", "predecessor_prompt", "predecessor_marker",
+        "predecessor_root", "predecessor_body", "deadline_same", "deadline_finite",
+        "deadline_live", "predecessor_route", "pending_absent", "verified_identity",
+        "verified_phase", "record_document", "record_owner", "receipt_remount",
+        "receipt_retained", "receipt_present", "receipt_absent", "submission_sequence",
+        "submission_marker", "old_record_nodes", "old_root_detached", "old_body_detached",
+        "root_replaced", "body_replaced", "initial_root_same", "initial_body_same",
+        "record_root_same", "record_body_same", "record_marker", "record_canonical",
+        "record_fingerprint_format", "record_fingerprint", "native_fingerprint", "first_pin",
+        "submission_pins", "state_model", "expansion_model"]
+    private static let pendingRouteDiagnosticRules: Set<String> = [
+        "not_checked", "candidate_absent", "candidate_current", "candidate_bound",
+        "candidate_verified", "route_discard_present", "route_edges_present", "context_failure_present",
+        "model_failure_present", "candidate_outcome", "candidate_clicked", "action",
+        "binding_permission", "expansion_permission", "provisional_permission", "bound_permission",
+        "refresh_permission", "suppressed", "native_first_pin", "state_absent",
+        "context_state", "context_url", "context_non_url", "url_unchanged",
+        "from_url", "document", "owner", "pending_record",
+        "last_verified", "pending_phase", "record_sequence", "native_adopted",
+        "record_root", "record_body", "record_replacement", "record_document",
+        "record_owner", "state_marker", "submission_sequence", "submission_marker",
+        "record_marker", "expected_marker", "private_marker", "submitted",
+        "submission_count", "prompt", "record_canonical", "expanded_canonical",
+        "candidate_fingerprint", "record_fingerprint", "submission_pins", "predecessor_absent",
+        "predecessor_current", "predecessor_context", "predecessor_model", "predecessor_outcome",
+        "predecessor_clicked", "predecessor_expanded_canonical", "predecessor_canonical", "predecessor_prompt",
+        "predecessor_marker", "predecessor_document", "predecessor_owner", "old_root",
+        "old_body", "deadline_same", "deadline_finite", "deadline_expired",
+        "edges_array", "edges_count", "edges_keys", "edge_absent",
+        "edge_array", "edge_keys", "edge_from", "edge_to",
+        "edge_unchanged", "conversation_identity", "conversation_route", "state_model",
+        "predecessor_model_choice", "expected_model", "expansion_model", "product",
+        "temporary", "model_pins", "user_count", "current_root",
+        "current_body", "root_connected", "body_connected", "body_canonical",
+        "old_root_detached", "old_body_detached", "root_replaced", "body_replaced",
+        "root_same", "body_same", "initial_candidate", "initial_flag",
+        "initial_provisional", "initial_pending_private", "initial_private_pin", "pending_flag",
+        "pending_provisional", "pending_initial_route", "pending_remount", "pending_private_marker",
+        "pending_private_fingerprint"]
+    private static let submissionContextDiagnosticRules: Set<String> = [
+        "not_checked", "invocationClaimed", "invocationCurrent", "statePresent", "stateNotRevoked",
+        "stateDocumentMatches", "stateOwnerMatches", "stateCurrent", "globalOwnerMatches", "topFrame",
+        "providerMatches", "originMatches", "urlMatches", "firstMarkerMatches", "productProofVerified",
+        "temporaryVerified", "modelChoiceMatches"]
     private static let boundCertificateLabels: [String: Set<String>] = [
         "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
         "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
@@ -2782,7 +2970,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider == .chatgpt, let value = raw as? [String: Any],
               value["kind"] as? String == "chatgpt_bound_certificate_v1",
               ordinaryKeys.isSubset(of: Set(value.keys)),
-              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState"])),
+              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState", "pendingRouteGuard"])),
               let routeRule = value["routeRule"] as? String, boundCertificateRouteRules.contains(routeRule) else { return nil }
         var safe: [String: Any] = ["kind": "chatgpt_bound_certificate_v1", "routeRule": routeRule]
         if let invalidation = value["modelPinInvalidation"] {
@@ -2792,6 +2980,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let state = value["modelPinState"] {
             guard boundCertificateModelPinRules.contains(routeRule), let projected = sanitizedModelPinState(state) else { return nil }
             safe["modelPinState"] = projected
+        }
+        if let pending = value["pendingRouteGuard"] {
+            guard let projected = sanitizedPendingRouteGuard(pending) else { return nil }
+            safe["pendingRouteGuard"] = projected
         }
         for key in boundCertificateFlags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
@@ -2803,6 +2995,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
               bytes.count <= 960 else { return nil }
+        return safe
+    }
+
+    private static func sanitizedPendingRouteGuard(_ raw: Any) -> [String: Any]? {
+        let flags = ["pendingPrivate", "initialRoute", "provisional", "currentNodesObserved",
+                     "currentRootMatches", "currentBodyMatches"]
+        let labels: [String: Set<String>] = [
+            "rule": pendingRouteDiagnosticRules, "boundPinsRule": boundPinDiagnosticRules,
+            "submissionContextRule": submissionContextDiagnosticRules,
+            "modelPinsRule": boundCertificateModelPinRules.union(["not_checked", "none"])]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + Array(labels.keys)) else { return nil }
+        var safe: [String: Any] = [:]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, allowed) in labels {
+            guard let label = value[key] as? String, allowed.contains(label) else { return nil }
+            safe[key] = label
+        }
+        // Unreached physical checks are unknown, not evidence of a mismatch.
+        guard safe["currentNodesObserved"] as? Bool == true
+            || (safe["currentRootMatches"] as? Bool == false && safe["currentBodyMatches"] as? Bool == false) else { return nil }
         return safe
     }
 
@@ -2873,12 +3088,38 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+    /// Project independent finite records so additional guard facts cannot
+    /// displace the original model-pin cause at the unchanged per-record cap.
+    private static func boundCertificateDiagnosticRecords(_ raw: Any?, provider: Provider) -> [[String: Any]] {
+        guard var value = raw as? [String: Any] else { return [] }
+        let pending = value.removeValue(forKey: "pendingRouteGuard")
+        guard let certificate = sanitizedBoundCertificateDiagnostic(value, provider: provider) else { return [] }
+        var records = [certificate]
+        if let pending {
+            guard let guardFacts = sanitizedPendingRouteGuard(pending) else { return [] }
+            let record: [String: Any] = ["kind": "chatgpt_pending_route_guard_v1",
+                "stage": certificate["stage"]!, "phase": certificate["phase"]!,
+                "routeRule": certificate["routeRule"]!, "pendingRouteGuard": guardFacts]
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+                  bytes.count <= 960 else { return [] }
+            records.append(record)
+        }
+        return records
+    }
+
     /// Remove even malformed/foreign diagnostics before observation processing.
-    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+    static func removeBoundCertificateDiagnosticRecords(from observed: inout [String: Any], provider: Provider) -> [String] {
         let raw = observed.removeValue(forKey: "boundCertificateDiagnostic")
-        guard let safe = sanitizedBoundCertificateDiagnostic(raw, provider: provider),
-              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys) else { return nil }
-        return String(decoding: bytes, as: UTF8.self)
+        return boundCertificateDiagnosticRecords(raw, provider: provider).compactMap { record in
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+                  bytes.count <= 960 else { return nil }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
+
+    /// Primary-certificate convenience for callers that do not log guard facts.
+    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+        removeBoundCertificateDiagnosticRecords(from: &observed, provider: provider).first
     }
 
     // A certified route transition discards the adapter result before ordinary
@@ -2899,9 +3140,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
             records.append(recovery)
         }
-        if let certificate = sanitizedBoundCertificateDiagnostic(value["boundCertificateDiagnostic"], provider: provider) {
-            records.append(certificate)
-        }
+        records.append(contentsOf: boundCertificateDiagnosticRecords(value["boundCertificateDiagnostic"], provider: provider))
         if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
            let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
            diagnostic["kind"] as? String == "first_user_structure", diagnostic["provider"] as? String == provider.rawValue,
@@ -3130,6 +3369,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "model_unverified", "timeout", "context_changed", "node_changed", "text_mismatch", "expanded", "failed"]
             guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
             safe["expansionOutcome"] = outcome
+        }
+        if let rawExposure = value["expansionExposure"] {
+            guard provider == .chatgpt, let exposure = rawExposure as? [String: Any] else { return nil }
+            let hits: Set<String> = ["unavailable", "invalid_rect", "outside_viewport", "pointer_events",
+                "self", "descendant", "ancestor", "other", "none"]
+            var projected: [String: Any] = [:]
+            for key in ["beforeScroll", "afterScroll", "final"] {
+                guard let hit = exposure[key] as? String,
+                      hits.contains(hit) || key == "afterScroll" && hit == "not_scrolled" else { return nil }
+                projected[key] = hit
+            }
+            for key in ["scrolled", "waited"] {
+                guard let flag = firstUserDiagnosticBool(exposure[key]) else { return nil }
+                projected[key] = flag
+            }
+            guard let outcome = exposure["waitOutcome"] as? String,
+                  ["not_needed", "ready", "expired", "context_changed", "control_changed", "model_changed", "failed"].contains(outcome),
+                  let milliseconds = ComputerToolArgumentContract.exactInt64(exposure["waitMilliseconds"]),
+                  (0...1_800).contains(milliseconds) else { return nil }
+            projected["waitOutcome"] = outcome; projected["waitMilliseconds"] = milliseconds
+            safe["expansionExposure"] = projected
         }
         if let rawFailure = value["expansionContextFailure"] {
             let failures: Set<String> = ["frame", "provider", "origin", "owner", "user_count", "submission", "submission_count",
@@ -3435,6 +3695,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             initialExpansion["kind"] = "first_user_initial_expansion"; initialExpansion["provider"] = provider.rawValue
             for key in ["action", "scope"] { initialExpansion[key] = summary[key] }
         }
+        var exposure = summary.removeValue(forKey: "expansionExposure") as? [String: Any] ?? [:]
+        if !exposure.isEmpty {
+            exposure["kind"] = "first_user_expansion_exposure"; exposure["provider"] = provider.rawValue
+            for key in ["action", "scope"] { exposure[key] = summary[key] }
+        }
         var recovery = summary.removeValue(forKey: "recoveryLifecycle") as? [String: Any] ?? [:]
         if !recovery.isEmpty {
             recovery["kind"] = "first_user_recovery_lifecycle"; recovery["provider"] = provider.rawValue
@@ -3455,6 +3720,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
             + (initialExpansion.isEmpty ? [] : [initialExpansion])
+            + (exposure.isEmpty ? [] : [exposure])
             + (recovery.isEmpty ? [] : [recovery])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
             + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
@@ -3478,6 +3744,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_initial_expansion\"") {
                 event = "firstUserInitialExpansion"
+            }
+            else if safe.contains("\"kind\":\"first_user_expansion_exposure\"") {
+                event = "firstUserExpansionExposure"
             }
             else if safe.contains("\"kind\":\"first_user_recovery_lifecycle\"") {
                 event = "firstUserRecoveryLifecycle"
@@ -4474,12 +4743,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
-        if let certificate = Self.removeBoundCertificateDiagnostic(from: &observed, provider: provider) {
+        for (index, certificate) in Self.removeBoundCertificateDiagnosticRecords(from: &observed, provider: provider).enumerated() {
             // This existing finite diagnostic channel also covers later spent
             // reads and cleanup. The record cannot enter response validation.
             Self.inspectionLog.error("firstUserRecoveryLifecycle sequence=\(session.sequence) \(certificate, privacy: .public)")
             #if DEBUG
-            boundCertificateDiagnosticsObserverForTesting?(certificate)
+            if index == 0 { boundCertificateDiagnosticsObserverForTesting?(certificate) }
             #endif
         }
         let rendererWork = observed.removeValue(forKey: "rendererWorkDiagnostic")

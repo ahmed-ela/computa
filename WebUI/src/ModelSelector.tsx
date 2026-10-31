@@ -1,15 +1,35 @@
-import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
+import { useEffect, useState } from 'octane';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@octanejs/shadcn/Select';
 import { Button } from '@octanejs/shadcn/Button';
+import { ModelProviderIcon } from './ModelProviderIcon';
 import type { ModelOption, NativeAction, WebsiteModelProvider } from './types';
 
-export function modelOptionLabel(option: ModelOption): string {
+function fullModelLabel(option: ModelOption): string {
   return option.label.split(' · ')[0];
 }
 
-// Temporarily hide local inference choices in every picker. Keep their catalog,
-// saved selections and runtime support intact so this can be reversed later.
+export function modelOptionLabel(option: ModelOption): string {
+  const label = fullModelLabel(option);
+  const separator = label.indexOf(' / ');
+  return separator < 0 ? label : label.slice(separator + 3);
+}
+
+export function ModelLabel({ model, option }: { model: string; option?: ModelOption }) {
+  const fullLabel = option ? fullModelLabel(option) : model;
+  const separator = fullLabel.indexOf(' / ');
+  return <span className="model-option-label" title={fullLabel}>
+    <ModelProviderIcon model={model} />
+    {separator >= 0 && <span className="sr-only">{fullLabel.slice(0, separator)}: </span>}
+    <span className="model-option-name">{option ? modelOptionLabel(option) : model}</span>
+  </span>;
+}
+
+const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude']);
+
+// Offer specific website/API models only. Keep hidden local/default selections
+// and runtime support intact without silently substituting a different model.
 function isVisibleModel(model: string): boolean {
-  return model.startsWith('browser/') || model.startsWith('api/');
+  return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
 }
 
 export function ModelSelector({ options, model, label, disabled = false, className,
@@ -17,17 +37,27 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
   const visibleOptions = options.filter((option) => isVisibleModel(option.id));
+  const [open, setOpen] = useState(false);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  // Preserve a missing remote selection without silently choosing another model.
+  if (isVisibleModel(model) && !visibleOptions.some((option) => option.id === model)) {
+    visibleOptions.push({ id: model, label: model, detail: model, highMemory: false, available: false });
+  }
   return (
-    <NativeSelect className={className} aria-label={label} title={selected?.detail ?? model}
-      value={model} disabled={disabled}
-      onInput={(event: Event) => onSelect((event.currentTarget as HTMLSelectElement).value)}>
-      {!visibleOptions.some((option) => option.id === model) &&
-        <NativeSelectOption value={model} disabled hidden={!isVisibleModel(model)}>
-          {selected ? modelOptionLabel(selected) : model}
-        </NativeSelectOption>}
-      {visibleOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}
-        disabled={option.available === false}>{modelOptionLabel(option)}{option.available === false ? ' (unavailable)' : ''}</NativeSelectOption>)}
-    </NativeSelect>
+    <Select value={model} disabled={disabled} open={open && !disabled} onOpenChange={setOpen}
+      onValueChange={(value: string) => { if (!disabled) onSelect(value); }}>
+      <SelectTrigger className={`model-selector-trigger ${className ?? ''}`}
+        aria-label={`${label}: ${selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
+        <SelectValue><ModelLabel model={model} option={selected} /></SelectValue>
+      </SelectTrigger>
+      <SelectContent className="model-selector-content" position="popper" align="start">
+        {visibleOptions.map((option) => <SelectItem key={option.id} value={option.id}
+          textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
+          <ModelLabel model={option.id} option={option} />
+          {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
+        </SelectItem>)}
+      </SelectContent>
+    </Select>
   );
 }
 

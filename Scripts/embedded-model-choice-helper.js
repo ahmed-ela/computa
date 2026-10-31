@@ -156,7 +156,9 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
     && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
     && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
 }
-function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null) {
+// The optional predecessor is private to one fresh Power-step rendering wait.
+// Established selections always pass only their single pinned expected power.
+function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null, previous = null) {
   if (!trigger || !expected) return false;
   const fail = (stage, rule) => {
     if (diagnostic && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; }
@@ -164,7 +166,7 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnosti
   };
   const different = value => {
     const power = websiteChatHeaderPresentation(value, true).power;
-    return !!power && power.key !== expected.key;
+    return !!power && power.key !== expected.key && power.key !== previous?.key;
   };
   if (different(trigger.innerText)) return fail('current', 'current_power');
   // Current ancestry loses an attached header child that changed and detached
@@ -469,17 +471,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
-  let headerReadiness = null;
+  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic)) {
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic, changingPowerHeader)) {
       selectionChanged = true;
       if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation', Object.freeze(diagnostic), 'remount_header');
     }
   };
   const headerObserver = new MutationObserver(observeHeader);
   const observeControls = records => {
+    if (changingPowerSlider && records.some(record => record.type === 'attributes'
+      && record.target === changingPowerSlider.node && record.attributeName === 'aria-valuenow'
+      && (record.target.getAttribute('aria-valuenow') !== changingPowerSlider.value
+        || record.oldValue != null && record.oldValue !== changingPowerSlider.value))) selectionChanged = true;
     if (mutable && !proofLocked) return;
     if (records.some(record => {
       if (record.type !== 'attributes' || !tracked.has(record.target)
@@ -533,7 +539,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       headerObserved = true;
       headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
     }
-    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key) throw failure('model_mismatch');
+    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key
+      && current.headerPower.key !== changingPowerHeader?.key) throw failure('model_mismatch');
     if (headerExpected && current.closedPresentation && !current.headerPower && !current.headerPresentation)
       throw failure('model_unverified');
     if (pin) {
@@ -761,6 +768,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     while (current.powerIndex !== target) {
       if (!mutable || Date.now() >= until || typeof window.KeyboardEvent !== 'function') throw failure('model_mismatch');
       const before = current.powerIndex, direction = target > before ? 1 : -1;
+      const previousHeader = current.headerPower;
       if (attempt.powerEvents >= 4) throw failure('model_unverified');
       const powerItem = current.powerItem, slider = current.slider;
       powerItem.focus?.({ preventScroll: true });
@@ -772,6 +780,42 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       powerItem.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
       current = await wait(() => websiteChatPickerState().powerIndex !== before);
       if (current.powerIndex !== before + direction) throw failure('model_unverified');
+      const nextPower = websiteChatPowers[current.powerIndex];
+      if (current.headerPower && current.headerPower.key !== nextPower.key) {
+        // React can acknowledge the slider before committing the header text.
+        // Only this fresh, exact keyboard step may wait for its old header to
+        // catch up. Retain every owner, product, structure and drift guard;
+        // spend the original deadline without another key or picker action.
+        if (Date.now() >= until) throw failure('model_unverified');
+        if (!previousHeader || previousHeader.key !== websiteChatPowers[before].key
+          || current.headerPower.key !== previousHeader.key || globalThis.__computaChatPresetPin || freshGuard() !== true)
+          throw failure('model_mismatch');
+        const popup = current.topMenu;
+        // The acknowledged arrow's pending record precedes this read-only wait.
+        // Every subsequent ordinal change, including a restored one, is drift.
+        observer.takeRecords?.();
+        changingPowerSlider = { node: slider, value: String(before + direction) };
+        headerExpected = nextPower; changingPowerHeader = previousHeader;
+        readStage = 'power_header_settlement_pending';
+        try {
+          current = await wait(() => {
+            const observed = websiteChatPickerState();
+            return observed.headerPower?.key !== previousHeader.key || observed.trigger !== trigger
+              || observed.topMenu !== popup || observed.powerItem !== powerItem || observed.slider !== slider
+              || observed.mode !== 'power' || observed.powerIndex !== before + direction
+              || !observed.enabled(trigger) || !observed.enabled(powerItem);
+          });
+          observeHeader(headerObserver.takeRecords?.() || []);
+          observeControls(observer.takeRecords?.() || []);
+        } finally { changingPowerHeader = null; changingPowerSlider = null; }
+        if (Date.now() >= until) throw failure('model_unverified');
+        current = state();
+        if (current.headerPower?.key !== nextPower.key || current.topMenu !== popup
+          || current.powerItem !== powerItem || current.slider !== slider || current.mode !== 'power'
+          || current.powerIndex !== before + direction || freshGuard() !== true) throw failure('model_mismatch');
+        headerExpected = null; // The next owned step has its own observed predecessor.
+        readStage = 'power_header_settled';
+      }
     }
     return current;
   };
@@ -779,7 +823,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
     // Temporary-page hydration can leave the exact visible model trigger
-    // disabled while its recognized power label is already rendered. Wait only
+    // disabled while a recognized placeholder power label is rendered. Wait only
     // in this first, effect-free mutable selection and spend its original clock.
     // Enabling authorizes a fresh full picker read, never model proof by itself.
     const disabled = node => !!node && (node.disabled === true || node.getAttribute('disabled') !== null
@@ -787,14 +831,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     const closedShape = current => !current.topMenu && current.allMenus.length === 0
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
-    const disabledPower = websiteChatHeaderPresentation(initial.trigger?.innerText).power;
+    const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
-      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledPower
+      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
       && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
       && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
       && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
       const form = trigger.closest('form');
-      headerExpected = disabledPower;
+      // No selection has been observed yet. Hydration may replace this
+      // canonical placeholder with another canonical remembered preset;
+      // neither disabled value can pin or authorize a model selection.
       headerReadiness = { startedDisabled: true, outcome: 'waiting', reason: null };
       readStage = 'initial_trigger_disabled_wait';
       let rejected = null;
@@ -811,7 +857,6 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
-        if (power.key !== disabledPower.key) return reject('state_changed');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
@@ -824,9 +869,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
       initial = state();
-      // The wait has ended. The existing mutable picker flow may now change
-      // power intentionally; its normal proof-lock boundary owns those checks.
-      headerExpected = null;
+      // The newly enabled current header starts the ordinary full picker proof.
+      // Its associated Power and checked family still must independently agree.
       headerReadiness.outcome = 'recognized'; readStage = 'initial_trigger_ready';
     }
     // Only the first mutable selection may observe an empty, still-hydrating

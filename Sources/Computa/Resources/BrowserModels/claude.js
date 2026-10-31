@@ -156,7 +156,9 @@ function websiteChatClosedHeaderMatches(state, power, pin = globalThis.__computa
     && pin.headerTrigger === state.trigger && pin.owner === globalThis.__computaModelOwner
     && pin.document === document && pin.invalidated !== true && pin.selection?.power?.key === power.key;
 }
-function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null) {
+// The optional predecessor is private to one fresh Power-step rendering wait.
+// Established selections always pass only their single pinned expected power.
+function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnostic = null, previous = null) {
   if (!trigger || !expected) return false;
   const fail = (stage, rule) => {
     if (diagnostic && diagnostic.rule == null) { diagnostic.stage = stage; diagnostic.rule = rule; }
@@ -164,7 +166,7 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected, diagnosti
   };
   const different = value => {
     const power = websiteChatHeaderPresentation(value, true).power;
-    return !!power && power.key !== expected.key;
+    return !!power && power.key !== expected.key && power.key !== previous?.key;
   };
   if (different(trigger.innerText)) return fail('current', 'current_power');
   // Current ancestry loses an attached header child that changed and detached
@@ -469,17 +471,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
-  let headerReadiness = null;
+  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic)) {
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected, diagnostic, changingPowerHeader)) {
       selectionChanged = true;
       if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation', Object.freeze(diagnostic), 'remount_header');
     }
   };
   const headerObserver = new MutationObserver(observeHeader);
   const observeControls = records => {
+    if (changingPowerSlider && records.some(record => record.type === 'attributes'
+      && record.target === changingPowerSlider.node && record.attributeName === 'aria-valuenow'
+      && (record.target.getAttribute('aria-valuenow') !== changingPowerSlider.value
+        || record.oldValue != null && record.oldValue !== changingPowerSlider.value))) selectionChanged = true;
     if (mutable && !proofLocked) return;
     if (records.some(record => {
       if (record.type !== 'attributes' || !tracked.has(record.target)
@@ -533,7 +539,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       headerObserved = true;
       headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
     }
-    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key) throw failure('model_mismatch');
+    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key
+      && current.headerPower.key !== changingPowerHeader?.key) throw failure('model_mismatch');
     if (headerExpected && current.closedPresentation && !current.headerPower && !current.headerPresentation)
       throw failure('model_unverified');
     if (pin) {
@@ -761,6 +768,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     while (current.powerIndex !== target) {
       if (!mutable || Date.now() >= until || typeof window.KeyboardEvent !== 'function') throw failure('model_mismatch');
       const before = current.powerIndex, direction = target > before ? 1 : -1;
+      const previousHeader = current.headerPower;
       if (attempt.powerEvents >= 4) throw failure('model_unverified');
       const powerItem = current.powerItem, slider = current.slider;
       powerItem.focus?.({ preventScroll: true });
@@ -772,6 +780,42 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       powerItem.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
       current = await wait(() => websiteChatPickerState().powerIndex !== before);
       if (current.powerIndex !== before + direction) throw failure('model_unverified');
+      const nextPower = websiteChatPowers[current.powerIndex];
+      if (current.headerPower && current.headerPower.key !== nextPower.key) {
+        // React can acknowledge the slider before committing the header text.
+        // Only this fresh, exact keyboard step may wait for its old header to
+        // catch up. Retain every owner, product, structure and drift guard;
+        // spend the original deadline without another key or picker action.
+        if (Date.now() >= until) throw failure('model_unverified');
+        if (!previousHeader || previousHeader.key !== websiteChatPowers[before].key
+          || current.headerPower.key !== previousHeader.key || globalThis.__computaChatPresetPin || freshGuard() !== true)
+          throw failure('model_mismatch');
+        const popup = current.topMenu;
+        // The acknowledged arrow's pending record precedes this read-only wait.
+        // Every subsequent ordinal change, including a restored one, is drift.
+        observer.takeRecords?.();
+        changingPowerSlider = { node: slider, value: String(before + direction) };
+        headerExpected = nextPower; changingPowerHeader = previousHeader;
+        readStage = 'power_header_settlement_pending';
+        try {
+          current = await wait(() => {
+            const observed = websiteChatPickerState();
+            return observed.headerPower?.key !== previousHeader.key || observed.trigger !== trigger
+              || observed.topMenu !== popup || observed.powerItem !== powerItem || observed.slider !== slider
+              || observed.mode !== 'power' || observed.powerIndex !== before + direction
+              || !observed.enabled(trigger) || !observed.enabled(powerItem);
+          });
+          observeHeader(headerObserver.takeRecords?.() || []);
+          observeControls(observer.takeRecords?.() || []);
+        } finally { changingPowerHeader = null; changingPowerSlider = null; }
+        if (Date.now() >= until) throw failure('model_unverified');
+        current = state();
+        if (current.headerPower?.key !== nextPower.key || current.topMenu !== popup
+          || current.powerItem !== powerItem || current.slider !== slider || current.mode !== 'power'
+          || current.powerIndex !== before + direction || freshGuard() !== true) throw failure('model_mismatch');
+        headerExpected = null; // The next owned step has its own observed predecessor.
+        readStage = 'power_header_settled';
+      }
     }
     return current;
   };
@@ -779,7 +823,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     let initial = state();
     if (initial.topMenu) { await close(); initial = state(); }
     // Temporary-page hydration can leave the exact visible model trigger
-    // disabled while its recognized power label is already rendered. Wait only
+    // disabled while a recognized placeholder power label is rendered. Wait only
     // in this first, effect-free mutable selection and spend its original clock.
     // Enabling authorizes a fresh full picker read, never model proof by itself.
     const disabled = node => !!node && (node.disabled === true || node.getAttribute('disabled') !== null
@@ -787,14 +831,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     const closedShape = current => !current.topMenu && current.allMenus.length === 0
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
-    const disabledPower = websiteChatHeaderPresentation(initial.trigger?.innerText).power;
+    const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
-      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledPower
+      && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
       && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
       && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
       && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
       const form = trigger.closest('form');
-      headerExpected = disabledPower;
+      // No selection has been observed yet. Hydration may replace this
+      // canonical placeholder with another canonical remembered preset;
+      // neither disabled value can pin or authorize a model selection.
       headerReadiness = { startedDisabled: true, outcome: 'waiting', reason: null };
       readStage = 'initial_trigger_disabled_wait';
       let rejected = null;
@@ -811,7 +857,6 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
-        if (power.key !== disabledPower.key) return reject('state_changed');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
@@ -824,9 +869,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
       initial = state();
-      // The wait has ended. The existing mutable picker flow may now change
-      // power intentionally; its normal proof-lock boundary owns those checks.
-      headerExpected = null;
+      // The newly enabled current header starts the ordinary full picker proof.
+      // Its associated Power and checked family still must independently agree.
       headerReadiness.outcome = 'recognized'; readStage = 'initial_trigger_ready';
     }
     // Only the first mutable selection may observe an empty, still-hydrating
@@ -1819,7 +1863,7 @@ function modelResponseExtraction(answer) {
   const chrome = new Set();
   if (wrapper && wrapper !== answer && answer.contains(wrapper)
     && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
-    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0')].filter(node =>
+    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
       modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
     const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
       .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
@@ -1911,6 +1955,82 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+// Completion belongs to the latest response's single message-actions bar.
+// Claude has changed the Copy button's testid; its observed accessible name
+// remains Copy. Author content and unrelated/nested toolbars cannot supply it.
+function modelCompletionObservation() {
+  const candidates = [...document.querySelectorAll('[data-testid="assistant-message"] [data-perf-reply-text]')].filter(modelVisible);
+  const answers = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
+  const answer = answers.at(-1), stop = modelFind(['button[aria-label="Stop response"]']);
+  const status = modelFind(['[data-testid="response-status-announcer"][role="status"]']);
+  const interrupted = !!status && !status.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
+    && (status.textContent || '').trim().replace(/’/g, "'") === "Claude's response was interrupted.";
+  const streaming = [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(modelVisible);
+  const busy = !!stop || streaming;
+  const message = answer?.closest('[data-testid="assistant-message"]');
+  const article = answer?.closest('[role="article"]');
+  const messages = article ? [...article.querySelectorAll('[data-testid="assistant-message"]')] : [];
+  const bodies = article ? [...article.querySelectorAll('[data-perf-reply-text]')] : [];
+  const bars = article ? [...article.querySelectorAll('[data-testid="message-actions"]')] : [];
+  const outsideAuthoredContent = node => !!node && !node.closest('[data-perf-reply-text], [data-testid="user-message"], pre, code')
+    && node.closest('[role="article"]') === article
+    && (!node.closest('[data-testid="assistant-message"]') || node.closest('[data-testid="assistant-message"]') === message);
+  const scopeOwned = !!article && !article.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
+    && messages.length === 1 && messages[0] === message && bodies.includes(answer)
+    && bodies.every(body => body === answer || answer.contains(body))
+    && article.querySelectorAll('[data-testid="user-message"]').length === 0;
+  const actionBar = scopeOwned && bars.length === 1 && outsideAuthoredContent(bars[0]) ? bars[0] : null;
+  const copies = actionBar ? [...actionBar.querySelectorAll('button[aria-label="Copy"]')] : [];
+  const copy = copies.length === 1 && outsideAuthoredContent(copies[0])
+    && copies[0].closest('[data-testid="message-actions"]') === actionBar ? copies[0] : null;
+  // A toolbar may use display:contents and have no box of its own. The exact
+  // button must be visible; the toolbar must remain semantically enabled.
+  const barEnabled = !!actionBar && actionBar.isConnected && !actionBar.disabled
+    && actionBar.getAttribute('aria-disabled') !== 'true' && !actionBar.closest('[hidden], [inert], [aria-hidden="true"]')
+    && !['hidden', 'collapse'].includes(getComputedStyle(actionBar).visibility) && getComputedStyle(actionBar).display !== 'none';
+  const scopedCopies = copies.length, enabledCopies = copy && barEnabled && modelEnabled(copy) ? 1 : 0;
+  const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies === 1;
+  return { answers, answer, stop, message, article, actionBar, copy, busy, interrupted, scopedCopies, enabledCopies, answerComplete };
+}
+// Diagnostic only: explain the existing completion guard without granting
+// completion from a missing, renamed, moved, hidden or disabled control.
+function modelCompletionStructure(answer, message, article) {
+  // Diagnostics must never turn an otherwise valid adapter read into a failure.
+  try {
+    const count = nodes => Math.min(nodes.length, 1_000);
+    const scoped = selector => article ? [...article.querySelectorAll(selector)] : null;
+    const copies = scoped('[data-testid="message-actions"] button[data-testid="action-bar-copy"][aria-label="Copy"]');
+    const streaming = message?.getAttribute('data-is-streaming');
+    const ancestors = [];
+    for (let node = answer?.parentElement; node && ancestors.length < 4; node = node.parentElement) {
+      const tag = node.tagName.toLowerCase(), role = node.getAttribute('role');
+      const descendants = selector => count(node.querySelectorAll(selector));
+      ancestors.push({ depth: ancestors.length + 1,
+        tag: ['div', 'section', 'article', 'main', 'form', 'body', 'html'].includes(tag) ? tag : 'other',
+        role: role === null ? 'none' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation'].includes(role) ? role : 'other',
+        isAssistantMessage: node.getAttribute('data-testid') === 'assistant-message',
+        assistantDescendants: descendants('[data-testid="assistant-message"]'),
+        replyBodyDescendants: descendants('[data-perf-reply-text]'),
+        actionBars: descendants('[data-testid="message-actions"]'),
+        copyTestIDButtons: descendants('button[data-testid="action-bar-copy"]'),
+        copyLabelButtons: descendants('button[aria-label="Copy"]'),
+        exactCopyButtons: descendants('button[data-testid="action-bar-copy"][aria-label="Copy"]') });
+      if (['body', 'html'].includes(tag)) break;
+    }
+    return { kind: 'claude_completion_shape_v1', answerPresent: !!answer, messagePresent: !!message,
+      messageStreamingState: !message ? null : streaming === null ? 'absent'
+        : ['true', 'false'].includes(streaming) ? streaming : 'other',
+      articlePresent: !!article, articleIsMessage: article ? article === message : null,
+      articleAssistantDescendants: article ? count(scoped('[data-testid="assistant-message"]')) : null,
+      articleReplyBodies: article ? count(scoped('[data-perf-reply-text]')) : null,
+      articleActionBars: article ? count(scoped('[data-testid="message-actions"]')) : null,
+      articleCopyTestIDButtons: article ? count(scoped('[data-testid="message-actions"] button[data-testid="action-bar-copy"]')) : null,
+      articleCopyLabelButtons: article ? count(scoped('[data-testid="message-actions"] button[aria-label="Copy"]')) : null,
+      articleExactCopyButtons: copies ? count(copies) : null,
+      articleVisibleCopies: copies ? count(copies.filter(modelVisible)) : null,
+      articleEnabledCopies: copies ? count(copies.filter(modelEnabled)) : null, ancestors };
+  } catch { return null; }
+}
 // Website UI labels may split/reset whitespace; message bytes never use this.
 function modelQuotaLabel(text) { return (text || '').replace(/\s+/g, ' ').trim(); }
 function modelUsageLimitPopup() {
@@ -2203,6 +2323,7 @@ if (ownedUserCount > 0) {
   return modelFirstUserFailure('first_missing');
 if (usageLimited && input.action !== 'stop') return modelUsageLimitFailure();
 
+let completionSnapshot = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('claude');
@@ -2233,21 +2354,9 @@ async function providerPageAction() {
   const usageLimited = modelUsageLimited();
   if (usageLimited && action !== 'stop') return modelUsageLimitFailure();
   const composer = modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]']);
-  const candidates = [...document.querySelectorAll('[data-testid="assistant-message"] [data-perf-reply-text]')].filter(modelVisible);
-  const answers = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
-  const answer = answers.at(-1), stop = modelFind(['button[aria-label="Stop response"]']);
-  const status = modelFind(['[data-testid="response-status-announcer"][role="status"]']);
-  const interrupted = !!status && !status.closest('[data-testid="assistant-message"], [data-testid="user-message"]')
-    && (status.textContent || '').trim().replace(/’/g, "'") === "Claude's response was interrupted.";
-  const streaming = [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(modelVisible);
-  const busy = !!stop || streaming;
-  const message = answer?.closest('[data-testid="assistant-message"]');
-  // The observed article is a DIV with this role, not necessarily an ARTICLE tag.
-  const article = answer?.closest('[role="article"]');
-  const copies = article && article.querySelectorAll('[data-testid="assistant-message"]').length === 1
-    ? [...article.querySelectorAll('[data-testid="message-actions"] button[data-testid="action-bar-copy"][aria-label="Copy"]')] : [];
-  const scopedCopies = copies.length, enabledCopies = copies.filter(modelEnabled).length;
-  const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies > 0;
+  const completion = modelCompletionObservation();
+  const { answers, answer, stop, message, article, busy, interrupted, scopedCopies, enabledCopies, answerComplete } = completion;
+  completionSnapshot = completion;
   const temporary = modelTemporaryVerified();
   const temporaryActionAvailable = modelEnabled(modelFind(['button[aria-label="Use incognito"]']));
   const responseExtraction = modelResponseExtraction(answer);
@@ -2255,7 +2364,8 @@ async function providerPageAction() {
     responseCount: answers.length, userCount: ownedUserCount, firstUserIdentity, firstUserFingerprint,
     firstUserVerified: ownedUserCount > 0, firstUserMarkerVerified: ownedUserCount > 0,
     busy, interrupted, text: modelResponseText(answer, responseExtraction).slice(0, 220_001),
-    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: 0, logicalAnswers: answers.length,
+    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer, responseExtraction),
+      claudeCompletionStructure: modelCompletionStructure(answer, message, article), modernMarkers: 0, logicalAnswers: answers.length,
       scopedCopies, enabledCopies, depth: -1 } };
   if (action === 'inspect') {
     const signIn = !composer && [...document.querySelectorAll('a, button')].filter(modelVisible)
@@ -2350,6 +2460,24 @@ async function providerPageAction() {
   return { submitted: true };
 }
 const observed = await websiteModelFinalGuard('claude', input, await providerPageAction(), modelTemporaryVerified);
+// The final model proof can yield while opening/closing the picker. Never
+// admit a stale completed response if its exact physical landmarks, text, latest
+// answer, or streaming state changed during that proof. A fresh read may qualify
+// the replacement; this read only withdraws completion and performs no action.
+if (!observed.error && observed.answerComplete === true) {
+  const current = modelCompletionObservation();
+  const unchanged = completionSnapshot && current.answerComplete
+    && ['answer', 'message', 'article', 'actionBar', 'copy'].every(key => current[key] === completionSnapshot[key])
+    && current.answers.length === completionSnapshot.answers.length
+    && modelResponseText(current.answer, modelResponseExtraction(current.answer)).slice(0, 220_001) === observed.text;
+  if (!unchanged) {
+    observed.answerComplete = false;
+    observed.busy = current.busy; observed.interrupted = current.interrupted;
+    observed.completionEvidence = { ...observed.completionEvidence, logicalAnswers: current.answers.length,
+      scopedCopies: current.scopedCopies, enabledCopies: current.enabledCopies,
+      claudeCompletionStructure: modelCompletionStructure(current.answer, current.message, current.article) };
+  }
+}
 if (observed.error === 'first_user_observation_replaced') return observed;
 if (['inspect', 'verifyModel'].includes(input.action) && modelUserRoots().length !== ownedUserCount) {
   const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, modelUserRoots().length,

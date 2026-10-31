@@ -7,14 +7,16 @@ const outbound = prompt + "\n\n" + markerLine;
 
 defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
 
-function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
+const claudeCodeCaptionClasses = ["text-text-500 font-small pb-0", "text-secondary text-caption-regular font-sans pb-0"] as const;
+
+function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string, captionClasses: string = claudeCodeCaptionClasses[0]) {
   f.answer.text = ""; f.answer.children = [];
   const wrapper = new Element("DIV", { class: "relative border-border-400" });
   const container = new Element("DIV", { class: "absolute right-0 h-8 px-2 items-center inline-flex" });
   const control = new Element("BUTTON", { class: "cds-reset relative isolate inline-flex shrink-0 items-center" });
   const content = new Element("SPAN", { class: "inline-flex min-w-0 items-center gap-1" });
   const icon = new Element("SPAN", {}, "\uE056"); content.append(icon); control.append(content); container.append(control);
-  const label = new Element("DIV", { class: "text-text-500 font-small pb-0" }, "json");
+  const label = new Element("DIV", { class: captionClasses }, "json");
   const pre = new Element("PRE"), code = new Element("CODE", {}, raw); pre.append(code);
   wrapper.append(container, label, pre); f.answer.append(wrapper);
   Object.defineProperty(f.answer, "innerText", { get: () => "\uE056\njson\n" + raw });
@@ -249,13 +251,13 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
-  test("observed Claude code chrome admits only its literal sole JSON envelope", async () => {
-    for (const envelope of [
+  test("current and legacy Claude code captions admit only their literal sole JSON envelope", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const envelope of [
       { type: "message", text: 'It\'s "quoted" C:\\tmp\\path\nnext line' },
       { type: "tool_calls", calls: [{ name: "exec_command", arguments: { cmd: 'printf "literal\\n"\nprintf "It\'s quoted"' } }] },
     ]) {
       const f = fixture(provider, { userPrompt: prompt }), raw = "\n" + JSON.stringify(envelope) + "\n";
-      observedClaudeCodeBlock(f, raw);
+      observedClaudeCodeBlock(f, raw, captionClasses);
       const result = await f.run();
       expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("\uE056"); expect(result.text).not.toContain("json\n");
@@ -264,8 +266,8 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
-  test("Claude code chrome does not excuse mismatched structure or authored content", async () => {
-    for (const change of [
+  test("current and legacy Claude code captions do not excuse mismatched structure or authored content", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const change of [
       (f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.values.class = "relative border-other"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "font-small pb-0"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "JSON"; },
@@ -282,8 +284,33 @@ describe("embedded Claude fixed adapter", () => {
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedClaudeCodeBlock>) => { block.code.text = '{"type":"message","text":"invalid "quote""}'; },
     ]) {
       const f = fixture(provider, { userPrompt: prompt }), raw = '{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"literal"}}]}';
-      const block = observedClaudeCodeBlock(f, raw); change(f, block);
+      const block = observedClaudeCodeBlock(f, raw, captionClasses); change(f, block);
       expect((await f.run()).text).toBe("\uE056\njson\n" + raw);
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("caption alternatives reject class near misses, hidden labels, duplicates and nonliteral language text", async () => {
+    for (const captionClasses of claudeCodeCaptionClasses) for (const change of [
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary text-caption-regular pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-caption-regular font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary text-caption-regular font-sans"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-text-500 text-caption-regular font-sans pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.class = "text-secondary font-small pb-0"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.hidden = ""; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values["aria-hidden"] = "true"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.values.inert = ""; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "json prose"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.label.text = "JSON"; },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.append(new Element("DIV", { class: claudeCodeCaptionClasses[1] }, "json")); },
+      (block: ReturnType<typeof observedClaudeCodeBlock>) => { block.wrapper.append(new Element("DIV", {}, "json")); },
+    ]) {
+      const f = fixture(provider, { userPrompt: prompt }), raw = '{"type":"message","text":"Exact bytes"}';
+      const block = observedClaudeCodeBlock(f, raw, captionClasses); change(block);
+      const result = await f.run();
+      expect(result.text).toBe("\uE056\njson\n" + raw);
+      expect(result.completionEvidence.codeStructure).toMatchObject({ selectedExtraction: "rendered_fallback", extractionReason: "outside_content" });
       expect(f.send.clicks).toBe(0);
     }
   });
@@ -753,6 +780,214 @@ describe("embedded Claude fixed adapter", () => {
     f.copy.disabled = false; f.copy.connected = false;
     f.body.append(new Element("BUTTON", { "aria-label": "Copy", "data-testid": "action-bar-copy", "data-test-id": "copy-button" }));
     expect(await f.run()).toMatchObject({ answerComplete: false });
+  });
+
+  test("the unique semantic Copy control completes after its obsolete testid disappears or changes", async () => {
+    for (const testid of [undefined, "new-provider-copy-id"] as const) for (const insideMessage of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (testid === undefined) delete f.copy.values["data-testid"]; else f.copy.values["data-testid"] = testid;
+      if (insideMessage) {
+        f.article.children = f.article.children.filter(node => node !== f.controls); f.response.append(f.controls);
+      }
+      const observed = await f.run();
+      expect(observed).toMatchObject({ answerComplete: true, busy: false, interrupted: false,
+        firstUserVerified: true, firstUserMarkerVerified: true, text: '{"type":"message","text":"OK"}',
+        completionEvidence: { scopedCopies: 1, enabledCopies: 1,
+          claudeCompletionStructure: { articleActionBars: 1, articleCopyLabelButtons: 1, articleCopyTestIDButtons: 0 } } });
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("semantic completion accepts one logical nested reply body and a display-contents toolbar", async () => {
+    const f = fixture(provider, { userPrompt: prompt, computedStyle: node => ({ visibility: "visible",
+      display: node.values["data-testid"] === "message-actions" ? "contents" : "block" }) });
+    delete f.copy.values["data-testid"];
+    const nested = new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text);
+    f.answer.text = ""; f.answer.append(nested);
+    f.controls.getClientRects = () => [];
+    expect(await f.run()).toMatchObject({ answerComplete: true, responseCount: 1,
+      text: '{"type":"message","text":"OK"}', completionEvidence: { scopedCopies: 1, enabledCopies: 1 } });
+  });
+
+  test("semantic completion rejects authored, nested, duplicate, hidden, disabled and unrelated controls", async () => {
+    for (const variant of ["authored-bar", "user-bar", "nested-article", "nested-bar", "duplicate-bar", "duplicate-copy",
+      "hidden-duplicate-copy", "disabled-copy", "aria-disabled-copy", "hidden-copy", "hidden-bar", "disabled-bar", "code-copy",
+      "foreign-copy", "other-assistant", "other-reply-body", "user-in-article", "nested-article-scope"] as const) {
+      const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+      const move = (node: Element, parent: Element) => {
+        if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node);
+        parent.append(node);
+      };
+      if (variant === "authored-bar") move(f.controls, f.answer);
+      if (variant === "user-bar") move(f.controls, f.userBody!);
+      if (variant === "nested-article" || variant === "code-copy") {
+        const wrapper = new Element(variant === "code-copy" ? "CODE" : "DIV", variant === "nested-article" ? { role: "article" } : {});
+        f.controls.append(wrapper); move(f.copy, wrapper);
+      }
+      if (variant === "nested-bar") {
+        const nested = new Element("DIV", { "data-testid": "message-actions" }); f.controls.append(nested); move(f.copy, nested);
+      }
+      if (variant === "duplicate-bar") f.article.append(new Element("DIV", { "data-testid": "message-actions" }));
+      if (["duplicate-copy", "hidden-duplicate-copy"].includes(variant)) f.controls.append(new Element("BUTTON", {
+        "aria-label": "Copy", ...(variant === "hidden-duplicate-copy" ? { hidden: "" } : {}) }));
+      if (variant === "disabled-copy") f.copy.disabled = true;
+      if (variant === "aria-disabled-copy") f.copy.values["aria-disabled"] = "true";
+      if (variant === "hidden-copy") f.copy.values.hidden = "";
+      if (variant === "hidden-bar") f.controls.values.hidden = "";
+      if (variant === "disabled-bar") f.controls.values["aria-disabled"] = "true";
+      if (variant === "foreign-copy") move(f.controls, f.body);
+      if (variant === "other-assistant") f.article.append(new Element("DIV", { "data-testid": "assistant-message" }));
+      if (variant === "other-reply-body") f.response.append(new Element("DIV", { "data-perf-reply-text": "" }, "Other response"));
+      if (variant === "user-in-article") f.article.append(new Element("DIV", { "data-testid": "user-message" }, "Other user"));
+      if (variant === "nested-article-scope") {
+        const wrapper = new Element("DIV", { "data-testid": "assistant-message" }); f.messages.append(wrapper); move(f.article, wrapper);
+      }
+      const observed = await f.run();
+      // A user-message mutation fails ownership before completion is considered.
+      if (variant === "user-in-article") expect(observed.error).toBe("conversation_changed");
+      else expect(observed.answerComplete).toBe(false);
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("semantic completion cannot reuse an older response's Copy toolbar", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+    const article = new Element("DIV", { role: "article" });
+    const message = new Element("DIV", { "data-testid": "assistant-message", "data-is-streaming": "false" });
+    message.append(new Element("DIV", { "data-perf-reply-text": "" }, '{"type":"message","text":"New response"}'));
+    article.append(message); f.messages.append(article);
+    expect(await f.run()).toMatchObject({ answerComplete: false, responseCount: 2,
+      text: '{"type":"message","text":"New response"}', completionEvidence: { scopedCopies: 0, enabledCopies: 0 } });
+  });
+
+  test("the final model await cannot admit stale response landmarks, content or a restarted stream", async () => {
+    for (const variant of ["remove-copy", "replace-copy", "duplicate-copy", "replace-bar", "hidden-copy", "disabled-copy",
+      "streaming", "stop", "interrupted", "replace-answer", "changed-text", "append-response"] as const) {
+      const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
+      const picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
+      picker.selected("Sonnet 5"); const click = picker.trigger.onClick!; let closes = 0;
+      picker.trigger.onClick = () => {
+        const wasOpen = picker.menu.values.hidden === undefined || picker.nested?.values.hidden === undefined;
+        click();
+        if (!wasOpen || ++closes !== 2) return;
+        if (variant === "remove-copy") f.copy.connected = false;
+        if (variant === "replace-copy") f.controls.replaceChildren(new Element("BUTTON", { "aria-label": "Copy" }));
+        if (variant === "duplicate-copy") f.controls.append(new Element("BUTTON", { "aria-label": "Copy" }));
+        if (variant === "replace-bar") {
+          const bar = new Element("DIV", { "data-testid": "message-actions" }); bar.append(new Element("BUTTON", { "aria-label": "Copy" }));
+          f.article.children = f.article.children.filter(node => node !== f.controls); f.controls.connected = false; f.article.append(bar);
+        }
+        if (variant === "hidden-copy") f.copy.values.hidden = "";
+        if (variant === "disabled-copy") f.copy.disabled = true;
+        if (variant === "streaming") f.response.values["data-is-streaming"] = "true";
+        if (variant === "stop") f.stop.connected = true;
+        if (variant === "interrupted") f.status.text = "Claude's response was interrupted.";
+        if (variant === "replace-answer") f.response.replaceChildren(new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text));
+        if (variant === "changed-text") f.answer.text = '{"type":"message","text":"Changed"}';
+        if (variant === "append-response") {
+          const article = new Element("DIV", { role: "article" }), message = new Element("DIV", { "data-testid": "assistant-message", "data-is-streaming": "false" });
+          const bar = new Element("DIV", { "data-testid": "message-actions" }); bar.append(new Element("BUTTON", { "aria-label": "Copy" }));
+          message.append(new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text)); article.append(message, bar); f.messages.append(article);
+        }
+      };
+      const observed = await completeClaudeRead(f, "inspect", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" } });
+      expect(closes).toBe(2);
+      expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(false);
+      expect(f.copy.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("completion diagnostics distinguish a missing article from zero scoped controls without accepting it", async () => {
+    const f = fixture(provider, { userPrompt: prompt });
+    delete f.article.values.role;
+    const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+    expect(observed.answerComplete).toBe(false);
+    expect(shape).toMatchObject({ answerPresent: true, messagePresent: true, messageStreamingState: "false",
+      articlePresent: false, articleIsMessage: null, articleAssistantDescendants: null,
+      articleReplyBodies: null, articleActionBars: null, articleExactCopyButtons: null,
+      articleVisibleCopies: null, articleEnabledCopies: null });
+    expect(shape.ancestors[0]).toMatchObject({ depth: 1, tag: "div", role: "none", isAssistantMessage: true,
+      assistantDescendants: 0, replyBodyDescendants: 1, actionBars: 0, exactCopyButtons: 0 });
+    expect(shape.ancestors[1]).toMatchObject({ depth: 2, role: "none", isAssistantMessage: false,
+      assistantDescendants: 1, actionBars: 1, copyTestIDButtons: 1, copyLabelButtons: 1, exactCopyButtons: 1 });
+    expect(shape.ancestors).toHaveLength(4);
+  });
+
+  test("completion diagnostics distinguish self scopes, changed action bars and changed Copy labels", async () => {
+    for (const variant of ["self", "bar", "testid", "label"] as const) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (variant === "self") f.response.values.role = "article";
+      if (variant === "bar") f.controls.values["data-testid"] = "changed";
+      if (variant === "testid") f.copy.values["data-testid"] = "changed";
+      if (variant === "label") f.copy.values["aria-label"] = "changed";
+      const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+      expect(observed.answerComplete).toBe(variant === "testid");
+      expect(shape.articleIsMessage).toBe(variant === "self");
+      expect(shape.articleAssistantDescendants).toBe(variant === "self" ? 0 : 1);
+      expect(shape.articleActionBars).toBe(["self", "bar"].includes(variant) ? 0 : 1);
+      expect(shape.articleExactCopyButtons).toBe(0);
+      expect(shape.articleCopyTestIDButtons).toBe(variant === "label" ? 1 : 0);
+      expect(shape.articleCopyLabelButtons).toBe(variant === "testid" ? 1 : 0);
+      expect(shape.ancestors[1].exactCopyButtons).toBe(["self", "bar"].includes(variant) ? 1 : 0);
+    }
+  });
+
+  test("completion diagnostics preserve visibility, enabled and streaming distinctions", async () => {
+    for (const variant of ["hidden", "disabled", "streaming", "absent", "other", "complete"] as const) {
+      const f = fixture(provider, { userPrompt: prompt });
+      if (variant === "hidden") f.copy.values.hidden = "";
+      if (variant === "disabled") f.copy.disabled = true;
+      if (variant === "streaming") f.response.values["data-is-streaming"] = "true";
+      if (variant === "absent") delete f.response.values["data-is-streaming"];
+      if (variant === "other") f.response.values["data-is-streaming"] = "PRIVATE_STREAMING_STATE";
+      const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+      expect(observed.answerComplete).toBe(variant === "complete");
+      expect(shape.articleExactCopyButtons).toBe(1);
+      expect(shape.articleVisibleCopies).toBe(variant === "hidden" ? 0 : 1);
+      expect(shape.articleEnabledCopies).toBe(["hidden", "disabled"].includes(variant) ? 0 : 1);
+      expect(shape.messageStreamingState).toBe(variant === "streaming" ? "true" : ["absent", "other"].includes(variant) ? variant : "false");
+      expect(JSON.stringify(shape)).not.toContain("PRIVATE");
+    }
+  });
+
+  test("completion diagnostics retain absent-answer unknowns and never leak arbitrary ancestor attributes", async () => {
+    const empty = fixture(provider);
+    const missing = (await empty.run()).completionEvidence.claudeCompletionStructure;
+    expect(missing).toMatchObject({ answerPresent: false, messagePresent: false, messageStreamingState: null,
+      articlePresent: false, articleIsMessage: null, articleActionBars: null, ancestors: [] });
+    const f = fixture(provider, { userPrompt: prompt });
+    f.response.tagName = "PRIVATE_ELEMENT"; f.response.values.role = "PRIVATE_ROLE";
+    f.response.values.id = "PRIVATE_ID"; f.response.values.class = "PRIVATE_CLASS";
+    f.copy.values["data-private-url"] = "https://PRIVATE_URL";
+    const shape = (await f.run()).completionEvidence.claudeCompletionStructure;
+    expect(shape.ancestors[0]).toMatchObject({ tag: "other", role: "other" });
+    expect(JSON.stringify(shape)).not.toContain("PRIVATE");
+  });
+
+  test("completion diagnostic counts and ancestor walks remain bounded when duplicate controls deny completion", async () => {
+    const f = fixture(provider, { userPrompt: prompt });
+    for (let index = 0; index < 1_005; index++) f.controls.append(new Element("BUTTON", { "aria-label": "Copy", "data-testid": "action-bar-copy" }));
+    const observed = await f.run(), shape = observed.completionEvidence.claudeCompletionStructure;
+    expect(observed.answerComplete).toBe(false);
+    expect(shape.articleExactCopyButtons).toBe(1_000);
+    expect(shape.articleVisibleCopies).toBe(1_000); expect(shape.articleEnabledCopies).toBe(1_000);
+    expect(shape.ancestors).toHaveLength(4);
+    expect(shape.ancestors[1].exactCopyButtons).toBe(1_000);
+  });
+
+  test("an unavailable optional completion diagnostic cannot fail or complete an adapter read", async () => {
+    for (const disabled of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt }); f.copy.disabled = disabled;
+      const query = f.response.querySelectorAll.bind(f.response);
+      f.response.querySelectorAll = selector => {
+        if (selector === 'button[data-testid="action-bar-copy"]') throw new Error("diagnostic-only fixture exception");
+        return query(selector);
+      };
+      const observed = await f.run();
+      expect(observed.answerComplete).toBe(!disabled);
+      expect(observed.completionEvidence.claudeCompletionStructure).toBeNull();
+      expect(observed.text).toBe('{"type":"message","text":"OK"}');
+    }
   });
 
   test("streaming or a visible Stop response prevents premature completion", async () => {

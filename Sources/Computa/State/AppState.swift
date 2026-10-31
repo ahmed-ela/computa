@@ -154,7 +154,7 @@ final class AppState {
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
             id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
-        } ?? LocalModelCatalog.defaultModelID
+        } ?? WebsiteModelCatalog.freshProfileDefaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         apiProviders = APIProviderCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()

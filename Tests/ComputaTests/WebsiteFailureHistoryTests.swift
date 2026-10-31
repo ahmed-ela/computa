@@ -3,6 +3,71 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testQuotaRecoveryMessageUsesAvailableRestartPathAndPreservesExactLegacyHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaQuotaHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let task = UUID().uuidString, thread = UUID().uuidString
+        var expectedRecords: [WebsiteTurnFailureStore.Record] = []
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .claude, .gemini] {
+            let failure = EmbeddedWebModelTransport.Failure.usageLimited(provider)
+            XCTAssertTrue(failure.blocksProviderUntilRefresh, "Copy changes cannot grant automatic retries")
+            XCTAssertEqual(failure.requiredAction, "wait_for_quota_reset")
+            let body = try WebModelServer.errorBody(for: failure)
+            let current = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let fields = try XCTUnwrap(current["error"] as? [String: Any])
+            XCTAssertEqual(fields["message"] as? String,
+                "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Computa, then start a fresh task.")
+            XCTAssertEqual(fields["code"] as? String, "website_usage_limit")
+            XCTAssertEqual(fields["required_action"] as? String, "wait_for_quota_reset")
+            XCTAssertEqual(fields["retryable"] as? Bool, false)
+            var legacy = current, legacyFields = fields
+            legacyFields["message"] = "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+            legacy["error"] = legacyFields
+            for envelope in [current, legacy] {
+                let text = String(decoding: try JSONSerialization.data(withJSONObject: envelope,
+                    options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+                let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: UUID().uuidString, modelID: "browser/" + provider.rawValue, diagnosticText: text))
+                XCTAssertEqual(record.diagnosticText, text, "Old history retains its exact original finite message")
+                XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+                expectedRecords.append(record)
+            }
+        }
+        XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread), expectedRecords)
+    }
+
+    func testQuotaHistoryCompatibilityRejectsNearMissMessagesAndChangedEnvelopeFields() throws {
+        let native = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.usageLimited(.claude))
+        let current = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        var legacy = current, legacyFields = try XCTUnwrap(current["error"] as? [String: Any])
+        legacyFields["message"] = "Claude's website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+        legacy["error"] = legacyFields
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+        func rejected(_ envelope: [String: Any], model: String = "browser/claude") throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                modelID: model, diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)))
+        }
+        for envelope in [current, legacy] {
+            let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+            let message = try XCTUnwrap(fields["message"] as? String)
+            let mutations: [[String: Any]] = [["message": message + " "], ["message": message.replacingOccurrences(of: "Claude", with: "Gemini")],
+                ["message": "Restart Computa to reset quota."], ["retryable": true], ["retryable": 0],
+                ["required_action": "retry_send"], ["type": "server_error"], ["code": "internal_error"],
+                ["param": "input"], ["pageText": "PRIVATE_PAGE_TEXT"]]
+            for mutation in mutations {
+                var altered = envelope, alteredFields = fields
+                mutation.forEach { alteredFields[$0.key] = $0.value }
+                altered["error"] = alteredFields
+                try rejected(altered)
+            }
+            var extra = envelope; extra["extra"] = "unexpected"
+            try rejected(extra)
+            var missing = envelope, missingFields = fields; missingFields.removeValue(forKey: "param"); missing["error"] = missingFields
+            try rejected(missing)
+            try rejected(envelope, model: "browser/gemini")
+        }
+    }
+
     func testWebsiteTurnLimitSurvivesReloadWithPriorActionWarningAndExactFailureIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaWebsiteTurnLimit-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

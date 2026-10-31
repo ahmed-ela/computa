@@ -93,10 +93,13 @@ gh workflow run release-alpha.yml --repo ahmed-ela/computa \
   --ref Macrouse --field tag="$computa_release_tag"
 ```
 
-GitHub CLI must be signed in with access to this private repository. Finish
-uploading all assets before dispatching; a tag push alone does not publish a
-release. You can also dispatch **Publish Computa alpha** in GitHub's Actions
-page and provide the existing draft tag.
+The repository, [`ahmed-ela/computa`](https://github.com/ahmed-ela/computa), is
+public. GitHub CLI must be signed in with permission to create releases and
+dispatch workflows; an unpublished draft still requires maintainer access.
+Published release assets are public downloads. Finish uploading all assets
+before dispatching; a tag push alone does not publish a release. You can also
+dispatch **Publish Computa alpha** in GitHub's Actions page and provide the
+existing draft tag.
 
 The workflow checks out the current default branch rather than executing code
 from the supplied tag. On a macOS runner, the publisher downloads the draft's

@@ -245,7 +245,9 @@ final class WebsiteModelStateTests: XCTestCase {
         let reopened = AppState(tasks: [], preferences: preferences)
         XCTAssertEqual(reopened.defaultModel, choice.modelID)
         XCTAssertEqual(reopened.websiteModelChoices, state.websiteModelChoices)
-        XCTAssertEqual(WebUISnapshot(state: reopened).modelOptions.map(\.id), snapshot.modelOptions.map(\.id))
+        // Compare after selection: an unavailable initial default is retained
+        // only while selected and disappears when the observed choice replaces it.
+        XCTAssertEqual(WebUISnapshot(state: reopened).modelOptions.map(\.id), WebUISnapshot(state: state).modelOptions.map(\.id))
     }
 
     func testSavedDefaultAndTaskChoiceRemainSelectedWhenNoLongerAvailable() async throws {

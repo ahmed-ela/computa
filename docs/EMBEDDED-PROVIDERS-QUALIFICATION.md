@@ -1,10 +1,12 @@
 # Embedded website provider qualification
 
-## Current scope: ChatGPT only
+## Current scope
 
-Gemini and Claude implementation and qualification are on hold at the user's
-request. The remaining remote API cases are also held while ChatGPT is the
-priority. Existing provider options were not removed by this scope change.
+The historical results below describe ChatGPT qualification. Gemini resumed in
+the [Gemini qualification record](GEMINI-HARNESS-QUALIFICATION.md), and Claude
+resumed on October 31 in the [Claude qualification record](CLAUDE-HARNESS-QUALIFICATION.md).
+The remaining remote API cases remain outside this work. Existing provider
+options were not removed by these scope changes.
 
 ## Candidate261: verified ChatGPT renderer failure recovery
 
