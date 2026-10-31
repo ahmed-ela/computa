@@ -90,9 +90,25 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
   if (metadata.appVersion !== config.version || tag !== `v${config.version}-alpha.${config.build}`) {
     throw new Error("Alpha tag must use the tagged app version and increasing Apple build number");
   }
-  const releasePath = `releases/tags/${encodeURIComponent(tag)}`;
+  // The tag endpoint only exposes published releases. Authenticated listing
+  // includes drafts; inspect every page before binding this operation to one ID.
+  const releasePages = JSON.parse(await context.run(["gh", "api", "--paginate", "--slurp",
+    `${apiRoot}/releases?per_page=100`]));
+  if (!Array.isArray(releasePages) || releasePages.some(page => !Array.isArray(page)
+    || page.some(item => typeof item !== "object" || item === null || typeof item.tag_name !== "string"))) {
+    throw new Error("Release listing is malformed");
+  }
+  const matches = releasePages.flat().filter(item => item.tag_name === tag);
+  if (matches.length !== 1 || !Number.isSafeInteger(matches[0].id) || matches[0].id <= 0) {
+    throw new Error("Select exactly one existing release with a positive numeric ID for this tag");
+  }
+  const releaseID = matches[0].id;
+  const releasePath = `releases/${releaseID}`;
+  const hasReleaseIdentity = (value: any) => value?.id === releaseID && value?.tag_name === tag;
   const release = await api(releasePath);
-  if (release.draft !== true || release.tag_name !== tag) throw new Error("Select an existing unpublished draft; published releases are immutable");
+  if (!hasReleaseIdentity(release) || release.draft !== true) {
+    throw new Error("Select the same existing unpublished draft; published releases are immutable");
+  }
   const stem = `Computa-${metadata.version}-arm64`;
   const dmgNames = [`${stem}.dmg`, `${stem}-signed-test.dmg`];
   const manifestNames = dmgNames.map(name => name.replace(/\.dmg$/, ".manifest.json"));
@@ -137,7 +153,8 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
     }
     await context.verifyPackage(join(stage, dmgName), manifest, manifestBytes, installerFiles);
     await ensureMerged();
-    if (await resolveTag() !== source || draftSnapshot(await api(releasePath)) !== snapshot) {
+    const currentRelease = await api(releasePath);
+    if (await resolveTag() !== source || !hasReleaseIdentity(currentRelease) || draftSnapshot(currentRelease) !== snapshot) {
       throw new Error("Release tag, notes or assets changed during verification; nothing was published");
     }
     context.log(`Verified ${tag}: app ${config.version} (${config.build}), ${channel}, tagged source ${source}.`);
@@ -148,11 +165,13 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
       + (channel === "signed-test" ? "**Not notarized:** this signed test build may be blocked by macOS.\n"
         : "The app notarization ticket and Gatekeeper assessment passed. DMG notarization is separate.\n")
       + "Compiled app source identity, clean-Mac installation and live model/task qualification remain maintainer checks; see the release notes above.\n";
-    const notesPath = join(stage, "verified-notes.md");
-    await writeFile(notesPath, notes, { flag: "wx" });
-    await context.run(["gh", "release", "edit", tag, "--repo", repo, "--draft=false", "--prerelease", "--latest=false", "--notes-file", notesPath]);
+    const updatePath = join(stage, "verified-release.json");
+    await writeFile(updatePath, JSON.stringify({ body: notes, draft: false, prerelease: true, make_latest: "false" }), { flag: "wx" });
+    // Keep the mutation bound to the verified ID too; resolving the tag again
+    // could publish a replacement draft created after the final snapshot.
+    await context.run(["gh", "api", "--method", "PATCH", `${apiRoot}/${releasePath}`, "--input", updatePath]);
     const published = await api(releasePath);
-    if (published.draft !== false || published.prerelease !== true || published.tag_name !== tag
+    if (!hasReleaseIdentity(published) || published.draft !== false || published.prerelease !== true
       || assetsSnapshot(published) !== assetsSnapshot(release) || published.body !== notes) {
       throw new Error("Publication outcome could not be confirmed; inspect GitHub before retrying");
     }
