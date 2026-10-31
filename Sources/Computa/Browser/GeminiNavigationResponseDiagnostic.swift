@@ -83,7 +83,7 @@ enum GeminiNavigationResponseDiagnostic {
                         expires: validClock ? expires.flatMap { expiryBucket($0.timeIntervalSince(now)) } : nil)
     }
 
-    private static func destination(_ url: URL?) -> Destination? {
+    static func destination(_ url: URL?) -> Destination? {
         guard let url, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme?.lowercased() == "https", parts.user == nil, parts.password == nil,
               parts.port == nil || parts.port == 443 else { return nil }

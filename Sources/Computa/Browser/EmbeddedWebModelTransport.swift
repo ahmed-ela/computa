@@ -3614,6 +3614,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
         let firstFailure = session.terminalFailure == nil
         let recorded = recordedWebsiteBlocker(failure, session: session)
+        if failure == .humanVerificationRequired(.gemini) {
+            browser.captureGeminiCAPTCHA(tabID: session.tabID, view: session.view, trigger: .transport)
+        }
         if action == "inspect", phase == "before", failure == .humanVerificationRequired(.gemini) {
             enrollGeminiPostBlockDiagnostic(session, firstFailure: firstFailure)
         }
@@ -4641,7 +4644,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
             case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
-            case "website_verification_required": throw recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
+            case "website_verification_required":
+                let failure = recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
+                if provider == .gemini {
+                    browser.captureGeminiCAPTCHA(tabID: session.tabID, view: session.view, trigger: .transport)
+                }
+                throw failure
             case "website_usage_limit":
                 if action == "inspect", session.state == "loading", session.documentGeneration == nil,
                    session.sequence == 0, session.confirmedUsers == 0,

@@ -1241,3 +1241,29 @@ before clearing its challenge or losing the failing request/page state.
 Evidence: `captcha332-lifecycle/older-verification-h-plan.json`,
 `marker-h/{plan,restart,dispatch,restoration}.json`, its native capture directory,
 `response332-marker-h.json` and `cookie-timeline332-marker-h.json`.
+
+### October 31: automatic evidence before CAPTCHA teardown
+
+Build 333 adds [automatic local CAPTCHA diagnostics](GEMINI-CAPTCHA-DIAGNOSTICS.md)
+for the next recurrence. A bounded per-view journal retains finite request,
+redirect-callback and response metadata, plus historical shared-profile cookie
+events. Actual native/adapter detection freezes and durably saves a report
+before cleanup can remove the view. Cleanup-first detection, cancellation and
+shutdown are covered. An inherited provider gate does not fabricate a new
+request, and a late challenge response can add one immutable linked supplement.
+
+All 219 focused native tests passed, including 34 new schema/storage/integration
+cases. The tests verify saved files before immediate teardown, preserved first
+evidence across generation changes, late response retention, failure/retry
+bounds, privacy and storage safety, plus the existing verification/cleanup and
+real WebKit loopback regressions. The earlier test-helper syntax error and
+macOS temporary-path alias failures remain recorded; production symlink checks
+were retained. Final source hashes were unchanged during the passing run.
+
+No Google navigation or CAPTCHA completion was needed for this addition. It is
+instrumentation, not a recurrence fix. Public WebKit callback metadata still
+does not prove transmitted Cookie headers, network/cache provenance or the full
+initial redirect chain. The original root-cause investigation remains unresolved.
+
+Evidence: `native333-full-repaired/{plan.json,test.log,result.json}` and
+`native333-store-repair-result.json` under the existing local evidence root.
