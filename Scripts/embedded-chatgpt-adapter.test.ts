@@ -12,6 +12,29 @@ const disabledWorkDiagnostic = 'const chatGPTSyncWorkStart = () => null; const c
 const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
+describe('ChatGPT finite recovery guard diagnostics', () => {
+  test('every emitted guard label has a matching native projection contract', () => {
+    const native = readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift', import.meta.url), 'utf8');
+    const jsRules = (name: string) => JSON.parse(source.match(new RegExp(`const ${name} = Object.freeze\\((\\[[\\s\\S]*?\\])\\);`))![1]) as string[];
+    const nativeRules = (name: string) => [...native.match(new RegExp(`private static let ${name}: Set<String> = \\[([\\s\\S]*?)\\]`))![1]
+      .matchAll(/"([^"]+)"/g)].map(match => match[1]);
+    for (const [jsName, nativeName, start, end, pattern] of [
+      ['chatGPTBoundPinDiagnosticRules', 'boundPinDiagnosticRules', 'function chatGPTBoundFirstUserExpansionPins', 'const chatGPTBoundPinDiagnosticRules', /check\('([^']+)'/g],
+      ['chatGPTPendingRouteDiagnosticRules', 'pendingRouteDiagnosticRules', 'function chatGPTPendingFirstRouteDiscard', 'const chatGPTPendingRouteDiagnosticRules', /(?:reject\(|modeCheck\('(?:initial|pending)', )'([^']+)'/g],
+    ] as const) {
+      const labels = jsRules(jsName), accepted = nativeRules(nativeName);
+      expect(new Set(labels)).toEqual(new Set(accepted));
+      const emitted = [...source.slice(source.indexOf(start), source.indexOf(end)).matchAll(pattern)].map(match => match[1]);
+      for (const label of emitted) expect(labels).toContain(label);
+    }
+    const contexts = [...source.match(/const chatGPTSubmissionContextCheckKeys = Object.freeze\(\[([\s\S]*?)\]\)/)![1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+    expect(new Set(['not_checked', ...contexts])).toEqual(new Set(nativeRules('submissionContextDiagnosticRules')));
+    const modelScope = source.slice(source.indexOf('function chatGPTFirstRouteModelPins'), source.indexOf('// While native\'s first submission is pending'));
+    const models = [...modelScope.matchAll(/reject\('([^']+)'/g)].map(match => match[1]);
+    for (const label of models) expect(nativeRules('boundCertificateModelPinRules')).toContain(label);
+  });
+});
+
 describe('ChatGPT rejected user-count diagnostics', () => {
   test('reproduces a verified zero-root gap rejecting before the existing collapsed-remount recovery', async () => {
     const choice = { key: 'chat/latest/instant', label: 'Instant' };
@@ -2438,11 +2461,38 @@ describe('ChatGPT per-round canonical submission ownership', () => {
           if (mutation === 'extra_edge') continuation.firstUserExpansionRouteContinuation.push({ fromURL: 'https://chatgpt.com/c/foreign', toURL: x.f.document.URL });
         });
         denied(discarded); expect(candidate.routeDiscard, mutation).toBeUndefined();
+        const guard = discarded.boundCertificateDiagnostic?.pendingRouteGuard;
+        const expectedRule: Record<string, string> = { body: 'body_canonical', owner: 'context_url',
+          private_pin: 'pending_private_fingerprint', native_pin: 'native_adopted', record_hash: 'record_fingerprint',
+          model: 'model_pins', work: 'product', temporary: 'temporary', deadline: 'deadline_expired',
+          second_remount: 'current_root', stale_lease: 'context_url', first_edge: 'edge_from', extra_edge: 'edges_count' };
+        expect(guard, mutation).toMatchObject({ rule: expectedRule[mutation], pendingPrivate: true,
+          initialRoute: false, provisional: true });
+        expect(guard.submissionContextRule, mutation).toBe(mutation === 'owner' ? 'globalOwnerMatches'
+          : mutation === 'stale_lease' ? 'invocationCurrent' : 'urlMatches');
+        if (mutation === 'second_remount') expect(guard).toMatchObject({ currentNodesObserved: true,
+          currentRootMatches: false, currentBodyMatches: false });
+        if (mutation === 'model') expect(guard.modelPinsRule).not.toBe('not_checked');
+        expect(JSON.stringify(discarded.boundCertificateDiagnostic).length, mutation).toBeLessThanOrEqual(960);
         expect(candidate, mutation).not.toHaveProperty('verified', true);
         expect(record.phase, mutation).toBe('send_claimed'); expect(record.root, mutation).toBeNull(); expect(record.body, mutation).toBeNull();
         expect(initialControl.clicks, mutation).toBe(1); expect(expand.clicks, mutation).toBe(1); expect(x.send.clicks, mutation).toBe(1);
         expect(discarded, mutation).not.toHaveProperty('submissionProof'); expect(discarded, mutation).not.toHaveProperty('firstUserFingerprint', first.fingerprint);
       }
+    });
+
+    test('a terminal pending-route guard retains the original cause across a later spent read', async () => {
+      const { x, first, body, next, discarded, candidate } = await pendingPrivateHashPromotion(staged => {
+        staged.body.text += '!';
+      });
+      const diagnostic = discarded.boundCertificateDiagnostic;
+      expect(diagnostic.pendingRouteGuard).toMatchObject({ rule: 'body_canonical', boundPinsRule: 'submission_context',
+        submissionContextRule: 'urlMatches', currentNodesObserved: true, currentRootMatches: true, currentBodyMatches: true });
+      body.text = first.outbound;
+      const spent = await x.observe(first, next); denied(spent);
+      expect(candidate.certificateDiagnostic).toBe(diagnostic);
+      expect(spent.boundCertificateDiagnostic).toEqual(diagnostic);
+      expect(JSON.parse(spent.debugStructure).recoveryLifecycle.path).toBe('spent_recovery');
     });
 
     test('pending-private public-promotion continuation requires the exact fresh second edge and complete proof', async () => {

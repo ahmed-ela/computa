@@ -5657,45 +5657,96 @@ function chatGPTFirstUserExpansionRouteStart(candidate) {
 }
 function chatGPTBoundFirstUserExpansionPins(candidate) {
   const state = candidate.state, record = candidate.record, pinned = globalThis.__computaModelFirstProof;
-  return input.action === 'inspect' && input.suppressFirstUserExpansionClaim !== true && (candidate.provisional || candidate.initialRoute
-    ? input.allowProvisionalFirstUserExpansion === true && input.allowBoundFirstUserExpansion !== true
-      && input.allowFirstUserBinding === true && input.allowFirstUserExpansion === true
-      && input.expectedFirstUserFingerprint == null && (candidate.initialRoute || candidate.remount === true)
-      && record?.nativeFirstPinned !== true && input.allowBoundFirstUserRemountRefresh !== true
-    : input.allowBoundFirstUserExpansion === true && input.allowProvisionalFirstUserExpansion !== true
-      && input.allowFirstUserBinding !== true && input.allowFirstUserExpansion !== true)
-    && state === globalThis.__computaChatSubmissionState && chatGPTSubmissionContext(state)
-    && record?.sequence === 1 && (candidate.initialRoute || candidate.pendingPrivate
-      ? state.pending === record && state.lastVerified == null && record.phase === 'send_claimed'
-        && record.root == null && record.body == null
-        && (candidate.pendingPrivate ? pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint : pinned == null)
-        && candidate.predecessor != null && candidate.predecessor === globalThis.__computaModelFirstExpansion
-        && candidate.predecessor.outcome === 'expanded' && candidate.predecessor.contextFailure == null
-        && candidate.predecessor.clicked === true && candidate.predecessor.expandedText === record.canonical
-        && candidate.predecessor.document === document && candidate.predecessor.owner === input.ownerToken
-        && candidate.predecessor.prompt === candidate.prompt && candidate.predecessor.marker === candidate.marker
-        && candidate.predecessor.root === candidate.oldRoot && candidate.predecessor.body === candidate.oldBody
-        && candidate.deadline === candidate.predecessor.deadline && Number.isFinite(candidate.deadline) && Date.now() <= candidate.deadline
-        && (!candidate.pendingPrivate || chatGPTFirstUserExpansionRouteStart(candidate.predecessor) >= 0)
-      : state.pending == null && state.lastVerified === record && record.phase === 'verified')
-    && record.document === document && record.owner === input.ownerToken
-    && (candidate.awaitingNativeRefresh === true ? candidate.remount === true
-      && record.replacement === candidate.replacementReceipt && candidate.replacementReceipt != null : record.replacement == null)
-    && input.submissionSequence === 1 && input.submissionMarker === record.marker
-    && (candidate.remount ? (candidate.initialRoute || candidate.pendingPrivate || record.root === candidate.oldRoot && record.body === candidate.oldBody)
-      && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false
-      && candidate.root !== candidate.oldRoot && candidate.body !== candidate.oldBody
-      : candidate.initialRoute ? candidate.oldRoot === candidate.root && candidate.oldBody === candidate.body
-        : record.root === candidate.root && record.body === candidate.body)
-    && record.marker === candidate.marker && record.canonical === candidate.canonical
-    && typeof record.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.fingerprint)
-    && record.fingerprint === candidate.fingerprint
-    && (candidate.provisional || candidate.initialRoute || record.fingerprint === input.expectedFirstUserFingerprint)
-    && (candidate.initialRoute || pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint)
-    && chatGPTSubmissionPins(record)
-    && websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
-    && websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice);
+  const check = (rule, value) => {
+    // Observe the original operand once, preserving short-circuit order and
+    // truthiness. Diagnostics cannot turn a failure into admission.
+    try {
+      if (!value && candidate.boundPinsRuleInvocation !== websiteChatInvocationLease) {
+        candidate.boundPinsRule = rule; candidate.boundPinsRuleInvocation = websiteChatInvocationLease;
+      }
+    } catch { }
+    return value;
+  };
+  return check('action', input.action === 'inspect') && check('suppressed', input.suppressFirstUserExpansionClaim !== true)
+    && (candidate.provisional || candidate.initialRoute
+      ? check('provisional_permission', input.allowProvisionalFirstUserExpansion === true)
+        && check('bound_permission_disabled', input.allowBoundFirstUserExpansion !== true)
+        && check('binding_permission', input.allowFirstUserBinding === true)
+        && check('expansion_permission', input.allowFirstUserExpansion === true)
+        && check('native_pin_absent', input.expectedFirstUserFingerprint == null)
+        && check('provisional_remount', candidate.initialRoute || candidate.remount === true)
+        && check('native_pin_unadopted', record?.nativeFirstPinned !== true)
+        && check('refresh_permission_disabled', input.allowBoundFirstUserRemountRefresh !== true)
+      : check('bound_permission', input.allowBoundFirstUserExpansion === true)
+        && check('provisional_permission_disabled', input.allowProvisionalFirstUserExpansion !== true)
+        && check('binding_disabled', input.allowFirstUserBinding !== true)
+        && check('expansion_disabled', input.allowFirstUserExpansion !== true))
+    && check('state_current', state === globalThis.__computaChatSubmissionState)
+    && check('submission_context', chatGPTSubmissionContext(state))
+    && check('record_sequence', record?.sequence === 1)
+    && (candidate.initialRoute || candidate.pendingPrivate
+      ? check('pending_identity', state.pending === record) && check('last_verified_absent', state.lastVerified == null)
+        && check('record_pending_phase', record.phase === 'send_claimed')
+        && check('pending_root_absent', record.root == null) && check('pending_body_absent', record.body == null)
+        && (candidate.pendingPrivate ? check('private_marker', pinned?.marker === candidate.marker)
+          && check('private_fingerprint', pinned.fingerprint === record.fingerprint) : check('private_pin_absent', pinned == null))
+        && check('predecessor_present', candidate.predecessor != null)
+        && check('predecessor_current', candidate.predecessor === globalThis.__computaModelFirstExpansion)
+        && check('predecessor_expanded', candidate.predecessor.outcome === 'expanded')
+        && check('predecessor_context', candidate.predecessor.contextFailure == null)
+        && check('predecessor_clicked', candidate.predecessor.clicked === true)
+        && check('predecessor_canonical', candidate.predecessor.expandedText === record.canonical)
+        && check('predecessor_document', candidate.predecessor.document === document)
+        && check('predecessor_owner', candidate.predecessor.owner === input.ownerToken)
+        && check('predecessor_prompt', candidate.predecessor.prompt === candidate.prompt)
+        && check('predecessor_marker', candidate.predecessor.marker === candidate.marker)
+        && check('predecessor_root', candidate.predecessor.root === candidate.oldRoot)
+        && check('predecessor_body', candidate.predecessor.body === candidate.oldBody)
+        && check('deadline_same', candidate.deadline === candidate.predecessor.deadline)
+        && check('deadline_finite', Number.isFinite(candidate.deadline)) && check('deadline_live', Date.now() <= candidate.deadline)
+        && check('predecessor_route', !candidate.pendingPrivate || chatGPTFirstUserExpansionRouteStart(candidate.predecessor) >= 0)
+      : check('pending_absent', state.pending == null) && check('verified_identity', state.lastVerified === record)
+        && check('verified_phase', record.phase === 'verified'))
+    && check('record_document', record.document === document) && check('record_owner', record.owner === input.ownerToken)
+    && (candidate.awaitingNativeRefresh === true ? check('receipt_remount', candidate.remount === true)
+      && check('receipt_retained', record.replacement === candidate.replacementReceipt)
+      && check('receipt_present', candidate.replacementReceipt != null) : check('receipt_absent', record.replacement == null))
+    && check('submission_sequence', input.submissionSequence === 1) && check('submission_marker', input.submissionMarker === record.marker)
+    && (candidate.remount ? check('old_record_nodes', candidate.initialRoute || candidate.pendingPrivate || record.root === candidate.oldRoot && record.body === candidate.oldBody)
+      && check('old_root_detached', candidate.oldRoot?.isConnected === false) && check('old_body_detached', candidate.oldBody?.isConnected === false)
+      && check('root_replaced', candidate.root !== candidate.oldRoot) && check('body_replaced', candidate.body !== candidate.oldBody)
+      : candidate.initialRoute ? check('initial_root_same', candidate.oldRoot === candidate.root) && check('initial_body_same', candidate.oldBody === candidate.body)
+        : check('record_root_same', record.root === candidate.root) && check('record_body_same', record.body === candidate.body))
+    && check('record_marker', record.marker === candidate.marker) && check('record_canonical', record.canonical === candidate.canonical)
+    && check('record_fingerprint_format', typeof record.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.fingerprint))
+    && check('record_fingerprint', record.fingerprint === candidate.fingerprint)
+    && check('native_fingerprint', candidate.provisional || candidate.initialRoute || record.fingerprint === input.expectedFirstUserFingerprint)
+    && check('first_pin', candidate.initialRoute || pinned?.marker === candidate.marker && pinned.fingerprint === record.fingerprint)
+    && check('submission_pins', chatGPTSubmissionPins(record))
+    && check('state_model', websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice))
+    && check('expansion_model', websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice));
 }
+const chatGPTBoundPinDiagnosticRules = Object.freeze([
+  "not_checked", "action", "suppressed", "provisional_permission",
+  "bound_permission_disabled", "binding_permission", "expansion_permission", "native_pin_absent",
+  "provisional_remount", "native_pin_unadopted", "refresh_permission_disabled", "bound_permission",
+  "provisional_permission_disabled", "binding_disabled", "expansion_disabled", "state_current",
+  "submission_context", "record_sequence", "pending_identity", "last_verified_absent",
+  "record_pending_phase", "pending_root_absent", "pending_body_absent", "private_marker",
+  "private_fingerprint", "private_pin_absent", "predecessor_present", "predecessor_current",
+  "predecessor_expanded", "predecessor_context", "predecessor_clicked", "predecessor_canonical",
+  "predecessor_document", "predecessor_owner", "predecessor_prompt", "predecessor_marker",
+  "predecessor_root", "predecessor_body", "deadline_same", "deadline_finite",
+  "deadline_live", "predecessor_route", "pending_absent", "verified_identity",
+  "verified_phase", "record_document", "record_owner", "receipt_remount",
+  "receipt_retained", "receipt_present", "receipt_absent", "submission_sequence",
+  "submission_marker", "old_record_nodes", "old_root_detached", "old_body_detached",
+  "root_replaced", "body_replaced", "initial_root_same", "initial_body_same",
+  "record_root_same", "record_body_same", "record_marker", "record_canonical",
+  "record_fingerprint_format", "record_fingerprint", "native_fingerprint", "first_pin",
+  "submission_pins", "state_model", "expansion_model"
+]);
+
 async function chatGPTRecaptureInitialRoute(predecessor) {
   // A native-certified first route can cross a successful display expansion
   // before either first-message pin exists. Identity still comes from the
@@ -5802,61 +5853,133 @@ function chatGPTFirstRouteModelPins(candidate) {
 function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
   const state = candidate?.state, record = candidate?.record, predecessor = candidate?.predecessor;
   const pinned = globalThis.__computaModelFirstProof;
-  const initial = candidate === chatGPTInitialRouteRecovery && candidate?.initialRoute === true
-    && candidate.provisional !== true && candidate.pendingPrivate !== true && pinned == null;
-  const pendingPrivate = candidate?.pendingPrivate === true && candidate.provisional === true
-    && candidate.initialRoute !== true && candidate.remount === true
-    && pinned?.marker === candidate.marker && pinned?.fingerprint === fingerprint;
-  if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
-    || !candidate.bound || !(initial || pendingPrivate) || candidate.verified === true
-    || candidate.routeDiscard || candidate.routeContinuationEdges || candidate.contextFailure || candidate.modelFailure
-    || candidate.outcome !== 'expanded' || candidate.clicked !== true
-    || input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.allowFirstUserExpansion !== true
-    || input.allowProvisionalFirstUserExpansion !== true || input.allowBoundFirstUserExpansion === true
-    || input.allowBoundFirstUserRemountRefresh === true || input.suppressFirstUserExpansionClaim === true
-    || input.expectedFirstUserFingerprint != null) return null;
+  let initialModeRule = null, pendingModeRule = null;
+  const modeCheck = (mode, rule, value) => {
+    if (!value) { if (mode === 'initial' && !initialModeRule) initialModeRule = rule; if (mode === 'pending' && !pendingModeRule) pendingModeRule = rule; }
+    return value;
+  };
+  const initial = modeCheck('initial', 'initial_candidate', candidate === chatGPTInitialRouteRecovery)
+    && modeCheck('initial', 'initial_flag', candidate?.initialRoute === true)
+    && modeCheck('initial', 'initial_provisional', candidate.provisional !== true)
+    && modeCheck('initial', 'initial_pending_private', candidate.pendingPrivate !== true)
+    && modeCheck('initial', 'initial_private_pin', pinned == null);
+  const pendingPrivate = modeCheck('pending', 'pending_flag', candidate?.pendingPrivate === true)
+    && modeCheck('pending', 'pending_provisional', candidate.provisional === true)
+    && modeCheck('pending', 'pending_initial_route', candidate.initialRoute !== true)
+    && modeCheck('pending', 'pending_remount', candidate.remount === true)
+    && modeCheck('pending', 'pending_private_marker', pinned?.marker === candidate.marker)
+    && modeCheck('pending', 'pending_private_fingerprint', pinned?.fingerprint === fingerprint);
+  const reject = (rule, value) => {
+    try {
+      if (value && candidate && candidate.pendingRouteRuleInvocation !== websiteChatInvocationLease) {
+        candidate.pendingRouteRule = rule; candidate.pendingRouteRuleInvocation = websiteChatInvocationLease;
+      }
+    } catch { }
+    return value;
+  };
+  if (reject('candidate_absent', !candidate)
+    || reject('candidate_current', candidate !== globalThis.__computaModelBoundFirstExpansion)
+    || reject('candidate_bound', !candidate.bound)
+    || reject(candidate.pendingPrivate === true ? pendingModeRule : initialModeRule, !(initial || pendingPrivate))
+    || reject('candidate_verified', candidate.verified === true)
+    || reject('route_discard_present', candidate.routeDiscard) || reject('route_edges_present', candidate.routeContinuationEdges)
+    || reject('context_failure_present', candidate.contextFailure) || reject('model_failure_present', candidate.modelFailure)
+    || reject('candidate_outcome', candidate.outcome !== 'expanded') || reject('candidate_clicked', candidate.clicked !== true)
+    || reject('action', input.action !== 'inspect') || reject('binding_permission', input.allowFirstUserBinding !== true)
+    || reject('expansion_permission', input.allowFirstUserExpansion !== true)
+    || reject('provisional_permission', input.allowProvisionalFirstUserExpansion !== true)
+    || reject('bound_permission', input.allowBoundFirstUserExpansion === true)
+    || reject('refresh_permission', input.allowBoundFirstUserRemountRefresh === true)
+    || reject('suppressed', input.suppressFirstUserExpansionClaim === true)
+    || reject('native_first_pin', input.expectedFirstUserFingerprint != null)) return null;
   chatGPTSubmissionContext(state);
   const context = chatGPTSubmissionContextFailure, edges = input.firstUserExpansionRouteContinuation;
-  if (!state || context?.state !== state || context.checks.urlMatches !== false
-    || !chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
-      .every(key => context.checks[key] === true)
-    || document.URL === input.expectedURL || candidate.routeURL !== input.expectedURL
-    || candidate.document !== document || candidate.owner !== input.ownerToken
-    || state.pending !== record || state.lastVerified != null || record?.phase !== 'send_claimed'
-    || record.sequence !== 1 || record.nativeFirstPinned === true || record.root != null || record.body != null || record.replacement != null
-    || record.document !== document || record.owner !== candidate.owner || state.firstMarker !== candidate.marker
-    || input.submissionSequence !== 1 || input.submissionMarker !== candidate.marker || record.marker !== candidate.marker
-    || input.expectedFirstUserMarker !== candidate.marker || globalThis.__computaModelFirstMarker !== candidate.marker
-    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
-    || globalThis.__computaModelFirstPrompt !== candidate.prompt || record.canonical !== candidate.canonical
-    || candidate.expandedText !== candidate.canonical || candidate.fingerprint !== fingerprint || record.fingerprint !== fingerprint
-    || !chatGPTSubmissionPins(record)
-    || !predecessor || predecessor !== globalThis.__computaModelFirstExpansion || predecessor.contextFailure || predecessor.modelFailure
-    || predecessor.outcome !== 'expanded' || predecessor.clicked !== true || predecessor.expandedText !== candidate.canonical
-    || predecessor.canonical !== candidate.canonical || predecessor.prompt !== candidate.prompt || predecessor.marker !== candidate.marker
-    || predecessor.document !== document || predecessor.owner !== candidate.owner
-    || candidate.oldRoot !== predecessor.root || candidate.oldBody !== predecessor.body
-    || candidate.deadline !== predecessor.deadline || !Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline
-    || !Array.isArray(edges) || edges.length !== 1 || Object.keys(edges).join(',') !== '0'
-    || !edges[0] || Array.isArray(edges[0]) || Object.keys(edges[0]).sort().join(',') !== 'fromURL,toURL'
-    || edges[0].fromURL !== predecessor.routeURL || edges[0].toURL !== candidate.routeURL || edges[0].fromURL === edges[0].toURL
-    || input.expectedConversationIdentity || input.expectedConversation
-    || !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
-    || !websiteModelChoiceEqual(predecessor.modelChoice, candidate.modelChoice)
-    || !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice)
-    || !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice)
-    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified() || !chatGPTFirstRouteModelPins(candidate)) return null;
+  if (reject('state_absent', !state) || reject('context_state', context?.state !== state)
+    || reject('context_url', context.checks.urlMatches !== false)
+    || reject('context_non_url', !chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+      .every(key => context.checks[key] === true))
+    || reject('url_unchanged', document.URL === input.expectedURL) || reject('from_url', candidate.routeURL !== input.expectedURL)
+    || reject('document', candidate.document !== document) || reject('owner', candidate.owner !== input.ownerToken)
+    || reject('pending_record', state.pending !== record) || reject('last_verified', state.lastVerified != null)
+    || reject('pending_phase', record?.phase !== 'send_claimed') || reject('record_sequence', record.sequence !== 1)
+    || reject('native_adopted', record.nativeFirstPinned === true) || reject('record_root', record.root != null)
+    || reject('record_body', record.body != null) || reject('record_replacement', record.replacement != null)
+    || reject('record_document', record.document !== document) || reject('record_owner', record.owner !== candidate.owner)
+    || reject('state_marker', state.firstMarker !== candidate.marker) || reject('submission_sequence', input.submissionSequence !== 1)
+    || reject('submission_marker', input.submissionMarker !== candidate.marker) || reject('record_marker', record.marker !== candidate.marker)
+    || reject('expected_marker', input.expectedFirstUserMarker !== candidate.marker)
+    || reject('private_marker', globalThis.__computaModelFirstMarker !== candidate.marker)
+    || reject('submitted', globalThis.__computaModelFirstSubmitted !== true) || reject('submission_count', globalThis.__computaModelLastSubmissionCount !== 0)
+    || reject('prompt', globalThis.__computaModelFirstPrompt !== candidate.prompt) || reject('record_canonical', record.canonical !== candidate.canonical)
+    || reject('expanded_canonical', candidate.expandedText !== candidate.canonical) || reject('candidate_fingerprint', candidate.fingerprint !== fingerprint)
+    || reject('record_fingerprint', record.fingerprint !== fingerprint) || reject('submission_pins', !chatGPTSubmissionPins(record))
+    || reject('predecessor_absent', !predecessor) || reject('predecessor_current', predecessor !== globalThis.__computaModelFirstExpansion)
+    || reject('predecessor_context', predecessor.contextFailure) || reject('predecessor_model', predecessor.modelFailure)
+    || reject('predecessor_outcome', predecessor.outcome !== 'expanded') || reject('predecessor_clicked', predecessor.clicked !== true)
+    || reject('predecessor_expanded_canonical', predecessor.expandedText !== candidate.canonical)
+    || reject('predecessor_canonical', predecessor.canonical !== candidate.canonical) || reject('predecessor_prompt', predecessor.prompt !== candidate.prompt)
+    || reject('predecessor_marker', predecessor.marker !== candidate.marker) || reject('predecessor_document', predecessor.document !== document)
+    || reject('predecessor_owner', predecessor.owner !== candidate.owner) || reject('old_root', candidate.oldRoot !== predecessor.root)
+    || reject('old_body', candidate.oldBody !== predecessor.body) || reject('deadline_same', candidate.deadline !== predecessor.deadline)
+    || reject('deadline_finite', !Number.isFinite(candidate.deadline)) || reject('deadline_expired', Date.now() > candidate.deadline)
+    || reject('edges_array', !Array.isArray(edges)) || reject('edges_count', edges.length !== 1)
+    || reject('edges_keys', Object.keys(edges).join(',') !== '0') || reject('edge_absent', !edges[0])
+    || reject('edge_array', Array.isArray(edges[0])) || reject('edge_keys', Object.keys(edges[0]).sort().join(',') !== 'fromURL,toURL')
+    || reject('edge_from', edges[0].fromURL !== predecessor.routeURL) || reject('edge_to', edges[0].toURL !== candidate.routeURL)
+    || reject('edge_unchanged', edges[0].fromURL === edges[0].toURL) || reject('conversation_identity', input.expectedConversationIdentity)
+    || reject('conversation_route', input.expectedConversation) || reject('state_model', !websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice))
+    || reject('predecessor_model_choice', !websiteModelChoiceEqual(predecessor.modelChoice, candidate.modelChoice))
+    || reject('expected_model', !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice))
+    || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
+    || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())
+    || reject('model_pins', !chatGPTFirstRouteModelPins(candidate))) return null;
   const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
-  if (roots.length !== 1 || root !== candidate.root || body !== candidate.body || !root?.isConnected || !body?.isConnected
-    || normalizedFirstBody(body) !== candidate.canonical
-    || (candidate.remount ? candidate.oldRoot?.isConnected !== false || candidate.oldBody?.isConnected !== false
-      || root === candidate.oldRoot || body === candidate.oldBody : root !== candidate.oldRoot || body !== candidate.oldBody)) return null;
+  try { candidate.pendingRouteNodes = { invocation: websiteChatInvocationLease, currentNodesObserved: true,
+    currentRootMatches: root === candidate.root, currentBodyMatches: body === candidate.body }; } catch { }
+  if (reject('user_count', roots.length !== 1) || reject('current_root', root !== candidate.root) || reject('current_body', body !== candidate.body)
+    || reject('root_connected', !root?.isConnected) || reject('body_connected', !body?.isConnected)
+    || reject('body_canonical', normalizedFirstBody(body) !== candidate.canonical)
+    || (candidate.remount ? reject('old_root_detached', candidate.oldRoot?.isConnected !== false)
+      || reject('old_body_detached', candidate.oldBody?.isConnected !== false) || reject('root_replaced', root === candidate.oldRoot)
+      || reject('body_replaced', body === candidate.oldBody)
+      : reject('root_same', root !== candidate.oldRoot) || reject('body_same', body !== candidate.oldBody))) return null;
   // Retain the already certified first edge; the existing continuation consumes
   // only its second edge. Neither the two-edge budget nor deadline is renewed.
   candidate.routeContinuationEdges = edges.map(edge => Object.freeze({ ...edge }));
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
+const chatGPTPendingRouteDiagnosticRules = Object.freeze([
+  "not_checked", "candidate_absent", "candidate_current", "candidate_bound",
+  "candidate_verified", "route_discard_present", "route_edges_present", "context_failure_present",
+  "model_failure_present", "candidate_outcome", "candidate_clicked", "action",
+  "binding_permission", "expansion_permission", "provisional_permission", "bound_permission",
+  "refresh_permission", "suppressed", "native_first_pin", "state_absent",
+  "context_state", "context_url", "context_non_url", "url_unchanged",
+  "from_url", "document", "owner", "pending_record",
+  "last_verified", "pending_phase", "record_sequence", "native_adopted",
+  "record_root", "record_body", "record_replacement", "record_document",
+  "record_owner", "state_marker", "submission_sequence", "submission_marker",
+  "record_marker", "expected_marker", "private_marker", "submitted",
+  "submission_count", "prompt", "record_canonical", "expanded_canonical",
+  "candidate_fingerprint", "record_fingerprint", "submission_pins", "predecessor_absent",
+  "predecessor_current", "predecessor_context", "predecessor_model", "predecessor_outcome",
+  "predecessor_clicked", "predecessor_expanded_canonical", "predecessor_canonical", "predecessor_prompt",
+  "predecessor_marker", "predecessor_document", "predecessor_owner", "old_root",
+  "old_body", "deadline_same", "deadline_finite", "deadline_expired",
+  "edges_array", "edges_count", "edges_keys", "edge_absent",
+  "edge_array", "edge_keys", "edge_from", "edge_to",
+  "edge_unchanged", "conversation_identity", "conversation_route", "state_model",
+  "predecessor_model_choice", "expected_model", "expansion_model", "product",
+  "temporary", "model_pins", "user_count", "current_root",
+  "current_body", "root_connected", "body_connected", "body_canonical",
+  "old_root_detached", "old_body_detached", "root_replaced", "body_replaced",
+  "root_same", "body_same", "initial_candidate", "initial_flag",
+  "initial_provisional", "initial_pending_private", "initial_private_pin", "pending_flag",
+  "pending_provisional", "pending_initial_route", "pending_remount", "pending_private_marker",
+  "pending_private_fingerprint"
+]);
+
 // A route crossing after display completion is a discarded read, not a new
 // display attempt. Retain only an exact, native-bound physical candidate. This
 // witness grants no response, replacement receipt, or retry; the next call must
@@ -6791,6 +6914,26 @@ function chatGPTRecoveryLifecycle(path = 'other') {
         boundRoutePending: candidate.routeDiscardConsumed !== candidate.routeDiscard } : {}) };
   } catch { return null; }
 }
+function chatGPTPendingRouteGuardDiagnostic(candidate) {
+  try {
+    const boundCurrent = candidate.boundPinsRuleInvocation === websiteChatInvocationLease;
+    const pendingCurrent = candidate.pendingRouteRuleInvocation === websiteChatInvocationLease;
+    if (!boundCurrent && !pendingCurrent) return null;
+    const rule = pendingCurrent && chatGPTPendingRouteDiagnosticRules.includes(candidate.pendingRouteRule)
+      ? candidate.pendingRouteRule : 'not_checked';
+    const boundPinsRule = boundCurrent && chatGPTBoundPinDiagnosticRules.includes(candidate.boundPinsRule)
+      ? candidate.boundPinsRule : 'not_checked';
+    const context = chatGPTSubmissionContextFailure;
+    const submissionContextRule = context?.state === candidate.state
+      ? chatGPTSubmissionContextCheckKeys.find(key => context.checks[key] === false) || 'not_checked' : 'not_checked';
+    const nodes = candidate.pendingRouteNodes?.invocation === websiteChatInvocationLease ? candidate.pendingRouteNodes : null;
+    return Object.freeze({ rule, boundPinsRule, submissionContextRule,
+      modelPinsRule: rule === 'model_pins' ? chatGPTFirstRouteModelFailureRule : 'not_checked',
+      pendingPrivate: candidate.pendingPrivate === true, initialRoute: candidate.initialRoute === true,
+      provisional: candidate.provisional === true, currentNodesObserved: nodes?.currentNodesObserved === true,
+      currentRootMatches: nodes?.currentRootMatches === true, currentBodyMatches: nodes?.currentBodyMatches === true });
+  } catch { return null; }
+}
 function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, observed = null) {
   try {
     if (!candidate || candidate.certificateDiagnostic) return;
@@ -6832,6 +6975,7 @@ function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, 
     }
     // Read only stored scalar/identity facts. In particular, do not call a
     // model/product/context proof getter again to explain a rejected operand.
+    const pendingRouteGuard = chatGPTPendingRouteGuardDiagnostic(candidate);
     candidate.certificateDiagnostic = Object.freeze({ kind: 'chatgpt_bound_certificate_v1', stage, rule,
       routeRule: chatGPTBoundRouteFailureRule, contextFailure: contextFailure ?? 'none',
       observedError: !observed?.error ? 'none' : errors.includes(observed.error) ? observed.error : 'other',
@@ -6844,7 +6988,8 @@ function chatGPTLatchCertificateFailure(candidate, stage, rule, contextFailure, 
       awaitingNativeRefresh: candidate.awaitingNativeRefresh === true, refreshClaimed: candidate.refreshClaimed === true,
       ...(chatGPTBoundRouteFailureRule === chatGPTFirstRouteModelFailureRule && chatGPTFirstRouteModelFailureRule !== 'none'
         && chatGPTFirstRouteModelFailureState ? { modelPinState: chatGPTFirstRouteModelFailureState } : {}),
-      ...(modelPinInvalidation ? { modelPinInvalidation } : {}) });
+      ...(modelPinInvalidation ? { modelPinInvalidation } : {}),
+      ...(pendingRouteGuard ? { pendingRouteGuard } : {}) });
     candidate.certificateDiagnosticDocument = document;
     candidate.certificateDiagnosticOwner = input.ownerToken;
   } catch { /* Diagnostic failure cannot change admission or retry a read. */ }

@@ -2765,6 +2765,59 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "model_remount_trigger_missing", "model_remount_trigger_disabled", "model_remount_closed_presentation",
         "model_remount_header_power", "model_remount_product", "model_remount_temporary", "model_remount_pending_completed",
         "model_remount_pending_header", "model_remount_pin_changed", "model_remount_pending_replaced"]
+    private static let boundPinDiagnosticRules: Set<String> = [
+        "not_checked", "action", "suppressed", "provisional_permission",
+        "bound_permission_disabled", "binding_permission", "expansion_permission", "native_pin_absent",
+        "provisional_remount", "native_pin_unadopted", "refresh_permission_disabled", "bound_permission",
+        "provisional_permission_disabled", "binding_disabled", "expansion_disabled", "state_current",
+        "submission_context", "record_sequence", "pending_identity", "last_verified_absent",
+        "record_pending_phase", "pending_root_absent", "pending_body_absent", "private_marker",
+        "private_fingerprint", "private_pin_absent", "predecessor_present", "predecessor_current",
+        "predecessor_expanded", "predecessor_context", "predecessor_clicked", "predecessor_canonical",
+        "predecessor_document", "predecessor_owner", "predecessor_prompt", "predecessor_marker",
+        "predecessor_root", "predecessor_body", "deadline_same", "deadline_finite",
+        "deadline_live", "predecessor_route", "pending_absent", "verified_identity",
+        "verified_phase", "record_document", "record_owner", "receipt_remount",
+        "receipt_retained", "receipt_present", "receipt_absent", "submission_sequence",
+        "submission_marker", "old_record_nodes", "old_root_detached", "old_body_detached",
+        "root_replaced", "body_replaced", "initial_root_same", "initial_body_same",
+        "record_root_same", "record_body_same", "record_marker", "record_canonical",
+        "record_fingerprint_format", "record_fingerprint", "native_fingerprint", "first_pin",
+        "submission_pins", "state_model", "expansion_model"]
+    private static let pendingRouteDiagnosticRules: Set<String> = [
+        "not_checked", "candidate_absent", "candidate_current", "candidate_bound",
+        "candidate_verified", "route_discard_present", "route_edges_present", "context_failure_present",
+        "model_failure_present", "candidate_outcome", "candidate_clicked", "action",
+        "binding_permission", "expansion_permission", "provisional_permission", "bound_permission",
+        "refresh_permission", "suppressed", "native_first_pin", "state_absent",
+        "context_state", "context_url", "context_non_url", "url_unchanged",
+        "from_url", "document", "owner", "pending_record",
+        "last_verified", "pending_phase", "record_sequence", "native_adopted",
+        "record_root", "record_body", "record_replacement", "record_document",
+        "record_owner", "state_marker", "submission_sequence", "submission_marker",
+        "record_marker", "expected_marker", "private_marker", "submitted",
+        "submission_count", "prompt", "record_canonical", "expanded_canonical",
+        "candidate_fingerprint", "record_fingerprint", "submission_pins", "predecessor_absent",
+        "predecessor_current", "predecessor_context", "predecessor_model", "predecessor_outcome",
+        "predecessor_clicked", "predecessor_expanded_canonical", "predecessor_canonical", "predecessor_prompt",
+        "predecessor_marker", "predecessor_document", "predecessor_owner", "old_root",
+        "old_body", "deadline_same", "deadline_finite", "deadline_expired",
+        "edges_array", "edges_count", "edges_keys", "edge_absent",
+        "edge_array", "edge_keys", "edge_from", "edge_to",
+        "edge_unchanged", "conversation_identity", "conversation_route", "state_model",
+        "predecessor_model_choice", "expected_model", "expansion_model", "product",
+        "temporary", "model_pins", "user_count", "current_root",
+        "current_body", "root_connected", "body_connected", "body_canonical",
+        "old_root_detached", "old_body_detached", "root_replaced", "body_replaced",
+        "root_same", "body_same", "initial_candidate", "initial_flag",
+        "initial_provisional", "initial_pending_private", "initial_private_pin", "pending_flag",
+        "pending_provisional", "pending_initial_route", "pending_remount", "pending_private_marker",
+        "pending_private_fingerprint"]
+    private static let submissionContextDiagnosticRules: Set<String> = [
+        "not_checked", "invocationClaimed", "invocationCurrent", "statePresent", "stateNotRevoked",
+        "stateDocumentMatches", "stateOwnerMatches", "stateCurrent", "globalOwnerMatches", "topFrame",
+        "providerMatches", "originMatches", "urlMatches", "firstMarkerMatches", "productProofVerified",
+        "temporaryVerified", "modelChoiceMatches"]
     private static let boundCertificateLabels: [String: Set<String>] = [
         "stage": ["model_read", "model_context", "replacement_observation", "receipt_context", "body_hash", "replacement_hash", "finalization_hash"],
         "rule": ["model_error", "context", "body", "replacement_result", "receipt_absent", "receipt_root",
@@ -2782,7 +2835,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider == .chatgpt, let value = raw as? [String: Any],
               value["kind"] as? String == "chatgpt_bound_certificate_v1",
               ordinaryKeys.isSubset(of: Set(value.keys)),
-              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState"])),
+              Set(value.keys).isSubset(of: ordinaryKeys.union(["modelPinInvalidation", "modelPinState", "pendingRouteGuard"])),
               let routeRule = value["routeRule"] as? String, boundCertificateRouteRules.contains(routeRule) else { return nil }
         var safe: [String: Any] = ["kind": "chatgpt_bound_certificate_v1", "routeRule": routeRule]
         if let invalidation = value["modelPinInvalidation"] {
@@ -2792,6 +2845,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let state = value["modelPinState"] {
             guard boundCertificateModelPinRules.contains(routeRule), let projected = sanitizedModelPinState(state) else { return nil }
             safe["modelPinState"] = projected
+        }
+        if let pending = value["pendingRouteGuard"] {
+            guard let projected = sanitizedPendingRouteGuard(pending) else { return nil }
+            safe["pendingRouteGuard"] = projected
         }
         for key in boundCertificateFlags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
@@ -2803,6 +2860,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
               bytes.count <= 960 else { return nil }
+        return safe
+    }
+
+    private static func sanitizedPendingRouteGuard(_ raw: Any) -> [String: Any]? {
+        let flags = ["pendingPrivate", "initialRoute", "provisional", "currentNodesObserved",
+                     "currentRootMatches", "currentBodyMatches"]
+        let labels: [String: Set<String>] = [
+            "rule": pendingRouteDiagnosticRules, "boundPinsRule": boundPinDiagnosticRules,
+            "submissionContextRule": submissionContextDiagnosticRules,
+            "modelPinsRule": boundCertificateModelPinRules.union(["not_checked", "none"])]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + Array(labels.keys)) else { return nil }
+        var safe: [String: Any] = [:]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        for (key, allowed) in labels {
+            guard let label = value[key] as? String, allowed.contains(label) else { return nil }
+            safe[key] = label
+        }
+        // Unreached physical checks are unknown, not evidence of a mismatch.
+        guard safe["currentNodesObserved"] as? Bool == true
+            || (safe["currentRootMatches"] as? Bool == false && safe["currentBodyMatches"] as? Bool == false) else { return nil }
         return safe
     }
 

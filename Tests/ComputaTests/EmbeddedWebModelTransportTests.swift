@@ -7959,10 +7959,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 try? await self.installBoundFirstUserCollapse(view, behavior: condition == "expired" ? "remount" : condition)
                 if condition == "expired" { try? await Task.sleep(for: .milliseconds(1_900)) }
             }
+            let prompt = String(repeating: "Bound recovery pending-private payload line.\n", count: 600)
             do {
                 _ = try await fixturePhaseProbe("pending_private_send") {
                     try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
-                        "prompt": String(repeating: "Bound recovery pending-private payload line.\n", count: 600)])
+                        "prompt": prompt])
                 }
                 let complete = try await fixturePhaseProbe("pending_private_complete") {
                     try await waitForState("complete", fixture.transport, token: token)
@@ -7977,13 +7978,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNotNil(initialDeadline)
                 XCTAssertEqual(deadline, initialDeadline, "Recovery must not renew the original display deadline")
                 if promoteDuringRecoveryHash {
-                    XCTAssertEqual(proof["firstUserFingerprint"] as? String, proof["submittedPromptFingerprint"] as? String)
+                    XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
                     let recovery = try await evaluate(view, """
                         const recovery = globalThis.__computaModelBoundFirstExpansion;
                         return { freshHashes: globalThis.__fixturePendingPrivateFreshHashes,
                           verified: recovery?.verified, edgeCount: recovery?.routeContinuationEdges?.length,
+                          firstHash: globalThis.__computaModelFirstProof?.fingerprint,
+                          submittedBodyHash: globalThis.__computaChatSubmissionState?.lastVerified?.fingerprint,
                           phase: globalThis.__computaChatSubmissionState?.lastVerified?.phase };
                         """, world: world) as? [String: Any]
+                    XCTAssertEqual(proof["firstUserFingerprint"] as? String, recovery?["firstHash"] as? String)
+                    XCTAssertEqual(recovery?["firstHash"] as? String, recovery?["submittedBodyHash"] as? String)
                     XCTAssertGreaterThanOrEqual(recovery?["freshHashes"] as? Int ?? 0, 2,
                         "Final route must freshly hash both the complete first body and submitted body")
                     XCTAssertEqual(recovery?["verified"] as? Bool, true)
@@ -11996,6 +12001,89 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
          "routeRule": "expected_model", "contextFailure": "url", "observedError": "first_user_observation_replaced",
          "phase": "verified", "receiptPresent": true, "receiptNodesMatch": true, "receiptRetained": true,
          "awaitingNativeRefresh": true, "refreshClaimed": true, "expectedModelPresent": false, "deferModelVerification": false]
+    }
+
+    private func pendingRouteGuardDiagnosticFixture() -> [String: Any] {
+        ["rule": "pending_private_fingerprint", "boundPinsRule": "submission_context",
+         "submissionContextRule": "urlMatches", "modelPinsRule": "not_checked",
+         "pendingPrivate": true, "initialRoute": false, "provisional": true,
+         "currentNodesObserved": false, "currentRootMatches": false, "currentBodyMatches": false]
+    }
+
+    func testPendingRouteGuardDiagnosticsPreserveFiniteFirstFailureFactsAndExistingObservation() throws {
+        var diagnostic = boundCertificateDiagnosticFixture()
+        diagnostic["stage"] = "body_hash"; diagnostic["routeRule"] = "provisional"
+        diagnostic["contextFailure"] = "private_pin"; diagnostic["phase"] = "send_claimed"
+        let originalGuard = pendingRouteGuardDiagnosticFixture()
+        diagnostic["pendingRouteGuard"] = originalGuard
+        XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt) as NSDictionary?, diagnostic as NSDictionary)
+        for provider in [EmbeddedWebModelTransport.Provider.gemini, .claude] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: provider))
+        }
+        let samples: [String: [String]] = [
+            "rule": ["not_checked", "context_non_url", "predecessor_expanded_canonical", "edge_from", "current_body", "model_pins"],
+            "boundPinsRule": ["not_checked", "private_fingerprint", "refresh_permission_disabled", "predecessor_route", "old_root_detached"],
+            "submissionContextRule": ["not_checked", "invocationCurrent", "stateOwnerMatches", "productProofVerified", "modelChoiceMatches"],
+            "modelPinsRule": ["not_checked", "none", "model_trigger_identity", "model_pin_invalidated", "model_remount_pending_replaced"]]
+        for (key, values) in samples {
+            for value in values {
+                var pending = originalGuard; pending[key] = value
+                var changed = diagnostic; changed["pendingRouteGuard"] = pending
+                XCTAssertEqual(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt) as NSDictionary?, changed as NSDictionary, key)
+            }
+        }
+        var observedNodes = originalGuard
+        observedNodes["currentNodesObserved"] = true; observedNodes["currentRootMatches"] = true
+        observedNodes["currentBodyMatches"] = false
+        var changed = diagnostic; changed["pendingRouteGuard"] = observedNodes
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt))
+        let authority: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message",
+            "firstUserVerified": false, "temporary": false, "text": "Unchanged observation"]
+        var observation = authority; observation["boundCertificateDiagnostic"] = diagnostic
+        let record = try XCTUnwrap(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: .chatgpt))
+        XCTAssertEqual(observation as NSDictionary, authority as NSDictionary)
+        XCTAssertLessThanOrEqual(record.utf8.count, 960)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(record.utf8)) as? NSDictionary, diagnostic as NSDictionary)
+        var discarded = authority; discarded["boundCertificateDiagnostic"] = diagnostic
+        discarded["url"] = "https://PRIVATE_CANARY"
+        let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(try JSONSerialization.data(withJSONObject: discarded), provider: .chatgpt)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE_CANARY") })
+        XCTAssertEqual(records.filter { $0.contains("pendingRouteGuard") }.count, 1)
+    }
+
+    func testPendingRouteGuardDiagnosticsRejectUnknownIncompletePrivateAndWrongTypeValues() throws {
+        let pending = pendingRouteGuardDiagnosticFixture()
+        var valid = boundCertificateDiagnosticFixture(); valid["pendingRouteGuard"] = pending
+        let flags = ["pendingPrivate", "initialRoute", "provisional", "currentNodesObserved", "currentRootMatches", "currentBodyMatches"]
+        func assertRejected(_ raw: Any, file: StaticString = #filePath, line: UInt = #line) {
+            var changed = valid; changed["pendingRouteGuard"] = raw
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(changed, provider: .chatgpt), file: file, line: line)
+            var observation: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message", "boundCertificateDiagnostic": changed]
+            XCTAssertNil(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: .chatgpt), file: file, line: line)
+            XCTAssertEqual(observation as NSDictionary, ["error": "conversation_changed", "detail": "first_user_message"] as NSDictionary, file: file, line: line)
+        }
+        for key in pending.keys {
+            var partial = pending; partial.removeValue(forKey: key); assertRejected(partial)
+            let invalid: [Any] = [NSNull(), "PRIVATE_CANARY", ["url": "https://PRIVATE_CANARY"], 0, 1]
+                + (flags.contains(key) ? [] : [true, false])
+            for value in invalid {
+                var malformed = pending; malformed[key] = value; assertRejected(malformed)
+            }
+        }
+        for key in ["url", "owner", "fingerprint", "canonical", "root", "body", "input", "record"] {
+            var privateValue = pending; privateValue[key] = "PRIVATE_CANARY"; assertRejected(privateValue)
+        }
+        for key in ["currentRootMatches", "currentBodyMatches"] {
+            var contradictory = pending; contradictory[key] = true; assertRejected(contradictory)
+        }
+        for malformed in [NSNull(), "PRIVATE_CANARY", [pending]] as [Any] { assertRejected(malformed) }
+        var malformed = pending; malformed["rule"] = "PRIVATE_CANARY"
+        var changed = valid; changed["pendingRouteGuard"] = malformed
+        let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(try JSONSerialization.data(withJSONObject:
+            ["error": "conversation_changed", "boundCertificateDiagnostic": changed]), provider: .chatgpt)
+        XCTAssertEqual(records.count, 1, "Rejected diagnostics must preserve the existing route error")
+        XCTAssertFalse(records.joined().contains("PRIVATE_CANARY"))
     }
 
     func testBoundCertificateDiagnosticRejectsPrivateUnknownIncompleteAndForeignShapes() throws {
