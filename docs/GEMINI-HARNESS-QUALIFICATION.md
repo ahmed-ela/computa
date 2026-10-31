@@ -6,18 +6,20 @@ one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
 Current status (October 31): build332, source `05d364f`, is installed and audited.
-CAPTCHA investigation takes priority over all-model qualification. One fresh
-owned 3.1 Pro marker task passed; after an ordinary same-build restart, the next
-fresh task received a captured HTTP 429 challenge before submission. A separately
-approved normal-tab navigation on that process reproduced HTTP 429. Inspector
-retained no request records for that first navigation from about:blank, so the
-outgoing cookie header and initial redirect source remain unknown. Successful
-normal network responses without the exemption-cookie name and an earlier
-challenge with a future native cookie candidate are both retained. Simple
-candidate loss or expiry does not explain that earlier failure; no browser-version
-cause or CAPTCHA prevention fix has been established. Both developer settings
-were restored off. Earlier staged/installed statements below describe historical
-evidence, not the current installation.
+CAPTCHA investigation takes priority over all-model qualification. The latest
+fresh 3.1 Pro marker passed in 9.101 seconds. After an ordinary same-build restart,
+the next owned task failed in 1.124 seconds before selection or submission. The
+working Inspector sequence then captured a normal human navigation returning a
+302 redirect to Google's 429 challenge. Both responses had current Dates and
+no-store headers. One approved navigation with Disable Caches visually checked
+also received a newly dated 302/429. This argues against a simple stale local
+redirect, but does not identify Google's trigger. The initial redirected
+request's refined Cookie header remains unavailable. Cookie totals immediately
+before shutdown matched those at restart; a preceding one-cookie count reduction
+had already occurred before exit. No browser-version cause or CAPTCHA-prevention
+fix has been established. All temporary developer/cache settings were restored.
+Earlier staged/installed statements below describe historical evidence, not the
+current installation.
 
 ## Ownership failure and repair
 
@@ -984,3 +986,82 @@ was changed. Inspector/chooser windows were closed, Preserve Log and Safari's
 developer setting restored off, both fixture apps quit and their loopback
 servers stopped. Local source, build, native/server and UI receipts are retained
 under `inspector-local332` and `inspector-local332b`.
+
+### October 31: capture succeeds; cache comparison does not clear the challenge
+
+Inspection of the already-loaded human challenge tab retained the next normal
+navigation's metadata. At 08:38:56 UTC the same process and tab reached Gemini
+with HTTP 200, explicit Source Network, no redirects and a current Date. Its
+outgoing Cookie header was present without the exemption name; the response did
+not set that name. This was 28 minutes 58 seconds after the previous human 429,
+without a restart or CAPTCHA completion in between. Request history, timing and
+provider state changed, so it is recovery evidence rather than an isolated fix.
+
+A second, model-owned 200 appeared 1.969 seconds later and its view closed. The
+source-defined automatic recovery path creates one owned catalog-discovery page
+after a healthy human document settles while a saved checkpoint exists. The
+persisted recovery report said verified and the checkpoint was absent. These
+facts support that attribution, although the report does not bind the response's
+tab ID. This extra request is counted separately from the single manually
+dispatched navigation. It sends no user prompt; ordinary healthy navigations
+without a checkpoint do not repeatedly start this recovery probe.
+
+After settings were restored, fresh marker C passed in 9.101 seconds with exact
+prompt/answer, verified 3.1 Pro selection, zero tools, continuous ownership and
+saved closed cleanup. A separately approved bounded comparison then restarted
+the unchanged build, initialized only a human `about:blank` document and attached
+Inspector before any human Gemini visit. Marker D was dispatched 120.975 seconds
+after launch and failed in 1.124 seconds: no website model-selection proof,
+submission, tool or answer, with matching closed cleanup. A native callback
+captured the model view's actual HTTP 429 before Gemini committed.
+
+| Observation | UTC | Result |
+| --- | --- | --- |
+| Fresh owned D after restart | 08:53:56 | Native model-view HTTP 429; no prompt sent |
+| Approved normal human navigation | 08:54:30 | Inspector 302 to Google `/sorry`, then 429 |
+| Approved navigation with Disable Caches visually on | 08:56:27 | Another 302 to `/sorry`, then 429 |
+
+Both captured redirect responses and both final challenge responses had a Date
+matching their respective new request, no-store/no-cache/must-revalidate, a past
+Expires date and no Age header. Inspector reported Network for the final resource
+in both cases. The cache-disabled comparison did not recover. Its checkbox was
+visibly checked although Accessibility still reported zero, so no independent
+backend acknowledgment of the setting is claimed. Summary Network also is not a
+source observation for every redirect hop. Together, the metadata and comparison
+argue against a simple stale cached redirect as the explanation for this run;
+they do not prove the whole HTTP-cache implementation correct.
+
+The initial redirected request lacked Cookie, Accept-Encoding, Accept-Language
+and HTTP-version fields in Inspector; the final challenge request included those
+fields and cookies without the exemption name. This is not evidence that the
+initial wire request omitted cookies. [WebKit issue 190214](https://bugs.webkit.org/show_bug.cgi?id=190214)
+documents missing refined load metrics for earlier redirect hops, including
+headers and protocol; current upstream source retains those refinements only for
+the final resource. The local fixture showed the same display pattern. This
+supports an Inspector limitation, not an exact installed-version diagnosis or a
+cookie-delivery fix.
+
+The seven scoped total-cookie counts were 29/20/20/20/21/21/21 at marker C's
+closure, but already 28/19/19/19/20/20/20 in the old process's shutdown sample.
+The first sample after restart exactly matched that latter matrix. Thus this
+count reduction is not demonstrated restart loss. All exemption categories
+remained zero. The www.google.com scopes later decreased from 20 to 19 at the
+cache-disabled sample; no cookie identity/value was retained, and the change
+cannot be attributed to the toggle. Equal counts are not proof of equal cookies.
+
+The approved budgets were exhausted without CAPTCHA completion or prompt
+replay. Cache disabling, Preserve Log and both developer settings were restored
+off by 08:57:42 UTC; Inspector/chooser windows closed. The three user tabs present
+before restart were restored by 08:58:21 UTC. The ChatGPT tab was already absent
+and was not recreated. Root cause, prevention and current broader qualification
+remain unresolved. The differing startup delays and prior request histories
+prevent treating these runs as a matched causal experiment.
+
+Evidence: `captcha332-lifecycle/inspector-loaded-recovery-oct31.json`,
+`loaded-inspector-recovery-report.json`, marker C/D capture directories,
+`controlled-restart-d.json`, `restart-d-normal-failure.json`,
+`restart-d-cache-bypass-failure.json`, `restart-d-comparison-summary.json`,
+`response332-loaded-inspector-recovery.json`, `response332-marker-c.json`,
+`response332-controlled-restart-d.json` and matching cookie receipts, including
+`cookie-timeline332-pre-restart-d-shutdown.json`. All paths are relative to the
+local qualification evidence root, with lifecycle records under its named folder.
