@@ -528,6 +528,70 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for alteration in alterations { bad = valid; bad.merge(alteration) { _, new in new }; rejected(bad) }
     }
 
+    func testPREFreeCodeWidgetPreservesLiteralEnvelopeThroughOwnedWebKitCompletion() async throws {
+        let message = #"{"type":"message","text":"Hi!"}"#
+        let tool = #"{"type":"tool_calls","calls":[{"name":"fixture","arguments":{"value":"quoted \\\" text"}}]}"#
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": syntheticChatGPTModelID, "input": "hi", "tools": [["type": "function", "name": "fixture",
+                "parameters": ["type": "object", "properties": ["value": ["type": "string"]]]]]]))
+        for (name, raw, outside, accepted) in [
+            ("message", message, "", true), ("tool", tool, "", true),
+            ("authored_prose", tool, "Authored explanation", false),
+            ("malformed_tool", #"{"type":"tool_calls","calls":["#, "", false),
+        ] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "hi")
+            defer { fixture.shutdown() }
+            let measured = try await evaluate(view, """
+                const answer=document.querySelector('[data-markdown-text-style="assistant-message"]');
+                const wrapper=document.createElement('div');
+                wrapper.className='relative Root-iW7ipz w-full min-w-0 contain-inline-size overflow-clip';
+                const header=document.createElement('div');
+                header.className='flex items-center font-sans text-sm select-none ActionBar-KWWAct';
+                const label=document.createElement('div'); label.className='min-w-0 flex-1 truncate'; label.textContent='JSON';
+                const copy=document.createElement('button'); copy.setAttribute('aria-label','Copy');
+                copy.style.cssText='width:24px;height:24px'; header.append(label,copy);
+                const content=document.createElement('div'); content.className='text-size-chat overflow-auto outline-none px-4 pt-0 pb-3';
+                const code=document.createElement('code'); code.className='block text-size-code CodeContent-observed';
+                code.textContent=\(try matchedProbeJSON(raw)); content.append(code); wrapper.append(header,content);
+                answer.replaceChildren(wrapper);
+                const outside=\(try matchedProbeJSON(outside));
+                if (outside) { const prose=document.createElement('p'); prose.textContent=outside; answer.append(prose); }
+                return {code:code.textContent, rendered:answer.innerText, preCount:answer.querySelectorAll('pre').length,
+                  codeCount:answer.querySelectorAll('code').length, copyVisible:copy.getClientRects().length>0};
+                """) as? [String: Any]
+            XCTAssertEqual(measured?["code"] as? String, raw, name)
+            XCTAssertNotEqual(measured?["rendered"] as? String, raw, name)
+            XCTAssertEqual(measured?["preCount"] as? Int, 0, name)
+            XCTAssertEqual(measured?["codeCount"] as? Int, 1, name)
+            XCTAssertEqual(measured?["copyVisible"] as? Bool, true, name)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+            let text = try XCTUnwrap(complete["text"] as? String)
+            let completion = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+            let structure = try XCTUnwrap(completion["codeStructure"] as? [String: Any])
+            XCTAssertEqual(structure["selectedExtraction"] as? String, accepted ? "raw_code" : "rendered_fallback", name)
+            if accepted {
+                XCTAssertEqual(text, raw, name)
+                let reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)
+                if name == "message" { XCTAssertEqual(reply, .message("Hi!")) }
+                else {
+                    guard case let .toolCalls(calls) = reply else { return XCTFail("Expected the unchanged tool proposal") }
+                    XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls.first?.name, "fixture")
+                    XCTAssertEqual(calls.first?.argumentsJSON, #"{"value":"quoted \\\" text"}"#)
+                }
+            } else {
+                XCTAssertNotEqual(text, raw, name)
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope, name)
+                }
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testRendererGuardFactsSurviveOwnedCompletionWithoutChangingTextOrInputs() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
@@ -12040,16 +12104,65 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let authority: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message",
             "firstUserVerified": false, "temporary": false, "text": "Unchanged observation"]
         var observation = authority; observation["boundCertificateDiagnostic"] = diagnostic
-        let record = try XCTUnwrap(EmbeddedWebModelTransport.removeBoundCertificateDiagnostic(from: &observation, provider: .chatgpt))
+        let projected = EmbeddedWebModelTransport.removeBoundCertificateDiagnosticRecords(from: &observation, provider: .chatgpt)
         XCTAssertEqual(observation as NSDictionary, authority as NSDictionary)
-        XCTAssertLessThanOrEqual(record.utf8.count, 960)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(record.utf8)) as? NSDictionary, diagnostic as NSDictionary)
+        XCTAssertEqual(projected.count, 2)
+        XCTAssertTrue(projected.allSatisfy { $0.utf8.count <= 960 })
+        var certificate = diagnostic; certificate.removeValue(forKey: "pendingRouteGuard")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(XCTUnwrap(projected.first).utf8)) as? NSDictionary, certificate as NSDictionary)
+        let guardRecord = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(projected.last).utf8)) as? [String: Any])
+        XCTAssertEqual(guardRecord["kind"] as? String, "chatgpt_pending_route_guard_v1")
+        XCTAssertEqual(guardRecord["pendingRouteGuard"] as? NSDictionary, originalGuard as NSDictionary)
         var discarded = authority; discarded["boundCertificateDiagnostic"] = diagnostic
         discarded["url"] = "https://PRIVATE_CANARY"
         let records = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(try JSONSerialization.data(withJSONObject: discarded), provider: .chatgpt)
-        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.count, 3)
         XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("PRIVATE_CANARY") })
         XCTAssertEqual(records.filter { $0.contains("pendingRouteGuard") }.count, 1)
+    }
+
+    func testPendingRouteGuardProjectionPreservesMaximumFiniteModelPinFactsUnderSeparateCaps() throws {
+        var diagnostic = boundCertificateDiagnosticFixture()
+        diagnostic["stage"] = "replacement_observation"; diagnostic["rule"] = "replacement_result"
+        diagnostic["routeRule"] = "model_pin_invalidated"; diagnostic["contextFailure"] = "conversation_identity"
+        diagnostic["phase"] = "send_claimed"
+        for key in ["receiptPresent", "receiptNodesMatch", "receiptRetained", "awaitingNativeRefresh", "refreshClaimed",
+                    "expectedModelPresent", "deferModelVerification"] { diagnostic[key] = false }
+        diagnostic["modelPinInvalidation"] = ["reason": "semantic_mutation", "source": "semantic_observer",
+            "attribute": "aria-valuenow", "nodeConnected": false, "attributePresent": false,
+            "currentMatches": false, "oldMatches": false] as [String: Any]
+        diagnostic["modelPinState"] = ["triggerPresent": false, "pinHeaderPresent": false,
+            "triggerCount": 256, "triggerCandidateCount": 256] as [String: Any]
+        let pending: [String: Any] = ["rule": "predecessor_expanded_canonical", "boundPinsRule": "provisional_permission_disabled",
+            "submissionContextRule": "stateDocumentMatches", "modelPinsRule": "model_remount_closed_presentation",
+            "pendingPrivate": false, "initialRoute": false, "provisional": false,
+            "currentNodesObserved": false, "currentRootMatches": false, "currentBodyMatches": false]
+        diagnostic["pendingRouteGuard"] = pending
+        XCTAssertGreaterThan(try JSONSerialization.data(withJSONObject: diagnostic).count, 960)
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedBoundCertificateDiagnostic(diagnostic, provider: .chatgpt),
+                     "The original per-record cap must remain unchanged")
+        let authority: [String: Any] = ["error": "conversation_changed", "detail": "first_user_message",
+            "firstUserVerified": false, "text": "Unchanged observation"]
+        var observation = authority; observation["boundCertificateDiagnostic"] = diagnostic
+        let records = EmbeddedWebModelTransport.removeBoundCertificateDiagnosticRecords(from: &observation, provider: .chatgpt)
+        XCTAssertEqual(observation as NSDictionary, authority as NSDictionary)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 })
+        var expectedCertificate = diagnostic; expectedCertificate.removeValue(forKey: "pendingRouteGuard")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(XCTUnwrap(records.first).utf8)) as? NSDictionary, expectedCertificate as NSDictionary)
+        let guardRecord = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(records.last).utf8)) as? [String: Any])
+        XCTAssertEqual(Set(guardRecord.keys), ["kind", "stage", "phase", "routeRule", "pendingRouteGuard"])
+        XCTAssertEqual(guardRecord["pendingRouteGuard"] as? NSDictionary, pending as NSDictionary)
+        XCTAssertEqual(guardRecord["stage"] as? String, diagnostic["stage"] as? String)
+        XCTAssertEqual(guardRecord["routeRule"] as? String, diagnostic["routeRule"] as? String)
+        var discarded = authority; discarded["boundCertificateDiagnostic"] = diagnostic
+        let routeRecords = EmbeddedWebModelTransport.routeDiscardDiagnosticRecords(try JSONSerialization.data(withJSONObject: discarded), provider: .chatgpt)
+        XCTAssertEqual(Array(routeRecords.dropFirst()), records)
+        for provider in [EmbeddedWebModelTransport.Provider.gemini, .claude] {
+            var foreign = authority; foreign["boundCertificateDiagnostic"] = diagnostic
+            XCTAssertTrue(EmbeddedWebModelTransport.removeBoundCertificateDiagnosticRecords(from: &foreign, provider: provider).isEmpty)
+            XCTAssertEqual(foreign as NSDictionary, authority as NSDictionary)
+        }
     }
 
     func testPendingRouteGuardDiagnosticsRejectUnknownIncompletePrivateAndWrongTypeValues() throws {

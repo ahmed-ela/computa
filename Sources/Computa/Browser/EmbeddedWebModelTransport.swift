@@ -2953,12 +2953,38 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+    /// Project independent finite records so additional guard facts cannot
+    /// displace the original model-pin cause at the unchanged per-record cap.
+    private static func boundCertificateDiagnosticRecords(_ raw: Any?, provider: Provider) -> [[String: Any]] {
+        guard var value = raw as? [String: Any] else { return [] }
+        let pending = value.removeValue(forKey: "pendingRouteGuard")
+        guard let certificate = sanitizedBoundCertificateDiagnostic(value, provider: provider) else { return [] }
+        var records = [certificate]
+        if let pending {
+            guard let guardFacts = sanitizedPendingRouteGuard(pending) else { return [] }
+            let record: [String: Any] = ["kind": "chatgpt_pending_route_guard_v1",
+                "stage": certificate["stage"]!, "phase": certificate["phase"]!,
+                "routeRule": certificate["routeRule"]!, "pendingRouteGuard": guardFacts]
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+                  bytes.count <= 960 else { return [] }
+            records.append(record)
+        }
+        return records
+    }
+
     /// Remove even malformed/foreign diagnostics before observation processing.
-    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+    static func removeBoundCertificateDiagnosticRecords(from observed: inout [String: Any], provider: Provider) -> [String] {
         let raw = observed.removeValue(forKey: "boundCertificateDiagnostic")
-        guard let safe = sanitizedBoundCertificateDiagnostic(raw, provider: provider),
-              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys) else { return nil }
-        return String(decoding: bytes, as: UTF8.self)
+        return boundCertificateDiagnosticRecords(raw, provider: provider).compactMap { record in
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+                  bytes.count <= 960 else { return nil }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
+
+    /// Primary-certificate convenience for callers that do not log guard facts.
+    static func removeBoundCertificateDiagnostic(from observed: inout [String: Any], provider: Provider) -> String? {
+        removeBoundCertificateDiagnosticRecords(from: &observed, provider: provider).first
     }
 
     // A certified route transition discards the adapter result before ordinary
@@ -2979,9 +3005,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             recovery["kind"] = "route_discard_recovery"; recovery["provider"] = provider.rawValue
             records.append(recovery)
         }
-        if let certificate = sanitizedBoundCertificateDiagnostic(value["boundCertificateDiagnostic"], provider: provider) {
-            records.append(certificate)
-        }
+        records.append(contentsOf: boundCertificateDiagnosticRecords(value["boundCertificateDiagnostic"], provider: provider))
         if let raw = value["debugStructure"] as? String, raw.utf8.count <= 8_192,
            let diagnostic = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
            diagnostic["kind"] as? String == "first_user_structure", diagnostic["provider"] as? String == provider.rawValue,
@@ -4584,12 +4608,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
-        if let certificate = Self.removeBoundCertificateDiagnostic(from: &observed, provider: provider) {
+        for (index, certificate) in Self.removeBoundCertificateDiagnosticRecords(from: &observed, provider: provider).enumerated() {
             // This existing finite diagnostic channel also covers later spent
             // reads and cleanup. The record cannot enter response validation.
             Self.inspectionLog.error("firstUserRecoveryLifecycle sequence=\(session.sequence) \(certificate, privacy: .public)")
             #if DEBUG
-            boundCertificateDiagnosticsObserverForTesting?(certificate)
+            if index == 0 { boundCertificateDiagnosticsObserverForTesting?(certificate) }
             #endif
         }
         let rendererWork = observed.removeValue(forKey: "rendererWorkDiagnostic")

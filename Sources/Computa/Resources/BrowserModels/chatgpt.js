@@ -2852,38 +2852,33 @@ function modelResponseExtraction(answer) {
   const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
   flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
   if (!knownType) return fallback('unknown_envelope_type');
-  // The observed PRE widget retained this structural core while its generated
-  // classes and border/header-height styling changed. Bind its actual preceding
-  // header to this sole code body; a footer or authored caption is insufficient.
-  // The separately observed PRE-free widget keeps its original exact proof.
-  const wrapper = (noPre ? code : blocks[0]).closest(noPre
-    ? 'div.relative.w-full.min-w-0.overflow-clip.contain-inline-size.border'
-    : 'div.relative.w-full.min-w-0.overflow-clip.contain-inline-size');
+  // Both observed PRE and PRE-free widgets retain this structural core while
+  // generated classes and border/header-height styling change. Bind the actual
+  // preceding header to this sole code body; a footer or caption is insufficient.
+  // PRE-free bodies still require the exact CODE/content identity above.
+  const wrapper = (noPre ? code : blocks[0]).closest('div.relative.w-full.min-w-0.overflow-clip.contain-inline-size');
   const chrome = new Set();
   const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
   if (wrapper && wrapper !== answer && answer.contains(wrapper)
     && wrapper.querySelectorAll('pre').length === blocks.length && wrapper.querySelectorAll('code').length === 1) {
-    let codeBranch = noPre ? null : blocks[0];
+    let codeBranch = noPre ? code.parentElement : blocks[0];
     for (let depth = 0; codeBranch && codeBranch.parentElement !== wrapper && depth < 4; depth++)
       codeBranch = codeBranch.parentElement;
     const branches = [...wrapper.children];
     const codeIndex = codeBranch?.parentElement === wrapper ? branches.indexOf(codeBranch) : -1;
-    const headers = [...wrapper.querySelectorAll(noPre
-      ? 'div.flex.items-center.font-sans.text-sm.select-none.min-h-12'
-      : 'div.flex.items-center.font-sans.text-sm.select-none')]
-      .filter(node => visible(node) && !node.closest('pre') && (noPre
-        || node.parentElement === wrapper && !node.querySelectorAll('pre, code').length
-          && codeIndex >= 0 && branches.indexOf(node) >= 0 && branches.indexOf(node) < codeIndex));
+    const headers = [...wrapper.querySelectorAll('div.flex.items-center.font-sans.text-sm.select-none')]
+      .filter(node => visible(node) && !node.closest('pre')
+        && node.parentElement === wrapper && !node.querySelectorAll('pre, code').length
+        && codeIndex >= 0 && branches.indexOf(node) >= 0 && branches.indexOf(node) < codeIndex);
     if (headers.length === 1) {
       const labels = [...headers[0].querySelectorAll('div.min-w-0.flex-1.truncate')].filter(node =>
         visible(node) && node.childElementCount === 0 && (node.textContent || '').trim() === 'JSON'
-        && (noPre || node.parentElement === headers[0]));
-      const copyNodes = [...headers[0].querySelectorAll(noPre
-        ? 'button[aria-label="Copy"]' : 'button[aria-label="Copy"], button[aria-label="Copy code"]')].filter(visible);
+        && node.parentElement === headers[0]);
+      const copyNodes = [...headers[0].querySelectorAll('button[aria-label="Copy"], button[aria-label="Copy code"]')].filter(visible);
       const copies = copyNodes.filter(node => !node.disabled && node.getAttribute('aria-disabled') !== 'true'
         && !(node.textContent || '').trim());
-      if (labels.length === 1 && copies.length === 1 && (noPre || copyNodes.length === 1)) {
+      if (labels.length === 1 && copies.length === 1 && copyNodes.length === 1) {
         chrome.add(labels[0]); chrome.add(copies[0]);
       }
     }
