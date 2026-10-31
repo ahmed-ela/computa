@@ -23,6 +23,11 @@ did not demonstrate restart loss.
 No browser-version, hidden-session or prompt-interaction trigger has been
 established. Developer/cache settings are restored, and the latest comparison
 kept Inspector off and default cache behavior throughout.
+The subsequent read-only network audit found no Tailscale exit node and matching
+public IPv6 egress at one diagnostic destination in Computa and Codex. Two real
+WebKit loopback tests also passed for transmitted headers, cookie eligibility
+and redirect counts through the unchanged human/model factories. These narrow
+checks do not establish Google's actual request routing or challenge trigger.
 Earlier staged/installed statements below describe historical evidence, not the
 current installation.
 
@@ -1139,3 +1144,68 @@ Evidence: `captcha332-lifecycle/foreground-comparison-plan.json`,
 `response332-foreground-f.json`, `response332-marker-g-navigation.json` and the
 matching cookie timelines. Lifecycle subpaths are relative to that named folder;
 response/cookie receipts are at the local qualification evidence root.
+
+### October 31: network-path audit and real request-factory controls
+
+Read-only system snapshots found no enabled HTTP/HTTPS/SOCKS/PAC proxy flags.
+One connected network service is Tailscale; its CLI reported Running, no exit
+node status, and no health entries. Current kernel routes for Gemini's eight
+IPv4 and eight IPv6 results all use `en0`. An active StudyLock content-filter
+extension was also listed. Neither a default route nor extension presence
+establishes actual per-app or historical egress. No network, DNS or protection
+setting was changed.
+
+One normal navigation to Cloudflare's documented diagnostic endpoint in each
+browser observed the same public IPv6 address: Computa at 09:36:36 UTC and the
+Codex in-app browser at 09:37:09 UTC. Computa's response reported HTTP/3 and the
+expected Safari 26.5/Computa identity; Codex reported HTTP/2 and Chrome 156. Both
+reported TLS 1.3 and WARP off. Only address equality/family was retained; raw
+addresses were discarded, both test tabs closed, and the original selection
+restored. This tests a single diagnostic host, not Gemini routing, a historical
+failure, or HTTP-version causation.
+
+The live hosts file maps Google Search hosts to Google's SafeSearch VIP.
+Current `www.google.com` IPv4/IPv6 results both match the resolution of
+`forcesafesearch.google.com`; Gemini's do not. Google's
+[documented SafeSearch setup](https://support.google.com/websearch/answer/186669?hl=en)
+uses this mapping. It is not, by itself, a faulty configuration or proof that it
+caused the initial Gemini redirect. The inspected StudyLock checkout contains a
+hosts/DNS guard but does not identify the active canary filter; its installed
+metadata was inaccessible. No claim about that installed filter's exact behavior
+or a SafeSearch bypass is justified.
+
+`EmbeddedBrowserInitialRequestTests` now observes real loopback HTTP requests
+through unchanged human/model factories, their retained production delegates,
+and one isolated nonpersistent store. Both factory orders are covered: human
+then model through 302 to 200, and model then human through 302 to 429. Each case
+observed exactly four requests: one initial GET and one redirect per tab, with
+identical transmitted User-Agent, expected Host, no body, a shared synthetic
+cookie on both hops, and exclusion of a cookie with a different path. Both
+cookies remained in the store. The two focused tests passed in 0.455 seconds;
+incremental compilation/linking succeeded, and source hashes were unchanged.
+
+The test window is attached but unshown. These controls establish generic
+factory/navigation behavior during the observed loads, not visible foreground
+equivalence, delayed retry absence, Google provider transport, HTTPS/TLS,
+cross-site cookie eligibility or persistent-profile restart behavior. The
+installed app and production source were not changed. This closes a concrete
+wire-observation coverage gap without declaring an unproven prevention fix.
+
+Four additional native turns occurred in the existing G chat between 09:30:31
+and 09:32:01 UTC, outside the controlled comparison. Their model document
+generations exactly join four HTTP 200 callbacks. Each had one user-role input,
+verified submission/completion and saved closed cleanup, with no native terminal
+error. They used Pro once and Flash-Lite three times; the last turn had four
+inference rounds and three tool calls. Metadata does not identify the human/UI
+source of submission, and prompt/answer contents were not inspected. These are
+not fixture qualification, and this interval must not be described as idle or
+unexplained recovery traffic. The later bounded response capture contained no
+records, which is not proof of no requests.
+
+Evidence: `network332-system-snapshot.json`, `network332-tailscale-status.json`,
+`network332-google-routes.json`, `network332-safesearch-resolution.json`,
+`network332-browser-comparison.json`, `response332-post-g-idle-{a,b}.json`
+(filenames predate `native332-post-g-turn-attribution.json`), and
+`initial-request-loopback332/{test.log,result.json}` at the local evidence root.
+Cloudflare describes the diagnostic endpoint in its
+[endpoint documentation](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/).
