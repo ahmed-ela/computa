@@ -5688,7 +5688,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testCollapsedFirstMessageWaitsForWebKitExposureThenRequiresTheExactExpandedBody() async throws {
         for changedBody in [false, true] {
             let fixture = try Fixture(page: Self.collapsedFirstUserPage(
-                expansionScript: changedBody ? "userBody.textContent += '!';" : "", exposureDelayFrames: 3))
+                expansionScript: changedBody ? "userBody.textContent += '!';" : "", exposureDelayMilliseconds: 45))
             defer { fixture.shutdown() }
             let choice = Self.fixtureChoice(.chatgpt)
             let started = try await startChoice(choice, in: fixture)
@@ -5722,11 +5722,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
             let ledger = try await evaluate(view, """
                 return {clicks:window.fixtureExpansionClicks, scrolls:window.fixtureExposureScrolls,
-                  frames:window.fixtureExposureFrames, coveredAtScroll:window.fixtureCoveredAtScroll};
+                  layoutChanges:window.fixtureExposureChanges, coveredAtScroll:window.fixtureCoveredAtScroll};
                 """) as? [String: Any]
             XCTAssertEqual(ledger?["clicks"] as? Int, 1)
             XCTAssertEqual(ledger?["scrolls"] as? Int, 1)
-            XCTAssertEqual(ledger?["frames"] as? Int, 3)
+            XCTAssertEqual(ledger?["layoutChanges"] as? Int, 1)
             XCTAssertEqual(ledger?["coveredAtScroll"] as? Bool, true)
             let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
             let exposure = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_expansion_exposure" })
@@ -7868,7 +7868,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testPendingPrivateFirstProofRecoversCollapsedRemountAfterRouteBeforeSubmissionAdoption() async throws {
-        for condition in ["remount", "remount_changed", "partial_remount", "expired"] {
+        try await verifyPendingPrivateFirstProofRecovery(conditions: ["remount", "remount_changed", "partial_remount", "expired"])
+    }
+
+    func testPendingPrivateFirstProofRehashesAfterPublicPromotionDuringRecoveryBodyHashWithoutReclick() async throws {
+        try await verifyPendingPrivateFirstProofRecovery(conditions: ["remount"], promoteDuringRecoveryHash: true)
+    }
+
+    private func verifyPendingPrivateFirstProofRecovery(conditions: [String], promoteDuringRecoveryHash: Bool = false) async throws {
+        for condition in conditions {
             let succeeds = condition == "remount"
             let fixture = try Fixture(page: Self.collapsedFirstUserPage())
             defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil); fixture.shutdown() }
@@ -7878,17 +7886,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let ownedID = try XCTUnwrap(fixture.createdTabs.last)
             let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
             _ = try await fixturePhaseProbe("pending_private_ready") { try await waitForState("ready", fixture.transport, token: token) }
+            let generation = fixture.browser.documentGeneration(for: ownedID)
             let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
             _ = try await evaluate(view, """
                 const original = crypto.subtle.digest.bind(crypto.subtle);
+                globalThis.__fixturePendingPrivateFreshHashes = 0;
                 crypto.subtle.digest = async (...args) => {
                   const result = await original(...args);
                   const state = globalThis.__computaChatSubmissionState;
+                  const recovery = globalThis.__computaModelBoundFirstExpansion;
+                  const canonicalDigest = recovery && new TextDecoder().decode(args[1]) === recovery.canonical;
+                  if (location.pathname === '/c/public-pending-private-body-hash' && canonicalDigest)
+                    globalThis.__fixturePendingPrivateFreshHashes++;
                   if (!globalThis.__fixturePendingPrivateRoute && location.pathname === '/'
                     && globalThis.__computaModelFirstProof && state?.pending?.phase === 'send_claimed'
                     && !state.lastVerified && !globalThis.__computaModelBoundFirstExpansion) {
                     globalThis.__fixturePendingPrivateRoute = true;
                     history.pushState({}, '', '/c/local-chatgpt%3Apending-private?temporary-chat=true');
+                  } else if (\(promoteDuringRecoveryHash) && !globalThis.__fixturePendingPrivatePublicRoute
+                    && location.pathname.startsWith('/c/local-chatgpt') && recovery?.pendingPrivate === true
+                    && recovery.provisional === true && recovery.outcome === 'expanded'
+                    && !recovery.finalizationDiagnostic && canonicalDigest
+                    && globalThis.__computaModelFirstProof && state?.pending?.phase === 'send_claimed'
+                    && !state.lastVerified) {
+                    globalThis.__fixturePendingPrivatePublicRoute = true;
+                    history.pushState({}, '', '/c/public-pending-private-body-hash?temporary-chat=true');
                   }
                   return result;
                 }; return true;
@@ -7898,6 +7920,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
                 guard checkpoint == .routeAccepted else { return }
                 transitions += 1
+                if transitions == 2 {
+                    XCTAssertTrue(promoteDuringRecoveryHash)
+                    let discarded = try? await self.evaluate(view, """
+                        const recovery = globalThis.__computaModelBoundFirstExpansion;
+                        const state = globalThis.__computaChatSubmissionState;
+                        const pending = state?.pending;
+                        return { pendingPrivate: recovery?.pendingPrivate, provisional: recovery?.provisional,
+                          stage: recovery?.routeDiscard?.stage, verified: recovery?.verified === true,
+                          pendingPhase: pending?.phase, lastVerified: !!state?.lastVerified,
+                          hasAdoptedNodes: !!pending?.root || !!pending?.body,
+                          matchingPrivateHash: globalThis.__computaModelFirstProof?.fingerprint === pending?.fingerprint,
+                          deadline: recovery?.deadline };
+                        """, world: world) as? [String: Any]
+                    XCTAssertEqual(discarded?["pendingPrivate"] as? Bool, true)
+                    XCTAssertEqual(discarded?["provisional"] as? Bool, true)
+                    XCTAssertEqual(discarded?["stage"] as? String, "body_hash")
+                    XCTAssertEqual(discarded?["verified"] as? Bool, false)
+                    XCTAssertEqual(discarded?["pendingPhase"] as? String, "send_claimed")
+                    XCTAssertEqual(discarded?["lastVerified"] as? Bool, false)
+                    XCTAssertEqual(discarded?["hasAdoptedNodes"] as? Bool, false)
+                    XCTAssertEqual(discarded?["matchingPrivateHash"] as? Bool, true)
+                    XCTAssertEqual(discarded?["deadline"] as? Double, initialDeadline)
+                    return
+                }
+                XCTAssertEqual(transitions, 1, "Only the two existing native-certified route edges may continue")
                 let state = try? await self.evaluate(view, """
                     const s = globalThis.__computaChatSubmissionState;
                     return { pinned: !!globalThis.__computaModelFirstProof, pending: s?.pending?.phase,
@@ -7929,11 +7976,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let deadline = try await evaluate(view, "return globalThis.__computaModelBoundFirstExpansion?.deadline;", world: world) as? Double
                 XCTAssertNotNil(initialDeadline)
                 XCTAssertEqual(deadline, initialDeadline, "Recovery must not renew the original display deadline")
+                if promoteDuringRecoveryHash {
+                    XCTAssertEqual(proof["firstUserFingerprint"] as? String, proof["submittedPromptFingerprint"] as? String)
+                    let recovery = try await evaluate(view, """
+                        const recovery = globalThis.__computaModelBoundFirstExpansion;
+                        return { freshHashes: globalThis.__fixturePendingPrivateFreshHashes,
+                          verified: recovery?.verified, edgeCount: recovery?.routeContinuationEdges?.length,
+                          phase: globalThis.__computaChatSubmissionState?.lastVerified?.phase };
+                        """, world: world) as? [String: Any]
+                    XCTAssertGreaterThanOrEqual(recovery?["freshHashes"] as? Int ?? 0, 2,
+                        "Final route must freshly hash both the complete first body and submitted body")
+                    XCTAssertEqual(recovery?["verified"] as? Bool, true)
+                    XCTAssertEqual(recovery?["edgeCount"] as? Int, 2)
+                    XCTAssertEqual(recovery?["phase"] as? String, "verified")
+                    XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+                    XCTAssertEqual(fixture.createdTabs.count, 1)
+                }
             } catch {
                 if succeeds { throw error }
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition)
             }
-            XCTAssertEqual(transitions, 1, condition)
+            XCTAssertEqual(transitions, promoteDuringRecoveryHash ? 2 : 1, condition)
             let clicks = try await evaluate(view, "return {initial: window.fixtureExpansionClicks, recovery: window.fixtureBoundExpansionClicks};") as? [String: Int]
             XCTAssertEqual(clicks?["initial"], 1, condition)
             XCTAssertEqual(clicks?["recovery"], condition == "remount" || condition == "remount_changed" ? 1 : 0, condition)
@@ -15464,7 +15527,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false,
                                                expansionScript: String = "", expansionDelayMilliseconds: Int = 25,
-                                               earlyExpansionScript: String = "", exposureDelayFrames: Int = 0) -> String {
+                                               earlyExpansionScript: String = "", exposureDelayMilliseconds: Int = 0) -> String {
         var page = acknowledgedAppendRacePage().replacingOccurrences(of: "user.appendChild(userBody);", with: """
             user.appendChild(userBody);
             if (window.fixturePrompts.length === 1) {
@@ -15480,25 +15543,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 setTimeout(() => { userBody.textContent = prompt; expand.remove(); \(expansionScript) }, \(expansionDelayMilliseconds));
               });
               user.appendChild(expand);
-              if (\(exposureDelayFrames) > 0) {
+              if (\(exposureDelayMilliseconds) > 0) {
                 // A real WebKit hit-test obstruction survives the synchronous
-                // scroll return, then disappears only after rendering frames.
+                // scroll return. A later page layout change exposes the same
+                // control; no native fixture hook can admit it or fake the hit.
                 expand.style.cssText = 'position:fixed;left:240px;top:420px;width:120px;height:40px;z-index:1000';
                 const cover = document.createElement('div');
                 cover.style.cssText = 'position:fixed;left:240px;top:420px;width:120px;height:40px;z-index:1001';
                 document.body.appendChild(cover);
-                window.fixtureExposureScrolls = 0; window.fixtureExposureFrames = 0;
+                window.fixtureExposureScrolls = 0; window.fixtureExposureChanges = 0;
                 const scrolled = new MutationObserver(records => {
                   if (!records.some(record => record.attributeName === 'data-fixture-expansion-scroll')) return;
                   scrolled.disconnect(); window.fixtureExposureScrolls++;
                   const rect = expand.getBoundingClientRect();
                   window.fixtureCoveredAtScroll = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2) === cover;
-                  const settle = () => {
-                    window.fixtureExposureFrames++;
-                    if (window.fixtureExposureFrames >= \(exposureDelayFrames)) cover.remove();
-                    else requestAnimationFrame(settle);
-                  };
-                  requestAnimationFrame(settle);
+                  setTimeout(() => { cover.remove(); window.fixtureExposureChanges++; }, \(exposureDelayMilliseconds));
                 });
                 scrolled.observe(expand, { attributes: true });
               }

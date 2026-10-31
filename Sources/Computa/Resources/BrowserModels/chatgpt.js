@@ -5795,20 +5795,26 @@ function chatGPTFirstRouteModelPins(candidate) {
     || reject('model_checked_family', picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key)) return false;
   return true;
 }
-// Before either first-message pin exists, only the already dispatched native
-// outbound hash can retain a completed initial-route display. This witness
-// grants no first proof, verified flag, response or extra display attempt.
-function chatGPTPendingInitialRouteDiscard(candidate, fingerprint, stage) {
+// While native's first submission is pending, its dispatched outbound hash
+// can retain a completed display across the second route edge. Either no
+// first-message pin exists yet, or the existing private pin must match that
+// same hash. This witness grants no proof, response or extra display attempt.
+function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
   const state = candidate?.state, record = candidate?.record, predecessor = candidate?.predecessor;
+  const pinned = globalThis.__computaModelFirstProof;
+  const initial = candidate === chatGPTInitialRouteRecovery && candidate?.initialRoute === true
+    && candidate.provisional !== true && candidate.pendingPrivate !== true && pinned == null;
+  const pendingPrivate = candidate?.pendingPrivate === true && candidate.provisional === true
+    && candidate.initialRoute !== true && candidate.remount === true
+    && pinned?.marker === candidate.marker && pinned?.fingerprint === fingerprint;
   if (!candidate || candidate !== globalThis.__computaModelBoundFirstExpansion
-    || candidate !== chatGPTInitialRouteRecovery || !candidate.bound || !candidate.initialRoute
-    || candidate.provisional || candidate.pendingPrivate || candidate.verified === true
+    || !candidate.bound || !(initial || pendingPrivate) || candidate.verified === true
     || candidate.routeDiscard || candidate.routeContinuationEdges || candidate.contextFailure || candidate.modelFailure
     || candidate.outcome !== 'expanded' || candidate.clicked !== true
     || input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.allowFirstUserExpansion !== true
     || input.allowProvisionalFirstUserExpansion !== true || input.allowBoundFirstUserExpansion === true
     || input.allowBoundFirstUserRemountRefresh === true || input.suppressFirstUserExpansionClaim === true
-    || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null) return null;
+    || input.expectedFirstUserFingerprint != null) return null;
   chatGPTSubmissionContext(state);
   const context = chatGPTSubmissionContextFailure, edges = input.firstUserExpansionRouteContinuation;
   if (!state || context?.state !== state || context.checks.urlMatches !== false
@@ -7094,7 +7100,7 @@ if (ownedUserCount > 0) {
   if (boundRecovery && (rejectBoundHash('context', (boundHashContextFailure = chatGPTFirstUserExpansionContextFailure(boundRecovery)) !== null)
     || rejectBoundHash('rendered', rendered !== boundRecovery.canonical)
     || rejectBoundHash('fingerprint', fingerprint !== boundRecovery.fingerprint))) {
-    const continued = chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'body_hash')
+    const continued = chatGPTPendingFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash')
       || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'body_hash');
     if (continued) return continued;
     chatGPTLatchCertificateFailure(boundRecovery, 'body_hash', boundHashFailure, boundHashContextFailure);
@@ -7145,7 +7151,7 @@ if (ownedUserCount > 0) {
   // request the existing fresh complete proof before any result is admitted.
   if (boundRecovery && document.URL !== input.expectedURL
     && (!observed.error || observed.error === 'document_changed')) {
-    const discarded = chatGPTPendingInitialRouteDiscard(boundRecovery, fingerprint, 'model_read')
+    const discarded = chatGPTPendingFirstRouteDiscard(boundRecovery, fingerprint, 'model_read')
       || chatGPTBoundFirstRouteDiscard(boundRecovery, fingerprint, 'model_read');
     if (discarded) return discarded;
   }

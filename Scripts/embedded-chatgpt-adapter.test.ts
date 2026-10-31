@@ -2380,6 +2380,100 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
     });
 
+    test('pending-private recovery carries a public promotion during its full-body hash without reclicking', async () => {
+      const { x, first, state, record, body, expand, initialControl, initial, continuation } = await pendingPrivateStage();
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-pending-private-body-hash?temporary-chat=true';
+      x.f.onDigest(() => {
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate).toMatchObject({ pendingPrivate: true, provisional: true, outcome: 'expanded' });
+        expect(candidate.finalizationDiagnostic).toBeUndefined();
+        x.f.document.URL = toURL; x.f.location.pathname = '/c/public-pending-private-body-hash';
+      }, first.outbound);
+      const discarded = await x.observe(first, continuation); denied(discarded);
+      expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      expect(candidate.routeDiscard).toMatchObject({ fromURL, toURL, stage: 'body_hash' });
+      expect(candidate).not.toHaveProperty('verified', true); expect(record.phase).toBe('send_claimed');
+      expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(state.pending).toBe(record);
+      const hashes = x.f.digestInputs.length;
+      const fresh = await x.observe(first, { ...continuation,
+        firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] });
+      expect(fresh.error).toBeUndefined(); expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(fresh.modelEvidence.selected).toEqual(choice); expect(fresh.temporary).toBe(true);
+      expect(x.f.digestInputs.slice(hashes).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(record.body).toBe(body); expect(record.phase).toBe('verified'); expect(candidate.verified).toBe(true);
+      expect(candidate.deadline).toBe(initial.deadline); expect(candidate.routeContinuationEdges).toHaveLength(2);
+      expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+    });
+
+    const pendingPrivateHashPromotion = async (mutate?: (staged: Awaited<ReturnType<typeof pendingPrivateStage>>) => void) => {
+      const staged = await pendingPrivateStage(), { x, first, continuation } = staged;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-pending-private-negative?temporary-chat=true';
+      x.f.onDigest(() => {
+        x.f.document.URL = toURL; x.f.location.pathname = '/c/public-pending-private-negative'; mutate?.(staged);
+      }, first.outbound);
+      const discarded = await x.observe(first, continuation);
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      return { ...staged, candidate, discarded, next: { ...continuation,
+        firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] } };
+    };
+
+    test('pending-private public-promotion witness rejects altered ownership content model pins and first edge', async () => {
+      for (const mutation of ['body', 'owner', 'private_pin', 'native_pin', 'record_hash', 'model', 'work',
+        'temporary', 'deadline', 'second_remount', 'stale_lease', 'first_edge', 'extra_edge']) {
+        const { x, first, record, candidate, expand, initialControl, discarded } = await pendingPrivateHashPromotion(staged => {
+          const { x, first, body, record, continuation } = staged;
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+          if (mutation === 'native_pin') record.nativeFirstPinned = true;
+          if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+          if (mutation === 'model') x.picker!.selected('High');
+          if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'deadline') x.f.advanceTime(2_000);
+          if (mutation === 'second_remount') replaceRoot(x).body.text = first.outbound;
+          if (mutation === 'stale_lease') x.f.world.__computaChatActiveInvocation = {};
+          if (mutation === 'first_edge') continuation.firstUserExpansionRouteContinuation[0].fromURL += '/wrong';
+          if (mutation === 'extra_edge') continuation.firstUserExpansionRouteContinuation.push({ fromURL: 'https://chatgpt.com/c/foreign', toURL: x.f.document.URL });
+        });
+        denied(discarded); expect(candidate.routeDiscard, mutation).toBeUndefined();
+        expect(candidate, mutation).not.toHaveProperty('verified', true);
+        expect(record.phase, mutation).toBe('send_claimed'); expect(record.root, mutation).toBeNull(); expect(record.body, mutation).toBeNull();
+        expect(initialControl.clicks, mutation).toBe(1); expect(expand.clicks, mutation).toBe(1); expect(x.send.clicks, mutation).toBe(1);
+        expect(discarded, mutation).not.toHaveProperty('submissionProof'); expect(discarded, mutation).not.toHaveProperty('firstUserFingerprint', first.fingerprint);
+      }
+    });
+
+    test('pending-private public-promotion continuation requires the exact fresh second edge and complete proof', async () => {
+      for (const mutation of ['missing_edge', 'stale_edge', 'wrong_destination', 'extra_edge', 'body', 'owner',
+        'private_pin', 'record_hash', 'native_pin', 'model', 'work', 'deadline', 'remount']) {
+        const { x, first, record, body, candidate, discarded, next, expand, initialControl } = await pendingPrivateHashPromotion();
+        denied(discarded); expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const goodEdges = next.firstUserExpansionRouteContinuation.map(edge => ({ ...edge }));
+        if (mutation === 'missing_edge') next.firstUserExpansionRouteContinuation.pop();
+        if (mutation === 'stale_edge') next.firstUserExpansionRouteContinuation[1].fromURL = 'https://chatgpt.com/c/foreign';
+        if (mutation === 'wrong_destination') next.firstUserExpansionRouteContinuation[1].toURL += '-wrong';
+        if (mutation === 'extra_edge') next.firstUserExpansionRouteContinuation.push({ fromURL: x.f.document.URL, toURL: x.f.document.URL + '-extra' });
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+        if (mutation === 'native_pin') record.nativeFirstPinned = true;
+        if (mutation === 'model') x.picker!.selected('High');
+        if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+        if (mutation === 'deadline') x.f.advanceTime(2_000);
+        if (mutation === 'remount') replaceRoot(x).body.text = first.outbound;
+        denied(await x.observe(first, next)); expect(candidate, mutation).not.toHaveProperty('verified', true);
+        expect(record.phase, mutation).toBe('send_claimed'); expect(record.body, mutation).toBeNull();
+        expect(initialControl.clicks, mutation).toBe(1); expect(expand.clicks, mutation).toBe(1); expect(x.send.clicks, mutation).toBe(1);
+        if (mutation.endsWith('edge') || mutation === 'wrong_destination') {
+          next.firstUserExpansionRouteContinuation = goodEdges;
+          denied(await x.observe(first, next)); expect(expand.clicks).toBe(1);
+        }
+      }
+    });
+
     test('pending private recovery requires exact native pins and a successful detached predecessor', async () => {
       for (const mutation of ['permission', 'binding', 'initial_expansion', 'native_first', 'native_hash', 'private_hash', 'owner',
         'unfinished', 'expired', 'prefix', 'old_root', 'old_body', 'same_body', 'native_pinned', 'no_route', 'foreign_route']) {
