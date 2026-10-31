@@ -3035,6 +3035,99 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
         }
       });
+      const preserveOpenPowerHeader = (picker: any) => {
+        for (const node of [picker.trigger, picker.secondary]) {
+          const click = node.onClick;
+          node.onClick = () => {
+            const before = picker.primary.text; click();
+            if (picker.menu.values.hidden === undefined) picker.primary.text = before;
+          };
+        }
+      };
+      test('fresh power steps await the delayed header before proving all five presets without replay', async () => {
+        for (const start of ['Instant', 'Pro']) for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true });
+          const steps = Math.abs(index - (start === 'Instant' ? 0 : 4));
+          picker.selected(start); preserveOpenPowerHeader(picker);
+          const dispatch = picker.powerItem.onDispatch; let settlements = 0;
+          picker.powerItem.onDispatch = (event: any) => {
+            const previous = picker.primary.text; dispatch(event);
+            if (!event.key?.startsWith('Arrow')) return;
+            const next = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'][Number(picker.slider.values['aria-valuenow'])];
+            setImmediate(() => {
+              settlements++; picker.primary.text = 'Thinking effort\n\n' + next;
+              const record = { type: 'characterData', target: { nodeType: 3, parentElement: picker.primary,
+                textContent: picker.primary.text }, oldValue: previous };
+              for (const observer of [...f.observers]) observer.callback([record]);
+            });
+          };
+          const result = await f.run('selectModel', { modelChoice: choice(label) });
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice(label));
+          expect(result.modelEvidence.chatSelection.power.label).toBe(label);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(arrows(picker)).toHaveLength(steps); expect(settlements).toBe(steps);
+          expect(picker.trigger.clicks).toBe(1);
+          expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+          expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+          expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+          expect((await f.run('verifyModel', { expectedModelChoice: choice(label) })).modelEvidence.selected).toEqual(choice(label));
+          expect(arrows(picker)).toHaveLength(steps);
+        }
+      });
+      const pendingPowerHeader = async () => {
+        const { f, picker } = setup(false, { closedCompositeHeader: true });
+        picker.selected('Instant'); preserveOpenPowerHeader(picker);
+        const clocks: { milliseconds: number; expire: () => void }[] = [];
+        let registered!: () => void;
+        const registration = new Promise<void>(resolve => { registered = resolve; });
+        f.window.webkit.messageHandlers.computaModelClock = { postMessage: (body: any) => new Promise(resolve => {
+          clocks.push({ milliseconds: body.milliseconds, expire: () => resolve(true) }); registered();
+        }) };
+        const pending = f.run('selectModel', { modelChoice: choice('Medium'),
+          operationID: '6c78ca4d-4c47-46f5-b3c8-8175d4eb1549' });
+        await Promise.race([registration, pending.then((result: any) => {
+          throw new Error('Retained header returned before settlement: ' + result.error);
+        })]);
+        expect(arrows(picker)).toHaveLength(1); expect(picker.secondary.clicks).toBe(0);
+        expect(picker.primary.text).toBe('Thinking effort\n\nInstant');
+        expect(picker.slider.values['aria-valuenow']).toBe('1');
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1_800);
+        const wake = (label = 'Medium', oldValue = 'Thinking effort\n\nInstant') => {
+          picker.primary.text = 'Thinking effort\n\n' + label;
+          const record = { type: 'characterData', target: { nodeType: 3, parentElement: picker.primary,
+            textContent: picker.primary.text }, oldValue };
+          for (const observer of [...f.observers]) observer.callback([record]);
+        };
+        return { f, picker, pending, clocks, wake };
+      };
+      test('power header settlement preserves timeout, structure, product and transient mismatch failures', async () => {
+        for (const drift of ['timeout', 'late_positive', 'third_header', 'unknown_header', 'slider_only', 'owner', 'work', 'replaced_slider', 'transient_third', 'transient_slider']) {
+          const { f, picker, pending, clocks, wake } = await pendingPowerHeader();
+          if (drift === 'timeout') { f.advanceTime(1_801); clocks[0].expire(); }
+          else {
+            if (drift === 'late_positive') f.advanceTime(1_801);
+            if (drift === 'transient_slider') for (const observer of [...f.observers]) observer.callback([
+              { type: 'attributes', target: picker.slider, attributeName: 'aria-valuenow', oldValue: '1' },
+              { type: 'attributes', target: picker.slider, attributeName: 'aria-valuenow', oldValue: '2' },
+            ]);
+            if (drift === 'slider_only') picker.slider.values['aria-valuenow'] = '2';
+            if (drift === 'owner') f.world.__computaModelOwner = 'changed-owner';
+            if (drift === 'work') { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }
+            if (drift === 'replaced_slider') { picker.powerItem.children = []; picker.powerItem.append(new Node('SPAN', { ...picker.slider.values })); }
+            wake(drift === 'third_header' ? 'High' : drift === 'unknown_header' ? 'Unknown' : 'Medium',
+              drift === 'transient_third' ? 'Thinking effort\n\nPro' : 'Thinking effort\n\nInstant');
+          }
+          const result = await pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(f.world.__computaChatPresetPin).toBeUndefined();
+          expect(f.world.__computaModelSelection.completed).toBe(false);
+          expect(arrows(picker)).toHaveLength(1); expect(picker.secondary.clicks, drift).toBe(0);
+          expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+          expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+          expect((await f.run('selectModel', { modelChoice: choice('Medium') })).selected).toBeUndefined();
+          expect(arrows(picker)).toHaveLength(1);
+        }
+      });
       test('composite positive grammar rejects compact duplicate unknown and family text without textContent authority', async () => {
         for (const label of ['Thinking effortInstant', 'Thinking effort Instant Pro', 'Thinking effort Thinking effort Instant',
           'Thinking effort GPT-6', 'Thinking effort GPT-6 Pro', 'Prefix Thinking effort Instant', 'Thinking effort Instant suffix',
@@ -3146,6 +3239,18 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
 
       test('disabled initial picker enables before the existing mutable power selection can run', async () => {
         const x = await pendingDisabledHeader(true, 'property', 'High');
+        preserveOpenPowerHeader(x.picker);
+        const dispatch = x.picker.powerItem.onDispatch;
+        x.picker.powerItem.onDispatch = (event: any) => {
+          const previous = x.picker.primary.text; dispatch(event);
+          if (!event.key?.startsWith('Arrow')) return;
+          const next = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'][Number(x.picker.slider.values['aria-valuenow'])];
+          setImmediate(() => {
+            x.picker.primary.text = 'Thinking effort\n\n' + next;
+            x.wake([{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker.primary,
+              textContent: x.picker.primary.text }, oldValue: previous }]);
+          });
+        };
         expect(arrows(x.picker)).toHaveLength(0); x.enable();
         const result = await x.pending;
         expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('High'));
