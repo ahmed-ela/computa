@@ -2,10 +2,10 @@ import type { AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState
 import { reorderQueuedPrompts } from './promptQueue';
 
 const previewWorkspace = '/Users/preview/Projects/localcodex-demo';
-const model27B = 'mlx-community/Qwen3.8-27B-4bit';
-const model35B = 'lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit';
-const model9B = 'lmstudio-community/Qwen3.5-9B-MLX-4bit';
-const model4B = 'lmstudio-community/Qwen3.5-4B-MLX-4bit';
+const modelChatGPT = 'browser/chatgpt/choice/preview-instant';
+const modelGemini = 'browser/gemini/choice/preview-flash';
+const modelClaude = 'browser/claude/choice/preview-sonnet';
+const modelCerebras = 'api/cerebras/model/preview-gpt-oss';
 
 function previewReview(taskID: string, scope: ReviewScope = 'lastTurn', reference = '', revision = 1): ReviewState {
   const header = '@@ -1,3 +1,4 @@';
@@ -42,7 +42,7 @@ const previewTasks: TaskSnapshot[] = [
     id: 'preview-response-formatting', title: 'Response formatting checks',
     summary: 'Synthetic paragraphs, lists, code, tables, and inert HTML.',
     status: 'Completed', statusTone: 'green', updatedAt: now - 100,
-    workspace: previewWorkspace, model: model4B, modelSelectable: true,
+    workspace: previewWorkspace, model: modelCerebras, modelSelectable: true,
     queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false,
     entries: [{
       id: 'preview-formatted-answer', kind: 'assistant', title: 'Computa', timestamp: now - 100,
@@ -72,7 +72,7 @@ const previewTasks: TaskSnapshot[] = [
     statusTone: 'green',
     updatedAt: now - 130,
     workspace: previewWorkspace,
-    model: model4B,
+    model: modelCerebras,
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
@@ -119,7 +119,7 @@ const previewTasks: TaskSnapshot[] = [
     statusTone: 'neutral',
     updatedAt: now - 240,
     workspace: previewWorkspace,
-    model: model9B,
+    model: modelClaude,
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
@@ -136,7 +136,7 @@ const previewTasks: TaskSnapshot[] = [
     updatedAt: now - 28,
     activeTurnStartedAt: now - 95,
     workspace: previewWorkspace,
-    model: model9B,
+    model: modelClaude,
     modelSelectable: false,
     queuedPrompts: [
       { id: 'preview-queue-1', text: 'After that, list the visible Calculator controls.', status: 'queued' },
@@ -175,7 +175,7 @@ const previewTasks: TaskSnapshot[] = [
     statusTone: 'orange',
     updatedAt: now - 850,
     workspace: previewWorkspace,
-    model: model27B,
+    model: modelChatGPT,
     modelSelectable: true,
     queuedPrompts: [{
       id: 'preview-queue-failed',
@@ -207,7 +207,7 @@ const previewTasks: TaskSnapshot[] = [
     statusTone: 'green',
     updatedAt: now - 3_900,
     workspace: previewWorkspace,
-    model: model4B,
+    model: modelCerebras,
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
@@ -250,12 +250,12 @@ return {
   permissions: { accessibility: 'Not granted', screenRecording: 'Not granted' },
   appearance: 'system',
   accessMode: 'askEveryTime',
-  defaultModel: model27B,
+  defaultModel: modelChatGPT,
   modelOptions: [
-    { id: model27B, label: 'Qwen3.8-27B · MLX 4-bit', detail: '16.1 GB model file. Current validated Computa model.', highMemory: false },
-    { id: model35B, label: 'Qwen3.6-35B-A3B · MLX 4-bit', detail: '20.4 GB model file. Very tight on this 24 GB Mac; download and load in LM Studio separately.', highMemory: true },
-    { id: model9B, label: 'Qwen3.5-9B · MLX 4-bit', detail: '5.98 GB model files. Lower-memory option; download and load in LM Studio separately.', highMemory: false },
-    { id: model4B, label: 'Qwen3.5-4B · MLX 4-bit', detail: '3.06 GB model files. Smallest option; download and load in LM Studio separately.', highMemory: false },
+    { id: modelChatGPT, label: 'ChatGPT / Instant · Built-in browser', detail: 'Preview ChatGPT model; no provider request is made.', highMemory: false },
+    { id: modelGemini, label: 'Gemini / 3.5 Flash-Lite · Built-in browser', detail: 'Preview Gemini model; no provider request is made.', highMemory: false },
+    { id: modelClaude, label: 'Claude / Sonnet 5.5 · Built-in browser', detail: 'Preview Claude model; no provider request is made.', highMemory: false },
+    { id: modelCerebras, label: 'Cerebras / gpt-oss-120b', detail: 'Preview API model; no provider request is made.', highMemory: false },
   ],
   showToolPayloads: false,
   isInspectorPresented: false,

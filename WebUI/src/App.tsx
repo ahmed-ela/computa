@@ -14,7 +14,7 @@ import {
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
 import { ReviewPanel } from './ReviewPanel';
-import { ModelSelector, WebsiteModelsRefresh } from './ModelSelector';
+import { ModelLabel, ModelSelector, WebsiteModelsRefresh } from './ModelSelector';
 import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
@@ -71,10 +71,6 @@ function clockTime(timestamp: number) {
     hour: 'numeric',
     minute: '2-digit',
   });
-}
-
-function modelName(model: string, snapshot: AppSnapshot) {
-  return snapshot.modelOptions.find((option) => option.id === model)?.label.split(' · ')[0] ?? model.split('/').pop() ?? model;
 }
 
 const toolNames: Record<string, string> = {
@@ -593,9 +589,8 @@ function Composer({
         />
         <div className="composer-controls">
           <div className="composer-left">
-            {/* Capture input before controlled restoration while the native host acknowledges the choice. */}
             <ModelSelector
-              key={`${task.id}:${task.model}`}
+              key={task.id}
               className="model-picker"
               label="Task model"
               model={task.model}
@@ -817,7 +812,7 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
           <h2>Task</h2>
           <dl>
             <div><dt>Status</dt><dd className={toneClass(task.statusTone)}>{task.status}</dd></div>
-            <div><dt>Model</dt><dd title={task.model}>{modelName(task.model, snapshot)}</dd></div>
+            <div><dt>Model</dt><dd title={task.model}><ModelLabel model={task.model} option={snapshot.modelOptions.find((option) => option.id === task.model)} /></dd></div>
             <div><dt>Workspace</dt><dd className="mono">{task.workspace}</dd></div>
             {task.branch ? <div><dt>Branch</dt><dd className="mono">{task.branch}</dd></div> : null}
             <div><dt>Events</dt><dd>{task.entries.length}</dd></div>
@@ -857,6 +852,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
     const previous = document.activeElement as HTMLElement | null;
     const frame = requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('button')?.focus());
     const handleKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (event.key === 'Escape') { event.preventDefault(); post({ action: 'dismissSettings' }); }
       if (event.key !== 'Tab') return;
       const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), summary, [tabindex="0"]') ?? []);
@@ -905,7 +901,6 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             <label className="setting-row">
               <span><strong>Default model</strong><small>Used for new tasks. You can choose another in the composer.</small></span>
               <ModelSelector
-                key={snapshot.defaultModel}
                 label="Default model for new tasks"
                 model={snapshot.defaultModel}
                 options={snapshot.modelOptions}

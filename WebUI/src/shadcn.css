@@ -6,6 +6,7 @@
 @source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/input.tsrx";
 @source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/textarea.tsrx";
 @source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/native-select.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/select.tsrx";
 @source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/badge.tsrx";
 @source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/switch.tsrx";
 

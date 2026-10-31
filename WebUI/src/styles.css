@@ -248,6 +248,21 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .composer-left { flex: 1; }
 .model-select-wrap { display: flex; min-width: 0; align-items: center; gap: 3px; color: var(--text-secondary); }
 .model-picker { max-width: 260px; min-width: 0; }
+.model-selector-trigger { min-width: 0; max-width: 240px; color: var(--text); font-size: 12px; }
+.model-option-label { display: inline-flex; min-width: 0; align-items: center; gap: 7px; vertical-align: middle; }
+.model-option-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-provider-icon { display: inline-block; flex: 0 0 16px; width: 16px; height: 16px; background: currentColor; mask-size: contain; mask-repeat: no-repeat; mask-position: center; -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
+.model-provider-icon.provider-gemini { background: linear-gradient(25deg, #4c8df6 15%, #b677d5 65%, #e599ad); }
+.model-provider-icon.provider-claude { background: #d97757; }
+.model-provider-icon.provider-cerebras { background: #e97642; }
+.model-selector-content { z-index: 120; min-width: 200px; max-width: min(360px, calc(100vw - 24px)); max-height: min(360px, var(--radix-select-content-available-height)); padding: 4px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface-raised); color: var(--text); box-shadow: 0 12px 32px #0003, 0 2px 8px #0002; }
+.model-selector-content [data-slot="select-item"] { min-height: 32px; padding: 7px 28px 7px 8px; border-radius: 5px; color: var(--text); font-size: 12px; }
+.model-selector-content [data-slot="select-item"]:where(:focus, [data-highlighted]) { background: var(--surface-hover); }
+.model-selector-content [data-slot="select-item"][data-disabled] { opacity: .45; pointer-events: none; }
+.model-option-unavailable { color: var(--text-tertiary); font-size: 11px; }
+.composer-shell .model-selector-trigger { height: 28px; border: 0; box-shadow: none; background: transparent; color: var(--text-secondary); font-size: 11px; }
+.composer-shell .model-selector-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.setting-row > .model-selector-trigger { flex-shrink: 0; }
 .composer-shell select { border: 0; background: transparent; color: var(--text-secondary); font-size: 11px; }
 .composer-shell [data-slot="native-select-icon"] { width: 13px; height: 13px; }
 .send-shortcut { display: flex; gap: 2px; }

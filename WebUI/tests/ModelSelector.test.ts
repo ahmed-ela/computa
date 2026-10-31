@@ -2,12 +2,28 @@ import 'octane/compiler/register';
 import { describe, expect, mock, test } from 'bun:test';
 import { createElement as h } from 'octane';
 import { renderToStaticMarkup } from 'octane/server';
-import { decodeHTMLAttribute } from 'entities/decode';
+import { decodeHTML, decodeHTMLAttribute } from 'entities/decode';
 import type { ModelOption } from '../src/types';
 
 mock.module('@octanejs/shadcn/Button', () => ({ Button: ({ variant: _variant, size: _size, ...props }: Record<string, unknown>) => h('button', props) }));
-mock.module('@octanejs/shadcn/NativeSelect', () => ({ NativeSelect: (props: Record<string, unknown>) => h('select', props), NativeSelectOption: (props: Record<string, unknown>) => h('option', props) }));
+// These mocks expose the selector's supplied content and state. Keyboard, focus,
+// and portal behavior belong to the real Select and require browser verification.
+mock.module('@octanejs/shadcn/Select', () => ({
+  Select: ({ children, value, disabled }: Record<string, unknown>) => h('div', {
+    'data-select-value': value, 'data-select-disabled': Boolean(disabled), children,
+  }),
+  SelectTrigger: ({ size: _size, ...props }: Record<string, unknown>) => h('button', { role: 'combobox', ...props }),
+  SelectValue: (props: Record<string, unknown>) => h('span', props),
+  SelectContent: ({ position: _position, align: _align, side: _side, sideOffset: _sideOffset,
+    onCloseAutoFocus: _onCloseAutoFocus, onEscapeKeyDown: _onEscapeKeyDown,
+    onPointerDownOutside: _onPointerDownOutside, ...props }: Record<string, unknown>) => h('div', { role: 'listbox', ...props }),
+  SelectItem: ({ value, disabled, textValue, ...props }: Record<string, unknown>) => h('div', {
+    role: 'option', 'data-value': value, 'aria-disabled': disabled ? 'true' : undefined,
+    'data-text-value': textValue, ...props,
+  }),
+}));
 const { ModelSelector, WebsiteModelsRefresh, modelOptionLabel, websiteModelsRefreshAction } = await import('../src/ModelSelector');
+const { ModelProviderIcon } = await import('../src/ModelProviderIcon');
 
 const options: ModelOption[] = [
   { id: 'browser/chatgpt', label: 'ChatGPT / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
@@ -21,29 +37,100 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
-  test('composer and Settings distinguish provider and exact model labels', () => {
+  test('composer and Settings show model names while keeping provider identity accessible', async () => {
     for (const label of ['Task model', 'Default model for new tasks']) {
       const html = selector(options[1].id, label);
-      expect(html).toContain(`aria-label="${label}"`);
-      for (const option of options) expect(html).toContain(modelOptionLabel(option));
-      expect(html).toContain('ChatGPT / Website default');
-      expect(html).toContain('Gemini / Fixture Fast');
-      expect(html).not.toContain('Built-in browser</option>');
+      const elements = await parsedElements(html);
+      expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes['aria-label'])
+        .toBe(`${label}: ChatGPT / Fixture Fast`);
+      const names = await textBySelector(html, '.model-option-name');
+      expect(names).toEqual([modelOptionLabel(options[1]), ...options.map(modelOptionLabel)]);
+      const providerText = (await textBySelector(html, '.sr-only')).join(' ');
+      for (const provider of ['ChatGPT', 'Gemini', 'Claude']) expect(providerText).toContain(provider);
+      expect(names.join(' ')).not.toContain('Built-in browser');
+      expect(names.join(' ')).not.toContain('ChatGPT /');
     }
   });
 
-  test('saved missing choices remain visible and disabled without choosing a fallback', () => {
-    const html = selector(options[4].id);
-    expect(html).toContain('Claude / Fixture Old (unavailable)');
-    expect(html).toMatch(/<option[^>]*value="browser\/claude\/choice\/old"[^>]*disabled/);
-    expect(html).toContain('Refresh after sign-in; never substitute');
-    const unknown = selector('browser/claude/choice/missing');
-    expect(unknown).toContain('browser/claude/choice/missing</option>');
-    expect(unknown).toMatch(/<option[^>]*value="browser\/claude\/choice\/missing"[^>]*disabled/);
+  test('identical model names across providers retain their exact selection IDs', async () => {
+    const html = selector(options[3].id);
+    const elements = await parsedElements(html);
+    expect(elements.find((element) => element.attributes['data-select-value'])?.attributes['data-select-value'])
+      .toBe(options[3].id);
+    expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes['aria-label'])
+      .toBe('Task model: Gemini / Fixture Fast');
+    expect(elements.filter((element) => element.attributes.role === 'option').map((element) => element.attributes['data-value']))
+      .toEqual(options.map((option) => option.id));
+    expect((await textBySelector(html, '.model-option-name')).filter((name) => name === 'Fixture Fast')).toHaveLength(3);
   });
 
-  test('busy tasks disable model input and discovery refresh reflects its state', () => {
-    expect(selector(options[1].id, 'Task model', true)).toMatch(/<select[^>]*disabled/);
+  test('only the provider prefix and metadata suffix are removed from long or slash-containing names', async () => {
+    const name = 'organization/model / Detailed model name with a long context window';
+    const option = { ...options[1], id: 'api/cerebras/model/fixture', label: `Cerebras / ${name} · API` };
+    expect(modelOptionLabel(option)).toBe(name);
+    expect(modelOptionLabel({ ...option, label: 'Standalone model · API' })).toBe('Standalone model');
+    const html = renderToStaticMarkup(h(ModelSelector, { options: [option], model: option.id, label: 'Task model', onSelect: () => {} })).html;
+    expect(await textBySelector(html, '.model-option-name')).toEqual([name, name]);
+  });
+
+  test('saved missing choices remain visible and disabled without choosing a fallback', async () => {
+    const html = selector(options[4].id);
+    expect(html).toContain('(unavailable)');
+    expect(await textBySelector(html, '.model-option-name')).toContain('Fixture Old');
+    const items = (await parsedElements(html)).filter((element) => element.attributes.role === 'option');
+    expect(items.find((element) => element.attributes['data-value'] === options[4].id)?.attributes['aria-disabled']).toBe('true');
+    expect(html).toContain('Refresh after sign-in; never substitute');
+    const unknown = selector('browser/claude/choice/missing');
+    expect(await textBySelector(unknown, '.model-option-name')).toContain('browser/claude/choice/missing');
+    const unknownElements = await parsedElements(unknown);
+    expect(unknownElements.find((element) => element.attributes['data-select-value'])?.attributes['data-select-value'])
+      .toBe('browser/claude/choice/missing');
+    expect(unknownElements.find((element) => element.attributes['data-value'] === 'browser/claude/choice/missing')?.attributes['aria-disabled'])
+      .toBe('true');
+  });
+
+  test('saved local models stay readable in the trigger but remain absent from the choices', async () => {
+    const local = { id: 'local/saved-model', label: 'Local / Saved model · MLX', detail: 'Saved local selection', highMemory: false };
+    for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model']]) {
+      const html = renderToStaticMarkup(h(ModelSelector, { options: [...options, local], model, label: 'Task model', onSelect: () => {} })).html;
+      expect((await textBySelector(html, '.model-option-name'))[0]).toBe(name);
+      const elements = await parsedElements(html);
+      expect(elements.find((element) => element.attributes['data-select-value'])?.attributes['data-select-value']).toBe(model);
+      expect(elements.filter((element) => element.attributes.role === 'option').map((element) => element.attributes['data-value']))
+        .toEqual(options.map((option) => option.id));
+    }
+  });
+
+  test('provider identities map to local decorative marks and unknown providers use the generic icon', async () => {
+    for (const [model, provider, asset] of [
+      ['browser/chatgpt/choice/fast', 'chatgpt', 'openai'],
+      ['api/openai/model/fixture', 'openai', 'openai'],
+      ['browser/gemini/choice/fast', 'gemini', 'gemini'],
+      ['browser/claude/choice/fast', 'claude', 'claude'],
+      ['api/cerebras/model/fixture', 'cerebras', 'cerebras'],
+    ]) {
+      const elements = await parsedElements(renderToStaticMarkup(h(ModelProviderIcon, { model })).html);
+      const mark = elements.find((element) => element.attributes['data-provider'] === provider);
+      expect(mark).toBeDefined();
+      expect(mark?.attributes['aria-hidden']).toBe('true');
+      expect(mark?.attributes.style).toContain(`/providers/${asset}.svg`);
+      expect(mark?.attributes.style).not.toMatch(/https?:/);
+    }
+    for (const model of ['api/custom/model/fixture', 'api/toString/model/fixture', 'api/__proto__/model/fixture', 'local/saved-model']) {
+      const elements = await parsedElements(renderToStaticMarkup(h(ModelProviderIcon, { model })).html);
+      expect(elements.some((element) => element.attributes['data-provider'])).toBe(false);
+      // Other suites replace Icon with a decorative span; its root semantics,
+      // rather than Lucide's SVG implementation, are the contract here.
+      expect(elements[0]?.attributes['aria-hidden']).toBe('true');
+    }
+  });
+
+  test('busy tasks disable model input and discovery refresh reflects its state', async () => {
+    const disabled = selector(options[1].id, 'Task model', true);
+    expect(disabled).toContain('data-select-disabled="true"');
+    const items = (await parsedElements(disabled)).filter((element) => element.attributes.role === 'option');
+    expect(items).toHaveLength(options.length);
+    expect(items.every((element) => element.attributes['aria-disabled'] === 'true')).toBe(true);
     const idle = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, onRefresh: () => {} })).html;
     const running = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, refreshing: true, onRefresh: () => {} })).html;
     expect(idle).toContain('Refresh models');
@@ -100,11 +187,11 @@ describe('website model selectors', () => {
     const malicious = { id: 'browser/claude/choice/"<script>', label: 'Claude / <script>alert(1)</script> · Built-in browser', detail: '<img src=x onerror=bad()>" autofocus onfocus="bad()', highMemory: false };
     const html = renderToStaticMarkup(h(ModelSelector, { options: [malicious], model: malicious.id, label: 'Task model', onSelect: () => {} })).html;
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-    expect(html).toContain('value="browser/claude/choice/&quot;<script>"');
     const elements = await parsedElements(html);
-    expect(elements.map((element) => element.tag)).toEqual(['select', 'option']);
-    expect(elements[0].attributes.title).toBe(malicious.detail);
-    expect(elements[1].attributes.value).toBe(malicious.id);
+    expect(elements.map((element) => element.tag).filter((tag) => ['script', 'img', 'iframe', 'foreignObject'].includes(tag))).toEqual([]);
+    expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes.title).toBe(malicious.detail);
+    expect(elements.find((element) => element.attributes.role === 'option')?.attributes['data-value']).toBe(malicious.id);
+    expect(await textBySelector(html, '.model-option-name')).toEqual(['<script>alert(1)</script>', '<script>alert(1)</script>']);
     for (const element of elements) {
       expect(element.attributes).not.toHaveProperty('onerror');
       expect(element.attributes).not.toHaveProperty('onfocus');
@@ -116,6 +203,15 @@ describe('website model selectors', () => {
       .map((element) => element.tag)).toEqual(['script', 'img']);
   });
 });
+
+async function textBySelector(html: string, selector: string): Promise<string[]> {
+  const values: string[] = [];
+  await new HTMLRewriter().on(selector, {
+    element() { values.push(''); },
+    text(chunk) { values[values.length - 1] += chunk.text; },
+  }).transform(new Response(html)).text();
+  return values.map((value) => decodeHTML(value));
+}
 
 async function parsedElements(html: string): Promise<{ tag: string; attributes: Record<string, string> }[]> {
   const elements: { tag: string; attributes: Record<string, string> }[] = [];
