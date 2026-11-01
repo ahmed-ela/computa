@@ -454,6 +454,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
         var loggedGroqComposerFailure = false
+        var loggedGroqSendFailure = false
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
@@ -1451,6 +1452,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func waitForSendReady(_ session: Session, prompt: String) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
+        // Diagnostic only, local to this one bounded readiness wait. A previous
+        // false observation cannot authorize Send or replace a later error.
+        var lastGroqDiagnostic: String?
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             let remaining = deadline - .now
@@ -1461,16 +1465,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 observed = try await page(session, action: "sendReady", prompt: prompt, maximumWait: remaining)
             } catch {
                 if ContinuousClock.now >= deadline, (error as? Failure) == .pageUnavailable {
-                    throw Failure.editorFailure("send_unavailable")
+                    throw sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
                 }
                 throw error
+            }
+            if session.provider == .groq, let ready = observed["sendReady"] as? NSNumber,
+               CFGetTypeID(ready) == CFBooleanGetTypeID(), !ready.boolValue {
+                lastGroqDiagnostic = Self.groqSendFailureDiagnostic(action: "sendReady", stage: "last_observation",
+                    detail: observed["sendReadinessFailure"])
             }
             guard ContinuousClock.now < deadline else { break }
             try requireLifecycle(observed, session: session)
             if observed["sendReady"] as? Bool == true { return }
             _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
         }
-        throw Failure.editorFailure("send_unavailable")
+        throw sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
+    }
+
+    private func sendReadinessFailure(_ session: Session, diagnostic: String?) -> Failure {
+        guard session.provider == .groq, let diagnostic else { return .editorFailure("send_unavailable") }
+        if !session.loggedGroqSendFailure {
+            session.loggedGroqSendFailure = true
+            Self.inspectionLog.notice("sendFailure provider=groq \(diagnostic, privacy: .public)")
+        }
+        return .editorFailure(diagnostic)
     }
 
     private func preparationFailure(_ session: Session) -> Failure {
@@ -4137,6 +4155,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "composer_unavailable; action=\(action); detail=\(reason)"
     }
 
+    /// Only fixed adapter categories may survive page cleanup. This describes
+    /// the evaluated failure, never current geometry or permission to act.
+    static func groqSendFailureDiagnostic(action: String, stage: String, detail: Any?) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel",
+            "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
+        let readinessReasons: Set<String> = ["disabled", "invalid_geometry", "outside_viewport", "occluded"]
+        guard actions.contains(action), stage == "current" || stage == "last_observation" && action == "sendReady" else { return nil }
+        let reasons = stage == "current" ? readinessReasons.union(["send_missing", "send_ambiguous"]) : readinessReasons
+        let reason = (detail as? String).flatMap { reasons.contains($0) ? $0 : nil } ?? "unknown"
+        return "send_unavailable; action=\(action); stage=\(stage); detail=\(reason)"
+    }
+
     static func insertionDifferenceDiagnostic(_ observed: [String: Any]) -> String? {
         guard let index = observed["firstDifference"] as? Int, (0...360_000).contains(index) else { return nil }
         func scalar(_ key: String) -> String? {
@@ -5289,7 +5319,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     throw Failure.editorFailure(diagnostic)
                 }
                 throw Failure.editorFailure(error)
-            case "composer_not_empty", "prompt_not_inserted", "send_unavailable", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
+            case "send_unavailable":
+                if provider == .groq {
+                    throw sendReadinessFailure(session, diagnostic: Self.groqSendFailureDiagnostic(action: action,
+                        stage: "current", detail: observed["detail"]))
+                }
+                throw Failure.editorFailure(error)
+            case "composer_not_empty", "prompt_not_inserted", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
             default: throw Failure.composerUnavailable
             }
         }

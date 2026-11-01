@@ -11384,6 +11384,141 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqSendFailureDiagnosticRejectsPrivateOrUnobservedCategories() throws {
+        let reasons = ["disabled", "invalid_geometry", "outside_viewport", "occluded"]
+        let invalid: [Any?] = [nil, NSNull(), false, 1, [], ["occluded": true], "OCCLUDED",
+            "https://private.invalid/?PROMPT_SECRET", "occluded\nPROMPT_SECRET", String(repeating: "SECRET", count: 1_000)]
+        for stage in ["current", "last_observation"] {
+            for reason in reasons {
+                let value = try XCTUnwrap(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: "sendReady", stage: stage, detail: reason))
+                XCTAssertEqual(value, "send_unavailable; action=sendReady; stage=\(stage); detail=\(reason)")
+                XCTAssertLessThan(value.utf8.count, 128)
+            }
+            for detail in invalid {
+                XCTAssertEqual(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: "sendReady", stage: stage, detail: detail),
+                               "send_unavailable; action=sendReady; stage=\(stage); detail=unknown")
+            }
+        }
+        for action in ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel", "prepare",
+                       "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"] {
+            for reason in ["send_missing", "send_ambiguous"] {
+                XCTAssertEqual(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: action, stage: "current", detail: reason),
+                               "send_unavailable; action=\(action); stage=current; detail=\(reason)")
+                if action == "sendReady" {
+                    XCTAssertEqual(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: action, stage: "last_observation", detail: reason),
+                                   "send_unavailable; action=sendReady; stage=last_observation; detail=unknown")
+                } else {
+                    XCTAssertNil(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: action, stage: "last_observation", detail: reason))
+                }
+            }
+        }
+        for (action, stage) in [("sendReady", "PRIVATE_STAGE"), ("submit", "last_observation"),
+                                ("sendReady\nPRIVATE_ACTION", "current"), ("", "current")] {
+            XCTAssertNil(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: action, stage: stage, detail: "disabled"))
+        }
+    }
+
+    func testGroqSendReadinessRetainsActualFailureWithoutSendingOrRenewingDeadline() async throws {
+        let cases = [
+            ("disabled", "groqFixture.send.disabled = true;"),
+            ("outside_viewport", "groqFixture.send.style.cssText = 'position:fixed;left:' + (innerWidth + 100) + 'px;top:100px';"),
+            ("occluded", """
+                const r = groqFixture.send.getBoundingClientRect(), cover = document.createElement('div');
+                cover.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;z-index:1000`;
+                document.body.append(cover);
+                """),
+        ]
+        for (reason, mutation) in cases {
+            let fixture = try Fixture(page: Self.groqFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGroqFixture(fixture, send: false)
+            _ = try await evaluate(view, "groqFixture.inputs = 0; groqFixture.editor.addEventListener('input', () => groqFixture.inputs++); return true;")
+            var actions: [String] = [], changed = false
+            var firstReadiness: ContinuousClock.Instant?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if action == "sendReady", firstReadiness == nil { firstReadiness = .now }
+                guard action == "insert", !changed else { return }
+                changed = true
+                let result = try? await self.evaluate(view, mutation + " return true;")
+                XCTAssertEqual(result as? Bool, true)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE bounded Send readiness fixture"])
+                XCTFail("An unready Send cannot be dispatched")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    .editorFailure("send_unavailable; action=sendReady; stage=last_observation; detail=\(reason)"))
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(changed)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertFalse(actions.contains("submit"))
+            if let firstReadiness {
+                XCTAssertLessThan(ContinuousClock.now - firstReadiness, .seconds(3.5), "Diagnostics cannot renew the existing three-second deadline")
+            } else { XCTFail("The diagnostic must come from an actual readiness observation") }
+            let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount, groqFixture.inputs];") as? [Int]
+            XCTAssertEqual(counts, [0, 0, 1])
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGroqSendReadinessDiagnosticCannotPreventTransientEnableOrOverrideOwnershipFailure() async throws {
+        for drifts in [false, true] {
+            let fixture = try Fixture(page: Self.groqFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGroqFixture(fixture, send: false)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            var actions: [String] = [], disabled = false, released = false, firstFailureReturned = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if action == "insert", !disabled {
+                    disabled = true
+                    _ = try? await self.evaluate(view, "groqFixture.send.disabled = true; return true;")
+                }
+                guard action == "sendReady", !released else { return }
+                if drifts, !firstFailureReturned {
+                    firstFailureReturned = true
+                    // Return one validated false snapshot before waking the
+                    // next read that will lose ownership. Its saved diagnostic
+                    // must not replace that later, stronger failure.
+                    _ = try? await self.evaluate(view, "document.body.classList.add('fixture-readiness-change'); return true;")
+                    return
+                }
+                released = true
+                let stillDisabled = try? await self.evaluate(view, "return groqFixture.send.disabled;")
+                XCTAssertEqual(stillDisabled as? Bool, true)
+                let mutation = drifts
+                    ? "history.replaceState(null, '', '/?model=openai%2Fgpt-oss-20b');"
+                    : "groqFixture.send.disabled = false;"
+                _ = try? await self.evaluate(view, mutation + " return true;")
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE readiness observation cannot grant Send authority"])
+                XCTAssertFalse(drifts)
+                _ = try await waitForState("complete", fixture.transport, token: token)
+            } catch {
+                XCTAssertTrue(drifts, "A transiently disabled Send must recover through the existing read-only wait")
+                guard let failure = error as? EmbeddedWebModelTransport.Failure, case .ownershipFailure = failure else {
+                    return XCTFail("The actual changed ownership must win over any readiness diagnostic: \(error)")
+                }
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(disabled); XCTAssertTrue(released)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, drifts ? 0 : 1)
+            XCTAssertGreaterThanOrEqual(actions.filter { $0 == "sendReady" }.count, 2)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, drifts ? "failed" : "transcript_cleared")
+            let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+            XCTAssertEqual(counts, drifts ? [0, 0] : [1, 1])
+            if drifts { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+            else { try await assertHumanTabIntact(fixture) }
+        }
+    }
+
     private static func groqFixturePage() throws -> String {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

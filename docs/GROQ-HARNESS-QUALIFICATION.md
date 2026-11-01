@@ -4,16 +4,17 @@
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 355 (0.8.0) is installed from `5e86f34`. Its first GPT-OSS 120B
-harness marker failed before Send with `composer_unavailable`; live support
-remains unqualified. Direct website probes below are not harness qualification.
+Build 357 (0.8.0) is installed from `64febc1`. After the editor hit-test repair,
+a fresh GPT-OSS 120B marker failed before Send with
+`send_unavailable`; live support remains unqualified. Direct website probes
+below are not harness qualification.
 
 The observed menu contains these general chat choices:
 
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build355: pre-Send composer failure |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build357: pre-Send readiness failure |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -216,5 +217,41 @@ L `f1864c9bba68bb964f93e92ad87f52c01c44c25ae78253eaec7dceeb5350132d`.
 Reproducible native/signed356 candidate copies were retired after verifying the
 installed artifact and preserving full receipts/inventories. Installed356 and
 the installer backups remain; this storage cleanup is not a release operation.
+
+## Fresh installed check — build 357
+
+Case `groq-gptoss120b-marker357-c` failed in 5,487 ms with
+`send_unavailable`. It invoked zero tools; the private view closed with a
+durable `not_created` receipt. The exact marker, selected model, unchanged
+installed process and source, native task/thread/turn, journals and error are
+retained in its evidence directory. Its unused diagnostic arm was verified and
+archived. No prompt was replayed. The three prepared workflow357-d cases remain
+unstarted, gated on a successful initial marker.
+
+The three-second Send-readiness wait discards its false observations, so this
+error does not distinguish a disabled, off-screen or covered button. A normal
+Groq tab with a harmless, unsent synthetic long draft visibly expands the
+editor, but this screenshot alone does not establish the exact predicate in the
+failed owned session. The subsequently approved, read-only Inspector check found
+the normal pane had a 360×527 mobile viewport: its expanded editor extended
+above the viewport, while its Send button was enabled and hit-testable at
+`[247,441,40,40]`. The model view is configured at 1024×768 and uses a separate
+desktop form. These different layouts do not prove the owned-view cause.
+The draft was never sent. Both developer settings were restored, and only the
+root-created test tab was closed. Evidence: `layout358-inspector-results.txt`,
+`layout358-safari-restored.txt`, `layout358-inspector-off.png` and
+`layout358-tab-closed.txt`.
+
+The next diagnostic preserves only the closed reason from the actual hit
+decision, labels a timeout reason as `last_observation`, and keeps the same
+deadline, event waits and Send gates. Missing/ambiguous controls have separate
+finite labels. JavaScript checks pass 48 tests and 529 assertions. Native run M
+failed compilation because a new test referenced a nonexistent fixture member;
+no tests ran. That reference and an unrelated notification-wakeup test defect
+were corrected. Native run N then passed all 26 tests in 49.584 seconds with
+unchanged source hashes, including the existing ChatGPT readiness deadline
+case. N log SHA-256:
+`9cab63a14d5beadf40a2b1275a0e0610e884b5a757323911a1b0640c1799ca2e`.
+The installed check of this diagnostic remains pending.
 
 No live harness pass or release is claimed yet.

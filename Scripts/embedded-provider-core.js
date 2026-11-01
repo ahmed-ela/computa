@@ -26,20 +26,22 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hit = node => {
-    if (!enabled(node) || typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return false;
+  const hitFailure = node => {
+    if (!enabled(node)) return 'disabled';
+    if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
     const right = r.left + r.width, bottom = r.top + r.height;
     if (![r.left, r.top, r.width, r.height, right, bottom, width, height].every(Number.isFinite)
-      || r.width <= 0 || r.height <= 0 || width <= 0 || height <= 0) return false;
+      || r.width <= 0 || r.height <= 0 || width <= 0 || height <= 0) return 'invalid_geometry';
     // An expanding editor can extend above the viewport. Test one point in its
     // visible intersection; an overlay or ancestor clip still fails the hit.
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
-    if (clippedRight <= left || clippedBottom <= top) return false;
+    if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
-    return node.contains(document.elementFromPoint(x, y));
+    return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
+  const hit = node => hitFailure(node) === null;
   const originalDocument = document, expectedURL = request.expectedURL;
   const context = () => request.provider === provider && window === window.top && document === originalDocument
     && location.origin === origin && document.URL === expectedURL
@@ -72,5 +74,5 @@ function computaProviderCore(request, provider, origin, actions) {
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
     globalThis[signalKey] = record;
   }
-  return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, context, assertContext, hash };
+  return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
 }

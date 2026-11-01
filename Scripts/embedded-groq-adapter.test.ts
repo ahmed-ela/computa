@@ -252,6 +252,76 @@ describe('Groq fixed fresh-session adapter', () => {
     }
   });
 
+  test('Send readiness reports only the actual finite reason without another hit probe or dispatch', async () => {
+    const cases = [
+      ['disabled', (f: any) => { f.f.send.disabled = true; }, 0],
+      ['invalid_geometry', (f: any) => { f.f.send.getBoundingClientRect = null; }, 0],
+      ['invalid_geometry', (f: any) => { f.f.send.rect.left = 'PRIVATE_SEND_GEOMETRY'; }, 0],
+      ['outside_viewport', (f: any) => { f.f.send.rect.top = 768; }, 0],
+      ['occluded', (f: any) => { const original = f.document.elementFromPoint;
+        f.document.elementFromPoint = (x: number, y: number) => { const hit = original(x, y); return hit === f.f.send ? f.body : hit; }; }, 1],
+    ] as const;
+    for (const [reason, change, probes] of cases) {
+      const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      f.f.send.textContent = 'PRIVATE_SEND_LABEL';
+      f.f.send.append(new f.Node('SVG', { 'aria-label': 'send' }));
+      change(f); f.hitQueries.length = 0;
+      const result = await f.run('sendReady', { prompt: groqPrompt });
+      expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(false);
+      expect(result.sendReadinessFailure).toBe(reason);
+      expect(f.hitQueries.filter(({ node }) => node === f.f.send).length).toBe(probes);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_SEND');
+      expect(f.f.sendCount).toBe(0); expect(f.f.editor.value).toBe(groqPrompt);
+      // The separate submit action rechecks the same guard and still cannot click.
+      expect(await f.run('submit', { prompt: groqPrompt })).toEqual({ error: 'send_unavailable', detail: reason });
+      expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('readiness retains the evaluated failure even if a later probe would see a different hit', async () => {
+    const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+    const original = f.document.elementFromPoint; let sendProbes = 0;
+    f.document.elementFromPoint = (x: number, y: number) => {
+      const hit = original(x, y);
+      if (hit !== f.f.send) return hit;
+      sendProbes++; f.document.elementFromPoint = original;
+      return f.body;
+    };
+    const result = await f.run('sendReady', { prompt: groqPrompt });
+    expect(result.sendReady).toBe(false); expect(result.sendReadinessFailure).toBe('occluded');
+    expect(sendProbes).toBe(1); expect(f.f.sendCount).toBe(0);
+  });
+
+  test('ready has no failure reason and the final editor-enabled check keeps its original order', async () => {
+    const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+    f.hitQueries.length = 0;
+    const ready = await f.run('sendReady', { prompt: groqPrompt });
+    expect(ready.sendReady).toBe(true); expect(ready.sendReadinessFailure).toBeNull();
+    expect(f.hitQueries.filter(({ node }) => node === f.f.send).length).toBe(1);
+    expect(f.f.sendCount).toBe(0);
+    const original = f.document.elementFromPoint;
+    f.document.elementFromPoint = (x: number, y: number) => {
+      const hit = original(x, y); if (hit === f.f.send) f.f.editor.disabled = true;
+      return hit;
+    };
+    const changed = await f.run('sendReady', { prompt: groqPrompt });
+    expect(changed.sendReady).toBe(false); expect(changed.sendReadinessFailure).toBe('disabled');
+    expect(f.f.sendCount).toBe(0);
+  });
+
+  test('missing and ambiguous Send controls report fixed details without exposing control text', async () => {
+    for (const ambiguity of [false, true]) {
+      const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      if (ambiguity) {
+        const extra = new f.Node('BUTTON', { type: 'submit' }, 'PRIVATE_DUPLICATE_SEND');
+        extra.append(new f.Node('SVG', { 'aria-label': 'send' })); f.f.form.append(extra);
+      } else f.f.send.remove();
+      expect(await f.run('sendReady', { prompt: groqPrompt })).toEqual({ error: 'send_unavailable',
+        detail: ambiguity ? 'send_ambiguous' : 'send_missing' });
+      expect(f.f.sendCount).toBe(0); expect(f.f.editor.value).toBe(groqPrompt);
+    }
+  });
+
   test('editor substitution and missing exact final marker stop before Send', async () => {
     const f = groqFixture(); await f.select(); await f.run('prepare');
     f.f.editor.oninput = () => { f.f.editor.value += 'changed'; };

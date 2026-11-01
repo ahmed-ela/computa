@@ -26,20 +26,22 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hit = node => {
-    if (!enabled(node) || typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return false;
+  const hitFailure = node => {
+    if (!enabled(node)) return 'disabled';
+    if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
     const right = r.left + r.width, bottom = r.top + r.height;
     if (![r.left, r.top, r.width, r.height, right, bottom, width, height].every(Number.isFinite)
-      || r.width <= 0 || r.height <= 0 || width <= 0 || height <= 0) return false;
+      || r.width <= 0 || r.height <= 0 || width <= 0 || height <= 0) return 'invalid_geometry';
     // An expanding editor can extend above the viewport. Test one point in its
     // visible intersection; an overlay or ancestor clip still fails the hit.
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
-    if (clippedRight <= left || clippedBottom <= top) return false;
+    if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
-    return node.contains(document.elementFromPoint(x, y));
+    return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
+  const hit = node => hitFailure(node) === null;
   const originalDocument = document, expectedURL = request.expectedURL;
   const context = () => request.provider === provider && window === window.top && document === originalDocument
     && location.origin === origin && document.URL === expectedURL
@@ -72,7 +74,7 @@ function computaProviderCore(request, provider, origin, actions) {
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
     globalThis[signalKey] = record;
   }
-  return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, context, assertContext, hash };
+  return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
 }
 
 // Groq chat is a fresh explicit-clear session, never a temporary conversation.
@@ -138,7 +140,7 @@ try {
     if (c.nodes(form, 'textarea#chat', 4).filter(c.visible).length !== 1) c.fail('composer_unavailable', 'form_editor_count');
     const sends = c.nodes(form, 'button[type="submit"]', 8).filter(node => c.visible(node)
       && c.nodes(node, 'svg[aria-label="send"]', 4).length === 1);
-    const send = c.unique(sends, 'send_unavailable');
+    const send = c.unique(sends, 'send_unavailable', sends.length ? 'send_ambiguous' : 'send_missing');
     return { editor, form, send };
   }
   function picker() {
@@ -395,9 +397,12 @@ try {
     return { ...initial.output, inserted: true };
   }
   if (state.submitted || state.inserted !== prompt || form.editor.value !== prompt || transcript().users.length !== 0) c.fail('prompt_not_inserted');
-  const ready = c.hit(form.send) && c.enabled(form.editor);
-  if (input.action === 'sendReady') return { ...initial.output, sendReady: ready };
-  if (!ready) c.fail('send_unavailable');
+  // Retain only the fixed reason from this actual decision. A later geometry
+  // probe could disagree with the check that prevented this Send.
+  const sendReadinessFailure = c.hitFailure(form.send) ?? (c.enabled(form.editor) ? null : 'disabled');
+  const ready = sendReadinessFailure === null;
+  if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure };
+  if (!ready) c.fail('send_unavailable', sendReadinessFailure);
   state.submitted = true;
   form.send.click();
   // This is the pre-click empty observation plus dispatch acknowledgment. It
