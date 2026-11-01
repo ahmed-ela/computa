@@ -1219,13 +1219,33 @@ function websiteModelPickerState(provider) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
-      // Claude's observed Fable rows advertise a separate credits purchase.
-      // Only exact visible purchase controls inside this option exclude it;
-      // unrelated page text or another row cannot change model eligibility.
+      // Purchase labels may use any element tag. Text must come from
+      // visible descendants of this exact row/menu; ancestor innerText can
+      // include aria-hidden/inert labels or a nested foreign option.
+      const purchaseScope = node => visible(node) && outside(node)
+        && node.closest(selector) === option
+        && node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu;
+      const purchaseLabel = node => {
+        if (!purchaseScope(node)) return false;
+        const aria = node.getAttribute('aria-label');
+        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        let remaining = 128, text = '', complete = true;
+        const visit = (current, depth) => {
+          if (!complete) return;
+          if (--remaining < 0 || depth > 32) { complete = false; return; }
+          if (current.nodeType === 3) {
+            text += current.textContent || '';
+            if (text.length > 256) complete = false;
+          } else if (current.nodeType === 1 && purchaseScope(current)) {
+            if (current.tagName === 'BR') text += '\n';
+            for (const child of current.childNodes) visit(child, depth + 1);
+          }
+        };
+        visit(node, 0);
+        return complete && /^Buy credits$/.test(websiteModelNormalize(text));
+      };
       const creditsRequired = provider === 'claude'
-        && [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
-          .some(node => visible(node) && /^Buy credits$/.test(
-            websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
+        && [option, ...option.querySelectorAll('*')].slice(0, 128).some(purchaseLabel);
       if (upgrades || creditsRequired) continue;
       const choice = family(option);
       // Gemini also selects a separate thinking-effort row in this menu.
@@ -1906,13 +1926,30 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
 function modelResponseExtraction(answer) {
-  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null,
     selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
   let rendered = '', blocks = [], code = null;
   const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
   if (!answer) return fallback('absent_answer');
   rendered = (answer.innerText || answer.textContent || '').trim();
   blocks = [...answer.querySelectorAll('pre')];
+  // This finite fact can restrict the existing one-shot format correction,
+  // never extract either call or authorize execution from the rejected reply.
+  if (blocks.length === 2) {
+    flags.repeatedIdenticalToolCalls = false;
+    const codes = blocks.map(block => [...block.querySelectorAll('code')]);
+    if (!blocks[0].contains(blocks[1]) && !blocks[1].contains(blocks[0])
+      && codes.every(items => items.length === 1) && answer.querySelectorAll('code').length === 2) {
+      const first = codes[0][0].textContent || '', second = codes[1][0].textContent || '';
+      if (first.length > 0 && first.length <= 220_000 && first === second
+        && new TextEncoder().encode(first).length <= 220_000) {
+        try {
+          const envelope = JSON.parse(first);
+          flags.repeatedIdenticalToolCalls = !!envelope && !Array.isArray(envelope) && envelope.type === 'tool_calls';
+        } catch { /* Unknown or malformed literal content remains ineligible. */ }
+      }
+    }
+  }
   if (blocks.length !== 1) return fallback(blocks.length ? 'multiple_pre' : 'missing_pre');
   const codes = [...blocks[0].querySelectorAll('code')];
   if (codes.length !== 1) return fallback(codes.length ? 'multiple_code' : 'missing_code');

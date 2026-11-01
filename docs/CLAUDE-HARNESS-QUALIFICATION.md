@@ -8,24 +8,74 @@ read-only inspection sent no prompt and changed no model; enabled picker control
 are availability observations, not successful inference or workflow evidence.
 The newly visible Opus choices still require independent qualification.
 
-As of November 1, build360 is published as `v0.8.0-alpha.360`; candidate361
-is installed locally for the separate qualification work on draft PR #18.
-PR #17 was squash-merged at `e42f8df`; its tree exactly matches the actual build
-source `59aa4a5`. The signed bundle and all frozen build inputs were revalidated
-before publication. The package is not notarized. Build360 adds request
-diagnostics, not a fix for the remaining Claude refusals or format errors.
-The live results below supersede the earlier absence of post-build354 testing.
+As of November 1, build362 is installed and published as `v0.8.0-alpha.362`.
+PR #18 was squash-merged at `b595d10`; its tree exactly matches the actual build
+source `d9eae0a`. The signed bundle and frozen build inputs were revalidated
+before publication. The package is not notarized. Full Claude qualification
+remains open in issue #15; release publication does not establish model reliability.
 
-The build353 exact-submission
-proof and bounded correction passed native tests and live transaction checks.
-The latest Sonnet 5 and Sonnet 4.6 workflows returned refusals, so neither is
-qualified for tool workflows. Haiku 5.5 passed a fresh response control but its
-next workflow failed on a rejected call shape. Sonnet 5.5 completed the fresh
-build353 workflow; earlier successful build349 workflows remain separate
-evidence. Build354 adds capture for the missing rejection category; its fresh
-Haiku workflow ended in a capability refusal after verified tool execution.
-The release includes these known limitations; full qualification remains open
-in issue #15.
+Current bounded evidence includes a successful Sonnet 5.5 workflow on build353
+and a successful Haiku 5.5 workflow on build361. Build362's Sonnet 5 marker
+received a valid refusal. Its Sonnet 4.6 marker passed, but the subsequent
+workflow failed on response formatting after code tests and browser submission
+had succeeded. Newly discovered Opus choices remain unqualified. These results
+are independent cases, not an all-model pass or a measured reliability rate.
+
+## Build362: duplicate code blocks stop the Sonnet 4.6 workflow
+
+The fresh `sonnet46-workflow362-v` case ran for 60.587 seconds. It edited only
+`reconcile.py`, passed all six protected tests, printed the correct reference,
+and submitted the loopback form exactly once. The browser click output and
+independent fixture ledger agree on the accepted receipt and unpredictable nonce.
+The eighth website response then contained two byte-identical `browser_close`
+JSON blocks separated by narration. Strict whole-reply parsing rejected it as
+`invalid_json`; neither rejected close call was dispatched. The task had no
+final answer or model-issued tab close, so the complete workflow failed.
+
+The captured reply's finite structure reports `preCount=2`, `codeCount=2`,
+`extractionReason=multiple_pre`, and rendered fallback extraction. The existing
+Claude format-correction guard requires a single valid tool block with
+`outside_content`, so it did not admit this case. This identifies an eligibility
+gap in the correction path, not duplicate execution or lost completed history.
+All eight owned website sessions have saved closed cleanup receipts. App cleanup
+closed the task-created fixture tab; that does not substitute for the requested
+model action. The fixture server was stopped before its independent audit.
+
+The rejected reply, exact task/turn/inference joins, native transcript, website
+transactions, cleanup records and terminal UI are retained privately under
+`work/claude-qualification-20261031/evidence/sonnet46-workflow362-v/`. The consumed
+diagnostic output was retired with its identity and hash preserved. The failed
+task was not replayed. Candidate363 will test a narrow extension of the existing
+one-time correction; the original reply must remain rejected and no tool call
+may be recovered directly from either code block.
+
+Candidate363 records a finite Boolean only when an owned answer has exactly two
+disjoint PRE elements, one CODE in each and no other CODE, with bounded,
+byte-identical bodies that parse as `tool_calls` objects. It retains the whole
+rendered response and `multiple_pre` rejection. This fact only admits the existing
+single correction attempt after exact submission and saved cleanup verification.
+The unchanged canonical request is sent in a fresh same-model session, under the
+original turn deadline and budgets; rejected narration and calls are not added to
+history. The corrected response must pass the ordinary strict parser, and a valid
+refusal remains a refusal. Missing, conflicting or malformed evidence stays terminal.
+
+The same candidate makes the purchase-row filter independent of the HTML tag
+used for an exact visible `Buy credits` label. Bounded text collection excludes
+hidden, inert and foreign-row descendants. Synthetic regressions check this
+generic discovery gap; the exact markup of the live Fable rows has not yet been
+captured, and installed catalog verification is still required.
+
+Candidate363 validation passed all 893 ChatGPT/Claude/Gemini adapter tests,
+including the shared purchase-filter regressions. The 263 selected native tests
+have passing results across two retained runs. The first run passed 262 and
+exposed an incorrect new test assumption: `fixtureInfer` throws a terminal
+rejection before its caller performs cleanup. The test now invokes that normal
+finish path and requires a saved closed receipt for the exact second session,
+with only two sends. All 16 Claude correction tests passed on rerun; production
+code was unchanged. Real WebKit tests confirmed that duplicate, conflicting and
+message blocks retain their full text and remain rejected by the strict codec.
+All nine version tests also passed. These checks do not establish a live
+candidate363 workflow pass; installation and fresh model qualification follow.
 
 ## Candidate 360: capture the post-tabs request
 

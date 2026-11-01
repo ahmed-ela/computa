@@ -1484,12 +1484,19 @@ actor WebModelServer {
     private static func isClaudeFormatCorrectionCandidate(_ snapshot: [String: Any]?) -> Bool {
         guard let completion = snapshot?["completionEvidence"] as? [String: Any],
               let structure = completion["codeStructure"] as? [String: Any],
-              receiptInteger(structure["preCount"], range: 1...1) == 1,
+              structure["selectedExtraction"] as? String == "rendered_fallback" else { return false }
+        if receiptInteger(structure["preCount"], range: 2...2) == 2,
+           receiptInteger(structure["codeCount"], range: 2...2) == 2,
+           structure["extractionReason"] as? String == "multiple_pre",
+           let repeated = structure["repeatedIdenticalToolCalls"] as? NSNumber,
+           CFGetTypeID(repeated) == CFBooleanGetTypeID(), repeated.boolValue {
+            return true
+        }
+        guard receiptInteger(structure["preCount"], range: 1...1) == 1,
               let valid = structure["literalCodeValidJSON"] as? NSNumber,
               CFGetTypeID(valid) == CFBooleanGetTypeID(), valid.boolValue,
               structure["literalCodeKnownEnvelopeType"] as? String == "tool_calls",
-              structure["extractionReason"] as? String == "outside_content",
-              structure["selectedExtraction"] as? String == "rendered_fallback" else { return false }
+              structure["extractionReason"] as? String == "outside_content" else { return false }
         return true
     }
 
@@ -1623,6 +1630,11 @@ actor WebModelServer {
             safe["literalCodeValidJSON"] = NSNull()
         } else if let value = raw["literalCodeValidJSON"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
             safe["literalCodeValidJSON"] = value.boolValue
+        }
+        if raw["repeatedIdenticalToolCalls"] is NSNull {
+            safe["repeatedIdenticalToolCalls"] = NSNull()
+        } else if let value = raw["repeatedIdenticalToolCalls"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
+            safe["repeatedIdenticalToolCalls"] = value.boolValue
         }
         if raw["literalCodeKnownEnvelopeType"] is NSNull {
             safe["literalCodeKnownEnvelopeType"] = NSNull()
