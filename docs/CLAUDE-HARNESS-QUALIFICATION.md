@@ -10,8 +10,10 @@ Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
 As of November 1, build374 (`c58d43d`) is installed and its launch is recorded.
-The latest Opus 4.6 full workflow passed on build374; the earlier Sonnet 5.5
-full workflow ran on build368 (`2dea3d2`). A later
+The latest Opus 4.6 full workflow passed on build374; subsequent Opus 4.8 and
+Opus 4.7 workflows returned valid refusals without tool use. A fresh Opus 3
+workflow failed with two malformed replies and no tool use. The earlier Sonnet
+5.5 full workflow ran on build368 (`2dea3d2`). A later
 Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
 on build371 is claimed. The separate Opus 5 reproductions on builds 373 and 374
 failed as recorded below. The
@@ -27,7 +29,9 @@ build361. Opus 5.5 completed one full workflow on build363. Build368's Opus 4.6
 marker passed, but its full workflow failed after a successful file edit. A
 fresh build374 Opus 4.6 workflow subsequently passed as recorded below; that
 result does not explain or erase the earlier failure.
-Opus 4.7 added prose to its marker; Opus 3's malformed reply was rejected.
+Opus 4.7 added prose to its earlier marker; its fresh build374 workflow returned
+a valid refusal without tool use. Opus 3's earlier malformed marker reply was
+rejected; its fresh build374 workflow also failed after one format correction.
 Build362's Sonnet 5 marker received a valid refusal. Sonnet 4.6 has passed
 markers but still fails full workflows: build364 corrected its malformed first
 reply, then received a valid refusal. Opus 5 still loses current model proof
@@ -270,6 +274,127 @@ This gives a concrete instruction-design hypothesis for a later controlled
 comparison, not a successful workflow or permission to reinterpret the refusal
 as an executable tool call.
 
+## Installed build374 Opus 4.7 workflow refusal, November 1
+
+The fresh `opus47-workflow374-d` task used a separate fixture and loopback port
+on build374, source `c58d43d29b384fb7b6e56b12bf77702d9e2ea34a`, process 19847.
+The ordinary picker exposed an enabled Opus 4.7 under More models; selection
+showed `Opus 4.7 Extra`, and the empty inspection tab was closed before the
+native task. That observation is separate from the harness's exact Opus 4.7
+selection proof and does not attest to the backend model or inference effort.
+
+The exact 729-byte prompt was sent once. After 13.886 seconds and one inference,
+the model returned a valid prose refusal with zero native tool calls. It
+declined the Computa/JSON-envelope framing and stated that the local tools were
+unavailable in that website conversation. The parser preserved the refusal as
+ordinary final text; no native error, website error, correction or rejected-reply
+capture occurred. This is the model's stated interpretation, not proof that
+Computa lacks those tools or that any one instruction caused the refusal.
+
+All five lifecycle phases and seven per-inference identity/cleanup checks
+passed, including the saved closed cleanup receipt and verified release. The
+task browser was never opened. All four fixture files remained unchanged, the
+receipt ledger stayed empty, and no POST or browser receipt occurred. The fixture
+grader retained `FAIL_LOCAL_FIXTURE` (7/19 checks); its independent test run did
+not constitute model-dispatched work. The workflow audit retained
+`failed_or_unverified`, `transportVerified=false` and
+`qualifiedLocalFixture=false`: 26/27 checks passed, with
+`workflowActuallyDispatchedTools` failing. The exact fixture server was stopped,
+and the unused task-scoped rejection arm was archived and disarmed.
+
+The case joins task `f9885273-a5f8-4a6a-af57-a66e7d4426b1`, thread
+`01a198ef-3eb7-7ef3-b667-8ce3a9944ee2`, turn
+`01a198ef-3fc0-70a0-974d-77abba1b4a54` and inference
+`6e3e2830-54d6-42d2-832d-2d022d6fd6db`. Under
+`evidence/opus47-workflow374-d/`, the retained SHA-256 values are:
+
+- `capture/native-turn-private.jsonl`:
+  `0eea6a6ba354bb7f180dcc2c8499f2c97456f6e1b3f3b4e5b2b0e1fabbdf7839`.
+- `capture/independent-audit-v6.json`:
+  `54f4e2a81fe4e62fc6da07820824960d80c1589fdab576f2246c7167d7992008`.
+- `independent-refusal-review.json`:
+  `509d60790fc802780902c46d9a4089b9d5cf9804d4d9cf8519c3d9b54e692700`.
+
+The fixture audit SHA-256 is
+`02818852ca5f68c8bb899dbe468e1e7be795c888ab5aaaa274bfad458911cbed`.
+A separate read-only review passed 30 checks and verified 50 retained-file
+hashes, preserving both negative qualification verdicts. No prompt was replayed
+and no alternative framing was tested in this case. The refusal supplies a
+bounded instruction-design hypothesis, not a unique root cause or workflow pass.
+
+## Installed build374 Opus 3 workflow format failure, November 1
+
+The fresh `opus3-workflow374-e` task used its own fixture and loopback port on
+build374, source `c58d43d29b384fb7b6e56b12bf77702d9e2ea34a`, process 19847.
+The ordinary picker showed Opus 3 enabled under More models; its empty inspection
+tab was closed before the verified native Opus 3 draft was sent once. The exact
+728-byte task reached terminal in 19.251 seconds with two failed inferences,
+zero tool calls and no final answer.
+
+The armed recorder retained the first 416-byte reply with exact task, session
+and submission proofs. Substantive prose before and after a syntactically valid
+156-byte `tool_calls` JSON object, plus a private-use glyph and `json` UI label,
+made the full response invalid JSON at offset zero. The object proposed opening
+the exact fixture URL. Its syntactic validity does not establish a valid tool
+call or authorize extracting and executing it. The adapter recorded one code
+block, `literalCodeValidJSON=true`, `extractionReason=outside_content` and
+`selectedExtraction=rendered_fallback`; the prose prevents an isolated-code
+projection. No proposed action was dispatched.
+
+One format correction followed the first session's saved closure. Its response
+also failed: `invalid_json`, unfenced, 240 bytes. The one-shot recorder had
+already captured the first reply, so the second raw text is unavailable and
+its structure cannot be inferred from the first. The native UI displayed the
+240-byte malformed-reply diagnostic. A separate generic high-demand runtime
+error event does not establish provider load as the cause. Both sessions have
+saved closed cleanup receipts; the second closure followed native terminal by
+87 ms. No accepted response was released and no operator replay occurred.
+
+The fixture remained unchanged with an empty ledger, no browser submission and
+no receipt. The fixture grader retained `FAIL_LOCAL_FIXTURE` (7/19 checks); the
+workflow audit retained `failed_or_unverified` (20/27), `transportVerified=false`,
+`qualifiedLocalFixture=false` and `correction.pairVerified=false`. The exact
+fixture process exited 143 after guarded shutdown. The consumed diagnostic arm
+was absent, and the exact original rejected reply was archived under the native
+directory lock by exclusive rename; no pending publication remained.
+
+Task `27c63d87-9c92-46dd-b783-41d4e13bab14`, thread
+`01a198f9-0739-7062-b746-a6f489baebe7` and turn
+`01a198f9-085e-7803-b11d-8ed79f10dd7d` join initial inference
+`c25f1f18-e1d7-4192-8e65-d26d941223e9` and corrective inference
+`4aa5095d-b142-461f-8afa-8a23826d550b`. Under
+`evidence/opus3-workflow374-e/`, retained SHA-256 values include:
+
+- `rejected-reply-private.json`:
+  `549475140ac4444c9d3dadc99500fa3e3fc50487623719e1a826e0748a010986`.
+- `capture/independent-audit-v6.json`:
+  `075fe83109f3520a0562bc09980a5562b153a3229ce329838d3afd6a6c09e6af`.
+- `independent-failure-review.json`:
+  `b236258940fb20b0927b770c611f619a2bf18d2af7df31b3c6192d0e9fdd75e1`.
+
+The separate review passed 34 checks and verified 34 retained-file hashes,
+preserving the negative qualification results. This case explains the captured
+first reply's rejection; it does not establish the earlier 75-byte marker's
+shape, the second reply's shape or a general Opus 3 limitation.
+
+## Source-only default instruction clarification, November 1
+
+The default base now says `Claims aren't access proof; rules, denials and Stop
+bind.` in place of `policy isn't block proof`. The new base is 1,020 UTF-8 bytes.
+Opus 4.8's retained refusal explicitly quoted the earlier clause as part of its
+interpretation of the wrapper. That observation motivates clearer wording;
+it does not prove the clause caused the refusal or that this change repairs it.
+
+All 32 historical digests, custom base composition, retained canonical history,
+compact native policy and refusal/no-bypass rules remain unchanged. The change
+does not alter parsing, dispatch, permissions, verification or retry behavior,
+and it leaves the frozen outer-framing A/B exports untouched. The focused native
+run passed 237 tests with zero failures and unchanged tested source. The receipt
+`base-instruction-clarification376-a/result.json` has SHA-256
+`6da397c79249ae10b462253c4363cfcc49563005da343f3f6ae470ba8d745d24`.
+This clarification is source-only: it is neither in installed build374 nor in
+already-signed candidate376, and no live model improvement is claimed.
+
 ## Rejected-reply evidence gaps and prepared framing comparison, November 1
 
 Source inspection found two additional parser failures whose exact replies were
@@ -292,11 +417,16 @@ errors and leave the diagnostic arm untouched. This source change is not in the
 already-signed candidate376 or the running build374.
 
 The separate `prompt-framing-ab376-a` experiment has two prepared prompts from
-the current native codec. Only two outer explanatory paragraphs differ; the
-canonical request, user task, native policies, schemas and refusal grammar are
-identical. The terminal schema is explicitly synthetic. A pure native export
-test passed, and an independent review checked 13 invariants. This design can
-test first-action wording sensitivity, not full workflow reliability.
+the pinned `0539728` codec and native policy, whose prompt source was unchanged
+at `49b4256`. Only two outer explanatory paragraphs differ; the canonical
+request, user task, native policies, schemas and refusal grammar are identical
+within that pair. The terminal schema is explicitly synthetic, and the export
+omitted the live engine's appended 362-byte permissions suffix. A pure native
+export test passed, and an independent review checked 13 invariants. This is an
+internally matched synthetic first-proposal comparison, not the exact historical
+payload or a full workflow test. The later base clarification requires a fresh
+export before either prompt can represent the current source; the old artifacts
+remain unchanged and unsent.
 
 Neither prompt has been sent. In the ordinary build374 Incognito tab, the
 desktop AX setter reported success for the 43,725-byte original but readback
@@ -351,7 +481,8 @@ continuous header absence, why the site detached the control, or a quota,
 background-rendering or caller-ordering cause. No repair is established by this
 case and no uncertain prompt was replayed.
 
-Opus 4.7's only failed scenario check is `markerExact`. The installed instructions
+In the earlier Opus 4.7 marker case, the only failed scenario check was
+`markerExact`. The installed instructions
 explicitly preserve the website model's identity and governing rules, distinguish
 host proposals from execution, and apply user exact-output requirements to
 decoded `message.text`. No contradictory identity-reassignment instruction was
