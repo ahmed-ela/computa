@@ -1046,6 +1046,17 @@ async function websiteChatPickerAction(request, fresh, freshGuard) {
   const current = websiteChatPickerState();
   if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0)
     return { pending: true, modelDiagnostic: websiteModelDiagnostic(current) };
+  // A fresh discovery page can expose its closed model trigger before it
+  // enables it. Let the native preparation deadline and DOM wakeups bound this
+  // read-only wait; do not spend a selection attempt or click a disabled row.
+  if (discovery && current.triggerCount === 1 && current.triggerCandidates.length === 1
+    && current.visible(current.trigger) && (current.trigger.disabled || current.trigger.getAttribute('aria-disabled') === 'true')
+    && !current.topMenu && current.allMenus.length === 0 && current.physicalMenus.length === 0
+    && [null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+    && [null, 'closed'].includes(current.trigger.getAttribute('data-state'))
+    && !current.duplicate && !current.conflicting && !current.indicatorInvalid
+    && !current.selectionAmbiguous && !current.navigationAmbiguous && freshGuard() === true)
+    return { pending: true, modelDiagnostic: websiteModelDiagnostic(current) };
   const attempt = globalThis[slot] = { choice, started: true, completed: false, powerEvents: 0, familyClicked: false };
   const result = await websiteChatObserveSelection(request, discovery ? null : choice, freshGuard, attempt,
     { scope: 'post_selection', action: request.action });
@@ -1735,6 +1746,53 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     }
   }
 }
+async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
+  if (attempt.closed) return false;
+  attempt.closed = true; // Any uncertain dismissal stays claimed across later reads.
+  const owner = globalThis.__computaModelOwner, url = document.URL;
+  const trigger = state.trigger, top = state.topMenu, nested = state.nestedMenu, secondary = state.secondary;
+  const selected = state.selected, owned = [top, nested].filter(Boolean);
+  const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
+  const current = () => websiteModelPickerState('claude');
+  let invalidated = false;
+  const unchanged = view => {
+    const valid = window === window.top && document.URL === url
+      && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
+      && (typeof freshGuard !== 'function' || freshGuard() === true)
+      && document.querySelectorAll('[data-testid="user-message"], [data-testid="assistant-message"]').length === 0
+      && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
+      && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
+      && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
+      && view.physicalMenus.every(menu => owned.includes(menu));
+    // A wakeup can observe drift that is restored before the await resumes.
+    // Its negative evidence remains decisive for this claimed close attempt.
+    invalidated ||= !valid;
+    return !invalidated;
+  };
+  try {
+    // A nested menu can consume Escape without closing its parent. Dismiss
+    // each exact observed popup once, child first, with physical closure and
+    // fresh context checks before the separate parent's dismissal.
+    for (const menu of [nested, top].filter(Boolean)) {
+      const before = current();
+      if (!unchanged(before) || Date.now() >= until) return false;
+      if (!before.physical(menu)) continue;
+      if (menu === nested ? before.nestedMenu !== nested || before.secondary !== secondary || before.topMenu !== top
+        : before.topMenu !== top || before.nestedMenu != null) return false;
+      if (!websiteModelDismissOwnedPicker('claude', trigger, menu)) return false;
+      if (!(await websiteModelWaitForChange(until, () => {
+        const view = current(); return !unchanged(view) || !view.physical(menu);
+      }))) return false;
+      const after = current();
+      if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
+    }
+    const after = current();
+    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+      && owned.every(menu => !after.physical(menu))
+      && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+      && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  } catch { return false; }
+}
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {
   if (state.provider === 'chatgpt') return websiteChatPickerAction(request, fresh, freshGuard);
   const diagnostic = () => ({ modelDiagnostic: websiteModelDiagnostic(state) });
@@ -1802,7 +1860,10 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
     if (!attempt.choices.length) return { error: 'model_unverified', ...diagnostic() };
     if (attempt.choices.length > 32) return { error: 'model_unverified', ...diagnostic() };
     const receipt = diagnostic();
-    if (!attempt.closed && state.enabled(state.trigger)) {
+    if (state.provider === 'claude') {
+      if (!(await websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard)))
+        return { error: 'model_unverified', modelDiagnostic: websiteModelDiagnostic(websiteModelPickerState(state.provider)) };
+    } else if (!attempt.closed && state.enabled(state.trigger)) {
       attempt.closed = true;
       const url = document.URL, owner = globalThis.__computaModelOwner;
       if (!websiteModelDismissOwnedPicker(state.provider, state.trigger, state.nestedMenu || state.topMenu))

@@ -142,6 +142,69 @@ final class WebsiteModelStateTests: XCTestCase {
         XCTAssertEqual(calls, ["claude"])
     }
 
+    func testRestoredSelectionAfterWebReadyRevalidatesItsProviderOnce() async {
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        let claude = cached.first { $0.provider == "claude" }!
+        let fresh = WebsiteModelChoice(provider: "claude", key: "Opus 5.5", label: "Opus 5.5")
+        let history = TimelineEntry(kind: .assistant, title: "Saved", body: "Preserve restored history")
+        let restored = AgentTask(id: "restored-after-ready", title: "Saved", summary: "", status: .completed,
+                                 workspace: "/tmp", model: claude.modelID, entries: [history])
+        var calls: [String] = []
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            calls.append(provider)
+            return provider == "claude" ? [fresh] : cached.filter { $0.provider == provider }
+        })
+        var retryBlocked: [Bool] = []
+        state.setWebsiteModelRefreshObserverForTesting { _, retry in retryBlocked.append(retry) }
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { calls == ["chatgpt"] && !state.websiteModelsRefreshing }
+        // This is the same replacement path used by asynchronous startup
+        // restoration; it deliberately does not invoke selectTask/setTaskModel.
+        state.replaceTasks(with: [restored])
+        await waitForDiscovery { calls == ["chatgpt", "claude"] && !state.websiteModelsRefreshing }
+        XCTAssertEqual(calls, ["chatgpt", "claude"])
+        XCTAssertTrue(retryBlocked.allSatisfy { !$0 })
+        XCTAssertEqual(state.selectedTask?.model, claude.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [history])
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "claude" }, [fresh])
+        XCTAssertEqual(state.modelOptions.first { $0.id == claude.modelID }?.available, false)
+        state.apply(.tasksSnapshot([restored]))
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(calls, ["chatgpt", "claude"], "Repeated restoration must not probe cached providers again")
+    }
+
+    func testRestoredRunningSelectionWaitsForIdleAndDoesNotRetryItsFailedRefresh() async {
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        let claude = cached.first { $0.provider == "claude" }!
+        let restored = AgentTask(id: "restored-running", title: "Running", summary: "", status: .running,
+                                 workspace: "/tmp", model: claude.modelID)
+        var calls: [String] = []
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            calls.append(provider)
+            if provider == "claude" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
+            return cached.filter { $0.provider == provider }
+        })
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { calls == ["chatgpt"] && !state.websiteModelsRefreshing }
+        state.apply(.tasksSnapshot([restored]))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(calls, ["chatgpt"], "A restored running task must keep discovery deferred")
+        state.apply(.taskStatusChanged(taskID: restored.id, status: .completed))
+        await waitForDiscovery { calls == ["chatgpt", "claude"] && !state.websiteModelsRefreshing }
+        XCTAssertEqual(calls, ["chatgpt", "claude"])
+        XCTAssertTrue(state.websiteModelsError?.contains("Claude:") == true)
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "claude" }, [claude])
+        state.replaceTasks(with: state.tasks)
+        state.selectTask(restored.id)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(calls, ["chatgpt", "claude"], "Snapshots must not clear or retry a failed provider gate")
+    }
+
     func testStartupDiscoversMissingFirstThenRevalidatesCachedProvidersOnce() async {
         let preferences = isolatedTestPreferences()
         let cached = modelStateChoice(provider: "chatgpt", key: "cached", label: "Cached")

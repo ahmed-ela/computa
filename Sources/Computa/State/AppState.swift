@@ -1405,6 +1405,10 @@ final class AppState {
         websiteSessionCleanupReceipts = websiteSessionCleanupReceipts.filter { liveTaskIDs.contains($0.key) }
         for receipt in cleanupReceipts { projectWebsiteSessionCleanupReceipt(receipt) }
         retireWebsiteModelSelections()
+        // Disk restoration and runtime snapshots can select a provider after
+        // the WebUI ready event. Reuse selected-provider demand and its launch
+        // budget instead of requiring another explicit model selection.
+        requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
     }
 
     func apply(_ event: AgentRuntimeEvent) {
