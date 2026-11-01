@@ -1,5 +1,80 @@
 # Groq website adapter qualification
 
+## Compact tool loading candidate
+
+New Groq chats register the read-only `computa_load_tools` tool alongside the
+existing native tools. The website initially receives a complete compact
+inventory. Loading one to four exact inventory names exposes their full current
+schemas in the next request and returns a small receipt. It executes nothing.
+Commands, patching, browser operations and approvals continue through the
+existing native engine and its checks.
+
+The catalog is scoped to the task, thread, turn, preparation, runtime generation,
+model, schema revision and tool-choice policy. A changed catalog discards the
+loaded selection. Browser binding and current action references remain separate.
+Forced tool choices are preloaded when the loader is not allowed; `none`,
+parallel-call limits and maximum-call limits retain their meaning. A successful
+new-thread registration receipt supports restart/resume; older threads are not
+silently migrated. Original canonical requests and continuation history remain
+unchanged.
+
+Schema loading previews the next presentation against the current request and
+an additional 256-unit estimate for the pending loader call and receipt. A
+selection that does not fit returns a read-only tool error and preserves the
+previous selection. Catalog preparation and its cached request commit together
+after admission. The estimate cannot promise that future tool results fit;
+the complete final request is always checked again before opening a provider page.
+
+Only this native compact path substitutes a concise version of a complete,
+byte-matching current Computa instruction block in a trusted instruction role.
+The default text-only background runtime base is also matched as a whole;
+custom policies and other runtime modes retain their original text. Shared base
+composition remains byte-identical across all existing configuration axes.
+User messages, foreign instructions, tool results and action evidence are not
+truncated. The outer response contract is also concise. Every reply still passes
+the existing envelope, model, ownership and cleanup verification.
+
+The final GPT-OSS 120B/20B prompt is counted with a pinned local ordinary-text
+`o200k_harmony` tokenizer. The local body limit is 6,000 tokens, with 2,000
+reserved for unmeasured website framing/output and the native session-marker
+suffix appended by the transport. Other Groq selections use a
+conservative 6,000 UTF-8-byte bound, not an asserted GPT-OSS token count. Missing
+or incompatible tokenizer resources fail before submission. Growing history
+that exceeds admission is reported explicitly; this feature does not silently
+summarize or discard it.
+
+A shared local rolling allowance charges the counted body plus the reserve and
+holds each charge for 65 seconds after Send returns, including uncertain Send
+failures. Small requests can share the allowance. Waiting is cancellable and
+rechecks the native turn before Send. This accounts only for Computa requests;
+manual use, other clients, changed provider limits and provider-side accounting
+can still produce a quota error. Charges are in memory and reset when the server
+or app restarts; this is not an account-wide or persistent quota ledger.
+No quota failure authorizes replay.
+
+Candidate validation on 2026-11-01: 294 focused native regression tests and two
+private offline measurement cases passed, with source hashes unchanged during
+the run. The regression coverage includes catalog scope/revision changes,
+transactional oversized-selection rejection, literal continuation preservation,
+32 unchanged base-instruction configurations, tokenizer parity and cancellable
+quota pacing. The earlier 27 native Groq transport tests also passed; the
+website adapter's ownership, model and cleanup acceptance rules are unchanged.
+
+The retained complete synthetic fixture was measured without provider requests.
+Its initial unbound prompt fell from 11,892 to 3,187 ordinary-body tokens. With
+the original post-tabs history retained, the bound prompt is 4,364 tokens for
+inventory only and 5,159 with the exact `browser_read` schema loaded. Loading
+`exec_command`, `apply_patch` and `browser_read` together at that later point is
+6,056 tokens and remains rejected. The same three schemas fit the initial
+request at 4,834 tokens. The loader preflight also reserves 256 units for its
+pending history; measurements below 6,000 do not by themselves guarantee a
+selection will pass that stricter preflight. These are source/fixture results,
+not yet installed-build or live Groq qualification.
+
+Private evidence: `groq368-compact-native-e-receipt.json` (log SHA-256
+`2b7ee6d1c0ab5607c7239028a23976e73425d1bf8e34c873bf308a159fb6ca27`),
+`offline-prompt369-f/manifest.json` and `offline-prompt369-g/manifest.json`.
+
 ## Scope and status — 2026-11-01
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded

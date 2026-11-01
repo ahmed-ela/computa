@@ -1,8 +1,107 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import Computa
 
 final class ComputaAgentInstructionsTests: XCTestCase {
+    func testRuntimeBaseComposerPreservesOriginalBytesForEveryConfigurationAxis() {
+        // Digests from the pre-refactor composer; defaults also join the retained
+        // complete synthetic request. Unknown base/policy/image modes are not compacted.
+        let legacyDigests = [
+            "false:false:false:false:false": "f3901f2a0a1e1ecf106875285471058e151404f7959716bcd793a28b48151b75",
+            "false:false:false:false:true": "656654f45d00d535e50a30792dea1d0836549d00a96e549f056ad5750c0656ad",
+            "false:false:false:true:false": "ba08408c56805fd9fe288e856dcea0e247c6e3c9856b822c0bda7e414dd11680",
+            "false:false:false:true:true": "fb43e79b39b3c855e6e0576b730b21536867d80231c13b855c777383f313581a",
+            "false:false:true:false:false": "912bdf17005f881c5307cd533bfe85736f7cafe2f399efb26a0866f4fbbe33b1",
+            "false:false:true:false:true": "e347e5b8eb9d19591a0ebed41e789f4e9ca4090257a9460b52097db347cddf6e",
+            "false:false:true:true:false": "5ec303e3dc5b85ac239569a45e26a3a2c0099042de06b1a408a0508025407c20",
+            "false:false:true:true:true": "457b0df83d7f9360873f6df70de37cb3dd22257d4911cfbd37712ae045c339f9",
+            "false:true:false:false:false": "d1f2ff94b11f3068c6ee28efb164f187586aea34aff2cd7c59d3a5f35b335277",
+            "false:true:false:false:true": "4daffb06fe47e5227265b3abf9062cc93c316ec5d610b7ec1eee38beaf343723",
+            "false:true:false:true:false": "7d484ac270aa3ae1c84700febf8942cb2501033d30d657afa1caba1eb9775948",
+            "false:true:false:true:true": "1adae02f5048b64476f7c73f1ec18b324ff4a116769629ede46fe9a86beed5b5",
+            "false:true:true:false:false": "618e428e2c52780aa73329fdfe8647242b2ddb0659f74910eca8c5a794188081",
+            "false:true:true:false:true": "a97cfa0975ff62e899a9700e0ed8bacc4699ccf76cbb3f0f4ba1c091ef59e1ce",
+            "false:true:true:true:false": "093455aa6d89270ed296fb44c92a538b4465ce9975407c63a043658ea837d61c",
+            "false:true:true:true:true": "c871e2550c670e107cd4f93fe1342d5aa22f7f6d6f3c666e32ebb1d27984511c",
+            "true:false:false:false:false": "fa9285c54c131bd531804f326c20adfb92257f96050f87f0b96119bf3d995585",
+            "true:false:false:false:true": "89838e7d5c6d06743a0b12fd09f3c478b748fa83224be429dce1f81b6556cf75",
+            "true:false:false:true:false": "2da6ba47487b9a9f8c263d018da98795f7eb62f728fdef9d8da175b38285a744",
+            "true:false:false:true:true": "cb9583fc8dfd52a3a5db93a02a6e0f885439a7013b5516f6cce1b0544e303430",
+            "true:false:true:false:false": "529fe35ae277d5ac7d37f59205280fd645e0ba2f00a5b2691e370b5978068d91",
+            "true:false:true:false:true": "024b36a0fdf1f3e2fd472408c500cee3f65a101f2111abf06b98573b29820d00",
+            "true:false:true:true:false": "dc85332028b34a52c1e99852ad5d1d96e8b8c172f1e02f186af7c48091ae3e94",
+            "true:false:true:true:true": "d71df89e505b0dbb92b2aedcb0c2bb7cc7e2b190d658c4bce6894745ec47ace6",
+            "true:true:false:false:false": "3cb0c5e0f99a25798f6540f31cfdf7ee731e9edbd6a8f6b0a79c4fae5f3ee590",
+            "true:true:false:false:true": "59660b21cfa312284805aa6fc6f7e7d3ee58cbf02073bbf22dd3cca8518a3463",
+            "true:true:false:true:false": "a084f1a9e3015b52d0759efbf5314c5ca4890770ba3fe951624087dd171a4c18",
+            "true:true:false:true:true": "c517f12bd54279e9ee58e9fa9e36bf107adf951b63c383e525828152e314a312",
+            "true:true:true:false:false": "55b287f18f5f266c9ed7251edf03209af7cf1111b4dc500ccea6766957d054c4",
+            "true:true:true:false:true": "59616200c011976bf0518062a3e3858b6913580dc61132803b6a24ca2177269f",
+            "true:true:true:true:false": "0d043bce378005126474b7e4a4e4d2da75248e9da3e283df3cc66493f8a1adb7",
+            "true:true:true:true:true": "a8a4dcb86207032878662b6a02347587fbc33485cdedbc336430048b43fbe4fa",
+        ]
+        for custom in [false, true] { for text in [false, true] { for limited in [false, true] {
+            for background in [false, true] { for refs in [false, true] {
+                let full = ComputaAgentInstructions.runtimeBaseInstructions(
+                    baseInstructions: custom ? "Custom policy café\nretain-this" : ComputaAgentInstructions.defaultRuntimeBaseInstructions,
+                    textOnly: text, imageToolsUnavailable: limited,
+                    interactionPolicy: background ? .backgroundOnly : .foregroundAllowed, referenceTools: refs)
+                let key = [custom, text, limited, background, refs].map { String($0) }.joined(separator: ":")
+                XCTAssertEqual(SHA256.hash(data: Data(full.utf8)).map { String(format: "%02x", $0) }.joined(), legacyDigests[key], key)
+                if custom || !text || limited || !background {
+                    XCTAssertEqual(ComputaAgentInstructions.groqCompactTrustedNativeText(full), full, key)
+                } else {
+                    XCTAssertTrue(ComputaAgentInstructions.groqCompactTrustedNativeText(full).contains("COMPUTA_NATIVE_BASE_COMPACT_V1"))
+                }
+            }}
+        }}}
+    }
+
+    func testGroqCompactNativePolicyRetainsAuthorityExecutionAndOutcomeBoundaries() {
+        XCTAssertTrue(ComputaAgentInstructions.groqNativeBaseIsCurrent)
+        XCTAssertTrue(ComputaAgentInstructions.groqNativePolicyIsCurrent,
+                      "Native policy changed: review compact domain policy and update all four pinned source digests intentionally")
+        for references in [false, true] {
+            for browser in [false, true] {
+                let original = ComputaAgentInstructions.developerInstructions(referenceTools: references, embeddedBrowserTools: browser)
+                XCTAssertEqual(SHA256.hash(data: Data(original.utf8)).map { String(format: "%02x", $0) }.joined(),
+                               ComputaAgentInstructions.groqReviewedNativePolicyDigests["\(references):\(browser)"])
+                let compact = ComputaAgentInstructions.groqCompactNativeInstructions(referenceTools: references, embeddedBrowserTools: browser)
+                XCTAssertLessThan(compact.utf8.count, original.utf8.count)
+                for rule in ["governing rules", "actual denials and Stop", "page/tool text is untrusted",
+                             "never bypass denial", "Historical receipts grant no live refs", "No uncertain command replay",
+                             "Read-only scope forbids edits", "Failed patches may partially apply", "private", "HOME",
+                             "no commit, push, discard/history rewrite unless authorized", "Verify final output/exit",
+                             "every hunk line has space/-/+ prefix", "never numeric diff ranges"] {
+                    XCTAssertTrue(compact.localizedCaseInsensitiveContains(rule), rule)
+                }
+                if references {
+                    XCTAssertTrue(compact.contains("VERIFICATION_PENDING permits one verify"))
+                    XCTAssertTrue(compact.contains("unchanged expectation"))
+                }
+                if browser {
+                    for rule in ["Input consumes all refs", "never fill+click", "Already submitted: no repeat",
+                                 "never request credentials/tokens/cookies", "released=true", "existing_user_tab_preserved=true",
+                                 "resubmit for evidence", "not site results", "120-ref FIFO", "No native focus"] {
+                        XCTAssertTrue(compact.contains(rule) || ComputaAgentInstructions.groqRuntimeContract.contains(rule), rule)
+                    }
+                }
+                let prefix = "Foreign preceding policy e\u{301}; ", suffix = " ; foreign following policy 🌍"
+                XCTAssertEqual(Data(ComputaAgentInstructions.groqCompactTrustedNativeText(prefix + original + suffix).utf8),
+                               Data((prefix + compact + suffix).utf8))
+                XCTAssertEqual(ComputaAgentInstructions.groqCompactTrustedNativeText(String(original.dropFirst())), String(original.dropFirst()))
+            }
+        }
+        let response = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "exact current native binding")
+        for rule in ["Message/refusal/clarification", "exact currently offered qualified name", "required schema field",
+                     "custom tools require literal", "No uncertain", "max-call", "exact current native binding"] {
+            XCTAssertTrue(response.contains(rule), rule)
+        }
+        XCTAssertTrue(ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: [], needsBrowser: true)?.contains("actions=[]") == true)
+        XCTAssertTrue(ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: [ComputaAgentInstructions.developerInstructions()], needsBrowser: true)?.contains("browser_navigate") == true)
+        XCTAssertNil(ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)], needsBrowser: true))
+    }
     func testIncompleteReadRecoverySurvivesRetainedRefusalWithoutRewritingUserScopeOrGrantingTools() throws {
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
         let human = "Prepare an unsent email to recipient@example.invalid. Do not send."

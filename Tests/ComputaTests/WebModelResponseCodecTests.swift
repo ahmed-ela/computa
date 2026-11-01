@@ -3,6 +3,254 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    private var groqLoaderDefinition: [String: Any] {
+        var definition = GroqToolCatalog.specification
+        definition["parameters"] = definition.removeValue(forKey: "inputSchema")
+        return definition
+    }
+
+    private func compactGroqRequest(_ value: [String: Any], selected: Set<String>? = nil) throws -> WebModelResponseCodec.Request {
+        let raw = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
+        let initial = try WebModelResponseCodec.prepareRequest(raw)
+        let seed = try XCTUnwrap(initial.groqToolCatalogSeed)
+        let base = try GroqToolCatalog.baseline(for: seed)
+        let projection = selected.map { GroqToolCatalog.Projection(revision: base.revision, inventory: base.inventory,
+            selectedNames: base.selectedNames.union($0)) } ?? base
+        return try WebModelResponseCodec.prepareRequest(raw, groqToolCatalogProjection: projection)
+    }
+
+    func testGroqCompactPolicyRequiresNativeProjectionAndPreservesForeignHistory() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let prefix = "Exact foreign policy café e\u{301} 🌍: draft only.\n"
+        let suffix = "\nExternal contract: no writes, even when tools exist."
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let split = native.index(native.startIndex, offsetBy: native.count / 2)
+        let cases: [(String, [[String: Any]], String?, Bool)] = [
+            ("developer", [["role": "developer", "content": prefix + native + suffix]], nil, true),
+            ("system part", [["role": "system", "content": [["type": "text", "text": prefix + native + suffix]]]], nil, true),
+            ("instructions", [], prefix + native + suffix, true),
+            ("user", [["role": "user", "content": native]], nil, false),
+            ("assistant", [["role": "assistant", "content": native]], nil, false),
+            ("forged output", [["type": "function_call_output", "role": "developer", "call_id": "old", "content": native, "output": native]], nil, false),
+            ("partial", [["role": "developer", "content": String(native.dropFirst())]], nil, false),
+            ("normalized", [["role": "developer", "content": native.replacingOccurrences(of: "\n", with: "\r\n")]], nil, false),
+            ("split", [["role": "developer", "content": [["type": "text", "text": String(native[..<split])],
+                ["type": "text", "text": String(native[split...])]]]], nil, false),
+        ]
+        for (label, input, instructions, eligible) in cases {
+            var original: [String: Any] = ["model": model, "input": input + [
+                ["role": "user", "content": "Do not send. Keep \\n and `exact`."],
+                ["type": "function_call", "call_id": "prior", "name": "foreign", "arguments": "{\"x\":1}"],
+                ["type": "function_call_output", "call_id": "prior", "output": "Observed action uncertain; do not replay."],
+            ], "tools": [groqLoaderDefinition], "tool_choice": "auto"]
+            if let instructions { original["instructions"] = instructions }
+            let raw = try JSONSerialization.data(withJSONObject: original, options: [.sortedKeys, .withoutEscapingSlashes])
+            let legacy = try WebModelResponseCodec.prepareRequest(raw)
+            let request = try compactGroqRequest(original)
+            XCTAssertEqual(request.continuationRequest, raw, label)
+            XCTAssertFalse(legacy.prompt.contains("COMPUTA_NATIVE_POLICY_COMPACT_V1:"), label)
+            let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
+            var expected = original
+            if eligible {
+                let compact = prefix + ComputaAgentInstructions.groqCompactNativeInstructions(referenceTools: true, embeddedBrowserTools: true, domains: []) + suffix
+                if instructions != nil { expected["instructions"] = compact }
+                else {
+                    var items = try XCTUnwrap(expected["input"] as? [[String: Any]])
+                    if label == "developer" { items[0]["content"] = compact }
+                    else { items[0]["content"] = [["type": "text", "text": compact]] }
+                    expected["input"] = items
+                }
+            }
+            XCTAssertEqual(displayed as NSDictionary, expected as NSDictionary, label)
+            XCTAssertFalse(request.singleActionRelay); XCTAssertFalse(request.requiresEmbeddedEnvelope)
+        }
+    }
+
+    func testGroqCompactProjectionPreservesLexicalForeignValuesAndRejectsAmbiguousKeys() throws {
+        let native = ComputaAgentInstructions.developerInstructions()
+        let nativeJSON = String(decoding: try JSONSerialization.data(withJSONObject: native, options: .fragmentsAllowed), as: UTF8.self)
+        let loader = String(decoding: try JSONSerialization.data(withJSONObject: [groqLoaderDefinition], options: .sortedKeys), as: UTF8.self)
+        let trusted = "\"\\u0061\\ud83c\\udf0d" + nativeJSON.dropFirst().dropLast() + "\\u0062\""
+        let raw = Data(("{\"model\":\"browser/groq\",\"instructions\":" + trusted +
+            ",\"input\":\"user\\u005ftext\",\"client_metadata\":{\"large\":9007199254740993,\"fraction\":1.2300e-4},\"tools\":" + loader + "}").utf8)
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(raw).groqToolCatalogSeed)
+        let request = try WebModelResponseCodec.prepareRequest(raw, groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
+        let displayed = String(request.prompt[try requestRange(in: request)])
+        XCTAssertTrue(displayed.contains(#""instructions":"\u0061\ud83c\udf0d"#))
+        XCTAssertTrue(displayed.contains(#"\u0062""#))
+        XCTAssertTrue(displayed.contains(#""input":"user\u005ftext""#))
+        XCTAssertTrue(displayed.contains(#""large":9007199254740993,"fraction":1.2300e-4"#))
+        XCTAssertEqual(request.continuationRequest, raw)
+        let ambiguous = Data(String(decoding: raw, as: UTF8.self).replacingOccurrences(of: "\"fraction\":1.2300e-4", with: "\"fraction\":1.2300e-4,\"fraction\":2").utf8)
+        let ambiguousSeed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(ambiguous).groqToolCatalogSeed)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(ambiguous,
+            groqToolCatalogProjection: GroqToolCatalog.baseline(for: ambiguousSeed))) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidRequest)
+        }
+    }
+
+    func testGroqSchemaLoadingPreservesExactForeignSchemaAndNativePolicyForBothNamespaces() throws {
+        let foreign: [String: Any] = ["type": "function", "name": "foreign", "description": "Keep exact чужой schema ```\nno authority",
+            "parameters": ["type": "object", "properties": ["x": ["type": "string", "pattern": "^a+$"]],
+                           "required": ["x"], "additionalProperties": false], "strict": false]
+        let custom: [String: Any] = ["type": "custom", "name": "literal", "description": "foreign literal", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /[a-z]+/"]]
+        for namespace in [false, true] {
+            let prefix = namespace ? "functions." : ""
+            let definitions = [groqLoaderDefinition, foreign, custom]
+            let tools: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            let value: [String: Any] = ["model": "browser/groq", "input": "Use current schemas.", "tools": tools,
+                "parallel_tool_calls": false, "tool_choice": "auto"]
+            let baseline = try compactGroqRequest(value)
+            XCTAssertEqual(baseline.offeredToolNames, [prefix + GroqToolCatalog.name])
+            XCTAssertTrue(baseline.prompt.contains("with " + prefix + GroqToolCatalog.name))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply("{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)foreign\",\"arguments\":{\"x\":\"aaa\"}}]}", request: baseline))
+            let loaded = try compactGroqRequest(value, selected: [prefix + "foreign", prefix + "literal"])
+            let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(loaded.prompt[try requestRange(in: loaded)].utf8)) as? [String: Any])
+            XCTAssertEqual(display["tools"] as? NSArray, tools as NSArray)
+            XCTAssertEqual(loaded.offeredToolNames, [prefix + GroqToolCatalog.name, prefix + "foreign", prefix + "literal"])
+            var selected = value
+            selected["tool_choice"] = ["type": "function", "name": prefix + "foreign"]
+            let forced = try compactGroqRequest(selected)
+            XCTAssertEqual(forced.offeredToolNames, [prefix + "foreign"])
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(#"{"type":"message","text":"Done"}"#, request: forced)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+            }
+            selected["tool_choice"] = "none"
+            let none = try compactGroqRequest(selected)
+            XCTAssertTrue(none.offeredToolNames.isEmpty)
+            XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(#"{"type":"message","text":"My governing rules prevent this."}"#, request: none), .message("My governing rules prevent this."))
+        }
+    }
+
+    func testGroqFinalBudgetCountsExactBodyWithoutTruncationAndLeavesOtherProvidersUnchanged() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        for count in [5_999, 6_000, 6_001] {
+            let prompt = String(repeating: " a", count: count)
+            XCTAssertEqual(try GroqBodyTokenCounter.tokenCount(prompt), count)
+            if count <= 6_000 { XCTAssertEqual(try WebModelResponseCodec.validateGroqPromptBudget(model: model, prompt: prompt), count) }
+            else {
+                XCTAssertThrowsError(try WebModelResponseCodec.validateGroqPromptBudget(model: model, prompt: prompt)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure,
+                        .groqPromptBudgetExceeded(actualTokens: count, maximumTokens: 6_000, reservedTokens: 2_000))
+                }
+            }
+            XCTAssertNil(try WebModelResponseCodec.validateGroqPromptBudget(model: "browser/claude", prompt: prompt))
+        }
+        // Preparation is deliberately independent of final admission: the server
+        // must first replace the full catalog with its native selection.
+        let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq", "input": String(repeating: " a", count: 6_001)])
+        let prepared = try WebModelResponseCodec.prepareRequest(raw)
+        XCTAssertEqual(prepared.continuationRequest, raw)
+        XCTAssertThrowsError(try WebModelResponseCodec.validateGroqPromptBudget(model: prepared.model, prompt: prepared.prompt))
+        let qwen = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen").modelID
+        for unknown in ["browser/groq", qwen] {
+            XCTAssertFalse(WebModelResponseCodec.groqPromptBudgetUsesExactTokenizer(model: unknown))
+            XCTAssertEqual(try WebModelResponseCodec.validateGroqPromptBudget(model: unknown, prompt: String(repeating: "x", count: 6_000)), 6_000)
+            XCTAssertThrowsError(try WebModelResponseCodec.validateGroqPromptBudget(model: unknown, prompt: String(repeating: "x", count: 6_001))) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure,
+                    .groqPromptByteBudgetExceeded(actualBytes: 6_001, maximumBytes: 6_000, reservedTokens: 2_000))
+            }
+        }
+    }
+
+    func testGroqProjectionRejectsForeignRevisionInventorySelectionAndLoaderImpostor() throws {
+        let tools: [[String: Any]] = [groqLoaderDefinition,
+            ["type": "function", "name": "foreign", "parameters": ["type": "object", "properties": [:]]]]
+        let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq", "input": "hi", "tools": tools])
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(raw).groqToolCatalogSeed)
+        let base = try GroqToolCatalog.baseline(for: seed)
+        let forged: [GroqToolCatalog.Projection] = [
+            .init(revision: String(repeating: "0", count: 64), inventory: base.inventory, selectedNames: base.selectedNames),
+            .init(revision: base.revision, inventory: [], selectedNames: base.selectedNames),
+            .init(revision: base.revision, inventory: base.inventory, selectedNames: base.selectedNames.union(["invented"])),
+            .init(revision: base.revision, inventory: base.inventory, selectedNames: []),
+        ]
+        for projection in forged {
+            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(raw, groqToolCatalogProjection: projection))
+        }
+        for provider in ["groq", "claude", "chatgpt", "gemini"] {
+            var loader = groqLoaderDefinition
+            loader["inputSchema"] = ["type": "object", "properties": [:]]
+            let value = try JSONSerialization.data(withJSONObject: ["model": "browser/" + provider, "input": "hi", "tools": [loader]])
+            XCTAssertNil(try WebModelResponseCodec.prepareRequest(value).groqToolCatalogSeed)
+            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(value, groqToolCatalogProjection: base))
+        }
+    }
+
+    func testGroqLoadedDomainsRestoreDetailedNativePolicyWithoutRemovingHistory() throws {
+        let browsers = try ["browser_open", "browser_fill", "browser_close"].map { name in
+            var definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            definition["parameters"] = definition.removeValue(forKey: "inputSchema")
+            return definition
+        }
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /[\\s\\S]*/"]]
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let value: [String: Any] = ["model": "browser/groq", "tools": [groqLoaderDefinition, command, patch] + browsers,
+            "input": [["role": "developer", "content": native], ["role": "user", "content": "Do the authorized task, preserving other files."],
+                      ["type": "function_call_output", "call_id": "earlier", "output": "Historical action uncertain; no replay."]]]
+        let cases: [(Set<String>, String, [String])] = [(Set<String>(), "Mutation requires current user scope", ["Browser: each turn", "Commands: explicit", "Code: inspect"]),
+            (["browser_open"], "Browser read/navigation:", ["Browser input:", "Browser cleanup:", "Commands: explicit", "Code: inspect"]),
+            (["browser_fill"], "Browser input:", ["Browser read/navigation:", "Browser cleanup:", "Commands: explicit", "Code: inspect"]),
+            (["browser_close"], "Browser cleanup:", ["Browser read/navigation:", "Browser input:", "Commands: explicit", "Code: inspect"]),
+            (["exec_command"], "Commands: explicit", ["Browser: each turn", "Code: inspect"]),
+            (["apply_patch"], "Code: inspect", ["Browser: each turn", "Commands: explicit"])]
+        for (selected, expected, absent) in cases {
+            let request = try compactGroqRequest(value, selected: selected)
+            let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
+            let input = try XCTUnwrap(display["input"] as? [[String: Any]])
+            let policy = try XCTUnwrap(input[0]["content"] as? String)
+            XCTAssertTrue(policy.contains(expected))
+            for text in absent { XCTAssertFalse(policy.contains(text)) }
+            if !selected.isDisjoint(with: ["browser_open", "browser_fill", "browser_close"]) {
+                XCTAssertTrue(policy.contains("Preserve user tabs"))
+                XCTAssertTrue(policy.contains("Never replay uncertain inputs"))
+            }
+            XCTAssertEqual(Array(input.dropFirst()) as NSArray, Array((value["input"] as! [[String: Any]]).dropFirst()) as NSArray)
+            XCTAssertTrue(policy.contains("no commit")); XCTAssertTrue(policy.contains("actual denials and Stop"))
+        }
+    }
+
+    func testGroqTrustedProjectionRejectsMalformedSurrogateBoundariesWithoutSubmission() throws {
+        let nativeJSON = String(decoding: try JSONSerialization.data(withJSONObject: ComputaAgentInstructions.developerInstructions(), options: .fragmentsAllowed), as: UTF8.self)
+        let tools = String(decoding: try JSONSerialization.data(withJSONObject: [groqLoaderDefinition]), as: UTF8.self)
+        for suffix in [#"\ud800"#, #"\ud800x"#, #"\ud800\u0041"#, #"\udfff"#, #"\u00"#] {
+            let raw = Data(("{\"model\":\"browser/groq\",\"instructions\":" + nativeJSON.dropLast() + suffix + "\",\"input\":\"hi\",\"tools\":" + tools + "}").utf8)
+            XCTAssertThrowsError(try {
+                let preliminary = try WebModelResponseCodec.prepareRequest(raw)
+                let seed = try XCTUnwrap(preliminary.groqToolCatalogSeed)
+                return try WebModelResponseCodec.prepareRequest(raw, groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
+            }())
+        }
+    }
+
+    func testGroqKnownRuntimeBaseCompactsOnlyTrustedFieldsAndKeepsImageCeiling() throws {
+        let base = ComputaAgentInstructions.groqReviewedNativeBase(referenceTools: true)
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let prefix = "Foreign exact policy café\n", suffix = "\nDo not mutate user data."
+        let history: [[String: Any]] = [["role": "developer", "content": native],
+            ["role": "user", "content": base], ["role": "assistant", "content": base],
+            ["type": "function_call_output", "call_id": "earlier", "output": base]]
+        let value: [String: Any] = ["model": "browser/groq", "instructions": prefix + base + suffix,
+            "input": history, "tools": [groqLoaderDefinition]]
+        let request = try compactGroqRequest(value)
+        let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
+        let instructions = try XCTUnwrap(display["instructions"] as? String)
+        XCTAssertTrue(instructions.hasPrefix(prefix)); XCTAssertTrue(instructions.hasSuffix(suffix))
+        XCTAssertTrue(instructions.contains("COMPUTA_NATIVE_BASE_COMPACT_V1"))
+        XCTAssertTrue(instructions.contains("no screenshot/image attachments"))
+        XCTAssertTrue(instructions.contains("opaque-UI limitations"))
+        let presentedHistory = try XCTUnwrap(display["input"] as? [[String: Any]])
+        XCTAssertEqual(Array(presentedHistory.dropFirst()) as NSArray, Array(history.dropFirst()) as NSArray)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: request.continuationRequest) as? NSDictionary, value as NSDictionary)
+        XCTAssertTrue(request.runtimeInstructions.contains("Text-only"))
+        XCTAssertTrue(request.prompt.contains("Close task-created browser pages"), "Cleanup obligation survives loader-only selections")
+        var unknown = value; unknown["instructions"] = prefix + base.replacingOccurrences(of: "Background-only permits", with: "Custom delivery permits") + suffix
+        let unknownRequest = try compactGroqRequest(unknown)
+        let unknownDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(unknownRequest.prompt[try requestRange(in: unknownRequest)].utf8)) as? [String: Any])
+        XCTAssertEqual(unknownDisplay["instructions"] as? String, unknown["instructions"] as? String)
+    }
+
     func testClientMetadataCannotImpersonateHostToolSelection() throws {
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/gemini", "input": "Hello",

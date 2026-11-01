@@ -3,6 +3,209 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testGroqCatalogLoadsNextRequestOnlyUnderNativeTurnRegistration() async throws {
+        let label = "groq-native-catalog"
+        let task = websiteInferenceFixtureTaskID(label)
+        let thread = websiteInferenceFixtureTaskID(label + ":thread")
+        let turn = websiteInferenceFixtureTaskID(label + ":turn")
+        let preparation = UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        let fixtureTool: [String: Any] = ["type": "function", "name": "fixture_read",
+            "description": "Read the synthetic fixture", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic fixture"]]
+        func requestData() throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "input": history, "tools": [loader, fixtureTool]])
+        }
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(requestData()).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        let args: [String: Any] = ["catalog_revision": revision, "names": ["fixture_read"]]
+        let firstReply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
+            "calls": [["name": GroqToolCatalog.name, "arguments": args]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [firstReply,
+            #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+            isNewThread: true, isCompactToolThread: true)
+        let first = try responseOutput(await server.fixtureInfer(requestData(), taskID: label))
+        XCTAssertEqual(first.first?["name"] as? String, GroqToolCatalog.name)
+        let scope = GroqToolCatalog.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, modelID: model)
+        let receipt = try await server.loadGroqTools(scope: scope, arguments: JSONSerialization.data(withJSONObject: args))
+        history += first + [["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]),
+                             "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await server.fixtureInfer(requestData(), taskID: label))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 2)
+        let initial = try canonicalRequest(in: prompts[0])
+        XCTAssertEqual((initial["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, [GroqToolCatalog.name])
+        let loaded = try canonicalRequest(in: prompts[1])
+        XCTAssertEqual(Set((loaded["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []),
+                       [GroqToolCatalog.name, "fixture_read"])
+        XCTAssertEqual(loaded["input"] as? NSArray, history as NSArray)
+        _ = await server.fixtureFinish(taskID: label)
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: JSONSerialization.data(withJSONObject: args))
+            XCTFail("Retired turn loaded a schema")
+        } catch { XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "native_turn_mismatch") }
+    }
+
+    func testGroqPromptBudgetRejectsBeforeWebsiteStart() async throws {
+        let base = FixtureWebModelTransport()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let data = try JSONSerialization.data(withJSONObject: [
+            "model": syntheticWebsiteModelID("groq"), "input": String(repeating: "size ", count: 7_000), "tools": []
+        ])
+        do {
+            _ = try await server.fixtureInfer(data, taskID: "groq-over-budget")
+            XCTFail("An oversized request reached the website")
+        } catch {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+        }
+        let operations = await base.operations()
+        XCTAssertTrue(operations.isEmpty)
+    }
+
+    func testGroqOversizedSchemaLoadRetainsPriorSelectionAndCanContinue() async throws {
+        let label = "groq-load-too-large"
+        let model = syntheticWebsiteModelID("groq")
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        let small: [String: Any] = ["type": "function", "name": "fixture_small", "description": "Read a small fixture",
+            "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        var large = small
+        large["name"] = "fixture_large"
+        large["description"] = String(repeating: "capacity ", count: 7_000)
+        var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic fixture; do not perform external actions."]]
+        func data() throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "input": history,
+                "tools": [loader, small, large], "parallel_tool_calls": false])
+        }
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data()).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        func arguments(_ name: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["catalog_revision": revision, "names": [name]])
+        }
+        func proposal(_ name: String) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [[
+                "name": GroqToolCatalog.name, "arguments": try JSONSerialization.jsonObject(with: arguments(name))]]]), as: UTF8.self)
+        }
+        let base = FixtureWebModelTransport(replyTexts: [try proposal("fixture_small"), try proposal("fixture_large"),
+            #"{"type":"tool_calls","calls":[{"name":"fixture_small","arguments":{}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let scope = GroqToolCatalog.Scope(taskID: websiteInferenceFixtureTaskID(label),
+            threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+            runtimeGeneration: websiteInferenceFixtureGeneration,
+            preparationID: UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!, modelID: model)
+        try await server.prepareInferenceTurn(taskID: scope.taskID, threadID: scope.threadID,
+            runtimeGeneration: scope.runtimeGeneration, preparationID: scope.preparationID, isCompactToolThread: true)
+        let first = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        let receipt = try await server.loadGroqTools(scope: scope, arguments: arguments("fixture_small"))
+        history += first + [["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]),
+                             "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        let callsBefore = await base.operations()
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: arguments("fixture_large"))
+            XCTFail("An oversized selection must not strand the next request")
+        } catch { XCTAssertEqual(error as? GroqToolCatalog.Failure, .selectionTooLarge) }
+        let callsAfter = await base.operations()
+        XCTAssertEqual(callsBefore, callsAfter, "Schema preflight must not open or send to the provider")
+        history += second + [["type": "function_call_output", "call_id": try XCTUnwrap(second.first?["call_id"]),
+                              "output": GroqToolCatalog.Failure.selectionTooLarge.localizedDescription]]
+        let third = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        XCTAssertEqual(third.first?["name"] as? String, "fixture_small", "The prior usable selection survives rejection")
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 3)
+        let final = try canonicalRequest(in: prompts[2])
+        XCTAssertEqual(final["input"] as? NSArray, history as NSArray)
+        XCTAssertEqual(Set((final["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []),
+                       [GroqToolCatalog.name, "fixture_small"])
+        XCTAssertEqual(final["parallel_tool_calls"] as? Bool, false)
+        let issues = await server.fixtureFinish(taskID: label)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqLoaderReservesEstimatedHistoryWithoutRaisingFinalBudget() async throws {
+        let label = "groq-load-history-reserve", model = syntheticWebsiteModelID("groq")
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        func request(_ repeats: Int) throws -> Data {
+            let tool: [String: Any] = ["type": "function", "name": "fixture_edge",
+                "description": String(repeating: "capacity ", count: repeats),
+                "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+            return try JSONSerialization.data(withJSONObject: ["model": model, "input": "Read the synthetic fixture",
+                                                               "tools": [loader, tool]])
+        }
+        func projected(_ repeats: Int) throws -> (Data, GroqToolCatalog.Projection, Int) {
+            let data = try request(repeats)
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data).groqToolCatalogSeed)
+            let base = try GroqToolCatalog.baseline(for: seed)
+            let selection = GroqToolCatalog.Projection(revision: base.revision, inventory: base.inventory,
+                selectedNames: base.selectedNames.union(["fixture_edge"]))
+            let prompt = try WebModelResponseCodec.prepareRequest(data, groqToolCatalogProjection: selection).prompt
+            return (data, selection, try GroqBodyTokenCounter.tokenCount(prompt))
+        }
+        let target = WebModelResponseCodec.groqMaximumBodyTokens - WebModelServer.groqLoaderHistoryReserve + 1
+        var low = 0, high = 7_000
+        while low < high {
+            let middle = (low + high) / 2
+            if try projected(middle).2 < target { low = middle + 1 } else { high = middle }
+        }
+        let (data, selection, count) = try projected(low)
+        XCTAssertGreaterThanOrEqual(count, target)
+        XCTAssertLessThanOrEqual(count, WebModelResponseCodec.groqMaximumBodyTokens,
+                                "This case fits final admission but not the estimated pending load-history allowance")
+        let args = try JSONSerialization.data(withJSONObject: ["catalog_revision": selection.revision, "names": ["fixture_edge"]])
+        let reply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [[
+            "name": GroqToolCatalog.name, "arguments": try JSONSerialization.jsonObject(with: args)]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [reply])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let scope = GroqToolCatalog.Scope(taskID: websiteInferenceFixtureTaskID(label),
+            threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+            runtimeGeneration: websiteInferenceFixtureGeneration,
+            preparationID: UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!, modelID: model)
+        try await server.prepareInferenceTurn(taskID: scope.taskID, threadID: scope.threadID,
+            runtimeGeneration: scope.runtimeGeneration, preparationID: scope.preparationID, isCompactToolThread: true)
+        _ = try await server.fixtureInfer(data, taskID: label)
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: args)
+            XCTFail("The pending loader history estimate must also fit")
+        } catch { XCTAssertEqual(error as? GroqToolCatalog.Failure, .selectionTooLarge) }
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 1)
+        let initial = try canonicalRequest(in: prompts[0])
+        XCTAssertEqual((initial["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, [GroqToolCatalog.name])
+        let issues = await server.fixtureFinish(taskID: label)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqPacingCancellationNeverSendsWaitingRequest() async throws {
+        let base = FixtureWebModelTransport()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.setGroqSubmissionIntervalForTesting(.seconds(3_600))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let data = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID("groq"), "input": String(repeating: "hi ", count: 1_500), "tools": []])
+        _ = try await server.fixtureInfer(data, taskID: "groq-paced-first")
+        let waiting = Task { try await server.fixtureInfer(data, taskID: "groq-paced-second") }
+        addTeardownBlock { waiting.cancel() }
+        try await waitForFixtureCondition {
+            await base.operations().filter { $0 == "webProviderStart" }.count == 2
+        }
+        _ = await server.fixtureCancel(taskID: "groq-paced-second")
+        do { _ = try await waiting.value; XCTFail("Cancelled paced request completed") }
+        catch {}
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+    }
+
     private func browserAvailabilityRequest(provider: String = "chatgpt", input: [[String: Any]]) throws -> Data {
         let tools = EmbeddedBrowserTools.definitions().map { definition in
             var value = definition
@@ -27,7 +230,10 @@ final class WebModelServerTests: XCTestCase {
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic page"]]
             var submittedHistories: [NSArray] = []
-            let states: [EmbeddedBrowserToolAvailability] = [.unbound, .bound, .unbound]
+            // Legacy Groq threads retain full registration. Their bound full
+            // catalog exceeds its new budget; new compact threads are covered
+            // separately by the native load/next-request regression.
+            let states: [EmbeddedBrowserToolAvailability] = provider == "groq" ? [.unbound] : [.unbound, .bound, .unbound]
             for (index, availability) in states.enumerated() {
                 await state.set(availability)
                 submittedHistories.append(history as NSArray)
@@ -40,8 +246,17 @@ final class WebModelServerTests: XCTestCase {
                                           "output": "Exact synthetic result-\(index)"]]
                 }
             }
+            if provider == "groq" {
+                await state.set(.bound)
+                do {
+                    _ = try await server.fixtureInfer(browserAvailabilityRequest(provider: provider, input: history), taskID: provider)
+                    XCTFail("Legacy full catalog crossed the Groq budget")
+                } catch {
+                    XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+                }
+            }
             let prompts = await base.sentPrompts()
-            XCTAssertEqual(prompts.count, 3)
+            XCTAssertEqual(prompts.count, states.count)
             for (index, prompt) in prompts.enumerated() {
                 let object = try canonicalRequest(in: prompt)
                 let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
@@ -49,7 +264,7 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(object["input"] as? NSArray, submittedHistories[index])
             }
             let queries = await state.queries()
-            XCTAssertEqual(queries.count, 3)
+            XCTAssertEqual(queries.count, states.count + (provider == "groq" ? 1 : 0))
             XCTAssertEqual(Set(queries.map(\.taskID)), [websiteInferenceFixtureTaskID(provider)])
             XCTAssertEqual(Set(queries.map(\.threadID)), [websiteInferenceFixtureTaskID(provider + ":thread")])
             XCTAssertEqual(Set(queries.map(\.turnID)), [websiteInferenceFixtureTaskID(provider + ":turn")])
@@ -2725,6 +2940,7 @@ private actor FixtureWebModelTransport: WebModelTransport {
     private let cleanupDelay: Bool
     private let startGate: WebListenerStartupGate?
     private var tokens = Set<String>()
+    private var tokenProviders: [String: String] = [:]
     private var prompts: [String] = []
     private var replyTexts: [String]
     private let fixedChoice: WebsiteModelChoice?
@@ -2744,16 +2960,20 @@ private actor FixtureWebModelTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         ledger.append(operation)
         var response: [String: Any]
+        let currentProvider: String?
         if operation == "webProviderStart" {
             if let startGate { await startGate.pause() }
             let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
             guard let provider = object["provider"] else { throw WebModelServer.Failure.invalidRequest }
             providers.append(provider)
             let token = UUID().uuidString; tokens.insert(token)
+            tokenProviders[token] = provider
+            currentProvider = provider
             response = ["sessionToken": token, "state": "ready"]
         } else {
             let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
             guard let token = object["sessionToken"], tokens.contains(token) else { throw WebModelServer.Failure.invalidRequest }
+            currentProvider = tokenProviders[token]
             switch operation {
             case "webProviderSend":
                 prompts.append(try XCTUnwrap(object["prompt"]))
@@ -2764,11 +2984,16 @@ private actor FixtureWebModelTransport: WebModelTransport {
             case "webProviderFinish", "webProviderCancel":
                 if cleanupDelay { try await Task.sleep(for: .milliseconds(30)) }
                 if cleanupFailsOnce { cleanupFailsOnce = false; response = ["cleanup": "failed"] }
-                else { tokens.remove(token); response = ["cleanup": cleanupResult] }
+                else { tokens.remove(token); tokenProviders.removeValue(forKey: token); response = ["cleanup": cleanupResult] }
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        if let choice = fixedChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
+        // Fixed synthetic menu, independent of the requested model. Concrete
+        // Groq fixtures now exercise actual tokenizer/model routing; this does
+        // not replace contradictory evidence in ChoiceWebModelTransport.
+        let groqFixtureChoice = currentProvider == "groq"
+            ? WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B") : nil
+        if let choice = fixedChoice ?? groqFixtureChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
             response["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
                 "source": "selected_model_indicator", "verification": "website_selection"]
         }

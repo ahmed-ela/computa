@@ -10,10 +10,18 @@ let syntheticChatGPTChoice = WebsiteModelChoice(provider: "chatgpt", key: "chat/
 let syntheticChatGPTModelID = syntheticChatGPTChoice.modelID
 
 func syntheticWebsiteModelID(_ provider: String) -> String {
-    provider == "chatgpt" ? syntheticChatGPTModelID : "browser/" + provider
+    if provider == "groq" {
+        return WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+    }
+    return provider == "chatgpt" ? syntheticChatGPTModelID : "browser/" + provider
 }
 
 func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
+    if provider == "groq" {
+        return WebsiteModelChoice(provider: provider,
+            key: key.contains("new") ? "openai/gpt-oss-20b" : "openai/gpt-oss-120b",
+            label: key.contains("new") ? "GPT OSS 20B" : "GPT OSS 120B")
+    }
     guard provider == "chatgpt" else { return WebsiteModelChoice(provider: provider, key: key, label: label) }
     let power: WebsiteModelChoice.ChatGPTPower = key.contains("old") ? .instant : key.contains("new") ? .high : .medium
     return WebsiteModelChoice(provider: provider, key: power.modelKey, label: power.label)
@@ -39,6 +47,7 @@ func makeWebsiteInferenceFixtureServer(testCase: XCTestCase, rejectedReplyDirect
     let root = storageDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("computa-website-inference-fixture-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let server = WebModelServer(rejectedReplyDirectory: rejectedReplyDirectory)
+    await server.setGroqSubmissionIntervalForTesting(.zero)
     await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
     await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
         runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }

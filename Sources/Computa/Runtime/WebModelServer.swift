@@ -183,6 +183,7 @@ actor WebModelServer {
         let isMaintenance: Bool
         // Diagnostic provenance only; never page/tool or inference authority.
         let isNewThread: Bool
+        let isCompactToolThread: Bool
     }
 
     private struct PreparedInferenceContext: Equatable, Sendable {
@@ -192,6 +193,7 @@ actor WebModelServer {
         let isMaintenance: Bool
         // Diagnostic provenance only; never page/tool or inference authority.
         let isNewThread: Bool
+        let isCompactToolThread: Bool
     }
 
     private struct ContextWaiter {
@@ -240,6 +242,20 @@ actor WebModelServer {
     private var embeddedTransportIdentity: AnyObject?
     private var browserToolAvailabilityProvider: EmbeddedBrowserToolAvailabilityProvider?
     private var browserToolAvailabilityProviderRevision = UUID()
+    private var groqSubmissionPacer = WebsiteRequestPacer()
+    private var groqToolCatalog = GroqToolCatalog()
+    private struct GroqCatalogRequestContext: Sendable {
+        let scope: GroqToolCatalog.Scope
+        let canonicalRequest: Data
+        let browserAvailability: EmbeddedBrowserToolAvailability?
+        let seed: GroqToolCatalog.Seed
+    }
+    private var groqCatalogRequests: [String: GroqCatalogRequestContext] = [:]
+    // Estimate for the pending loader invocation/receipt in the next history.
+    // Units follow final admission: exact GPT-OSS body tokens, otherwise a
+    // conservative UTF-8 byte allowance. New outputs can still exceed it; the
+    // full final-request budget remains mandatory before every website Start.
+    static let groqLoaderHistoryReserve = 256
     private var yieldedTurns: [String: YieldedTurn] = [:]
     private var closedTurns: [String: ClosedTurn] = [:]
     // A claimed Send whose output failed was never handed off. Saving its
@@ -282,23 +298,39 @@ actor WebModelServer {
         browserToolAvailabilityProviderRevision = UUID()
     }
 
+    #if DEBUG
+    func setGroqSubmissionIntervalForTesting(_ interval: Duration) {
+        precondition(active.isEmpty)
+        groqSubmissionPacer = WebsiteRequestPacer(interval: interval)
+    }
+    #endif
+
     func configureCleanupReceipts(directory: URL, runtimeGeneration: UUID,
                                   observer: @escaping @Sendable (WebsiteSessionCleanupReceipt) async -> Void) {
         cleanupReceiptStore = WebsiteSessionCleanupStore(directory: directory)
-        if runtimeGeneration != cleanupRuntimeGeneration { revokeAllInspectorAuthorizations() }
+        if runtimeGeneration != cleanupRuntimeGeneration {
+            revokeAllInspectorAuthorizations()
+            groqToolCatalog.removeAll()
+            groqCatalogRequests.removeAll()
+        }
         cleanupRuntimeGeneration = runtimeGeneration
         cleanupReceiptObserver = observer
     }
 
     func setCleanupRuntimeGeneration(_ generation: UUID) {
-        if generation != cleanupRuntimeGeneration { revokeAllInspectorAuthorizations() }
+        if generation != cleanupRuntimeGeneration {
+            revokeAllInspectorAuthorizations()
+            groqToolCatalog.removeAll()
+            groqCatalogRequests.removeAll()
+        }
         cleanupRuntimeGeneration = generation
     }
 
     /// Core calls this before turn/start, removing any preceding turn's
     /// identity before the native engine can open its first HTTP inference.
     func prepareInferenceTurn(taskID: String, threadID: String, runtimeGeneration: UUID, preparationID: UUID,
-                              isMaintenance: Bool = false, isNewThread: Bool = false) throws {
+                              isMaintenance: Bool = false, isNewThread: Bool = false,
+                              isCompactToolThread: Bool = false) throws {
         let task = try Self.canonicalID(taskID)
         let thread = try Self.canonicalID(threadID)
         guard !shuttingDown, active[task] == nil, cleanupTasks[task] == nil,
@@ -319,7 +351,10 @@ actor WebModelServer {
             try retention.admit(taskID: task, evidenceDirectory: evidenceDirectory!, protectedTaskIDs: protected)
         } catch { throw Failure.persistenceRequired }
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
-            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance, isNewThread: isNewThread)
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance,
+            isNewThread: isNewThread, isCompactToolThread: isCompactToolThread)
+        groqToolCatalog.remove(taskID: task)
+        groqCatalogRequests.removeValue(forKey: task)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
         inferenceContexts.removeValue(forKey: task)
         if usedSessionTokens[task] == nil { usedSessionTokens[task] = [] }
@@ -338,14 +373,16 @@ actor WebModelServer {
         let context = InferenceContext(threadID: try Self.canonicalID(threadID),
             turnID: try Self.canonicalID(turnID), runtimeGeneration: runtimeGeneration, preparationID: preparationID,
             isMaintenance: preparedInferenceContexts[task]?.isMaintenance ?? false,
-            isNewThread: preparedInferenceContexts[task]?.isNewThread ?? false)
+            isNewThread: preparedInferenceContexts[task]?.isNewThread ?? false,
+            isCompactToolThread: preparedInferenceContexts[task]?.isCompactToolThread ?? false)
         if inferenceContexts[task] == context { return }
         guard !shuttingDown, !retiringTaskIDs.contains(task),
               sessions[task] == nil, pendingClosedTransactions[task] == nil,
               inferenceContexts[task] == nil,
               preparedInferenceContexts[task] == PreparedInferenceContext(threadID: context.threadID,
                   runtimeGeneration: runtimeGeneration, preparationID: preparationID,
-                  isMaintenance: context.isMaintenance, isNewThread: context.isNewThread) else { throw Failure.inferenceContextRequired }
+                  isMaintenance: context.isMaintenance, isNewThread: context.isNewThread,
+                  isCompactToolThread: context.isCompactToolThread) else { throw Failure.inferenceContextRequired }
         inferenceContexts[task] = context
         cleanupTurns[task] = context.turnID
         if let waiter = contextWaiters.removeValue(forKey: task) { waiter.continuation.resume(returning: context) }
@@ -409,12 +446,59 @@ actor WebModelServer {
     }
 
     private func revokeInferenceContext(taskID: String) {
+        groqToolCatalog.remove(taskID: taskID)
+        groqCatalogRequests.removeValue(forKey: taskID)
         inspectorAuthorizations.removeValue(forKey: taskID)?.revoke()
         preparedInferenceContexts.removeValue(forKey: taskID)
         inferenceContexts.removeValue(forKey: taskID)
         if let waiter = contextWaiters.removeValue(forKey: taskID) {
             waiter.continuation.resume(throwing: CancellationError())
         }
+    }
+
+    /// Called only by the registered native read-only tool. Loading schemas
+    /// does not grant an action reference, browser binding, or permission.
+    func loadGroqTools(scope: GroqToolCatalog.Scope, arguments: Data) throws -> Data {
+        let task = try Self.canonicalID(scope.taskID)
+        guard task == scope.taskID, !shuttingDown, !Task.isCancelled,
+              active[task] == nil, cleanupTasks[task] == nil,
+              !retiringTaskIDs.contains(task),
+              sessions[task] == nil,
+              pendingClosedTransactions[task] == nil,
+              unresolvedStartAttempts[task] == nil,
+              notCreatedStartReceipts[task]?.receiptSaved != false,
+              !failedClosedHandoffs.contains(task),
+              scope.runtimeGeneration == cleanupRuntimeGeneration,
+              let context = inferenceContexts[task], context.isCompactToolThread,
+              context.threadID == scope.threadID, context.turnID == scope.turnID,
+              context.preparationID == scope.preparationID,
+              context.runtimeGeneration == scope.runtimeGeneration,
+              let current = groqCatalogRequests[task], current.scope == scope,
+              LocalModelCatalog.webProvider(for: scope.modelID) == "groq" else {
+            throw Failure.inferenceContextRequired
+        }
+        // Preview on a value copy. An over-budget schema selection returns a
+        // normal read-only tool error, leaving the prior usable selection intact.
+        var candidate = groqToolCatalog
+        let receipt = try candidate.load(scope: scope, arguments: arguments)
+        let projection = try candidate.prepare(scope: scope, seed: current.seed)
+        do {
+            let preview = try WebModelResponseCodec.prepareRequest(current.canonicalRequest,
+                browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection)
+            guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: preview.model, prompt: preview.prompt),
+                  units <= WebModelResponseCodec.groqMaximumBodyTokens - Self.groqLoaderHistoryReserve else {
+                throw GroqToolCatalog.Failure.selectionTooLarge
+            }
+        } catch let failure as WebModelResponseCodec.Failure {
+            switch failure {
+            case .promptTooLarge, .groqPromptBudgetExceeded, .groqPromptByteBudgetExceeded:
+                throw GroqToolCatalog.Failure.selectionTooLarge
+            default: throw failure
+            }
+        }
+        try Task.checkCancellation()
+        groqToolCatalog = candidate
+        return receipt
     }
 
     func registerCleanupTurn(taskID: String, threadID: String?, turnID: String?) {
@@ -886,7 +970,10 @@ actor WebModelServer {
         // only after native turn admission. Freeze it for corrective attempts;
         // continuation checks still use the unchanged original request bytes.
         try requireCurrentContext()
-        let request: WebModelResponseCodec.Request
+        var request: WebModelResponseCodec.Request
+        var admittedBrowserAvailability: EmbeddedBrowserToolAvailability?
+        var groqCatalogRequest: GroqCatalogRequestContext?
+        var stagedGroqCatalog: GroqToolCatalog?
         if originalRequest.requiresBrowserToolAvailability {
             guard let browserToolAvailabilityProvider else { throw Failure.inferenceContextRequired }
             let revision = browserToolAvailabilityProviderRevision
@@ -900,10 +987,37 @@ actor WebModelServer {
             }
             try requireCurrentContext()
             guard revision == browserToolAvailabilityProviderRevision else { throw Failure.inferenceContextRequired }
+            admittedBrowserAvailability = availability
             request = try WebModelResponseCodec.prepareRequest(originalRequest.continuationRequest,
                 browserToolAvailability: availability)
         } else {
             request = originalRequest
+        }
+        if provider == "groq", context.isCompactToolThread {
+            guard let seed = request.groqToolCatalogSeed else { throw Failure.inferenceContextRequired }
+            let scope = GroqToolCatalog.Scope(taskID: taskID, threadID: context.threadID, turnID: context.turnID,
+                runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                modelID: request.model)
+            var candidate = groqToolCatalog
+            let projection = try candidate.prepare(scope: scope, seed: seed)
+            request = try WebModelResponseCodec.prepareRequest(originalRequest.continuationRequest,
+                browserToolAvailability: admittedBrowserAvailability, groqToolCatalogProjection: projection)
+            groqCatalogRequest = GroqCatalogRequestContext(scope: scope,
+                canonicalRequest: originalRequest.continuationRequest,
+                browserAvailability: admittedBrowserAvailability, seed: seed)
+            stagedGroqCatalog = candidate
+        }
+        // Count the final projection, not the full internal native catalog.
+        // Rejection precedes creation of an owned website session and never
+        // truncates user input, tool evidence, or continuation history.
+        let groqBodyTokens = try WebModelResponseCodec.validateGroqPromptBudget(model: request.model, prompt: request.prompt)
+        // Keep the selection and its source request coherent when a changed
+        // catalog or policy fails final admission. No suspension splits commit.
+        if let stagedGroqCatalog { groqToolCatalog = stagedGroqCatalog }
+        groqCatalogRequests[taskID] = groqCatalogRequest
+        if let tokens = groqBodyTokens {
+            let exact = WebModelResponseCodec.groqPromptBudgetUsesExactTokenizer(model: request.model)
+            Self.promptLog.info("promptBudget version=1 provider=groq bodyUnits=\(tokens, privacy: .public) exactTokenizer=\(exact, privacy: .public) maximumBodyUnits=\(WebModelResponseCodec.groqMaximumBodyTokens, privacy: .public)")
         }
         if provider == "chatgpt" {
             // Finite sizes only: no prompt, account data, URLs or authority tokens.
@@ -991,6 +1105,7 @@ actor WebModelServer {
                         else { throw Failure.turnLimit }
                     }
                     prompt = correctionTicket.map { request.prompt + Self.correctionReminder(for: $0.reason) } ?? request.prompt
+                    _ = try WebModelResponseCodec.validateGroqPromptBudget(model: request.model, prompt: prompt)
                     var params = ["provider": provider]
                     if let choice {
                         guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
@@ -1173,9 +1288,26 @@ actor WebModelServer {
                     isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
                     isFirstInference: firstNativeInference && correctionTicket == nil && session.sequence == 1 && session.turnInferenceCount == 1)
                 defer { benchmarkCapture?.revoke() }
-                let sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(benchmarkCapture) {
-                    try await call(session.transport, operation: "webProviderSend",
-                        params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                // Groq's website has an observed 8K token-per-minute allowance.
+                // Local pacing is separate from prompt admission and cannot
+                // account for requests made outside Computa. Hold the permit
+                // through Send, including uncertain failures; never auto-retry.
+                let pacer = groqSubmissionPacer
+                let permit: UUID?
+                if let groqBodyTokens {
+                    permit = try await pacer.acquire(cost: groqBodyTokens + WebModelResponseCodec.groqReservedTokens)
+                } else { permit = nil }
+                let sent: [String: Any]
+                do {
+                    try requireCurrentContext()
+                    sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(benchmarkCapture) {
+                        try await call(session.transport, operation: "webProviderSend",
+                            params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                    }
+                    if let permit { await pacer.release(permit) }
+                } catch {
+                    if let permit { await pacer.release(permit) }
+                    throw error
                 }
                 try requireCurrentContext()
                 guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
@@ -2107,6 +2239,9 @@ actor WebModelServer {
         if error is WebsiteTurnContinuation.Failure {
             return .init(status: "409 Conflict", type: "invalid_request", code: "website_continuation_unverified")
         }
+        if error is GroqToolCatalog.Failure {
+            return .init(status: "409 Conflict", type: "invalid_request", code: "website_tool_catalog_invalid", param: "tools")
+        }
         if let failure = error as? WebModelResponseCodec.Failure {
             switch failure {
             case .invalidParameter(let param): return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_parameter", param: param)
@@ -2122,6 +2257,9 @@ actor WebModelServer {
             case .invalidTools, .unsupportedToolType: return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_tools", param: "tools")
             case .unsupportedModality: return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_modality", param: "input")
             case .promptTooLarge: return .init(status: "400 Bad Request", type: "invalid_request", code: "input_too_large", param: "input")
+            case .groqPromptBudgetExceeded: return .init(status: "400 Bad Request", type: "invalid_request", code: "website_prompt_budget_exceeded", param: "input")
+            case .groqPromptByteBudgetExceeded: return .init(status: "400 Bad Request", type: "invalid_request", code: "website_prompt_byte_budget_exceeded", param: "input")
+            case .groqTokenCounterUnavailable: return .init(status: "503 Service Unavailable", type: "server_error", code: "website_token_counter_unavailable")
             case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
             default: return .init(status: "500 Internal Server Error", type: "model_error", code: "invalid_model_output")
             }
@@ -2170,7 +2308,8 @@ actor WebModelServer {
         // Arbitrary NSError descriptions and other transport prose cannot be
         // promoted into an authoritative local model diagnostic.
         error is Failure || error is WebModelResponseCodec.Failure || error is WebsiteTurnContinuation.Failure
-            || error is EmbeddedWebModelTransport.Failure || error is WebsiteProviderFailure || NativeBrowserFailure(error) != nil
+            || error is GroqToolCatalog.Failure || error is EmbeddedWebModelTransport.Failure
+            || error is WebsiteProviderFailure || NativeBrowserFailure(error) != nil
     }
 
     /// Only native finite classifications can add recovery metadata. Website
@@ -2187,6 +2326,23 @@ actor WebModelServer {
         if let failure = error as? WebsiteTurnContinuation.Failure {
             fields["reason"] = failure.rawValue
             fields["retryable"] = false
+        }
+        if let failure = error as? WebModelResponseCodec.Failure {
+            switch failure {
+            case .groqPromptBudgetExceeded(let actual, let maximum, let reserve):
+                fields["retryable"] = false
+                fields["body_tokens"] = actual
+                fields["maximum_body_tokens"] = maximum
+                fields["reserved_tokens"] = reserve
+            case .groqTokenCounterUnavailable:
+                fields["retryable"] = false
+            case .groqPromptByteBudgetExceeded(let actual, let maximum, let reserve):
+                fields["retryable"] = false
+                fields["body_utf8_bytes"] = actual
+                fields["maximum_body_utf8_bytes"] = maximum
+                fields["reserved_tokens"] = reserve
+            default: break
+            }
         }
         if let failure = error as? EmbeddedWebModelTransport.Failure,
            let code = failure.diagnosticCode, let action = failure.requiredAction {
