@@ -12540,6 +12540,55 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeDuplicateCodeEvidenceNeverExtractsOrAcceptsTheOriginalReply() async throws {
+        let tool = #"{"type":"tool_calls","calls":[{"name":"browser_close","arguments":{}}]}"#
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "claude-native-fixture", "input": "Close the synthetic fixture tab", "tools": [["type": "function", "name": "browser_close",
+                "parameters": ["type": "object", "properties": [:] as [String: String]]]]]))
+        for scenario in ["identical", "conflicting", "message"] {
+            let first = scenario == "message" ? #"{"type":"message","text":"I cannot perform this request."}"# : tool
+            let second = scenario == "conflicting" ? #"{"type":"tool_calls","calls":[{"name":"browser_close","arguments":{"tab_id":"foreign"}}]}"# : first
+            let page = Self.providerPage(.claude).replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                const firstPre=document.createElement('pre'), secondPre=document.createElement('pre');
+                const firstCode=document.createElement('code'), secondCode=document.createElement('code');
+                firstCode.textContent=\(try matchedProbeJSON(first)); secondCode.textContent=\(try matchedProbeJSON(second));
+                firstPre.append(firstCode); secondPre.append(secondCode);
+                const prose=document.createElement('p'); prose.textContent='Review the observed output before closing the tab.';
+                body.replaceChildren(firstPre,prose,secondPre);
+                document.getElementById('messages').appendChild(turn);
+                """)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.claude)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Close the synthetic fixture tab"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            let text = try XCTUnwrap(complete["text"] as? String)
+            let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+            let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
+            XCTAssertEqual(structure["repeatedIdenticalToolCalls"] as? Bool, scenario == "identical", scenario)
+            XCTAssertEqual(structure["preCount"] as? Int, 2); XCTAssertEqual(structure["codeCount"] as? Int, 2)
+            XCTAssertTrue(structure["literalCodeValidJSON"] is NSNull)
+            XCTAssertEqual(structure["extractionReason"] as? String, "multiple_pre")
+            XCTAssertEqual(structure["selectedExtraction"] as? String, "rendered_fallback")
+            let rendered = try await evaluate(view, "return document.querySelector('[data-perf-reply-text]').innerText.trim();") as? String
+            XCTAssertEqual(text, rendered, "No duplicate block or authored narration may be dropped")
+            XCTAssertTrue(text.contains(first)); XCTAssertTrue(text.contains(second))
+            XCTAssertTrue(text.contains("Review the observed output before closing the tab."))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))
@@ -13475,6 +13524,25 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         source["preParentTags"] = ["div"]
         source["outsideTextLength"] = 220_002
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+    }
+
+    func testCodeStructureDuplicateEvidenceIsStrictlyNullableBooleanAndContentFree() throws {
+        let base: [String: Any] = ["preCount": 2, "codeCount": 2, "codeTextLength": 0,
+            "outsideTextLength": 364, "outsideTruncated": false, "preParentTags": [String](),
+            "extractionReason": "multiple_pre", "selectedExtraction": "rendered_fallback"]
+        for flag in [true, false, NSNull()] as [Any] {
+            var source = base; source["repeatedIdenticalToolCalls"] = flag; source["reply"] = "private_canary"
+            let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            if flag is NSNull { XCTAssertTrue(value["repeatedIdenticalToolCalls"] is NSNull) }
+            else { XCTAssertEqual(value["repeatedIdenticalToolCalls"] as? Bool, flag as? Bool) }
+            XCTAssertFalse(encoded.contains("private_canary")); XCTAssertLessThanOrEqual(encoded.utf8.count, 8_192)
+        }
+        for flag in [1, 0, "true", "private_canary", [], ["reply": "private_canary"]] as [Any] {
+            var source = base; source["repeatedIdenticalToolCalls"] = flag
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+        }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Legacy missing evidence remains readable, not correction eligible")
     }
 
     func testCodeStructureExtractionFlagsAreFiniteAndCannotCarryReplyContent() throws {

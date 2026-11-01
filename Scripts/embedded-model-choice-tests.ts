@@ -319,6 +319,105 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(opus.clicks).toBe(0);
     });
 
+
+    if (provider === 'claude') test('Claude purchase exclusion reads exact visible labels on any element tag', async () => {
+      for (const tag of ['P', 'LABEL', 'SMALL', 'STRONG', 'EM', 'CREDITS-LABEL']) {
+        const { f, picker } = setup();
+        const fable = picker.add(picker.menu, 'Fable 5.1', 'For your toughest challenges');
+        fable.append(new Node(tag, {}, 'Buy credits'));
+        const olderFable = picker.add(picker.nested, 'Fable 5', '');
+        olderFable.append(new Node(tag, { 'aria-label': '  Buy   credits  ' }, 'Purchase'));
+        const opus = picker.add(picker.menu, 'Opus 5.5', 'For complex work and everyday tasks');
+        const olderOpus = picker.add(picker.nested, 'Opus 4.6', '');
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined();
+        expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+        expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+        expect(result.modelChoices.some((item: any) => item.label.startsWith('Fable '))).toBe(false);
+        expect([fable, olderFable, opus, olderOpus].every(row => row.clicks === 0)).toBe(true);
+        expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+        expect((await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') })).error).toBe('model_unavailable');
+        expect(fable.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    if (provider === 'claude') test('Claude purchase text in hidden or foreign scopes cannot exclude an enabled row', async () => {
+      const { f, picker } = setup();
+      picker.menu.append(new Node('LABEL', {}, 'Buy credits'));
+      const opus = picker.add(picker.menu, 'Opus 5.5', 'This description mentions Buy credits without requiring it');
+      for (const values of [{ hidden: '' }, { 'aria-hidden': 'true' }, { inert: '' }])
+        opus.append(new Node('LABEL', values, 'Buy credits'));
+      const foreign = new Node('DIV', { role: 'option', 'aria-disabled': 'true' });
+      foreign.append(new Node('LABEL', {}, 'Buy credits'));
+      const wrapper = new Node('SECTION'); wrapper.append(foreign); opus.append(wrapper);
+      const fable = picker.add(picker.nested, 'Fable 5', '');
+      fable.append(new Node('LABEL', {}, 'Buy credits'));
+      const result = await advance(f, 'discoverModels');
+      expect(result.error).toBeUndefined();
+      expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(result.modelChoices).toContainEqual(choice('Sonnet 5.5'));
+      expect(result.modelChoices).not.toContainEqual(choice('Fable 5'));
+      expect(opus.clicks).toBe(0); expect(fable.clicks).toBe(0);
+      expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('Claude purchase exclusion requires exact own rendered or accessible label', async () => {
+      for (const label of ['Buy credits later', 'Do not Buy credits', 'Requires usage credits', 'buy credits']) {
+        const { f, picker } = setup();
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        opus.append(new Node('P', {}, label));
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+        expect(opus.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+      const { f, picker } = setup();
+      const fable = picker.add(picker.menu, 'Fable 5.1', '');
+      const label = new Node('LABEL', {}, 'Buy '); label.append(new Node('STRONG', {}, 'credits')); fable.append(label);
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+      expect(fable.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('Claude nested hidden and inert purchase text never becomes an ancestor purchase label', async () => {
+      for (const values of [{ hidden: '' }, { 'aria-hidden': 'true' }, { inert: '' }]) {
+        const { f, picker } = setup();
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        const section = new Node('SECTION'), wrapper = new Node('DIV');
+        wrapper.append(new Node('LABEL', values, 'Buy credits')); section.append(wrapper); opus.append(section);
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+        expect(opus.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    if (provider === 'claude') test('Claude visible purchase text remains exact when mixed with hidden descendants', async () => {
+      const { f, picker } = setup();
+      const fable = picker.add(picker.menu, 'Fable 5.1', '');
+      const label = new Node('LABEL', {}, 'Buy ');
+      label.append(new Node('SPAN', { 'aria-hidden': 'true' }, 'IGNORED'), new Node('STRONG', {}, 'credits'));
+      fable.append(label);
+      const result = await advance(f, 'discoverModels');
+      expect(result.error).toBeUndefined(); expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+      expect(fable.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('Claude hidden fragments and truncated descendants cannot manufacture purchase text', async () => {
+      for (const values of [{ 'aria-hidden': 'true' }, { inert: '' }]) {
+        const { f, picker } = setup();
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        const label = new Node('LABEL', {}, 'Buy '); label.append(new Node('STRONG', values, 'credits')); opus.append(label);
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+        expect(opus.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+      }
+      const { f, picker } = setup();
+      const opus = picker.add(picker.menu, 'Opus 5.5', '');
+      const label = new Node('LABEL', {}, 'Buy' + ' '.repeat(256) + 'credits'); opus.append(label);
+      const result = await advance(f, 'discoverModels');
+      expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(opus.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    });
+
     if (provider === 'chatgpt') test('discovery resolves the newest plain family and never advertises Sol or a literal Latest', async () => {
       const { f, picker } = setup(); picker.selected('GPT-5.6 Sol');
       const sol = picker.familyOptions[1], newest = picker.familyOptions[0];

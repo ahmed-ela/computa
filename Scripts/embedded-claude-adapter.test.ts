@@ -481,12 +481,48 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
+  test("two identical tool-code blocks expose only bounded correction evidence, never extracted calls", async () => {
+    const raw = JSON.stringify({ type: "tool_calls", calls: [{ name: "browser_close", arguments: {} }] });
+    const scenarios = ["identical", "different_arguments", "whitespace", "message", "malformed", "array",
+      "nested_pre", "extra_code", "missing_code", "third_pre", "oversized", "utf8_oversized"];
+    for (const scenario of scenarios) {
+      const f = fixture(provider, { userPrompt: prompt });
+      let first = raw, second = raw;
+      if (scenario === "different_arguments") second = JSON.stringify({ type: "tool_calls", calls: [{ name: "browser_close", arguments: { tab_id: "different" } }] });
+      if (scenario === "whitespace") second = " " + raw;
+      if (scenario === "message") first = second = JSON.stringify({ type: "message", text: "I cannot comply." });
+      if (scenario === "malformed") first = second = raw + "]";
+      if (scenario === "array") first = second = "[" + raw + "]";
+      if (scenario === "oversized") first = second = JSON.stringify({ type: "tool_calls", calls: [], private: "x".repeat(220_000) });
+      if (scenario === "utf8_oversized") first = second = JSON.stringify({ type: "tool_calls", calls: [], private: "é".repeat(120_000) });
+      f.answer.text = ""; f.answer.children = [];
+      const a = new Element("PRE"), b = new Element("PRE");
+      a.append(new Element("CODE", {}, first)); b.append(new Element("CODE", {}, second));
+      f.answer.append(a, new Element("P", {}, "I need to review the observed result before closing the tab."), b);
+      if (scenario === "nested_pre") { f.answer.children.pop(); a.append(b); }
+      if (scenario === "extra_code") f.answer.append(new Element("CODE", {}, raw));
+      if (scenario === "missing_code") b.children = [];
+      if (scenario === "third_pre") { const third = new Element("PRE"); third.append(new Element("CODE", {}, raw)); f.answer.append(third); }
+      const rendered = "Whole authored reply with private_canary narration and both blocks: " + first + "\n" + second;
+      Object.defineProperty(f.answer, "innerText", { get: () => rendered });
+      const result = await f.run(), evidence = result.completionEvidence.codeStructure;
+      expect(result.text).toBe(rendered.slice(0, 220_001));
+      expect(evidence).toMatchObject({ selectedExtraction: "rendered_fallback", extractionReason: "multiple_pre",
+        literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+        repeatedIdenticalToolCalls: scenario === "third_pre" ? null : scenario === "identical" });
+      const encoded = JSON.stringify(evidence);
+      expect(encoded.length).toBeLessThanOrEqual(8192);
+      expect(encoded).not.toContain("private_canary"); expect(encoded).not.toContain("browser_close");
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+
   test("absent answers leave literal JSON facts unobserved and keep empty extraction", async () => {
     const f = fixture(provider, { userPrompt: prompt, response: false });
     const result = await f.run();
     expect(result.text).toBe("");
     expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 0, codeCount: 0,
-      literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+      literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null,
       selectedExtraction: "rendered_fallback", extractionReason: "absent_answer" });
   });
 
