@@ -658,7 +658,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 }
 
-private actor FormatCorrectionFixtureTransport: WebModelTransport {
+actor FormatCorrectionFixtureTransport: WebModelTransport {
     struct Entry: Sendable { let operation: String; let token: String? }
     private var entries: [Entry] = []
     private var sentPrompts: [String] = []
@@ -753,7 +753,7 @@ private actor FormatCorrectionFixtureTransport: WebModelTransport {
     }
 }
 
-private actor FormatCorrectionGate {
+actor FormatCorrectionGate {
     private var paused = false
     private var released = false
     private var waiter: CheckedContinuation<Void, Never>?

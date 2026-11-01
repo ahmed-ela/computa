@@ -151,7 +151,7 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
     }
     nested.connected = true; delete nested.values.hidden;
   };
-  if (provider === 'chatgpt') {
+  if (provider === 'chatgpt' || provider === 'claude') {
     const dismiss = (event: any) => {
       if (event.type !== 'keydown' || event.key !== 'Escape') return;
       menu.values.hidden = ''; if (nested) nested.values.hidden = '';

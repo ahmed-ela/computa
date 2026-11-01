@@ -910,7 +910,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
               />
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
-            <div className="setting-row"><span><strong>Website models</strong><small>Choices come from your signed-in ChatGPT, Gemini and Claude menus.</small></span>
+            <div className="setting-row"><span><strong>Website models</strong><small>Choices come from the model menus on your signed-in provider websites.</small></span>
               {/* Model refresh controls are temporarily hidden; retain the component for later restoration.
               <WebsiteModelsRefresh canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing} onRefresh={post} />
               */}

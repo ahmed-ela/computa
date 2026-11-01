@@ -8,6 +8,8 @@ import OSLog
 /// Another website transport can replace the browser implementation without
 /// changing the desktop tools or local transcript.
 protocol WebModelTransport: Sendable {
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data
     func activateRequestMetadata(sessionToken: String) async -> Bool
     func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
@@ -24,6 +26,22 @@ protocol WebModelTransport: Sendable {
     func interruptPostBlockObservation(sessionToken: String) async
 }
 
+/// Native invocation identity, never serialized into the provider page. A Start
+/// error alone cannot establish that a browser session was never acquired.
+struct WebModelStartAdmission: Equatable, Sendable {
+    let id: UUID
+    let inferenceID: UUID
+    let taskID: String
+    let threadID: String
+    let turnID: String
+    let runtimeGeneration: UUID
+    let preparationID: UUID
+    let transportGeneration: UUID
+    let provider: String
+    let modelID: String
+    let parameters: Data
+}
+
 /// Stopping inference and disposing its session remain cancellation operations.
 /// Only an ordinary failed turn may retain an already-enrolled passive probe.
 enum WebModelCleanupCause: String, Sendable {
@@ -32,6 +50,13 @@ enum WebModelCleanupCause: String, Sendable {
 }
 
 extension WebModelTransport {
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        // Legacy/custom transports supply no native precreation proof. Their
+        // errors remain uncertain even if they reuse a known provider error.
+        if let authorization { return try await startWithRequestMetadata(params: params, authorization: authorization) }
+        return try await request(operation: "webProviderStart", params: params)
+    }
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
         authorization.revoke()
         return try await request(operation: "webProviderStart", params: params)
@@ -107,12 +132,17 @@ actor WebModelServer {
         let context: InferenceContext
         let transportGeneration: UUID
         let provesNativeContinuation: Bool
+        let provesFreshSessionSubmission: Bool
         let retainsConversation: Bool
         var requestMetadata: ChatGPTRequestMetadataLease?
         var submittedPromptFingerprint = ""
         var cumulativePromptUTF8Count = 0
         var turnInferenceCount = 0
-        var usesBoundedTurn: Bool { provesNativeContinuation && provider == "chatgpt" }
+        // Local history validation also protects fresh Claude sessions; it
+        // does not claim that Claude can continue a retained website page.
+        var usesVerifiedHistory: Bool { provesNativeContinuation || provesFreshSessionSubmission }
+        var usesBoundedTurn: Bool { usesVerifiedHistory && provider != "gemini" }
+        var freshSessionSubmissionVerified = false
         var sequence = 1
         var baselineResponseCount = 0
         var documentGeneration: UUID?
@@ -224,6 +254,7 @@ actor WebModelServer {
     private var usedSessionTokens: [String: Set<String>] = [:]
     private var unresolvedStartAttempts: [String: UnresolvedStartAttempt] = [:]
     private var unresolvedStartReceipts: [String: WebsiteSessionCleanupReceipt] = [:]
+    private var notCreatedStartReceipts: [String: WebsiteSessionCleanupReceipt] = [:]
     private var evidenceThreads: [String: String] = [:]
     private var active: [String: ActiveRequest] = [:]
     private var retiringTaskIDs = Set<String>()
@@ -274,6 +305,7 @@ actor WebModelServer {
               !retiringTaskIDs.contains(task) else { throw Failure.busy }
         guard sessions[task] == nil, pendingClosedTransactions[task] == nil else { throw Failure.cleanupFailed }
         guard unresolvedStartAttempts[task] == nil else { throw Failure.startOwnershipUnconfirmed }
+        guard notCreatedStartReceipts[task]?.receiptSaved != false else { throw Failure.persistenceRequired }
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
         do {
@@ -282,6 +314,7 @@ actor WebModelServer {
             let protected = Set(active.keys).union(sessions.keys).union(pendingClosedTransactions.keys)
                 .union(preparedInferenceContexts.keys).union(inferenceContexts.keys).union(contextWaiters.keys)
                 .union(cleanupTasks.keys).union(unresolvedStartAttempts.keys).union(unresolvedStartReceipts.keys)
+                .union(notCreatedStartReceipts.filter { !$0.value.receiptSaved }.map(\.key))
                 .union(yieldedTurns.keys).union(closedTurns.keys).union(retiringTaskIDs)
             try retention.admit(taskID: task, evidenceDirectory: evidenceDirectory!, protectedTaskIDs: protected)
         } catch { throw Failure.persistenceRequired }
@@ -294,6 +327,7 @@ actor WebModelServer {
         failedClosedHandoffs.remove(task)
         registerEvidenceThread(taskID: task, threadID: thread)
         cleanupTurns.removeValue(forKey: task)
+        notCreatedStartReceipts.removeValue(forKey: task)
     }
 
     /// Actual native turn acknowledgement/notification resolves the prepared
@@ -590,6 +624,7 @@ actor WebModelServer {
         embeddedTransport = nil
         embeddedTransportIdentity = nil
         let ids = Set(sessions.keys).union(active.keys).union(pendingClosedTransactions.keys).union(unresolvedStartAttempts.keys)
+            .union(notCreatedStartReceipts.keys)
             .union(preparedInferenceContexts.keys).union(inferenceContexts.keys)
         var issues: [String] = []
         for id in ids { issues += await cancel(taskID: id) }
@@ -621,6 +656,9 @@ actor WebModelServer {
         if let pending = pendingClosedTransactions[taskID] {
             return await persistClosedTransaction(taskID: taskID, pending: pending)
         }
+        if let receipt = notCreatedStartReceipts[taskID], sessions[taskID] == nil {
+            return await persistNotCreatedStart(taskID: taskID, receipt: receipt)
+        }
         guard let session = sessions[taskID] else {
             // A final inference closure already has the strongest causal proof.
             // Turn-end must not replace it with a weaker no_owned_session row.
@@ -641,6 +679,17 @@ actor WebModelServer {
         let receipt = await waitForCleanup(cleanup, taskID: taskID)
         cleanupTasks.removeValue(forKey: taskID)
         return receipt
+    }
+
+    /// The exact rejected invocation has no website token. Persist only this
+    /// absence proof; never borrow an earlier inference's closure or call Finish.
+    private func persistNotCreatedStart(taskID: String, receipt original: WebsiteSessionCleanupReceipt) async -> CleanupResult {
+        var receipt = original
+        receipt.receiptSaved = true
+        if cleanupReceiptStore?.save(receipt) != true { receipt.receiptSaved = false }
+        notCreatedStartReceipts[taskID] = receipt
+        await cleanupReceiptObserver?(receipt)
+        return CleanupResult(receipt: receipt, issues: receipt.receiptSaved ? [] : [Failure.persistenceRequired.localizedDescription])
     }
 
     private func waitForCleanup(_ cleanup: Task<CleanupResult, Never>, taskID: String) async -> CleanupResult {
@@ -686,11 +735,17 @@ actor WebModelServer {
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
                 params: params)
-            guard ["deleted", "not_created"].contains(reply["cleanup"] as? String ?? "") else {
-                throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
+            let reason: WebsiteSessionCleanupReceipt.Reason
+            switch reply["cleanup"] as? String {
+            case "deleted": reason = .deleted
+            case "not_created": reason = .notCreated
+            // Groq confirms removal of its owned visible transcript. This is
+            // neither temporary-chat proof nor a provider retention guarantee.
+            case "transcript_cleared" where session.provider == "groq": reason = .transcriptCleared
+            default: throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
             }
             let receipt = makeCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
-                outcome: .closed, reason: reply["cleanup"] as? String == "deleted" ? .deleted : .notCreated, trigger: trigger)
+                outcome: .closed, reason: reason, trigger: trigger)
             if sessions[taskID]?.token == session.token { sessions.removeValue(forKey: taskID) }
             let pending = PendingClosedTransaction(session: session, receipt: receipt)
             pendingClosedTransactions[taskID] = pending
@@ -723,7 +778,7 @@ actor WebModelServer {
             await cleanupReceiptObserver?(receipt)
             return CleanupResult(receipt: receipt, issues: [Failure.persistenceRequired.localizedDescription])
         }
-        if pending.session.provesNativeContinuation, let data = pending.session.completedSnapshot {
+        if pending.session.usesVerifiedHistory, let data = pending.session.completedSnapshot {
             do {
                 profile?.mark(.cleanupReleaseStart)
                 defer { profile?.mark(.cleanupReleaseEnd) }
@@ -784,6 +839,7 @@ actor WebModelServer {
               sessions[taskID] == nil || yieldedTurns[taskID] != nil,
               !failedClosedHandoffs.contains(taskID) else { throw Failure.cleanupFailed }
         guard unresolvedStartAttempts[taskID] == nil else { throw Failure.startOwnershipUnconfirmed }
+        guard notCreatedStartReceipts[taskID]?.receiptSaved != false else { throw Failure.persistenceRequired }
         let generation = embeddedTransportGeneration
         let operation = Task { try await self.perform(request, provider: provider,
             taskID: taskID, identity: identity, transport: transport, transportGeneration: generation) }
@@ -855,7 +911,7 @@ actor WebModelServer {
         }
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)
-            guard !session.provesNativeContinuation || current != nil else { throw Failure.modelUnverified }
+            guard !session.usesVerifiedHistory || current != nil else { throw Failure.modelUnverified }
             if let pinned = session.resolvedModel {
                 guard let current, pinned.isSameResolvedSelection(as: current) else { throw Failure.modelMismatch }
             } else if let current { session.resolvedModel = current }
@@ -923,8 +979,9 @@ actor WebModelServer {
                         try closed.continuation.validate(next: request)
                     }
                     let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider)
-                    if provesNativeContinuation { try WebsiteTurnContinuation.validateRequest(request) }
-                    if provider == "chatgpt", provesNativeContinuation {
+                    let provesFreshSessionSubmission = provider == "claude" && choice != nil
+                    if provesNativeContinuation || provesFreshSessionSubmission { try WebsiteTurnContinuation.validateRequest(request) }
+                    if provider == "chatgpt" || provesFreshSessionSubmission {
                         guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
                               request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
                         else { throw Failure.turnLimit }
@@ -938,6 +995,7 @@ actor WebModelServer {
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested",
                         turnScoped: retainsConversation(provider: provider))
+                    notCreatedStartReceipts.removeValue(forKey: taskID)
                     unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model)
                     if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
@@ -949,13 +1007,35 @@ actor WebModelServer {
                             taskID: task, threadID: thread, turnID: turn, preparationID: context.preparationID,
                             isMaintenance: context.isMaintenance)
                     }
+                    let startParameters = try JSONSerialization.data(withJSONObject: params)
+                    let admission = WebModelStartAdmission(id: UUID(), inferenceID: inferenceID, taskID: taskID,
+                        threadID: context.threadID, turnID: context.turnID, runtimeGeneration: context.runtimeGeneration,
+                        preparationID: context.preparationID, transportGeneration: transportGeneration,
+                        provider: provider, modelID: request.model, parameters: startParameters)
                     let reply: [String: Any]
-                    if let requestMetadata {
-                        let data = try await transport.startWithRequestMetadata(
-                            params: JSONSerialization.data(withJSONObject: params), authorization: requestMetadata)
+                    do {
+                        let data = try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
                         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
                         reply = object
-                    } else { reply = try await call(transport, operation: "webProviderStart", params: params) }
+                    } catch let rejected as EmbeddedWebModelTransport.PrecreationRejection {
+                        // Only the exact current native invocation can retire its
+                        // unknown Start. Arbitrary errors/page JSON never enter here.
+                        if rejected.admission == admission, (try? requireCurrentContext()) != nil,
+                           sessions[taskID] == nil, lease == nil,
+                           unresolvedStartReceipts[taskID] == nil,
+                           let pending = unresolvedStartAttempts[taskID], pending.inferenceID == inferenceID,
+                           pending.context == context, pending.provider == provider, pending.modelID == request.model {
+                            let receipt = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: context.threadID,
+                                turnID: context.turnID, runtimeGeneration: context.runtimeGeneration, outcome: .noOwnedSession,
+                                provider: WebsiteSessionCleanupReceipt.Provider(rawValue: provider), route: .embedded,
+                                modelID: request.model, reason: .notCreated, trigger: .inference,
+                                inferenceID: inferenceID.uuidString.lowercased())
+                            notCreatedStartReceipts[taskID] = receipt
+                            unresolvedStartAttempts.removeValue(forKey: taskID)
+                            _ = await persistNotCreatedStart(taskID: taskID, receipt: receipt)
+                        }
+                        throw rejected.failure
+                    }
                     guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
                         throw Self.snapshotFailure(reply)
                     }
@@ -964,6 +1044,7 @@ actor WebModelServer {
                         modelChoice: choice, transport: transport, inferenceID: inferenceID,
                         context: context, transportGeneration: transportGeneration,
                         provesNativeContinuation: provesNativeContinuation,
+                        provesFreshSessionSubmission: provesFreshSessionSubmission,
                         retainsConversation: retainsConversation(provider: provider))
                     session.requestMetadata = requestMetadata
                     session.resolvedModel = correctionSource?.resolvedModel ?? closed?.resolvedModel
@@ -989,6 +1070,11 @@ actor WebModelServer {
                     if session.provesNativeContinuation {
                         guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
                         try WebsiteTurnContinuation.validateRequest(request)
+                    }
+                    if session.provesFreshSessionSubmission {
+                        guard reply["freshSessionSubmissionCapability"] as? String == "fresh_session_submission_v1",
+                              reply["turnContinuationCapability"] == nil,
+                              reply["freshSessionSubmissionProof"] == nil else { throw Failure.invalidRequest }
                     }
                     if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: &session) }
                     let stageDeadline = ContinuousClock.now + readinessTimeout
@@ -1054,7 +1140,7 @@ actor WebModelServer {
                 session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
                 sessions[taskID] = session
                 lease = session
-                if provider == "chatgpt", responseDeadline == nil {
+                if session.usesBoundedTurn, responseDeadline == nil {
                     // Include the first Send await in the one absolute correction
                     // budget; a rejected reply never renews this deadline.
                     responseDeadline = ContinuousClock.now + responseTimeout
@@ -1141,6 +1227,12 @@ actor WebModelServer {
                             } else if case .unsupportedWebsiteResponse = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unsupportedWebsiteResponse, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .argumentsMustBeObject = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .invalidFunctionCallShape, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .customInputMustBeString = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .invalidCustomCallShape, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             }
                             throw error
                         }
@@ -1164,7 +1256,7 @@ actor WebModelServer {
                             ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                             : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                         responseProfile?.mark(.encoded)
-                        let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
+                        let continuation: WebsiteTurnContinuation? = try session.usesVerifiedHistory ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
                             let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
                             let diagnostic = retain
@@ -1198,7 +1290,7 @@ actor WebModelServer {
                             guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
                             responseProfile?.mark(.cleanupReceiptDone)
                             try requireCurrentContext()
-                            if !session.provesNativeContinuation {
+                            if !session.usesVerifiedHistory {
                                 try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
                                     session: session, phase: "release_verified", cleanupAttemptID: closed.receipt.attemptID)
                             }
@@ -1240,8 +1332,12 @@ actor WebModelServer {
                         try requireCurrentContext()
                         let prompt = request.prompt + Self.correctionReminder(for: reason)
                         var session = candidate.session
-                        if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
-                              session.provesNativeContinuation, !session.retainsConversation,
+                        let correctionProof = provider == "chatgpt" && session.provesNativeContinuation
+                            || provider == "claude" && reason == .invalidJSON
+                                && session.provesFreshSessionSubmission && session.freshSessionSubmissionVerified
+                                && Self.isClaudeFormatCorrectionCandidate(candidate.snapshot)
+                        if correctionTicket == nil, correctionProof, !context.isMaintenance,
+                              !session.retainsConversation,
                               session.sequence == 1, session.baselineResponseCount == 0,
                               session.resolvedModel != nil, session.documentGeneration != nil,
                               !session.submittedPromptFingerprint.isEmpty,
@@ -1319,7 +1415,7 @@ actor WebModelServer {
                         secondSessionToken: second.flatMap { UUID(uuidString: $0.token) }, outcome: outcome)
                     failedClosedHandoffs.insert(taskID)
                 }
-                if let lease, lease.provesNativeContinuation, !lease.retainsConversation,
+                if let lease, lease.usesVerifiedHistory, !lease.retainsConversation,
                    !lease.submittedPromptFingerprint.isEmpty {
                     failedClosedHandoffs.insert(taskID)
                 }
@@ -1366,6 +1462,21 @@ actor WebModelServer {
                 throw error
             }
         }
+    }
+
+    /// Diagnostic shape restricts eligibility only. It never supplies a
+    /// partial response or tool authority; the complete original reply remains
+    /// rejected and the second reply passes the unchanged strict codec.
+    private static func isClaudeFormatCorrectionCandidate(_ snapshot: [String: Any]?) -> Bool {
+        guard let completion = snapshot?["completionEvidence"] as? [String: Any],
+              let structure = completion["codeStructure"] as? [String: Any],
+              receiptInteger(structure["preCount"], range: 1...1) == 1,
+              let valid = structure["literalCodeValidJSON"] as? NSNumber,
+              CFGetTypeID(valid) == CFBooleanGetTypeID(), valid.boolValue,
+              structure["literalCodeKnownEnvelopeType"] as? String == "tool_calls",
+              structure["extractionReason"] as? String == "outside_content",
+              structure["selectedExtraction"] as? String == "rendered_fallback" else { return false }
+        return true
     }
 
     private static func correctionReminder(for reason: WebsiteModelFormatCorrectionStore.Reason) -> String {
@@ -1425,6 +1536,10 @@ actor WebModelServer {
         case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         case unofferedTool
         case unsupportedWebsiteResponse
+        // These codec failures cover both field sets and value types; the
+        // diagnostic must not infer which predicate failed without the reply.
+        case invalidFunctionCallShape
+        case invalidCustomCallShape
     }
 
     private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
@@ -1434,7 +1549,7 @@ actor WebModelServer {
               let token = UUID(uuidString: session.token),
               text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
               session.modelID.utf8.count <= 2_048,
-              ["chatgpt", "claude", "gemini"].contains(session.provider) else { return }
+              WebsiteModelCatalog.providers.contains(session.provider) else { return }
         let diagnosticFields: [String: Any]
         switch diagnostic {
         case let .malformed(value):
@@ -1445,6 +1560,10 @@ actor WebModelServer {
             diagnosticFields = ["reason": "unoffered_tool", "utf8Bytes": text.utf8.count]
         case .unsupportedWebsiteResponse:
             diagnosticFields = ["reason": "unsupported_website_response", "utf8Bytes": text.utf8.count]
+        case .invalidFunctionCallShape:
+            diagnosticFields = ["reason": "invalid_function_call_shape", "utf8Bytes": text.utf8.count]
+        case .invalidCustomCallShape:
+            diagnosticFields = ["reason": "invalid_custom_call_shape", "utf8Bytes": text.utf8.count]
         }
         var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
                                     "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),
@@ -1551,6 +1670,33 @@ actor WebModelServer {
                 throw Failure.invalidRequest
             }
         }
+        if session.provesFreshSessionSubmission {
+            guard snapshot["freshSessionSubmissionCapability"] as? String == "fresh_session_submission_v1",
+                  snapshot["turnContinuationCapability"] == nil,
+                  session.sequence == 1, session.baselineResponseCount == 0 else { throw Failure.invalidRequest }
+            if snapshot["state"] as? String == "complete" {
+                guard let proof = snapshot["freshSessionSubmissionProof"] as? [String: Any],
+                      Set(proof.keys) == ["sessionToken", "documentGeneration", "sequence", "baselineResponseCount",
+                                          "responseCount", "firstUserFingerprint", "submittedPromptFingerprint"],
+                      proof["sessionToken"] as? String == session.token,
+                      proof["documentGeneration"] as? String == rawGeneration,
+                      receiptInteger(proof["sequence"], range: 1...1) == 1,
+                      receiptInteger(proof["baselineResponseCount"], range: 0...0) == 0,
+                      receiptInteger(proof["responseCount"], range: 1...1) == 1,
+                      responseCount == 1, !fingerprint.isEmpty,
+                      proof["firstUserFingerprint"] as? String == fingerprint,
+                      !session.submittedPromptFingerprint.isEmpty,
+                      proof["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint else {
+                    throw Failure.invalidRequest
+                }
+                session.freshSessionSubmissionVerified = true
+            } else if snapshot["freshSessionSubmissionProof"] != nil {
+                throw Failure.invalidRequest
+            }
+        } else if session.provider != "claude",
+                  snapshot["freshSessionSubmissionCapability"] != nil || snapshot["freshSessionSubmissionProof"] != nil {
+            throw Failure.invalidRequest
+        }
         session.documentGeneration = generation
         if !fingerprint.isEmpty { session.firstUserFingerprint = fingerprint }
     }
@@ -1578,8 +1724,10 @@ actor WebModelServer {
         if let turnScoped { policy = turnScoped }
         else if provider == "chatgpt" { policy = nil }
         else { policy = Self.requiresNativeContinuationProof(provider: provider) }
+        let transactionMode = provider == "groq" ? "explicit_clear_per_inference"
+            : policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending"
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
-            "transactionMode": policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending",
+            "transactionMode": transactionMode,
             "transactionVersion": policy.map { $0 ? 2 : 1 } ?? 0,
             "transactionPolicyEstablished": policy != nil,
             "taskID": taskID, "threadID": context.threadID, "turnID": context.turnID,
@@ -1601,6 +1749,10 @@ actor WebModelServer {
             record[key] = context[key]
         }
         if session.provesNativeContinuation { record["submittedPromptFingerprint"] = context["submittedPromptFingerprint"] }
+        if session.provesFreshSessionSubmission, session.freshSessionSubmissionVerified {
+            record["submittedPromptFingerprint"] = session.submittedPromptFingerprint
+            record["submissionProofPolicy"] = "fresh_session_submission_v1"
+        }
         if let raw = context["documentGeneration"] as? String, let generation = UUID(uuidString: raw) {
             record["documentGeneration"] = generation.uuidString.lowercased()
         }

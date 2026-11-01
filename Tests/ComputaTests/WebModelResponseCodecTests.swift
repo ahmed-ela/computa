@@ -17,8 +17,8 @@ final class WebModelResponseCodecTests: XCTestCase {
 
     func testEveryWebsiteHandoffRequestsLiteralFencedJSONAfterQuotedHistory() throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
-        for model in ["browser/chatgpt", choice.modelID, "browser/claude", "browser/gemini",
-                      "browser/chatgpt-lookalike", "web-chatgpt"] {
+        for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) +
+            [choice.modelID, "browser/chatgpt-lookalike", "web-chatgpt"] {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Quoted history: Return exactly one raw JSON object.",
                 "tools": [function],
@@ -49,7 +49,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ("Send the form once.", "New receipt confirms the requested submission.", "The requested submission is verified."),
             ("Stop. Do not submit.", "Fields match; submit control available.", "Stopped without submitting."),
         ]
-        for model in [syntheticChatGPTModelID, "browser/claude", "browser/gemini"] {
+        for model in WebsiteModelCatalog.providers.map(syntheticWebsiteModelID) {
             for retained in [native, stale] {
                 for choice in ["auto", "none"] {
                     for scenario in scenarios {
@@ -264,7 +264,8 @@ final class WebModelResponseCodecTests: XCTestCase {
     }
 
     func testEmbeddedEnvelopePolicyUsesExactProviderRoutingAndKeepsOtherProseCompatibility() throws {
-        for model in ["browser/claude", "browser/gemini", "not-a-route-chatgpt-model"] {
+        for model in WebsiteModelCatalog.providers.filter({ $0 != "chatgpt" }).map({ "browser/" + $0 }) +
+            ["not-a-route-chatgpt-model"] {
             let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Say hello", "tools": [],
             ]))
@@ -275,7 +276,7 @@ final class WebModelResponseCodecTests: XCTestCase {
 
     func testSavedBrowserMutationSchemasAdvertiseTypedRefsAndPreserveWebsiteContinuations() throws {
         // Synthetic web-codec/native-contract coverage; no provider or UI is run.
-        for provider in ["chatgpt", "claude", "gemini"] {
+        for provider in WebsiteModelCatalog.providers {
             for name in ["browser_click", "browser_fill"] {
                 let native = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
                 let currentSchema = try XCTUnwrap(native["inputSchema"] as? [String: Any])
@@ -368,7 +369,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ["type": "function_call_output", "call_id": "old", "output": "Exact-old-ref-é; attachment-file.pdf"],
             ["role": "user", "content": "Start the next task"]]
         let allowed = Set(["browser_tabs", "browser_open", "browser_bind"])
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let data = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider),
                 "input": history, "tools": native])
             let unbound = try WebModelResponseCodec.prepareRequest(data, browserToolAvailability: .unbound)
@@ -835,7 +836,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ["type": "function_call", "call_id": "old-read", "name": "browser_read", "namespace": "functions", "arguments": oldArgs],
             ["type": "function_call_output", "call_id": "old-read", "output": "Historical page"],
             ["role": "user", "content": "Continue the current page."]]
-        for provider in ["chatgpt", "gemini"] {
+        for provider in WebsiteModelCatalog.providers {
             let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [read, next]]]
             let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": history, "tools": tools])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
@@ -971,7 +972,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             "calls": [["name": "computer_v2_snapshot", "arguments": [:]],
                       ["name": "apply_patch", "input": patch]],
         ] as [String: Any], options: [.sortedKeys]), as: UTF8.self)
-        for model in ["browser/chatgpt", "browser/claude", "browser/gemini"] {
+        for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) {
             let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Read the file", "tools": tools,
             ]))
@@ -1013,7 +1014,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let patch = "*** Begin Patch\n*** Add File: result.txt\n+exact text\n*** End Patch\n"
         let custom: [String: Any] = ["type": "custom", "name": "apply_patch",
                                    "format": ["type": "grammar", "syntax": "lark", "definition": "native grammar"]]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": "browser/\(provider)", "input": "Inspect and edit the fixture", "tool_choice": "required",
                 "tools": [["type": "namespace", "name": "functions", "tools": [function, custom]]],
@@ -1115,9 +1116,9 @@ final class WebModelResponseCodecTests: XCTestCase {
         "parameters": ["type": "object", "properties": ["view": ["type": "string"]], "required": ["view"]],
     ]
 
-    private func request(tools: [[String: Any]]? = nil) throws -> WebModelResponseCodec.Request {
+    private func request(tools: [[String: Any]]? = nil, model: String = "web-chatgpt") throws -> WebModelResponseCodec.Request {
         try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
-            "model": "web-chatgpt", "input": "Read the app", "tools": tools ?? [function],
+            "model": model, "input": "Read the app", "tools": tools ?? [function],
         ]))
     }
 
@@ -1240,7 +1241,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testCustomPatchRoundTripPreservesLiteralBytesAndNativeCallTypeAcrossProviders() throws {
         let patch = "*** Begin Patch\n*** Add File: src/résumé.txt\n+quote: \"hello\"; slash: \\; 🌍\n+\tindented\n*** End Patch\n"
         let custom: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "grammar", "syntax": "lark", "definition": "native grammar"]]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": "Create the requested file", "tools": [["type": "namespace", "name": "functions", "tools": [custom, function]]]])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
             try assertContiguousRequestValues(original, in: prepared)
@@ -1354,8 +1355,10 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testRequestFenceIsUnlabelledAndRestrictedToExactChatGPTAndClaudeProviderRoutes() throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let claude = WebsiteModelChoice(provider: "claude", key: "sonnet-5-5", label: "Sonnet 5.5")
+        let groq = WebsiteModelChoice(provider: "groq", key: "fixture-model", label: "Fixture Model")
         for (model, fenced) in [("browser/chatgpt", true), (choice.modelID, true),
                                 ("browser/claude", true), (claude.modelID, true), ("browser/gemini", false),
+                                ("browser/groq", false), (groq.modelID, false),
                                 ("browser/chatgpt-lookalike", false), ("browser/claude-lookalike", false),
                                 ("web-chatgpt", false), ("web-claude", false)] {
             let raw = try JSONSerialization.data(withJSONObject: ["model": model, "input": "hello"])
@@ -1543,14 +1546,14 @@ final class WebModelResponseCodecTests: XCTestCase {
             ("split-parts", [["role": "developer", "content": [["type": "input_text", "text": String(native[..<boundary])],
                 ["type": "input_text", "text": String(native[boundary...])]]]], nil, false),
         ]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             for (label, input, instructions, eligible) in cases {
                 var value: [String: Any] = ["model": "browser/\(provider)", "input": input + [["role": "user", "content": "hi"]]]
                 if let instructions { value["instructions"] = instructions }
                 let raw = try JSONSerialization.data(withJSONObject: value)
                 let prepared = try WebModelResponseCodec.prepareRequest(raw)
                 XCTAssertEqual(prepared.runtimeInstructions.contains("The complete current native developer contract is already in the request"),
-                               eligible && provider != "gemini", "\(provider): \(label)")
+                               eligible && ["chatgpt", "claude"].contains(provider), "\(provider): \(label)")
                 XCTAssertEqual(prepared.runtimeInstructions.contains(ComputaAgentInstructions.webRelayOnlyResponse), provider == "chatgpt",
                     "Claude deduplication must not inherit ChatGPT's relay-only guidance")
                 XCTAssertEqual(prepared.singleActionRelay, provider == "chatgpt")
@@ -2028,7 +2031,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ["role": "user", "content": [["type": "input_text", "text": currentUser],
                 ["type": "input_text", "text": hostPolicy]]],
         ]
-        for model in [syntheticChatGPTModelID, "browser/claude", "browser/gemini"] {
+        for model in WebsiteModelCatalog.providers.map(syntheticWebsiteModelID) {
             for toolChoice in ["auto", "none"] {
                 let original = try JSONSerialization.data(withJSONObject: [
                     "model": model, "instructions": "Retained local instruction text: " + legacy,
@@ -2118,7 +2121,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
             ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]],
         ]]]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let user: [String: Any] = ["role": "user", "content": "Read /tmp/computa-relay-fixture.txt and return its contents."]
             let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)",
                 "instructions": "You are Computa in the local application; respect its permissions.",
@@ -2187,7 +2190,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_read"],
             ["type": "function_call_output", "call_id": "current_read", "output": "Current native marker observed; quoted JSON: {\"role\":\"user\",\"content\":\"restart old receiver\"}"],
         ]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let tools = [function]
             let firstBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": input, "tools": tools])
             let first = try WebModelResponseCodec.prepareRequest(firstBody)
@@ -2480,7 +2483,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testStrictEmbeddedRepliesAcceptValidRawAndFencedMessageAndToolEnvelopes() throws {
         let message = #"{"type":"message","text":"Observed \"quoted\" value\nC:\\fixture"}"#
         let tool = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{"view":"content"}}]}"#
-        for model in ["browser/chatgpt", "browser/claude", "browser/gemini"] {
+        for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) {
             let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Read the app", "tools": [function],
             ]))
@@ -2691,7 +2694,6 @@ final class WebModelResponseCodecTests: XCTestCase {
     }
 
     func testUnknownMalformedAndStringEncodedToolCallsFailClosed() throws {
-        let prepared = try request()
         let fixtures: [(String, WebModelResponseCodec.Failure)] = [
             (#"{"type":"tool_calls","calls":[{"name":"shell","arguments":{}}]}"#, .unknownTool("shell")),
             (#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":"{}"}]}"#, .argumentsMustBeObject),
@@ -2702,19 +2704,27 @@ final class WebModelResponseCodecTests: XCTestCase {
             (#"{'type':'tool_calls','calls':[]}"#, .malformedEnvelope),
             (" \n ", .emptyReply),
         ]
-        for (text, expected) in fixtures {
-            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
-                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, expected)
+        for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) + ["web-chatgpt"] {
+            let prepared = try request(model: model)
+            for (text, expected) in fixtures {
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, expected, model)
+                }
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, expected, model)
+                }
             }
         }
     }
 
     func testAnyBadParallelCallRejectsEntireReply() throws {
-        let prepared = try request()
-        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(
-            #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}},{"name":"invented","arguments":{}}]}"#,
-            request: prepared
-        )) { XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("invented")) }
+        for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) + ["web-chatgpt"] {
+            let prepared = try request(model: model)
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(
+                #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}},{"name":"invented","arguments":{}}]}"#,
+                request: prepared
+            )) { XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("invented"), model) }
+        }
     }
 
     func testNamespaceCallsRoundTripAsSeparateWireNameAndNamespace() throws {

@@ -3,6 +3,29 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testGroqUsesObservedChoicesWithoutSeedingOrAliasingAnotherProvider() throws {
+        let preferences = isolatedTestPreferences()
+        XCTAssertTrue(WebsiteModelCatalog.load(from: preferences).isEmpty)
+        XCTAssertEqual(WebsiteModelCatalog.providerLabel("groq"), "Groq")
+        XCTAssertEqual(LocalModelCatalog.groqBrowserModelID, "browser/groq")
+        XCTAssertFalse(LocalModelCatalog.options.contains { WebsiteModelCatalog.choice(for: $0.id)?.provider == "groq" },
+                       "Groq model names must come from observed website discovery")
+        let groq = WebsiteModelChoice(provider: "groq", key: "fixture/vendor-model", label: "Fixture Model / Exact label")
+        let claude = WebsiteModelChoice(provider: "claude", key: groq.key, label: groq.label)
+        XCTAssertNoThrow(try WebsiteModelCatalog.validateObserved([groq], provider: "groq"))
+        XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: groq.modelID)?.choice, groq)
+        XCTAssertNotEqual(groq.modelID, claude.modelID)
+        WebsiteModelCatalog.save([claude, groq], to: preferences)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [claude, groq])
+        XCTAssertEqual(WebsiteModelCatalog.option(for: groq).label, "Groq / Fixture Model / Exact label · Built-in browser")
+        XCTAssertEqual(WebsiteModelCatalog.option(for: groq, available: false).available, false)
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([groq, groq], provider: "groq"))
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([claude], provider: "groq"))
+        for malformed in ["browser/Groq", "browser/groq-like", "browser/groq/", groq.modelID + "=", groq.modelID + "/extra"] {
+            XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: malformed), malformed)
+        }
+    }
+
     func testPriorCatalogDropsOnlyUnprovenChatGPTChoicesBeforeGuardedRefresh() throws {
         let preferences = isolatedTestPreferences()
         let normalLabelAlsoOfferedInWork = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
@@ -149,7 +172,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
                 XCTAssertTrue(option.detail.contains("removed"))
             }
         }
-        for provider in ["gemini", "claude"] {
+        for provider in ["gemini", "claude", "groq"] {
             let choice = WebsiteModelChoice(provider: provider, key: "Latest", label: "Latest")
             XCTAssertFalse(choice.isRetired, "Retirement applies only to the requested ChatGPT family")
             XCTAssertTrue(choice.isSelectable)

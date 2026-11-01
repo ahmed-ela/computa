@@ -1,0 +1,105 @@
+<!doctype html><meta charset="utf-8">
+<style>body{font:16px sans-serif;margin:24px}button,textarea,input{padding:8px;margin:4px}textarea{display:block;width:600px;height:120px}[hidden]{display:none!important}</style>
+<body><script>
+// Synthetic observed Groq DOM. Shared verbatim by inert-JS and real-WK tests.
+(() => {
+  const make = (tag, attributes = {}, text = '') => {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+    if (text) node.textContent = text;
+    return node;
+  };
+  const choices = [
+    ['qwen/qwen3.8-27b', 'Qwen/Qwen3.8-27B'],
+    ['meta-llama/llama-prompt-guard-2-22m', 'Llama Prompt Guard 2 22M'],
+    ['meta-llama/llama-prompt-guard-2-86m', 'Prompt Guard 2 86M'],
+    ['openai/gpt-oss-120b', 'GPT OSS 120B'], ['openai/gpt-oss-20b', 'GPT OSS 20B'],
+    ['openai/gpt-oss-safeguard-20b', 'Safety GPT OSS 20B'],
+  ];
+  const requestedModel = new URL(document.URL).searchParams.get('model');
+  const model = requestedModel || choices[0][0];
+  // Observed site bootstrapping chooses its persisted/default model on root.
+  // Inference tests supply their exact query and must never take this branch.
+  if (!requestedModel) window.history.replaceState(null, '', '/?model=' + encodeURIComponent(model));
+  const selected = choices.find(choice => choice[0] === model) || choices[0];
+  const f = window.groqFixture = { choices, model, sendCount: 0, clearCount: 0, pickerOpens: 0,
+    ignoreClear: false, delayClear: false, ignoreEscape: false, delayResponse: false, structuredReply: false,
+    reply: '{"type":"message","text":"OK"}',
+    user: null, userBody: null, answer: null, turn: null, clearButton: null, stats: null, dialog: null };
+  const header = make('header');
+  f.trigger = make('button', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+    'aria-controls': 'fixture-model-menu', 'data-state': 'closed' }, selected[1]);
+  f.trigger.append(make('svg', { class: 'lucide lucide-chevrons-up-down' })); header.append(f.trigger); document.body.append(header);
+  f.messages = make('main'); document.body.append(f.messages);
+  f.suggestions = make('div', { id: 'fixture-suggestions' }, 'Explain training vs inference'); f.messages.append(f.suggestions);
+  const form = make('form'), mobile = make('form', { hidden: '' });
+  f.editor = make('textarea', { id: 'chat', placeholder: 'Try it' });
+  f.send = make('button', { type: 'submit' }); f.send.append(make('svg', { 'aria-label': 'send' })); form.append(f.editor, f.send);
+  f.mobileEditor = make('textarea', { id: 'chat', placeholder: 'Try it' });
+  f.mobileSend = make('button', { type: 'submit' }); f.mobileSend.append(make('svg', { 'aria-label': 'send' })); mobile.append(f.mobileEditor, f.mobileSend);
+  document.body.append(form, mobile); f.form = form; f.mobileForm = mobile;
+  f.closePicker = () => {
+    f.dialog?.remove(); f.dialog = null;
+    f.trigger.setAttribute('aria-expanded', 'false'); f.trigger.setAttribute('data-state', 'closed');
+  };
+  f.trigger.onclick = () => {
+    if (f.dialog) { f.closePicker(); return; }
+    f.pickerOpens++;
+    const dialog = make('div', { role: 'dialog', id: 'fixture-model-menu', 'data-state': 'open' });
+    const search = make('input', { role: 'combobox', 'cmdk-input': '', placeholder: 'Search Models...', 'aria-controls': 'fixture-model-list' });
+    search.value = '';
+    const list = make('div', { role: 'listbox', 'cmdk-list': '', id: 'fixture-model-list' });
+    for (const [key, label] of choices) list.append(make('div', { role: 'option', 'cmdk-item': '', 'data-value': key,
+      ...(key === choices[0][0] ? { 'aria-selected': 'true', 'data-selected': 'true' } : {}) }, label));
+    dialog.append(search, list); document.body.append(dialog); f.dialog = dialog;
+    f.trigger.setAttribute('aria-expanded', 'true'); f.trigger.setAttribute('data-state', 'open');
+    dialog.onkeydown = event => { if (event.key === 'Escape' && !f.ignoreEscape) f.closePicker(); };
+  };
+  f.finishClear = () => {
+    f.turn?.remove(); f.clearButton?.remove(); f.stats?.remove();
+    f.turn = f.user = f.userBody = f.answer = f.clearButton = f.stats = null;
+    f.editor.value = ''; f.editor.disabled = false; f.send.disabled = false; f.suggestions.removeAttribute('hidden');
+  };
+  f.appendUser = text => {
+    const turn = make('div', { class: 'flex flex-col [word-break:break-word]' });
+    const user = make('div', { class: 'flex flex-row group/input font-medium whitespace-pre-wrap' });
+    const wrapper = make('div'), body = make('div', { class: 'line-clamp-5' }, text); wrapper.append(body); user.append(wrapper);
+    turn.append(user); f.messages.append(turn);
+    f.turn = turn; f.user = user; f.userBody = body;
+    f.suggestions.setAttribute('hidden', '');
+  };
+  f.finishResponse = () => {
+    const block = make('div', { class: 'flex flex-col font-normal text-base px-5' });
+    const answer = make('div', { class: 'font-inter pl-10px text-[0.9rem]' });
+    if (f.structuredReply) {
+      const outer = make('pre'), wrapper = make('div'), inner = make('pre', { class: 'rounded-lg text-sm' });
+      const code = make('code', { class: 'language-json' }, f.reply);
+      const chrome = make('div', { class: 'w-min ml-2 cursor-pointer absolute top-2 right-2 text-sm px-2' });
+      chrome.append(make('svg', { 'aria-label': 'copy' })); inner.append(code); wrapper.append(inner, chrome); outer.append(wrapper); answer.append(outer);
+      const reasoning = make('div', { class: 'border-l border-mutedaccent text-xs pl-4 pr-2 my-4' }, 'Synthetic reasoning, not response text');
+      block.append(reasoning); f.reasoning = reasoning; f.code = code; f.codeChrome = chrome;
+    } else answer.append(make('p', { class: 'text-left mb-4' }, f.reply));
+    const toolbar = make('div', { class: 'flex flex-row align-center items-center gap-1 pt-2' });
+    const copy = make('button', { 'data-state': 'closed' }); copy.append(make('svg', { 'aria-label': 'copy' })); toolbar.append(copy);
+    block.append(answer, toolbar); f.turn.append(block, make('div', { class: 'h-1' }));
+    f.answer = answer; f.copy = copy; f.toolbar = toolbar; f.assistant = block;
+    const clear = make('button', {}, 'Clear chat');
+    clear.onclick = () => { f.clearCount++; if (!f.ignoreClear && !f.delayClear) f.finishClear(); };
+    document.body.append(clear); f.clearButton = clear;
+    const stats = make('button', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      'aria-controls': 'fixture-speed', 'data-state': 'closed' }, '508.46 T/s');
+    stats.append(make('svg', { 'aria-label': 'zap' })); document.body.append(stats); f.stats = stats;
+    f.editor.disabled = false; f.send.disabled = false;
+  };
+  f.appendResponse = text => { f.appendUser(text); f.finishResponse(); };
+  f.send.onclick = event => {
+    event?.preventDefault(); f.sendCount++; f.appendUser(f.editor.value); f.editor.value = '';
+    f.editor.disabled = true; f.send.disabled = true;
+    if (!f.delayResponse) f.finishResponse();
+  };
+  form.onsubmit = event => event.preventDefault(); mobile.onsubmit = event => event.preventDefault();
+  window.groqFixtureReady = true;
+  window.fixtureReady = true;
+  window.fixtureGeneration = 'initial';
+})();
+</script></body>

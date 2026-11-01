@@ -24,7 +24,7 @@ export function ModelLabel({ model, option }: { model: string; option?: ModelOpt
   </span>;
 }
 
-const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude']);
+const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude', 'browser/groq']);
 
 // Offer specific website/API models only. Keep hidden local/default selections
 // and runtime support intact without silently substituting a different model.
@@ -65,7 +65,7 @@ type WebsiteModelsRefreshAction = Extract<NativeAction, { action: 'refreshWebsit
 
 export function websiteModelsRefreshAction(model?: string): WebsiteModelsRefreshAction | undefined {
   if (model === undefined) return { action: 'refreshWebsiteModels' };
-  const match = /^browser\/(chatgpt|gemini|claude)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
+  const match = /^browser\/(chatgpt|gemini|claude|groq)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
   return match && match[0] === model ? { action: 'refreshWebsiteModels', provider: match[1] as WebsiteModelProvider } : undefined;
 }
 
@@ -73,7 +73,7 @@ export function WebsiteModelsRefresh({ model, refreshing = false, canRefresh = f
   model?: string; refreshing?: boolean; canRefresh?: boolean; onRefresh: (action: WebsiteModelsRefreshAction) => void }) {
   const action = websiteModelsRefreshAction(model);
   if (!action) return null;
-  const provider = action.provider && ({ chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude' })[action.provider];
+  const provider = action.provider && ({ chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq' })[action.provider];
   const label = provider ? `Refresh ${provider} models` : 'Refresh models';
   return <Button variant="ghost" size="sm" aria-label={provider ? label : 'Refresh website models'}
     title={canRefresh ? `Read the model choices available in your signed-in ${provider ? `${provider} website` : 'websites'}`

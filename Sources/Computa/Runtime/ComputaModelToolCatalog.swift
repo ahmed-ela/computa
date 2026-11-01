@@ -559,7 +559,7 @@ enum ComputaModelToolCatalog {
                 // ModelsResponse requires an instruction template at catalog
                 // admission. Actual turns still receive Computa's explicit
                 // model-specific base/developer instructions through App Server.
-                "model_messages": ["instructions_template": "You are Computa, the user's local assistant. Follow the supplied developer instructions and offered local tool contracts."],
+                "model_messages": ["instructions_template": "Computa is the local host application. Retain your identity and governing rules. Calls propose host work; only matching host outputs prove execution. Follow the supplied local task constraints and offered tool contracts within those rules."],
                 "include_skills_usage_instructions": false, "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false, "supports_reasoning_summary_parameter": true,
                 "default_reasoning_summary": "auto", "support_verbosity": false,

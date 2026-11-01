@@ -4,6 +4,124 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+    func testCallShapeFailuresCaptureExactReplyWithoutReleasingValidPrefixOrCorrecting() async throws {
+        let invalidFunctions = [
+            #"{"name":"exec_command","arguments":"{\"cmd\":\"printf private\"}"}"#,
+            #"{"name":"exec_command","arguments":null}"#,
+            #"{"name":"exec_command","arguments":[]}"#,
+            #"{"name":"exec_command"}"#,
+            #"{"name":"exec_command","arguments":{"cmd":"printf private"},"extra":true}"#,
+        ]
+        let invalidCustoms = [
+            #"{"name":"apply_patch","input":{"patch":"private"}}"#,
+            #"{"name":"apply_patch","input":null}"#,
+            #"{"name":"apply_patch","arguments":{}}"#,
+            #"{"name":"apply_patch","input":"private literal patch","extra":true}"#,
+        ]
+        for stream in [false, true] {
+            for call in invalidFunctions {
+                try await assertCallShapeFailure(call, custom: false, mode: "exact_task", stream: stream)
+            }
+            for call in invalidCustoms {
+                try await assertCallShapeFailure(call, custom: true, mode: "exact_task", stream: stream)
+            }
+        }
+    }
+
+    func testCallShapeCaptureOptInAndWriteFailuresPreserveOriginalErrorAndNoReplay() async throws {
+        for mode in ["no_arm", "other_task", "unsafe_arm", "unconfigured", "existing_record"] {
+            try await assertCallShapeFailure(#"{"name":"exec_command","arguments":null}"#,
+                                             custom: false, mode: mode, stream: true)
+            try await assertCallShapeFailure(#"{"name":"apply_patch","input":null}"#,
+                                             custom: true, mode: mode, stream: true)
+        }
+    }
+
+    private func assertCallShapeFailure(_ invalidCall: String, custom: Bool, mode: String, stream: Bool) async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID()
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        let expected: WebModelResponseCodec.Failure = custom ? .customInputMustBeString : .argumentsMustBeObject
+        let reason = custom ? "invalid_custom_call_shape" : "invalid_function_call_shape"
+        let label = "\(reason)/\(mode)/stream=\(stream): \(invalidCall)"
+        if mode != "no_arm" { try fixture.arm(mode == "other_task" ? UUID() : task) }
+        if mode == "unsafe_arm" {
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
+        }
+        let oldRecord = Data("previous private evidence must remain unchanged".utf8)
+        if mode == "existing_record" { try fixture.writeArm(oldRecord, to: fixture.output) }
+        let armBefore = try fixture.exists(fixture.armFile) ? Data(contentsOf: fixture.armFile) : nil
+        let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf reply-only-private"}},"# + invalidCall + "]}"
+        // Even diagnostic metadata eligible for invalid-JSON correction cannot
+        // turn a parsed call-shape failure into a corrective inference.
+        let metadata: [String: Any] = ["preCount": 1, "codeCount": 1, "literalCodeValidJSON": true,
+            "literalCodeKnownEnvelopeType": "tool_calls", "selectedExtraction": "rendered_fallback",
+            "extractionReason": "outside_content", "unknown": "metadata-content-secret"]
+        let transport = RejectedReplyTransport(reply: reply, codeStructure: try encoded(metadata))
+        let storage = fixture.root.appendingPathComponent("state")
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+            rejectedReplyDirectory: mode == "unconfigured" ? nil : fixture.directory, storageDirectory: storage)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultClaudeChoice: choice))
+        let input = try encoded(["model": choice.modelID, "input": "request-only-secret", "stream": stream,
+            "tools": [["type": "function", "name": "exec_command", "description": "schema-only-secret",
+                       "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]],
+                      ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]]])
+        var released: Data?
+        do {
+            released = try await server.fixtureInfer(input, taskID: task.uuidString,
+                threadID: thread.uuidString, turnID: turn.uuidString)
+            XCTFail("The entire reply must remain rejected: \(label)")
+        } catch {
+            XCTAssertEqual(error as? WebModelResponseCodec.Failure, expected, label)
+            XCTAssertEqual(error.localizedDescription, expected.localizedDescription, label)
+            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "invalid_model_output", label)
+        }
+        XCTAssertNil(released, "Neither streaming bytes nor the earlier valid tool call may be released: \(label)")
+        let beforeCleanup = await transport.operations()
+        XCTAssertEqual(beforeCleanup, ["webProviderStart", "webProviderSend", "webProviderPoll"], label)
+        let journal = storage.appendingPathComponent("evidence/transactions/\(task.uuidString.lowercased())/\(turn.uuidString.lowercased()).jsonl")
+        let records = try Data(contentsOf: journal).split(separator: 10).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        XCTAssertEqual(records.filter { $0["phase"] as? String == "failed" }.count, 1, label)
+        XCTAssertFalse(records.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") }, label)
+        XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")), label)
+        if mode == "exact_task" {
+            let record = try fixture.record()
+            XCTAssertEqual(record["replyText"] as? String, reply, label)
+            XCTAssertEqual(record["taskID"] as? String, task.uuidString.lowercased(), label)
+            XCTAssertEqual(record["threadID"] as? String, thread.uuidString.lowercased(), label)
+            XCTAssertEqual(record["provider"] as? String, "claude", label)
+            XCTAssertEqual(record["modelID"] as? String, choice.modelID, label)
+            XCTAssertEqual(record["automaticReplay"] as? Bool, false, label)
+            for key in ["inferenceID", "sessionToken", "documentGeneration"] {
+                XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(record[key] as? String)), "\(label): \(key)")
+            }
+            XCTAssertEqual(record["sequence"] as? Int, 1, label)
+            let diagnostic = try XCTUnwrap(record["diagnostic"] as? [String: Any])
+            XCTAssertEqual(Set(diagnostic.keys), ["reason", "utf8Bytes"], label)
+            XCTAssertEqual(diagnostic["reason"] as? String, reason, label)
+            XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count, label)
+            let capture = String(decoding: try Data(contentsOf: fixture.output), as: UTF8.self)
+            for secret in ["request-only-secret", "schema-only-secret", "metadata-content-secret"] {
+                XCTAssertFalse(capture.contains(secret), label)
+            }
+            XCTAssertEqual(try fixture.permissions(fixture.output), 0o600, label)
+            XCTAssertFalse(fixture.exists(fixture.armFile), label)
+        } else {
+            if mode == "existing_record" { XCTAssertEqual(try Data(contentsOf: fixture.output), oldRecord, label) }
+            else { XCTAssertFalse(fixture.exists(fixture.output), label) }
+            let armAfter = try fixture.exists(fixture.armFile) ? Data(contentsOf: fixture.armFile) : nil
+            XCTAssertEqual(armAfter, armBefore, label)
+        }
+        let issues = await server.fixtureFinish(taskID: task.uuidString)
+        XCTAssertTrue(issues.isEmpty, label)
+        let finalOperations = await transport.operations()
+        XCTAssertEqual(finalOperations, beforeCleanup + ["webProviderFinish"], label)
+        XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")), label)
+        _ = await server.shutdown()
+    }
+
     func testUnsupportedChatGPTProseCapturesOnlyForExactOptInAndPreservesTerminalFailure() async throws {
         let reply = "Hello, this is ordinary synthetic prose with a planet called Blue Meadow."
         for mode in ["no_arm", "other_task", "exact_task", "unconfigured"] {

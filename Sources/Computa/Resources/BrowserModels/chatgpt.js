@@ -1375,10 +1375,11 @@ function websiteModelDiagnostic(state, readObservation = null) {
   return diagnostic;
 }
 function websiteModelDismissOwnedPicker(provider, trigger, menu) {
-  if (provider === 'chatgpt') {
+  if (provider === 'chatgpt' || provider === 'claude') {
     if (typeof window.KeyboardEvent !== 'function' || !menu?.dispatchEvent) return false;
-    // The family submenu does not toggle closed when its trigger is clicked.
-    // Dismiss only this associated popup; its listener receives one Escape.
+    // Selection may already be closing this popup. A trigger toggle could
+    // reopen it; Escape only dismisses the exact associated popup. The caller
+    // still requires observed physical closure and the same restored trigger.
     menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
   } else trigger.click();
   return true;

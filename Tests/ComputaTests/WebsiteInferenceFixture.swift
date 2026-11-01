@@ -112,12 +112,15 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     private var submittedFingerprints: [String: String] = [:]
     private let defaultChatChoice: WebsiteModelChoice?
     private let defaultGeminiChoice: WebsiteModelChoice?
+    private let defaultClaudeChoice: WebsiteModelChoice?
     private var hasExplicitChoice: [String: Bool] = [:]
     init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil,
-         defaultGeminiChoice: WebsiteModelChoice? = WebsiteModelChoice(provider: "gemini", key: "fixture-default-flash", label: "Fixture Default Flash")) {
+         defaultGeminiChoice: WebsiteModelChoice? = WebsiteModelChoice(provider: "gemini", key: "fixture-default-flash", label: "Fixture Default Flash"),
+         defaultClaudeChoice: WebsiteModelChoice? = nil) {
         self.base = base
         self.defaultChatChoice = defaultChatChoice
         self.defaultGeminiChoice = defaultGeminiChoice
+        self.defaultClaudeChoice = defaultClaudeChoice
     }
 
     func changeRevision(sessionToken: String) async throws -> UInt64? {
@@ -154,6 +157,16 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         if let token, ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
             snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
         }
+        if let token, providers[token] == "claude", hasExplicitChoice[token] == true,
+           snapshot["freshSessionSubmissionCapability"] == nil {
+            snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
+        }
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
+           let token, providers[token] == "claude", let choice = defaultClaudeChoice,
+           snapshot["modelEvidence"] == nil {
+            snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
+                "source": "model_picker_label", "verification": "website_selection"]
+        }
         if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
            let token, providers[token] == "chatgpt", let choice = defaultChatChoice,
            snapshot["modelEvidence"] == nil, let context = syntheticChatSelection(choice) {
@@ -184,8 +197,21 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
                 }
             }
         }
+        if snapshot["state"] as? String == "complete", let token,
+           providers[token] == "claude", hasExplicitChoice[token] == true,
+           snapshot["freshSessionSubmissionProof"] == nil,
+           let context = snapshot["modelProofContext"] as? [String: Any],
+           let document = context["documentGeneration"], let sequence = context["sequence"],
+           let baseline = context["baselineResponseCount"], let count = context["responseCount"],
+           let fingerprint = context["firstUserFingerprint"], let submitted = submittedFingerprints[token] {
+            // Explicitly synthetic proof of this fixture's serialized Send.
+            // Supplied contradictory proofs/contexts are never repaired.
+            snapshot["freshSessionSubmissionProof"] = ["sessionToken": token,
+                "documentGeneration": document, "sequence": sequence, "baselineResponseCount": baseline,
+                "responseCount": count, "firstUserFingerprint": fingerprint, "submittedPromptFingerprint": submitted]
+        }
         if ["webProviderFinish", "webProviderCancel"].contains(operation),
-           ["deleted", "not_created"].contains(snapshot["cleanup"] as? String ?? ""), let token {
+           ["deleted", "not_created", "transcript_cleared"].contains(snapshot["cleanup"] as? String ?? ""), let token {
             generations.removeValue(forKey: token)
             providers.removeValue(forKey: token)
             hasExplicitChoice.removeValue(forKey: token)
