@@ -132,12 +132,17 @@ actor WebModelServer {
         let context: InferenceContext
         let transportGeneration: UUID
         let provesNativeContinuation: Bool
+        let provesFreshSessionSubmission: Bool
         let retainsConversation: Bool
         var requestMetadata: ChatGPTRequestMetadataLease?
         var submittedPromptFingerprint = ""
         var cumulativePromptUTF8Count = 0
         var turnInferenceCount = 0
-        var usesBoundedTurn: Bool { provesNativeContinuation && provider == "chatgpt" }
+        // Local history validation also protects fresh Claude sessions; it
+        // does not claim that Claude can continue a retained website page.
+        var usesVerifiedHistory: Bool { provesNativeContinuation || provesFreshSessionSubmission }
+        var usesBoundedTurn: Bool { usesVerifiedHistory && provider != "gemini" }
+        var freshSessionSubmissionVerified = false
         var sequence = 1
         var baselineResponseCount = 0
         var documentGeneration: UUID?
@@ -767,7 +772,7 @@ actor WebModelServer {
             await cleanupReceiptObserver?(receipt)
             return CleanupResult(receipt: receipt, issues: [Failure.persistenceRequired.localizedDescription])
         }
-        if pending.session.provesNativeContinuation, let data = pending.session.completedSnapshot {
+        if pending.session.usesVerifiedHistory, let data = pending.session.completedSnapshot {
             do {
                 profile?.mark(.cleanupReleaseStart)
                 defer { profile?.mark(.cleanupReleaseEnd) }
@@ -900,7 +905,7 @@ actor WebModelServer {
         }
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)
-            guard !session.provesNativeContinuation || current != nil else { throw Failure.modelUnverified }
+            guard !session.usesVerifiedHistory || current != nil else { throw Failure.modelUnverified }
             if let pinned = session.resolvedModel {
                 guard let current, pinned.isSameResolvedSelection(as: current) else { throw Failure.modelMismatch }
             } else if let current { session.resolvedModel = current }
@@ -968,8 +973,9 @@ actor WebModelServer {
                         try closed.continuation.validate(next: request)
                     }
                     let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider)
-                    if provesNativeContinuation { try WebsiteTurnContinuation.validateRequest(request) }
-                    if provider == "chatgpt", provesNativeContinuation {
+                    let provesFreshSessionSubmission = provider == "claude" && choice != nil
+                    if provesNativeContinuation || provesFreshSessionSubmission { try WebsiteTurnContinuation.validateRequest(request) }
+                    if provider == "chatgpt" || provesFreshSessionSubmission {
                         guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
                               request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
                         else { throw Failure.turnLimit }
@@ -1032,6 +1038,7 @@ actor WebModelServer {
                         modelChoice: choice, transport: transport, inferenceID: inferenceID,
                         context: context, transportGeneration: transportGeneration,
                         provesNativeContinuation: provesNativeContinuation,
+                        provesFreshSessionSubmission: provesFreshSessionSubmission,
                         retainsConversation: retainsConversation(provider: provider))
                     session.requestMetadata = requestMetadata
                     session.resolvedModel = correctionSource?.resolvedModel ?? closed?.resolvedModel
@@ -1057,6 +1064,11 @@ actor WebModelServer {
                     if session.provesNativeContinuation {
                         guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
                         try WebsiteTurnContinuation.validateRequest(request)
+                    }
+                    if session.provesFreshSessionSubmission {
+                        guard reply["freshSessionSubmissionCapability"] as? String == "fresh_session_submission_v1",
+                              reply["turnContinuationCapability"] == nil,
+                              reply["freshSessionSubmissionProof"] == nil else { throw Failure.invalidRequest }
                     }
                     if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: &session) }
                     let stageDeadline = ContinuousClock.now + readinessTimeout
@@ -1122,7 +1134,7 @@ actor WebModelServer {
                 session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
                 sessions[taskID] = session
                 lease = session
-                if provider == "chatgpt", responseDeadline == nil {
+                if session.usesBoundedTurn, responseDeadline == nil {
                     // Include the first Send await in the one absolute correction
                     // budget; a rejected reply never renews this deadline.
                     responseDeadline = ContinuousClock.now + responseTimeout
@@ -1232,7 +1244,7 @@ actor WebModelServer {
                             ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                             : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                         responseProfile?.mark(.encoded)
-                        let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
+                        let continuation: WebsiteTurnContinuation? = try session.usesVerifiedHistory ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
                             let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
                             let diagnostic = retain
@@ -1266,7 +1278,7 @@ actor WebModelServer {
                             guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
                             responseProfile?.mark(.cleanupReceiptDone)
                             try requireCurrentContext()
-                            if !session.provesNativeContinuation {
+                            if !session.usesVerifiedHistory {
                                 try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
                                     session: session, phase: "release_verified", cleanupAttemptID: closed.receipt.attemptID)
                             }
@@ -1308,8 +1320,12 @@ actor WebModelServer {
                         try requireCurrentContext()
                         let prompt = request.prompt + Self.correctionReminder(for: reason)
                         var session = candidate.session
-                        if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
-                              session.provesNativeContinuation, !session.retainsConversation,
+                        let correctionProof = provider == "chatgpt" && session.provesNativeContinuation
+                            || provider == "claude" && reason == .invalidJSON
+                                && session.provesFreshSessionSubmission && session.freshSessionSubmissionVerified
+                                && Self.isClaudeFormatCorrectionCandidate(candidate.snapshot)
+                        if correctionTicket == nil, correctionProof, !context.isMaintenance,
+                              !session.retainsConversation,
                               session.sequence == 1, session.baselineResponseCount == 0,
                               session.resolvedModel != nil, session.documentGeneration != nil,
                               !session.submittedPromptFingerprint.isEmpty,
@@ -1387,7 +1403,7 @@ actor WebModelServer {
                         secondSessionToken: second.flatMap { UUID(uuidString: $0.token) }, outcome: outcome)
                     failedClosedHandoffs.insert(taskID)
                 }
-                if let lease, lease.provesNativeContinuation, !lease.retainsConversation,
+                if let lease, lease.usesVerifiedHistory, !lease.retainsConversation,
                    !lease.submittedPromptFingerprint.isEmpty {
                     failedClosedHandoffs.insert(taskID)
                 }
@@ -1434,6 +1450,21 @@ actor WebModelServer {
                 throw error
             }
         }
+    }
+
+    /// Diagnostic shape restricts eligibility only. It never supplies a
+    /// partial response or tool authority; the complete original reply remains
+    /// rejected and the second reply passes the unchanged strict codec.
+    private static func isClaudeFormatCorrectionCandidate(_ snapshot: [String: Any]?) -> Bool {
+        guard let completion = snapshot?["completionEvidence"] as? [String: Any],
+              let structure = completion["codeStructure"] as? [String: Any],
+              receiptInteger(structure["preCount"], range: 1...1) == 1,
+              let valid = structure["literalCodeValidJSON"] as? NSNumber,
+              CFGetTypeID(valid) == CFBooleanGetTypeID(), valid.boolValue,
+              structure["literalCodeKnownEnvelopeType"] as? String == "tool_calls",
+              structure["extractionReason"] as? String == "outside_content",
+              structure["selectedExtraction"] as? String == "rendered_fallback" else { return false }
+        return true
     }
 
     private static func correctionReminder(for reason: WebsiteModelFormatCorrectionStore.Reason) -> String {
@@ -1619,6 +1650,33 @@ actor WebModelServer {
                 throw Failure.invalidRequest
             }
         }
+        if session.provesFreshSessionSubmission {
+            guard snapshot["freshSessionSubmissionCapability"] as? String == "fresh_session_submission_v1",
+                  snapshot["turnContinuationCapability"] == nil,
+                  session.sequence == 1, session.baselineResponseCount == 0 else { throw Failure.invalidRequest }
+            if snapshot["state"] as? String == "complete" {
+                guard let proof = snapshot["freshSessionSubmissionProof"] as? [String: Any],
+                      Set(proof.keys) == ["sessionToken", "documentGeneration", "sequence", "baselineResponseCount",
+                                          "responseCount", "firstUserFingerprint", "submittedPromptFingerprint"],
+                      proof["sessionToken"] as? String == session.token,
+                      proof["documentGeneration"] as? String == rawGeneration,
+                      receiptInteger(proof["sequence"], range: 1...1) == 1,
+                      receiptInteger(proof["baselineResponseCount"], range: 0...0) == 0,
+                      receiptInteger(proof["responseCount"], range: 1...1) == 1,
+                      responseCount == 1, !fingerprint.isEmpty,
+                      proof["firstUserFingerprint"] as? String == fingerprint,
+                      !session.submittedPromptFingerprint.isEmpty,
+                      proof["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint else {
+                    throw Failure.invalidRequest
+                }
+                session.freshSessionSubmissionVerified = true
+            } else if snapshot["freshSessionSubmissionProof"] != nil {
+                throw Failure.invalidRequest
+            }
+        } else if session.provider != "claude",
+                  snapshot["freshSessionSubmissionCapability"] != nil || snapshot["freshSessionSubmissionProof"] != nil {
+            throw Failure.invalidRequest
+        }
         session.documentGeneration = generation
         if !fingerprint.isEmpty { session.firstUserFingerprint = fingerprint }
     }
@@ -1669,6 +1727,10 @@ actor WebModelServer {
             record[key] = context[key]
         }
         if session.provesNativeContinuation { record["submittedPromptFingerprint"] = context["submittedPromptFingerprint"] }
+        if session.provesFreshSessionSubmission, session.freshSessionSubmissionVerified {
+            record["submittedPromptFingerprint"] = session.submittedPromptFingerprint
+            record["submissionProofPolicy"] = "fresh_session_submission_v1"
+        }
         if let raw = context["documentGeneration"] as? String, let generation = UUID(uuidString: raw) {
             record["documentGeneration"] = generation.uuidString.lowercased()
         }

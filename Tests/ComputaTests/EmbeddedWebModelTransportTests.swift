@@ -10897,6 +10897,161 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testClaudeFreshSessionProofBindsCanonicalRequestOnlyAfterVerifiedCompletion() async throws {
+        let choice = Self.fixtureChoice(.claude)
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        XCTAssertEqual(started["freshSessionSubmissionCapability"] as? String, "fresh_session_submission_v1")
+        XCTAssertNil(started["freshSessionSubmissionProof"]); XCTAssertNil(started["turnContinuationCapability"])
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertNil(ready["freshSessionSubmissionProof"])
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": choice.modelID, "instructions": ComputaAgentInstructions.developerInstructions(),
+            "input": [["role": "user", "content": "Exact `code` and e\u{0301}, quotes \"x\", backslash \\ and\nnewlines"]],
+            "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object",
+                "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]]], "tool_choice": "auto"
+        ]))
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prepared.prompt])
+        XCTAssertNil(sent["freshSessionSubmissionProof"]); XCTAssertNil(sent["turnContinuationCapability"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let proof = try XCTUnwrap(complete["freshSessionSubmissionProof"] as? [String: Any])
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(Set(proof.keys), ["sessionToken", "documentGeneration", "sequence", "baselineResponseCount",
+            "responseCount", "firstUserFingerprint", "submittedPromptFingerprint"])
+        XCTAssertEqual(proof["sessionToken"] as? String, token)
+        XCTAssertEqual(proof["documentGeneration"] as? String, context["documentGeneration"] as? String)
+        XCTAssertEqual(proof["sequence"] as? Int, 1); XCTAssertEqual(proof["baselineResponseCount"] as? Int, 0)
+        XCTAssertEqual(proof["responseCount"] as? Int, 1)
+        XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prepared.prompt))
+        let rawOutbound = try await evaluate(view, "return window.fixturePrompts[0];")
+        let outbound = try XCTUnwrap(rawOutbound as? String)
+        XCTAssertEqual(proof["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+        XCTAssertEqual(proof["firstUserFingerprint"] as? String, context["firstUserFingerprint"] as? String)
+        XCTAssertNil(complete["turnContinuationCapability"])
+        try assertChoiceEvidence(complete, choice: choice)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        // The legacy native second Send is not a proof-capable continuation.
+        // The server uses a new page; no capability for this second body exists.
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Second legacy body"])
+        let second = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(second["sequence"] as? Int, 2)
+        XCTAssertNil(second["freshSessionSubmissionProof"]); XCTAssertNil(second["turnContinuationCapability"])
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testClaudeFreshSessionProofRejectsSubstitutedOrRenderedFirstBodyAndExtraAnswer() async throws {
+        for variant in ["substituted", "old_body", "rendered_markdown", "extra_answer"] {
+            var page = Self.providerPage(.claude)
+            let replacement: String
+            switch variant {
+            case "substituted": replacement = "user.textContent = prompt.replace('Original', 'Changed');"
+            case "old_body": replacement = "user.textContent = 'Unrelated earlier request' + prompt.slice(prompt.lastIndexOf('\\n\\nComputa session marker: '));"
+            case "rendered_markdown": replacement = "user.textContent = prompt.replaceAll('`', '');"
+            default: replacement = "user.textContent = prompt;"
+            }
+            page = page.replacingOccurrences(of: "user.textContent = prompt;", with: replacement)
+            if variant == "extra_answer" {
+                page = page.replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with:
+                    "document.getElementById('messages').appendChild(turn); document.getElementById('messages').appendChild(turn.cloneNode(true));")
+            }
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Original `literal delimiters`"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(complete["sequence"] as? Int, 1, variant)
+            XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64, "The legacy rendered-body pin alone is not canonical proof")
+            XCTAssertNil(complete["freshSessionSubmissionProof"], variant)
+            XCTAssertNil(complete["turnContinuationCapability"], variant)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testClaudeFreshSessionProofMissingUserRemainsPendingWithoutProof() async throws {
+        let page = Self.providerPage(.claude).replacingOccurrences(
+            of: "document.getElementById('messages').appendChild(user);", with: "window.fixtureUnrenderedUser = user;")
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "User body never rendered"])
+        XCTAssertNil(sent["freshSessionSubmissionProof"])
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        XCTAssertNil(pending["freshSessionSubmissionProof"])
+        let context = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await assertHumanTabIntact(fixture, retaining: XCTUnwrap(fixture.createdTabs.last))
+    }
+
+    func testClaudeFreshSessionProofRequiresNativeSendAcknowledgment() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var crossed = false, release = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit" else { return }
+            crossed = true
+            while !release { await Task.yield() }
+        }
+        let request = Task<Bool, Error> {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Cancel only the native Send acknowledgment"])
+            return true
+        }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !crossed, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertTrue(crossed); request.cancel(); release = true
+        do { _ = try await request.value; XCTFail("The native Send acknowledgment must be lost") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertNil(complete["freshSessionSubmissionProof"], "A later observed body cannot acknowledge the original native Send")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testClaudeFreshSessionProofCannotSurviveChangedNativeDocumentOrRoute() async throws {
+        for drift in ["route", "document"] {
+            let page = Self.modelChoicePage(.claude)
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Bind the first native document"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertNotNil(complete["freshSessionSubmissionProof"])
+            if drift == "route" {
+                _ = try await evaluate(view, "history.pushState({}, '', '/new?incognito&foreign=1'); return true;")
+            } else {
+                let generation = fixture.browser.documentGeneration(for: id)
+                view.loadHTMLString(page.replacingOccurrences(of: "'initial'", with: "'replacement'"), baseURL: view.url)
+                try await waitForFixture(view, generation: "replacement")
+                XCTAssertNotEqual(fixture.browser.documentGeneration(for: id), generation)
+            }
+            let changed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertNil(changed["freshSessionSubmissionProof"], drift)
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
     func testConcreteSelectionAcknowledgmentRejectsModelDriftAcrossNativeAwait() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.claude, deferSelectionCommit: true))
         defer { fixture.shutdown() }

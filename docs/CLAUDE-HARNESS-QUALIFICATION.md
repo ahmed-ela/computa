@@ -461,7 +461,70 @@ WebKit tests passed, including the retained-portal race, ignored Escape,
 discovery, model drift, and quota cleanup. The two new native cases passed again
 after making the fixture's closing commit deterministic. They require real
 popup removal before readiness and withhold all prompt insertion when Escape
-is ignored. Fresh live build352 qualification remains pending.
+is ignored.
+
+Build352 was Developer ID signed and installed from `d958ec7`, with all 11
+source-build checks, 10 signing checks and installed-artifact comparisons
+passing. A fresh Sonnet 5 marker reached a verified response in 7.982 seconds
+and its exact website session closed successfully. This establishes that the
+picker no longer blocked this attempt. The response declined the unexplained
+marker and questioned the external tool contract, so the marker did not pass
+and Sonnet 5 remains unqualified. No tool was proposed or dispatched.
+
+A separate Sonnet 4.6 workflow then failed in 15.665 seconds after one successful
+terminal read of the fixture README. The second response contained authored
+narration outside an otherwise valid JSON tool proposal. Its full 484-byte
+response correctly failed strict parsing with `invalid_json`; the proposed
+second terminal read was never dispatched. This was not malformed path escaping
+or merely a code-block caption. Both exact website sessions closed with durable
+`not_created` receipts. No code was changed, and no tests, browser actions or
+fixture submissions ran. The rejected reply and partial workflow evidence
+were preserved before cleanup. Claude lacks the exact submission capability
+required by the existing ChatGPT format-correction path; adding equivalent
+proof and a bounded correction is under investigation, without relaxing the
+parser or replaying completed actions.
+
+One fresh Sonnet 5 display control then explained why an exact marker was
+requested. It returned that marker exactly in 4.454 seconds with one verified
+inference, zero tools and a saved closed receipt. The same host instructions,
+schemas, permissions and strict parser were used. This qualifies the explained
+display control only; it neither retroactively passes the earlier refusal nor
+establishes browser or editing support.
+
+The ensuing Sonnet 5 local workflow returned a verified refusal in 9.869
+seconds. It declined the externally executed tool contract; zero tools ran,
+the fixture remained unchanged, and its exact website session closed. Its
+workflow audit therefore failed despite healthy transport. Repeating that
+request or treating the display-control pass as tool support is not justified.
+
+Candidate353 adds a distinct first-submission proof for concrete Claude model
+choices. Native code binds the canonical prompt and entire outbound body before
+Send. A proof is available only after the single native Send acknowledgment,
+exact first-user body, current document, model and completed answer agree.
+Claude still gets a fresh website page for each inference; this capability
+does not claim retained website-conversation support. Legacy bare-provider
+requests retain their existing path without gaining format-correction rights.
+
+For a rejected reply with one valid tool-call JSON code block and outside
+content, that proof can authorize one response-format correction. The existing
+strict parser still rejects the original full reply. The canonical request,
+completed tool outputs, selected model and absolute deadline are frozen; the
+first website session must have a saved closed receipt before the correction
+starts. The durable per-turn claim prevents another correction after restart
+or a later inference. Ordinary prose/message refusals and parsed unknown-tool
+or schema failures are not corrected. All proposed calls must pass the normal
+parser and tool contract on the new response before dispatch.
+
+All 157 selected native tests passed with unchanged source during the run,
+including 13 new Claude correction tests and five real-WebKit first-submission
+proof tests. Coverage includes changed bodies, lost Send acknowledgments,
+model/document drift, ordinary refusal passthrough, single correction claims
+across restart, canonical tool-output history, cancellation, saved cleanup,
+original deadlines and finite inference budgets. The first attempt exposed a
+test-only call passing `nil` to a nonoptional transport API; the fixture now
+uses a distinct real transport wrapper to test generation changes. No
+production guard was removed to pass that test. Live candidate353 qualification
+remains pending.
 
 ## Qualification contract
 

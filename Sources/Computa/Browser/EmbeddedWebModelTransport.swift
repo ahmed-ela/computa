@@ -338,6 +338,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var currentSubmission: SubmissionBinding?
         var previousSubmission: SubmissionBinding?
         var currentSubmissionVerified = false
+        // Claude proves only the first request of a fresh owned page. This is
+        // separate from retained-turn ownership and grants no continuation.
+        struct FreshSubmissionBinding {
+            let generation: UUID
+            let promptFingerprint: String
+            let outboundFingerprint: String
+        }
+        struct FreshSubmissionCompletion {
+            let binding: FreshSubmissionBinding
+            let url: URL
+            let responseFingerprint: String
+            let modelEvidence: WebsiteModelEvidence
+        }
+        var freshSubmissionBinding: FreshSubmissionBinding?
+        var freshSubmissionCompletion: FreshSubmissionCompletion?
+        var supportsFreshSessionSubmission: Bool { provider == .claude && !isDiscovery }
         var submittedUTF8Count = 0
         var usesSubmissionOwnership: Bool { !isDiscovery && (provider == .gemini || provider == .chatgpt) }
         var usesBoundedTurn: Bool { usesSubmissionOwnership && provider == .chatgpt }
@@ -1039,6 +1055,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         marker: submissionMarker, promptFingerprint: Self.promptFingerprint(prompt),
                         outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
+                if session.supportsFreshSessionSubmission {
+                    session.freshSubmissionCompletion = nil
+                    if !session.submitted, session.sequence == 0, session.confirmedUsers == 0,
+                       session.baseline == 0, session.firstUserFingerprint == nil,
+                       let generation = session.documentGeneration,
+                       browser.webView(for: session.tabID) === session.view,
+                       browser.documentGeneration(for: session.tabID) == generation {
+                        // Bind the actual canonical request before insertion and
+                        // the single Send, never from a later website echo.
+                        session.freshSubmissionBinding = .init(generation: generation,
+                            promptFingerprint: Self.promptFingerprint(prompt),
+                            outboundFingerprint: Self.outboundFingerprint(outbound))
+                    } else { session.freshSubmissionBinding = nil }
+                }
                 let readinessRequest = firstInstantReadinessRequest(session)
                 var readinessReceipt: PreparedEditorReadinessReceipt?
                 let inserted = try await page(session, action: "insert", prompt: outbound,
@@ -1125,6 +1155,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await poll(session)
             }
         } catch {
+            session.freshSubmissionCompletion = nil
             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
             logResponseProgressFailure(session, cause: error is CancellationError ? "cancelled"
                 : (error as? Failure) == .deadline ? "response_deadline" : "request_error")
@@ -2257,6 +2288,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.candidateSince = nil
                             }
                         }
+                        if currentAnswerVerified, session.supportsFreshSessionSubmission,
+                           session.sequence == 1, session.modelChoice != nil {
+                            // The adapter's final model await rechecks the same
+                            // answer and first user synchronously. Do not reuse
+                            // an older answer across native model-only awaits.
+                            let final = try await page(session, action: "inspect",
+                                recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                            currentAnswerVerified = final["temporary"] as? Bool == true
+                                && final["interrupted"] as? Bool == false
+                                && final["busy"] as? Bool == false && final["answerComplete"] as? Bool == true
+                                && (final["text"] as? String).map { $0.utf8.elementsEqual(response.utf8) } == true
+                                && count(final, "responseCount") == count(observed, "responseCount")
+                                && count(final, "userCount") == session.sequence
+                                && !session.pendingSubmission
+                            completionObservation = final
+                            if !currentAnswerVerified {
+                                session.completionCandidate = false
+                                session.candidateSince = nil
+                            }
+                        }
                         if currentAnswerVerified {
                             // A revoked/changed receipt cannot survive the last
                             // await and publish through the early-completion path.
@@ -2277,6 +2329,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 let receiptPresent = terminalCompletionReceipt(session) != nil
                                 Self.inspectionLog.notice("completionDecision version=1 provider=chatgpt session=\(session.token, privacy: .public) sequence=\(session.sequence) method=\(method, privacy: .public) quietReady=\(quietReady) observerArmed=\(session.completionObserverArmed) initialReceiptPresent=\(terminalCandidate != nil) finalReceiptPresent=\(receiptPresent) initialMatch=\(initialReason, privacy: .public) finalMatch=\(finalReason, privacy: .public) routeKind=\(route, privacy: .public)")
                             }
+                            session.freshSubmissionCompletion = freshSubmissionCompletion(session, observation: completionObservation)
                             session.state = "complete"
                             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                             session.responseProfile?.mark(.transportComplete)
@@ -5742,6 +5795,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if session.usesSubmissionOwnership {
             value["turnContinuationCapability"] = Self.turnContinuationCapability
         }
+        if session.supportsFreshSessionSubmission {
+            value["freshSessionSubmissionCapability"] = Self.freshSessionSubmissionCapability
+            if let proof = freshSessionSubmissionProof(session) { value["freshSessionSubmissionProof"] = proof }
+        }
         if session.state == "complete", let structure = session.responseCodeStructure {
             value["completionEvidence"] = ["codeStructure": structure]
         }
@@ -5763,6 +5820,57 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func count(_ observation: [String: Any], _ key: String) -> Int { observation[key] as? Int ?? 0 }
+
+    /// A first completed request only; never a capability to retain or append
+    /// another inference to this website conversation.
+    static let freshSessionSubmissionCapability = "fresh_session_submission_v1"
+
+    private func freshSubmissionCompletion(_ session: Session, observation: [String: Any]) -> Session.FreshSubmissionCompletion? {
+        guard session.supportsFreshSessionSubmission, session.state == "running", !Task.isCancelled,
+              session.terminalFailure == nil, session.sequence == 1, session.baseline == 0,
+              session.submitted, session.acknowledgedSendSequence == 1,
+              !session.pendingSubmission, session.confirmedUsers == 1, session.observedResponseCount == 1,
+              session.temporary, session.modelChoice != nil, session.modelSelectionVerified,
+              let binding = session.freshSubmissionBinding,
+              session.documentGeneration == binding.generation,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == binding.generation,
+              let url = session.view.url, observation["url"] as? String == url.absoluteString,
+              Self.firstUserDiagnosticBool(observation["temporary"]) == true,
+              Self.firstUserDiagnosticBool(observation["firstUserVerified"]) == true,
+              Self.firstUserDiagnosticBool(observation["firstUserMarkerVerified"]) == true,
+              Self.firstUserDiagnosticBool(observation["busy"]) == false,
+              Self.firstUserDiagnosticBool(observation["interrupted"]) == false,
+              Self.firstUserDiagnosticBool(observation["answerComplete"]) == true,
+              observation["modelVerificationPending"] == nil,
+              ComputerToolArgumentContract.exactInt64(observation["userCount"]) == 1,
+              ComputerToolArgumentContract.exactInt64(observation["responseCount"]) == 1,
+              let first = session.firstUserFingerprint, first == binding.outboundFingerprint,
+              observation["firstUserFingerprint"] as? String == first,
+              let text = observation["text"] as? String, !text.isEmpty,
+              text.utf8.elementsEqual(session.response.utf8),
+              let model = try? validatedModelEvidence(observation, session: session, action: "inspect") else { return nil }
+        return .init(binding: binding, url: url, responseFingerprint: Self.promptFingerprint(text), modelEvidence: model)
+    }
+
+    private func freshSessionSubmissionProof(_ session: Session) -> [String: Any]? {
+        guard session.supportsFreshSessionSubmission, session.state == "complete", !Task.isCancelled,
+              session.terminalFailure == nil, let proof = session.freshSubmissionCompletion,
+              session.submitted, session.acknowledgedSendSequence == 1,
+              session.sequence == 1, session.baseline == 0, session.observedResponseCount == 1,
+              session.confirmedUsers == 1, !session.pendingSubmission, session.temporary,
+              session.modelChoice != nil, session.modelSelectionVerified,
+              session.modelEvidence?.isSameResolvedSelection(as: proof.modelEvidence) == true,
+              session.firstUserFingerprint == proof.binding.outboundFingerprint,
+              session.documentGeneration == proof.binding.generation,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == proof.binding.generation,
+              session.view.url == proof.url, Self.promptFingerprint(session.response) == proof.responseFingerprint else { return nil }
+        return ["sessionToken": session.token, "documentGeneration": proof.binding.generation.uuidString,
+                "sequence": 1, "baselineResponseCount": 0, "responseCount": 1,
+                "firstUserFingerprint": proof.binding.outboundFingerprint,
+                "submittedPromptFingerprint": proof.binding.promptFingerprint]
+    }
 
     static let turnContinuationCapability = "per_submission_ownership_v1"
     static let maximumTurnSubmissions = 16
