@@ -1,11 +1,22 @@
 # Claude harness qualification
 
-Claude qualification resumed on October 31, 2026. The current live account offers
-Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6; Fable and Opus choices are upgrade
-gated. The prior cached Haiku 4.5 choice was absent from the observed menu.
-These account-specific observations are not model qualification results.
+Claude qualification resumed on October 31, 2026. The November 1 picker in the
+installed build359 presents Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6, plus
+Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6 and Opus 3 as enabled controls.
+Fable 5.1 and Fable 5 require usage credits. Haiku 4.5 remains absent. This
+read-only inspection sent no prompt and changed no model; enabled picker controls
+are availability observations, not successful inference or workflow evidence.
+The newly visible Opus choices still require independent qualification.
 
-As of October 31, build354 is installed from `38dde74`. The build353 exact-submission
+As of November 1, build359 is installed and published as `v0.8.0-alpha.359`.
+PRs #14 and #16 were squash-merged at `c3ca191`; the released binary was compiled
+from `92b4b3e`, with build-input equivalence checked after merge. No live Claude
+qualification has yet been recorded after build354. The Claude adapter,
+instructions, projection and codec in build359 match build354, while shared
+transport/server code changed for Groq. Component equivalence is not a current
+live-model pass.
+
+The build353 exact-submission
 proof and bounded correction passed native tests and live transaction checks.
 The latest Sonnet 5 and Sonnet 4.6 workflows returned refusals, so neither is
 qualified for tool workflows. Haiku 5.5 passed a fresh response control but its
@@ -13,8 +24,45 @@ next workflow failed on a rejected call shape. Sonnet 5.5 completed the fresh
 build353 workflow; earlier successful build349 workflows remain separate
 evidence. Build354 adds capture for the missing rejection category; its fresh
 Haiku workflow ended in a capability refusal after verified tool execution.
-PR #14 remains a draft;
-the public `v0.7.0-alpha.346` package is unchanged.
+The release includes these known limitations; full qualification remains open
+in issue #15.
+
+## Candidate 360: capture the post-tabs request
+
+The build354 Haiku refusal correctly recalled its previous edits, passing tests,
+reference and browser controls. The retained transcript does not identify lost
+history, but it also does not contain the exact final projected request. Repeating
+the same workflow without that evidence would not distinguish missing tools from
+a model refusing an intact handoff.
+
+Candidate360 adds a private, default-off request capture immediately before Send.
+An operator-created `ClaudeRequestDiagnostics-v1/arm.json` must name one exact
+native task, turn and concrete Claude model, a nonce and an expiry within ten
+minutes. Its fixed `after_browser_tabs` trigger matches only an immediate linked
+native call/output pair. Earlier requests and mismatched arms do not consume it.
+The one-shot `request.json` preserves the final prompt, original canonical request,
+finite projected tool catalog, hashes and native inference/session identifiers.
+It is explicitly `pre_send`, with `submissionVerified=false`; later submission,
+ownership, model and cleanup records remain necessary evidence.
+
+The capture reuses the rejected-reply diagnostic's private file and exclusive
+publication checks. Missing, expired or unsafe arms, capture failures and existing
+output files do not change inference behavior. It adds no replay, format repair,
+tool permission or website authority, and writes no prompt contents to logs.
+The bounded next experiment is a fresh loopback browser workflow that opens a
+page, inventories tabs, reads it, submits one harmless reference, reads its nonce
+receipt and closes only its own tab. This diagnostic experiment does not replace
+the full browser, terminal and file-editing qualification requirements.
+
+Validation: nine capture tests and 18 existing rejected-reply tests passed. The
+native open→tabs handoff test verifies that the capture equals the actual third
+transport prompt, retains original schemas/history and shares the later verified
+inference identifiers and prompt hash. Its first run failed because Foundation's
+temporary-path normalization retained `/var`, a symlink correctly rejected by the
+private-file guard. Changing only the fixture to POSIX `realpath` produced a
+passing rerun (0.997 seconds); production checks were unchanged. Both run logs
+and unchanged-source receipts are retained. Nine version tests also passed.
+These are local diagnostic/integration tests, not a live Claude qualification.
 
 ## Baseline: completion remains unverified
 
