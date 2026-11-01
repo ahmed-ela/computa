@@ -9,10 +9,16 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build374 (`c58d43d`) is installed and its launch is recorded.
-The latest Opus 4.6 full workflow passed on build374; subsequent Opus 4.8 and
-Opus 4.7 workflows returned valid refusals without tool use. A fresh Opus 3
-workflow failed with two malformed replies and no tool use. The earlier Sonnet
+As of November 1, build377 (`481f6e1`) is installed and its launch is recorded.
+Its fresh Opus 5 marker reached the five-minute deadline after a verified
+submission and an exact-session pending-model observation, with no answer.
+A separate short direct Opus 5 prompt passed in an ordinary foreground tab;
+that different payload and presentation do not establish the timeout's cause.
+A fresh Opus 4.8 workflow returned a valid refusal without tool use. The latest
+bounded Opus 4.6 full-workflow pass remains build374; build377 has not established
+a new Claude workflow pass. Earlier build374 Opus 4.8 and Opus 4.7 workflows
+returned valid refusals, and Opus 3 failed with two malformed replies and no
+tool use. The earlier Sonnet
 5.5 full workflow ran on build368 (`2dea3d2`). A later
 Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
 on build371 is claimed. The separate Opus 5 reproductions on builds 373 and 374
@@ -1586,3 +1592,106 @@ Private evidence is retained locally in `work/claude-qualification-20261031/`,
 including `evidence/sonnet55-marker340/`, `sonnet55-marker340-timeout.log`,
 `direct-control-ax.txt`, and the prepared `fixtures/` cases. No fixture server or
 real-mail workflow was started for the failed baseline.
+
+## Installed build377 live checks, November 1
+
+The approved restart installed source
+`481f6e1a84ad7626cb55c0ad16657d0aeac377e5`, process 90212. Retained build, signing
+and installation receipts match the installed executable and resources. This
+build includes the bounded no-output pending path, rejected-reply diagnostics,
+provider-first selector and the default-instruction clarification. Including
+these changes in one build does not isolate any one change's effect.
+
+The operator separately verified installed provider-menu keyboard selection and
+visually checked the provider icons and names, a Claude-only submenu containing
+ten cached model choices, the selected Opus 4.8 checkmark and placement within
+the window. Escape closed the menu without changing that selection. This is UI
+behavior evidence, not current website eligibility, backend model attestation or
+inference qualification. The screenshot is retained as
+`work/provider-menu-20261101/installed377-provider-menu.png`, SHA-256
+`3120fb4fa4156208b339c1a28bf07b2f7cf7bb2683e078d72d0a1614218ad487`.
+
+### Opus 5: pending observation followed by the original deadline
+
+Fresh case `opus5-marker377-a` failed with `provider_timeout` after 301.185
+seconds, one inference, zero native tools and no accepted final response.
+Before the failure, the native journal recorded exact Opus 5 website selection,
+a verified first-user fingerprint, document generation and submitted sequence1.
+A finite `phase=pending` observation matched that same session, generation and
+sequence, approximately 4.893 seconds after verified submission. No restored
+observation was retained in the bounded query. The pending branch therefore ran,
+but this case supplies no restoration or recovery-success evidence.
+
+The original response deadline remained in force. The exact session has a saved
+`closed / not_created` cleanup receipt; `not_created` does not mean that no
+prompt was sent. No accepted response, tool release or format correction
+occurred. The audit retains the negative marker verdict. Its seven finite
+records include six inspection samples without session IDs; those samples do
+not prove continuous page state, polling cadence or the absence of provider
+output. The local timeout is not evidence of a provider HTTP504 or outage.
+
+Evidence is retained in `evidence/opus5-marker377-a/`. The independent review
+SHA-256 is `7fdef65ee874581793d691fba8483d5c6b65a76c5507a2acf20af50bae05f761`; the finite log SHA-256 is
+`28567c748ff133b92812b91d814f2511642035d0ab29b1de30e31860b95dfff3`.
+
+### Separate direct Opus 5 control
+
+A new ordinary foreground Incognito tab with `Opus 5 High` selected returned
+exactly `OPUS5-DIRECT377-90B25C` for a short direct prompt, with a visible completed
+response signal. The operator then closed only that test-created tab. The saved
+observation is `evidence/opus5-direct377-d/completed.json`, SHA-256
+`11d91e3434c9cc8909f6cc8a2c3a859283b74d9fdb04cde13f52adc3d9ba079d`.
+
+This is a direct-response control, not a harness or workflow pass. Its payload
+and foreground presentation differ from the failed harness task. It does not
+separate request framing, request size, host presentation or provider behavior,
+and it does not establish the harness timeout's cause.
+
+### Opus 4.8: valid refusal without actions
+
+Fresh case `opus48-workflow377-c` returned a valid ordinary prose refusal after
+17.842 seconds, one inference and zero native tool calls. Its selected-model,
+first-user, document, session and saved-closure checks passed. It produced no
+website/native error, malformed reply or correction. The full-workflow verdict
+remains negative: all four initial fixture files were unchanged, no browser
+workflow or POST occurred, and no receipt was issued. The independent grader's
+failed tests are separate from model execution; the model dispatched no tests.
+
+The reply declined to emit tool-call envelopes for the external relay. It cited
+actual surrounding permission strings: `danger-full-access`, `approval policy:
+never`, and `do not provide the sandbox_permissions for any reason`. It did not
+quote the removed `policy isn't block proof` clause. These are the model's stated
+reasons, not proof that the host lacks tools or that any particular instruction
+caused the refusal. The base-clause clarification did not produce a successful
+workflow in this case; this was not a matched outer-framing-only experiment.
+
+The exact owned website session closed with a saved receipt. The fixture server
+was identity-checked and stopped, its listener was absent, and the exact unused
+rejected-reply arm was archived with task, inode, mtime and hash guards. No raw
+rejected-reply capture existed; the global arm and output slots were clear at
+retirement. No prompt was replayed. Case evidence and the independent review
+are retained under `evidence/opus48-workflow377-c/`; review SHA-256:
+`d8d78ae42ef5233897dec86757da2bd95c70b7832bfbd917c2150ec33d1a34ea`.
+
+This adds a negative build377 Opus 4.8 workflow result. It does not erase older
+results, resolve historical unconfirmed cleanup, qualify other models, or
+complete the Claude goal.
+
+### Build378 preparation: first-request diagnostic
+
+An opt-in diagnostic now records the exact native insertion argument for one
+nonce-bound synthetic first Opus 5 request, including the generated session
+marker. It also retains the canonical request and server prompt separately.
+The capture is private, single-use and bound to the task, turn, session, model,
+document generation and short expiry. Its scope is revoked when Send returns.
+It records a before-insert argument, not HTTP bytes or proof of submission.
+Existing selection, ownership, response, refusal and cleanup checks remain in
+force; the capture grants no focus or replay capability.
+
+Forty focused tests passed with unchanged source hashes: seven new capture
+tests, ten existing Claude capture tests, two native WebKit tests, one server
+lifecycle/noninterference test and twenty existing benchmark capture tests.
+The retained receipt is
+`work/claude-qualification-20261031/claude-first-request-capture-a/result.json`,
+SHA-256 `cef772a4257c0eb9a770d5bbc7c464d9a151518d4e6ae01c6f7f27225930c1b7`.
+These are local diagnostic checks, not a live provider repair or qualification.

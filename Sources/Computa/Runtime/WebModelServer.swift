@@ -1268,17 +1268,25 @@ actor WebModelServer {
                 // Private, opt-in evidence for one exact Claude inference. This
                 // records the request before Send; only the existing submission
                 // proof and cleanup checks can authorize its eventual response.
+                var claudeFirstRequest: ClaudeRequestCapture.FirstRequestScope?
                 if provider == "claude",
                    let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
                    let turn = UUID(uuidString: context.turnID), let token = UUID(uuidString: session.token) {
+                    let captureContext = ClaudeRequestCapture.Context(taskID: task, threadID: thread, turnID: turn,
+                        runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                        inferenceID: inferenceID, sessionToken: token, modelID: request.model)
+                    let captureDirectory = rejectedReplyDirectory?.deletingLastPathComponent()
+                        .appendingPathComponent(ClaudeRequestCapture.directoryName)
                     ClaudeRequestCapture.capture(
-                        directory: rejectedReplyDirectory?.deletingLastPathComponent()
-                            .appendingPathComponent(ClaudeRequestCapture.directoryName),
-                        context: .init(taskID: task, threadID: thread, turnID: turn,
-                            runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
-                            inferenceID: inferenceID, sessionToken: token, modelID: request.model),
+                        directory: captureDirectory, context: captureContext,
                         request: request, prompt: prompt)
+                    claudeFirstRequest = .init(directory: captureDirectory, context: captureContext,
+                        request: request, prompt: prompt, isNewThread: context.isNewThread,
+                        isMaintenance: context.isMaintenance,
+                        isFirstInference: firstNativeInference && correctionTicket == nil
+                            && session.sequence == 1 && session.turnInferenceCount == 1)
                 }
+                defer { claudeFirstRequest?.revoke() }
                 // A private nonce arm can retain only a new synthetic first
                 // Instant payload. Task-local metadata reaches the exact native
                 // send without adding wire fields, tools, waits or page authority.
@@ -1302,8 +1310,11 @@ actor WebModelServer {
                 do {
                     try requireCurrentContext()
                     sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(benchmarkCapture) {
-                        try await call(session.transport, operation: "webProviderSend",
-                            params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                        try await ClaudeRequestCapture.$firstRequest.withValue(claudeFirstRequest) {
+                            defer { claudeFirstRequest?.revoke() }
+                            return try await call(session.transport, operation: "webProviderSend",
+                                params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                        }
                     }
                     if let permit { await pacer.release(permit) }
                 } catch {
@@ -2941,8 +2952,17 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
     }
     static func matchesSyntheticRequest(_ request: WebModelResponseCodec.Request, nonce: UUID) -> Bool {
         let expectedModel = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
-        guard request.model == expectedModel,
-              request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
+        guard request.model == expectedModel else { return false }
+        return WebsiteSyntheticFirstRequest.matches(request,
+            expectedUserText: "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools.")
+    }
+}
+
+/// Pure shape validation shared by explicitly armed synthetic diagnostics.
+/// Provider/model admission remains with each caller; this grants no authority.
+enum WebsiteSyntheticFirstRequest {
+    static func matches(_ request: WebModelResponseCodec.Request, expectedUserText: String) -> Bool {
+        guard request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
               APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
               let object = try? JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any],
               object["model"] as? String == request.model,
@@ -2971,7 +2991,7 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
         guard let environment = parts(input[preludeCount], role: "user"), environment.count == 1,
               matchesEnvironmentFragment(environment[0]),
               let user = parts(input[preludeCount + 1], role: "user") else { return false }
-        let expected = "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        let expected = expectedUserText
         let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
         // The native host appends one exact policy text item; the engine can
         // join it to the user text with LF. Accept only those byte-exact forms,

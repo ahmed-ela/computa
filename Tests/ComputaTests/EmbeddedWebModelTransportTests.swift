@@ -11536,6 +11536,104 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeFirstRequestCaptureKeepsExactOutboundBeforeSendWithoutGrantingFocus() async throws {
+        for armed in [false, true] {
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+            let page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: "Opus 5")
+            let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let f = try ClaudeFirstRequestCaptureFixture(sessionToken: XCTUnwrap(UUID(uuidString: token)), now: Date())
+            defer { f.remove() }; if armed { try f.arm() }
+            let request = try f.request(), scope = try XCTUnwrap(f.scope(request)); defer { scope.revoke() }
+            fixture.browser.setModelNativeFocusDiagnosticRequested(true)
+            var actions: [String] = [], observedBeforeSend = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if action == "insert", armed {
+                    let record = try? f.record()
+                    observedBeforeSend = record?["stage"] as? String == "before_insert"
+                    let sends = try? await self.evaluate(view, "return window.fixturePrompts.length;")
+                    XCTAssertEqual((sends as? NSNumber)?.intValue, 0)
+                }
+            }
+            _ = try await ClaudeRequestCapture.$firstRequest.withValue(scope) {
+                try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": request.prompt])
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertEqual(actions.filter { $0 == "prepare" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+            XCTAssertEqual(observedBeforeSend, armed)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertNotNil(complete["freshSessionSubmissionProof"])
+            try assertChoiceEvidence(complete, choice: choice)
+            let raw = try await evaluate(view, "return window.fixturePrompts[0];")
+            let outbound = try XCTUnwrap(raw as? String)
+            XCTAssertTrue(outbound.hasPrefix(request.prompt + "\n\nComputa session marker: "))
+            if armed {
+                let record = try f.record()
+                let marker = try XCTUnwrap(record["marker"] as? String)
+                let exactNativeOutbound = request.prompt + "\n\nComputa session marker: " + marker
+                XCTAssertTrue((record["outbound"] as? String)?.utf8.elementsEqual(exactNativeOutbound.utf8) == true)
+                XCTAssertEqual(record["outboundSHA256"] as? String, EmbeddedWebModelTransport.promptFingerprint(exactNativeOutbound))
+                // The fixture reads contenteditable innerText, which can add
+                // trailing line breaks. Its canonical first-user binding must
+                // still match; do not mislabel that DOM serialization as input bytes.
+                XCTAssertEqual(record["outboundCanonicalSHA256"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+                XCTAssertTrue((record["serverPrompt"] as? String)?.utf8.elementsEqual(request.prompt.utf8) == true)
+                XCTAssertEqual(record["sessionToken"] as? String, token.lowercased())
+                XCTAssertEqual(record["documentGeneration"] as? String, fixture.browser.documentGeneration(for: id)?.uuidString.lowercased())
+                XCTAssertEqual(record["submissionVerified"] as? Bool, false)
+            } else { XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: f.directory.path).isEmpty) }
+            XCTAssertTrue(fixture.browser.modelNativeFocusDiagnosticRequested)
+            XCTAssertNil(fixture.browser.modelNativeFocusDiagnosticTabID)
+            XCTAssertEqual(fixture.browser.modelNativeFocusDiagnosticDisposition, .armed)
+            XCTAssertFalse(view.isInspectable)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await finishTerminalFixture(fixture, token: token)
+        }
+    }
+
+    func testClaudeFirstRequestCaptureRejectsNativeViewAndDocumentInvalidationBeforeInsert() async throws {
+        for drift in ["view", "document"] {
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+            let page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: "Opus 5")
+            let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let f = try ClaudeFirstRequestCaptureFixture(sessionToken: XCTUnwrap(UUID(uuidString: token)), now: Date())
+            defer { f.remove() }; try f.arm()
+            let request = try f.request(), scope = try XCTUnwrap(f.scope(request)); defer { scope.revoke() }
+            var invalidated = false, actions: [String] = []
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard action == "prepare", !invalidated else { return }
+                invalidated = true
+                if drift == "view" { fixture.browser.closeTab(id) }
+                else {
+                    let generation = fixture.browser.documentGeneration(for: id)
+                    view.loadHTMLString(page.replacingOccurrences(of: "'initial'", with: "'replacement'"), baseURL: view.url)
+                    try? await self.waitForFixture(view, generation: "replacement")
+                    XCTAssertNotEqual(fixture.browser.documentGeneration(for: id), generation)
+                }
+            }
+            do {
+                _ = try await ClaudeRequestCapture.$firstRequest.withValue(scope) {
+                    try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": request.prompt])
+                }
+                XCTFail("Native invalidation must retain the existing Send failure: \(drift)")
+            } catch { XCTAssertTrue(invalidated) }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertFalse(actions.contains("insert")); XCTAssertFalse(actions.contains("submit"))
+            XCTAssertFalse(f.exists(f.output)); XCTAssertTrue(f.exists(f.armFile))
+        }
+    }
+
     func testClaudeFreshSessionProofBindsCanonicalRequestOnlyAfterVerifiedCompletion() async throws {
         let choice = Self.fixtureChoice(.claude)
         let fixture = try Fixture(page: Self.modelChoicePage(.claude))

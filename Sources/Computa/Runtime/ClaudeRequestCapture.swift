@@ -29,6 +29,120 @@ enum ClaudeRequestCapture {
         let modelID: String
     }
 
+    @TaskLocal static var firstRequest: FirstRequestScope?
+    static let firstRequestPurpose = "claude_synthetic_first_request_v2"
+    static let firstRequestModel = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5").modelID
+
+    static func syntheticUserText(nonce: UUID) -> String {
+        "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+    }
+
+    /// Carries native metadata to the actual before-insert boundary. It grants
+    /// no focus, page access, submission proof, response or replay capability.
+    final class FirstRequestScope: @unchecked Sendable {
+        private let directory: URL
+        private let context: Context
+        private let request: WebModelResponseCodec.Request
+        private let serverPrompt: String
+        private let lock = NSLock()
+        private var active = true
+        private var attempted = false
+
+        init?(directory: URL?, context: Context, request: WebModelResponseCodec.Request, prompt: String,
+              isNewThread: Bool, isMaintenance: Bool, isFirstInference: Bool) {
+            guard !Task.isCancelled, isNewThread, !isMaintenance, isFirstInference, let directory,
+                  context.modelID == firstRequestModel, request.model == context.modelID,
+                  !prompt.isEmpty, prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
+                  !request.continuationRequest.isEmpty,
+                  request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes else { return nil }
+            self.directory = directory; self.context = context; self.request = request; serverPrompt = prompt
+        }
+
+        func revoke() { lock.withLock { active = false } }
+        private var isCurrent: Bool { lock.withLock { active } }
+
+        @discardableResult
+        func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+                     documentGeneration: UUID, marker: String, nativeFirstFresh: Bool, now: Date = Date()) -> Bool {
+            capture(prompt: prompt, outbound: outbound, modelID: modelID, sessionToken: sessionToken,
+                documentGeneration: documentGeneration, marker: marker, nativeFirstFresh: nativeFirstFresh,
+                now: now, beforeArmClaim: nil)
+        }
+
+        #if DEBUG
+        func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+                     documentGeneration: UUID, marker: String, nativeFirstFresh: Bool, now: Date,
+                     beforeArmClaimForTesting: @escaping @Sendable () -> Void) -> Bool {
+            capture(prompt: prompt, outbound: outbound, modelID: modelID, sessionToken: sessionToken,
+                documentGeneration: documentGeneration, marker: marker, nativeFirstFresh: nativeFirstFresh,
+                now: now, beforeArmClaim: beforeArmClaimForTesting)
+        }
+        #endif
+
+        private func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+                             documentGeneration: UUID, marker: String, nativeFirstFresh: Bool, now: Date,
+                             beforeArmClaim: (@Sendable () -> Void)?) -> Bool {
+            let started = ContinuousClock.now
+            guard !Task.isCancelled, nativeFirstFresh, modelID == context.modelID,
+                  UUID(uuidString: sessionToken) == context.sessionToken,
+                  marker.utf8.count == 36, UUID(uuidString: marker) != nil,
+                  prompt.utf8.elementsEqual(serverPrompt.utf8),
+                  outbound.utf8.count <= WebsiteBenchmarkCaptureLease.maximumPayloadBytes,
+                  outbound.utf8.elementsEqual((prompt + "\n\nComputa session marker: " + marker).utf8),
+                  lock.withLock({
+                      guard active, !attempted else { return false }
+                      attempted = true; return true
+                  }) else { return false }
+            var deadline: ContinuousClock.Instant?
+            return WebsitePrivateDiagnosticCapture.publish(directory: directory, outputName: "request.json",
+                maximumArmBytes: 4_096, maximumRecordBytes: 2_000_000,
+                makeRecord: { arm in
+                    guard APIModelCorrectionJSON.isUnambiguous(arm),
+                          let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
+                          Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt", "userPromptSHA256"],
+                          ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == 2,
+                          value["purpose"] as? String == firstRequestPurpose,
+                          value["trigger"] as? String == "first_user_request",
+                          let nonce = canonicalID(value["nonce"]),
+                          value["taskID"] as? String == context.taskID.uuidString.lowercased(),
+                          value["turnID"] as? String == context.turnID.uuidString.lowercased(),
+                          value["modelID"] as? String == context.modelID,
+                          let expiryText = value["expiresAt"] as? String, expiryText.utf8.count == 24,
+                          let expiry = timestampFormatter().date(from: expiryText),
+                          timestampFormatter().string(from: expiry) == expiryText,
+                          expiry > now, expiry.timeIntervalSince(now) <= maximumLifetime else { return nil }
+                    let expected = syntheticUserText(nonce: nonce)
+                    guard value["userPromptSHA256"] as? String == sha256(Data(expected.utf8)),
+                          WebsiteSyntheticFirstRequest.matches(request, expectedUserText: expected),
+                          let canonical = String(data: request.continuationRequest, encoding: .utf8),
+                          let catalogData = try? catalogEncoder().encode(request.toolCatalogDiagnostic),
+                          let catalog = try? JSONSerialization.jsonObject(with: catalogData) else { return nil }
+                    deadline = started + .milliseconds(Int64(expiry.timeIntervalSince(now) * 1_000))
+                    let record: [String: Any] = [
+                        "schemaVersion": 2, "purpose": firstRequestPurpose, "trigger": "first_user_request",
+                        "stage": "before_insert", "submissionVerified": false, "automaticReplay": false,
+                        "nonce": nonce.uuidString.lowercased(), "expiresAt": expiryText,
+                        "capturedAt": timestampFormatter().string(from: now), "provider": "claude",
+                        "taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),
+                        "turnID": context.turnID.uuidString.lowercased(), "runtimeGeneration": context.runtimeGeneration.uuidString.lowercased(),
+                        "preparationID": context.preparationID.uuidString.lowercased(), "inferenceID": context.inferenceID.uuidString.lowercased(),
+                        "sessionToken": context.sessionToken.uuidString.lowercased(), "modelID": context.modelID,
+                        "documentGeneration": documentGeneration.uuidString.lowercased(), "marker": marker,
+                        "userPromptSHA256": sha256(Data(expected.utf8)),
+                        "canonicalRequest": canonical, "canonicalRequestSHA256": sha256(request.continuationRequest),
+                        "canonicalRequestUTF8Bytes": request.continuationRequest.count,
+                        "serverPrompt": prompt, "serverPromptSHA256": sha256(Data(prompt.utf8)), "serverPromptUTF8Bytes": prompt.utf8.count,
+                        "outbound": outbound, "outboundSHA256": sha256(Data(outbound.utf8)),
+                        "outboundCanonicalSHA256": EmbeddedWebModelTransport.outboundFingerprint(outbound),
+                        "outboundUTF8Bytes": outbound.utf8.count, "outboundUTF16Count": outbound.utf16.count,
+                        "toolCatalog": catalog, "toolCatalogSHA256": sha256(catalogData),
+                    ]
+                    return try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
+                }, isCurrent: { !Task.isCancelled && self.isCurrent && deadline.map { ContinuousClock.now < $0 } == true },
+                beforeArmClaim: beforeArmClaim)
+        }
+    }
+
     @discardableResult
     static func capture(directory: URL?, context: Context, request: WebModelResponseCodec.Request,
                         prompt: String, now: Date = Date()) -> Bool {

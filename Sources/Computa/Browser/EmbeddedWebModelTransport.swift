@@ -1104,6 +1104,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     session.baseline = count(before, "responseCount")
                 }
+                // Opt-in evidence only, at the actual first native insertion.
+                // The preceding ordinary prepare already proved a fresh page;
+                // this scope never grants focus, Inspector or response authority.
+                if let capture = ClaudeRequestCapture.firstRequest, session.provider == .claude,
+                   !session.submitted, session.sequence == 0, session.baseline == 0,
+                   let choice = session.modelChoice, choice.modelID == ClaudeRequestCapture.firstRequestModel,
+                   let generation = session.documentGeneration,
+                   browser.webView(for: session.tabID) === session.view,
+                   browser.documentGeneration(for: session.tabID) == generation,
+                   let url = session.view.url, url.scheme == "https", url.host == "claude.ai",
+                   session.provider.conversationURL(url.absoluteString) == nil {
+                    capture.capture(prompt: prompt, outbound: outbound, modelID: choice.modelID,
+                        sessionToken: session.token, documentGeneration: generation,
+                        marker: submissionMarker, nativeFirstFresh: true)
+                }
                 if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,
                    canPrepareFirstInstantInInsert(session), session.provider == .chatgpt,
                    let choice = session.modelChoice, choice.key == "chat/latest/instant",

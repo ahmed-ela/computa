@@ -4,6 +4,62 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testClaudeFirstCaptureIsScopedToFreshSendAndRevokedBeforePollOrAfterSendFailure() async throws {
+        for mode in ["capture", "unarmed", "deferred", "old_thread", "send_failure"] {
+            let f = try ClaudeFirstRequestCaptureFixture(now: Date()); defer { f.remove() }
+            if mode != "unarmed" { try f.arm() }
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+            let base = FixtureWebModelTransport(replyTexts: [#"{"type":"message","text":"I cannot perform this request."}"#])
+            let observer = ClaudeFirstCaptureScopeTransport(
+                base: WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice),
+                captureAtSend: mode == "capture" || mode == "unarmed", failSend: mode == "send_failure")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: f.root.appendingPathComponent("rejected"), storageDirectory: f.root)
+            await server.configureEmbeddedTransport(observer)
+            let task = f.context.taskID.uuidString.lowercased(), thread = f.context.threadID.uuidString.lowercased()
+            let turn = f.context.turnID.uuidString.lowercased(), preparation = f.context.preparationID
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                isNewThread: mode != "old_thread")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+            let prepared = try f.request()
+            var request = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.continuationRequest) as? [String: Any])
+            request["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)]
+            do {
+                let response = try await server.infer(JSONSerialization.data(withJSONObject: request), taskID: task)
+                XCTAssertNotEqual(mode, "send_failure")
+                let output = try responseOutput(response)
+                XCTAssertEqual(output.count, 1); XCTAssertEqual(output[0]["type"] as? String, "message")
+                let content = try XCTUnwrap(output[0]["content"] as? [[String: Any]])
+                XCTAssertEqual(content.first?["text"] as? String, "I cannot perform this request.")
+            } catch { XCTAssertEqual(mode, "send_failure", "Unexpected inference failure: \(error)") }
+            let observation = await observer.observation()
+            XCTAssertEqual(observation.admitted, [mode != "old_thread"], mode)
+            XCTAssertEqual(observation.capturedAtSend, mode == "capture", mode)
+            let late = await observer.attemptLateCapture()
+            XCTAssertFalse(late, "Send return/error must revoke the saved scope: \(mode)")
+            XCTAssertFalse(observation.pollHadTaskLocal, mode)
+            XCTAssertFalse(observation.pollCaptured, "Scope must already be revoked before response polling: \(mode)")
+            // The native caller owns cleanup after an ordinary failed inference.
+            if mode == "send_failure" { _ = await server.fixtureCancel(taskID: task) }
+            let prompts = await base.sentPrompts(), operations = await base.operations()
+            XCTAssertEqual(prompts.count, 1, "Capture cannot add/replay Send")
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+            let canonical = try canonicalRequest(in: XCTUnwrap(prompts.first))
+            XCTAssertEqual(canonical["input"] as? NSArray, f.input() as NSArray)
+            XCTAssertEqual(canonical["tools"] as? NSArray, request["tools"] as? NSArray)
+            XCTAssertEqual(f.exists(f.output), mode == "capture", mode)
+            if mode == "capture" {
+                let record = try f.record()
+                XCTAssertTrue((record["serverPrompt"] as? String)?.utf8.elementsEqual(try XCTUnwrap(prompts.first).utf8) == true)
+                XCTAssertEqual(record["taskID"] as? String, task)
+                XCTAssertEqual(record["turnID"] as? String, turn)
+            } else if mode != "unarmed" { XCTAssertTrue(f.exists(f.armFile), mode) }
+        }
+    }
+
     func testGroqCatalogLoadsNextRequestOnlyUnderNativeTurnRegistration() async throws {
         let label = "groq-native-catalog"
         let task = websiteInferenceFixtureTaskID(label)
@@ -3672,5 +3728,40 @@ private actor SyntheticCaptureNoninterferenceTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         if operation == "webProviderSend" { admitted.append(WebsiteBenchmarkCaptureLease.current != nil) }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+private actor ClaudeFirstCaptureScopeTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private let captureAtSend: Bool, failSend: Bool
+    private var scope: ClaudeRequestCapture.FirstRequestScope?
+    private var prompt = "", token = ""
+    private let marker = UUID().uuidString.lowercased(), generation = UUID()
+    private var admitted: [Bool] = []
+    private var capturedAtSend = false, pollHadTaskLocal = false, pollCaptured = false
+    init(base: any WebModelTransport, captureAtSend: Bool, failSend: Bool) {
+        self.base = base; self.captureAtSend = captureAtSend; self.failSend = failSend
+    }
+    func observation() -> (admitted: [Bool], capturedAtSend: Bool, pollHadTaskLocal: Bool, pollCaptured: Bool) {
+        (admitted, capturedAtSend, pollHadTaskLocal, pollCaptured)
+    }
+    func attemptLateCapture() -> Bool {
+        scope?.capture(prompt: prompt, outbound: prompt + "\n\nComputa session marker: " + marker,
+            modelID: ClaudeRequestCapture.firstRequestModel, sessionToken: token,
+            documentGeneration: generation, marker: marker, nativeFirstFresh: true) ?? false
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderSend" {
+            scope = ClaudeRequestCapture.firstRequest; admitted.append(scope != nil)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            prompt = try XCTUnwrap(fields["prompt"]); token = try XCTUnwrap(fields["sessionToken"])
+            if captureAtSend { capturedAtSend = attemptLateCapture() }
+        } else if operation == "webProviderPoll" {
+            pollHadTaskLocal = ClaudeRequestCapture.firstRequest != nil
+            pollCaptured = attemptLateCapture()
+        }
+        let response = try await base.request(operation: operation, params: params)
+        if operation == "webProviderSend", failSend { throw WebModelServer.Failure.providerFailed }
+        return response
     }
 }
