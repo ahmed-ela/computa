@@ -8,13 +8,13 @@ read-only inspection sent no prompt and changed no model; enabled picker control
 are availability observations, not successful inference or workflow evidence.
 The newly visible Opus choices still require independent qualification.
 
-As of November 1, build359 is installed and published as `v0.8.0-alpha.359`.
-PRs #14 and #16 were squash-merged at `c3ca191`; the released binary was compiled
-from `92b4b3e`, with build-input equivalence checked after merge. No live Claude
-qualification has yet been recorded after build354. The Claude adapter,
-instructions, projection and codec in build359 match build354, while shared
-transport/server code changed for Groq. Component equivalence is not a current
-live-model pass.
+As of November 1, build360 is published as `v0.8.0-alpha.360`; candidate361
+is installed locally for the separate qualification work on draft PR #18.
+PR #17 was squash-merged at `e42f8df`; its tree exactly matches the actual build
+source `59aa4a5`. The signed bundle and all frozen build inputs were revalidated
+before publication. The package is not notarized. Build360 adds request
+diagnostics, not a fix for the remaining Claude refusals or format errors.
+The live results below supersede the earlier absence of post-build354 testing.
 
 The build353 exact-submission
 proof and bounded correction passed native tests and live transaction checks.
@@ -63,6 +63,138 @@ private-file guard. Changing only the fixture to POSIX `realpath` produced a
 passing rerun (0.997 seconds); production checks were unchanged. Both run logs
 and unchanged-source receipts are retained. Nine version tests also passed.
 These are local diagnostic/integration tests, not a live Claude qualification.
+
+### Installed build360 results, November 1
+
+Each row is a separate native task with its own fixture/server and retained
+evidence. All use the concrete Haiku 5.5 website choice. A browser-only control
+does not replace the complete code/terminal/browser workflow.
+
+| Case | Duration | Result |
+| --- | ---: | --- |
+| `haiku55-browser360-r` | 32.732 s | Open, tabs, read and fill succeeded. The fifth reply failed strict validation with `invalid_envelope_fields`; no submission or receipt. Five verified website cleanup receipts. |
+| `haiku55-browser360-s` | 53.388 s | Browser fixture passed: seven calls, eight verified website inferences, one accepted form POST, unpredictable receipt read and reported exactly, and a model-issued close of only its task tab. |
+| `haiku55-workflow360-t` | 53.277 s | Only the permitted function changed; six protected tests and the reference command passed. Browser open and fill succeeded, then an accepted final response claimed the tools were unavailable. No POST, receipt or model-issued close. Computa closed the task tab. Eight website inferences and cleanup receipts verified. Full workflow failed. |
+
+The first control captured the exact post-tabs prompt, original canonical
+request and all 22 offered/bound tools. Native call/output IDs and bytes matched,
+and later submission/ownership records matched the captured prompt hash. This
+rules out a missing catalog for that particular inference. It does not establish
+the contents of the later failed request. The raw malformed reply was not
+captured, so its unexpected top-level key remains unknown.
+
+The next two cases armed private rejected-reply capture before the first
+inference. Neither produced a rejected response: the browser control passed,
+and the full workflow ended in a valid message envelope containing a refusal.
+Both unused arms were preserved and removed after terminal verification. Their
+fixture servers were stopped; all failed evidence remains retained.
+
+The full workflow never called `browser_tabs`; `browser_open` and `browser_fill`
+already returned current observations. Its refusal accurately recalls the edit,
+tests, reference and filled field. The fill output contains current controls and
+does not report a capability denial. No concrete instruction contradiction was
+found. The exact final projected request still needs capture; fresh sessions or
+different task histories remain hypotheses, not established causes. No response
+was repaired, replayed or accepted with weaker validation.
+
+## Candidate 361: catalog freshness and the post-fill diagnostic
+
+The confirmed catalog defect is independent of the refusal: startup discovery
+skips any provider with cached choices, and the refresh controls are hidden.
+Consequently an existing Claude catalog cannot discover newly enabled Opus
+choices or retire absent Haiku 4.5 merely by restarting.
+
+The candidate preserves missing-provider discovery and requests one automatic
+revalidation per launch for a selected provider. Other cached providers wait for
+selection. Discovery waits for an idle app, retains the old catalog on failure,
+and uses the existing blocked-provider gates without retry authority. A missing
+saved selection remains disabled rather than silently switching the task's model.
+Claude rows with a visible purchase control are excluded from selectable choices.
+
+The manual request diagnostic also accepts `after_browser_fill`, with its own
+`claude_post_browser_fill_request_v1` purpose. It requires the same exact native
+task, turn, concrete model, bounded expiry and immediate unique call/output pair.
+The original post-tabs arm remains compatible. This closes the diagnostic gap
+for workflows that skip tab inventory; it does not change prompts, execution,
+parsing, cleanup or refusal handling.
+
+The combined native regression run passed 63 tests, including 29 catalog-state
+cases, blocked-provider/no-page guards, the legacy post-tabs handoff and private
+capture protections. The initial compile caught a test-only closure returning
+the tuple from `Set.insert` instead of `Void`; the corrected run passed with
+unchanged sources. All 880 adapter regressions across ChatGPT, Claude and Gemini
+passed (39,585 assertions), as did nine version tests.
+
+Signed candidate361, source `cf23323`, completed the fresh
+`haiku55-workflow361-u` invoice workflow in 80.561 seconds. It changed only the
+permitted function, passed six protected tests, printed the correct reference,
+submitted the browser form exactly once, read its unpredictable receipt from
+the click's current page observation, and closed its task-created tab. The
+independent fixture audit passed. Twelve tool calls and twelve website
+inferences had matching model, ownership and closed-session evidence. Three
+pre-edit test invocations failed on the original fixture bug; the later test
+invocation and independent audit passed. These were redundant model-selected
+test runs, not transport retries.
+
+The after-fill capture matched the immediate native call/output pair and the
+same inference's submitted prompt fingerprint. An independent 26-check audit
+confirmed the actual displayed request retained all 20 prior native call/output
+items, all 22 offered tool names/kinds, bound browser capabilities and the
+current execution handoff. The 152,768-byte prompt's SHA-256 was
+`2d82dbf29a33a7233b5839e83164f034a92eeafa8ff5f526875641d5d8ca8a1d`.
+No rejected reply was captured. The private capture and unused rejection arm
+were retained and retired; the fixture server was stopped. An initial audit
+run before server termination was preserved separately and failed only its
+server-lifecycle check; the final audit verified both process and listener absent.
+
+This is a successful control, not a demonstrated fix or explanation for the
+earlier Haiku refusal. The prompt and response policy were unchanged.
+
+The same installed check found two catalog issues. Restoring disk history after
+the WebUI ready event can select Claude without issuing refresh demand. The
+follow-up source fix reuses the existing once-per-launch queue after task
+replacement; 31 focused state tests passed, including two new restoration and
+idle/failure cases. Separately, explicit Haiku selection did open and close a
+discovery session, but Settings reported model verification failures for both
+ChatGPT and Claude, and retained the old catalog. This installed run does not
+establish live catalog freshness.
+
+## Candidate 362: discovery startup and nested-menu closure
+
+The retained discovery diagnostics separate two failures. ChatGPT exposed one
+visible, closed, disabled model trigger during fresh-page startup. Claude had
+an enabled trigger and an unambiguous checked model, but its parent menu remained
+open after the nested More models menu closed. A realistic fixture reproduced
+the latter failure: the child consumes Escape and closes only itself, while the
+old fixture incorrectly closed both menus from either event.
+
+Claude discovery now dismisses each exact observed popup once, child before
+parent, within the same 1.8-second deadline. It rechecks the current owner,
+document, selected model, fresh conversation and physical menu association
+before and after each dismissal. Observed invalidation remains latched even if
+the page later reverts; late closure cannot revive an expired attempt. No model
+row is selected, no prompt is sent, and the catalog is accepted only after both
+menus are physically closed. A real WebKit integration fixture verifies this
+sequence and preservation of an existing human tab.
+
+ChatGPT discovery returns pending while its one fresh, closed model trigger is
+disabled. Native DOM wakeups and the existing preparation deadline bound that
+wait. It does not claim a selection attempt, click a disabled control, provide
+model evidence, or relax ordinary selection/read-only verification. Once the
+trigger enables, the existing selection proof still applies.
+
+Validation: 31 state-restoration tests, two WebKit discovery tests, seven focused
+adapter cases (208 assertions), and nine version tests passed. The three-adapter
+run completed with 885 passes and one older ChatGPT assertion that expected an
+immediate error for this newly permitted discovery wait. Only that assertion's
+discovery branch was updated; its unknown, generic, read-only and retained-model
+negative cases remain unchanged. With production code unchanged, the final
+ChatGPT run passed all 573 tests (30,346 assertions); the preceding completed
+run passed all 131 Claude and 182 Gemini tests. The earlier interrupted run and
+failing reproductions are retained separately and are not passing evidence.
+Independent review passed after adding the late-closure and restored-context
+regressions. Candidate362 is not yet installed or released; live discovery and
+the broader Claude qualification remain pending.
 
 ## Baseline: completion remains unverified
 

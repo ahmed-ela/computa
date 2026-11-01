@@ -4291,6 +4291,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testAutomaticDiscoveryOfSavedBlockedProvidersCreatesNoOwnedPage() async throws {
+        for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini, .groq] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+            defer { fixture.shutdown() }
+            fixture.browser.recordHumanVerificationRequired(provider: provider.rawValue)
+            let checkpoint = fixture.browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
+            for _ in 0..<3 {
+                do {
+                    _ = try await fixture.transport.discoverModels(provider: provider.rawValue, retryBlocked: false)
+                    XCTFail("Automatic catalog demand must not bypass a saved provider block")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(provider))
+                }
+            }
+            XCTAssertTrue(fixture.createdTabs.isEmpty, "A blocked catalog request must not create/load an owned provider page")
+            XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs[provider.rawValue], checkpoint)
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testProviderGateStopsNewTasksAndDiscoveryUntilExplicitSuccessfulRefresh() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
         defer { fixture.shutdown() }
@@ -4632,7 +4652,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(finished["state"] as? String, "failed")
         do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]); XCTFail("A cleanup-only quota observation must gate future tasks") }
         catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
-        XCTAssertEqual(fixture.createdTabs.count, 1)
+        for _ in 0..<2 {
+            do {
+                _ = try await fixture.transport.discoverModels(provider: "claude", retryBlocked: false)
+                XCTFail("A quota block must also reject automatic catalog revalidation")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+            }
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 1, "Automatic demand cannot load another page or retry uncertain cleanup")
         XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty, "Quota retains the existing memory-only policy")
         for variable in ["fixtureInputCount", "fixtureFocusCount", "fixtureQuotaClicks"] {
             let value = try await evaluate(view, "return window.\(variable);") as? Int
@@ -11160,6 +11188,46 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertNil(fixture.browser.webView(for: id))
             try await assertHumanTabIntact(fixture)
         }
+    }
+
+    func testClaudeDiscoveryClosesNestedThenParentMenuWithDistinctEscapesWithoutInput() async throws {
+        let fixture = try Fixture(page: Self.claudeNestedDiscoveryPage())
+        defer { fixture.shutdown() }
+        let discovery = Task { try await fixture.transport.discoverModels(provider: "claude") }
+        for _ in 0..<1_000 where fixture.createdTabs.isEmpty { await Task.yield() }
+        let id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        let choices = try await discovery.value
+
+        XCTAssertEqual(choices, Self.choiceLabels(.claude).map {
+            WebsiteModelChoice(provider: "claude", key: $0, label: $0)
+        })
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let counts = try await evaluate(view, """
+            return {opens: window.fixtureModelTriggerClicks,
+              nestedOpens: window.fixtureNestedDiscoveryOpens,
+              childEscapes: window.fixtureNestedDiscoveryEscapes,
+              parentEscapes: window.fixtureNestedDiscoveryParentEscapes,
+              parentClosures: window.fixtureModelEscapeClosures};
+            """) as? [String: Int]
+        XCTAssertEqual(counts, ["opens": 1, "nestedOpens": 1, "childEscapes": 1,
+                                "parentEscapes": 1, "parentClosures": 1])
+        let order = try await evaluate(view, "return window.fixtureNestedDiscoveryEscapeOrder;") as? [String]
+        XCTAssertEqual(order, ["child", "parent"])
+        let closure = try await evaluate(view, """
+            return {childLeftParentOpen: window.fixtureNestedDiscoveryChildLeftParentOpen,
+              parentSawChildClosed: window.fixtureNestedDiscoveryParentSawChildClosed,
+              parentClosed: !document.getElementById('fixture-model-menu'),
+              childClosed: !document.getElementById('fixture-model-submenu'),
+              triggerCollapsed: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded') === 'false',
+              selectionUnchanged: window.fixtureModelCurrentLabel === window.fixtureModelInitialLabel};
+            """) as? [String: Bool]
+        XCTAssertEqual(closure, ["childLeftParentOpen": true, "parentSawChildClosed": true,
+                                 "parentClosed": true, "childClosed": true,
+                                 "triggerCollapsed": true, "selectionUnchanged": true])
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        XCTAssertNil(fixture.browser.webView(for: id), "Verified prompt-free discovery disposes only its owned tab")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testDiscoveryAuthRedirectClosesOnlyReadonlyOwnedTabAndDoesNotLeakCapacity() async throws {
@@ -17742,6 +17810,56 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if (!menu.isConnected) document.body.appendChild(menu);
             menu.style.display = 'block'; trigger.setAttribute('aria-expanded', 'false');
           }));
+        })();
+        </script>
+        """
+        return modelChoicePage(.claude).replacingOccurrences(of: "</body>", with: script + "</body>")
+    }
+
+    /// A separately portalled submenu consumes Escape without closing its
+    /// parent. The adapter must observe that closure before dismissing the
+    /// unchanged parent with a distinct Escape; a trigger toggle cannot pass.
+    private static func claudeNestedDiscoveryPage() -> String {
+        let script = """
+        <script>
+        (() => {
+          const trigger = document.getElementById('fixture-model-trigger');
+          const parent = document.getElementById('fixture-model-menu');
+          const more = document.createElement('button');
+          more.id = 'fixture-more-models'; more.textContent = 'More models';
+          more.setAttribute('aria-haspopup', 'menu'); more.setAttribute('aria-expanded', 'false');
+          more.setAttribute('aria-controls', 'fixture-model-submenu'); parent.appendChild(more);
+          const child = document.createElement('div'); child.id = 'fixture-model-submenu';
+          child.setAttribute('role', 'menu'); child.setAttribute('aria-labelledby', more.id);
+          child.style.cssText = 'display:none;position:fixed;left:480px;top:100px';
+          document.body.appendChild(child);
+          [...parent.querySelectorAll('[data-fixture-model]')].slice(2).forEach(row => child.appendChild(row));
+          window.fixtureNestedDiscoveryOpens = 0; window.fixtureNestedDiscoveryEscapes = 0;
+          window.fixtureNestedDiscoveryParentEscapes = 0; window.fixtureNestedDiscoveryEscapeOrder = [];
+          window.fixtureNestedDiscoveryChildLeftParentOpen = false;
+          window.fixtureNestedDiscoveryParentSawChildClosed = false;
+          more.addEventListener('click', () => {
+            window.fixtureNestedDiscoveryOpens++;
+            child.style.display = 'block'; more.setAttribute('aria-expanded', 'true');
+          });
+          document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape') return;
+            if (event.target === child && child.isConnected && child.style.display === 'block') {
+              event.preventDefault(); event.stopImmediatePropagation();
+              window.fixtureNestedDiscoveryEscapes++;
+              window.fixtureNestedDiscoveryEscapeOrder.push('child');
+              child.style.display = 'none'; child.remove(); more.setAttribute('aria-expanded', 'false');
+              more.focus();
+              window.fixtureNestedDiscoveryChildLeftParentOpen = parent.isConnected
+                && parent.style.display === 'block' && trigger.getAttribute('aria-expanded') === 'true';
+            } else if (event.target === parent && parent.isConnected && parent.style.display === 'block') {
+              window.fixtureNestedDiscoveryParentEscapes++;
+              window.fixtureNestedDiscoveryEscapeOrder.push('parent');
+              window.fixtureNestedDiscoveryParentSawChildClosed = !child.isConnected
+                && more.getAttribute('aria-expanded') === 'false';
+              // The original real DOM listener closes only this parent popup.
+            }
+          }, true);
         })();
         </script>
         """

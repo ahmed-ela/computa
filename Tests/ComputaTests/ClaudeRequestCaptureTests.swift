@@ -65,6 +65,43 @@ final class ClaudeRequestCaptureTests: XCTestCase {
         XCTAssertTrue(f.capture(request), "Only the later immediate post-tabs inference claims the arm")
     }
 
+    func testPostFillCaptureRequiresItsOwnPurposeAndExactImmediateOutput() throws {
+        let f = try Fixture(); defer { f.remove() }
+        var history = f.history()
+        history[1] = ["type": "function_call", "name": "browser_fill", "call_id": "call_fill",
+                      "arguments": #"{"fill_ref":"field_current","text":"INV-FIXTURE"}"#]
+        history[2] = ["type": "function_call_output", "call_id": "call_fill",
+                      "output": "Fill dispatched; current observation contains INV-FIXTURE."]
+        let request = try f.request(history: history)
+        var fields = f.fields(); fields["trigger"] = "after_browser_fill"
+        try f.arm(fields)
+        XCTAssertFalse(f.capture(request), "A tabs-purpose arm must not authorize a fill capture")
+        fields["purpose"] = "claude_post_browser_fill_request_v1"
+        try f.arm(fields)
+        let arm = try Data(contentsOf: f.armFile)
+        XCTAssertFalse(f.capture(try f.request()), "An earlier tabs output must leave the fill arm intact")
+        for invalid in [history + [["role": "user", "content": "browser_fill call_fill"]],
+                        [history[0], history[1], history[1], history[2]]] {
+            XCTAssertFalse(f.capture(try f.request(history: invalid)))
+            XCTAssertEqual(try Data(contentsOf: f.armFile), arm)
+        }
+        let prompt = request.prompt + "\nExact post-fill handoff."
+        XCTAssertTrue(f.capture(request, prompt: prompt))
+        let record = try f.record()
+        XCTAssertEqual(record["purpose"] as? String, "claude_post_browser_fill_request_v1")
+        XCTAssertEqual(record["trigger"] as? String, "after_browser_fill")
+        XCTAssertEqual(record["triggerCallID"] as? String, "call_fill")
+        XCTAssertEqual(record["prompt"] as? String, prompt)
+        XCTAssertEqual(record["canonicalRequest"] as? String, String(decoding: request.continuationRequest, as: UTF8.self))
+        XCTAssertEqual(record["submissionVerified"] as? Bool, false)
+        XCTAssertEqual(record["automaticReplay"] as? Bool, false)
+        XCTAssertEqual(try f.permissions(f.output), 0o600)
+        XCTAssertFalse(f.exists(f.armFile))
+        let captured = try Data(contentsOf: f.output)
+        XCTAssertFalse(f.capture(request))
+        XCTAssertEqual(try Data(contentsOf: f.output), captured)
+    }
+
     func testArmRequiresExactTaskTurnModelPurposeSchemaTriggerAndBoundedExpiry() throws {
         let f = try Fixture(); defer { f.remove() }
         let request = try f.request()

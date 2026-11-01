@@ -130,6 +130,195 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(picker.trigger.clicks).toBeLessThanOrEqual(provider === 'chatgpt' ? 3 : 2);
     });
 
+    if (provider === 'claude') test('discovery closes a nested-only Escape before separately dismissing its owned parent', async () => {
+      const { f, picker } = setup();
+      picker.nested.onDispatch = (event: any) => {
+        if (event.type === 'keydown' && event.key === 'Escape') picker.nested.values.hidden = '';
+      };
+      expect((await f.run('discoverModels')).pending).toBe(true);
+      expect((await f.run('discoverModels')).pending).toBe(true);
+      const pending = f.run('discoverModels');
+      for (let phase = 0; phase < 4; phase++) {
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        f.flush();
+      }
+      const result = await pending;
+      expect(result.error).toBeUndefined();
+      expect(result.modelChoices).toEqual(['Sonnet 5.5', 'Haiku 4.5', 'Sonnet 5', 'Sonnet 4.6'].map(choice));
+      expect(picker.nested.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+      expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+      expect(picker.trigger.clicks).toBe(1);
+      expect(picker.secondary.clicks).toBe(1);
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      expect(f.send.clicks).toBe(0);
+      expect((await f.run('discoverModels')).modelChoices).toEqual(result.modelChoices);
+      expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+    });
+
+    if (provider === 'claude') test('discovery never retries an uncertain popup dismissal or dismisses a changed parent', async () => {
+      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu']) {
+        const { f, picker } = setup();
+        const originalURL = f.document.URL, originalOwner = f.world.__computaModelOwner;
+        if (failure === 'ignored_parent') picker.menu.onDispatch = () => {};
+        picker.nested.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          if (failure === 'ignored_child') return;
+          picker.nested.values.hidden = '';
+          if (failure === 'lost_ack') throw new Error('PRIVATE ignored acknowledgement');
+          if (failure === 'owner') f.world.__computaModelOwner = 'foreign-owner';
+          if (failure === 'url') f.document.URL += '&foreign=1';
+          if (failure === 'model') picker.selected('Haiku 4.5');
+          if (failure === 'user') f.appendUser('A different user action');
+          if (failure === 'parent') {
+            picker.menu.connected = false;
+            f.body.append(new Node('DIV', { role: 'menu', id: 'model-picker-menu', 'aria-labelledby': 'model-picker-button' }));
+          }
+          if (failure === 'foreign_menu') f.body.append(new Node('DIV', { role: 'menu', id: 'unrelated' }));
+        };
+        expect((await f.run('discoverModels')).pending).toBe(true);
+        expect((await f.run('discoverModels')).pending).toBe(true);
+        const pending = f.run('discoverModels');
+        for (let phase = 0; phase < 4; phase++) {
+          for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+          f.flush();
+        }
+        expect((await pending).error).toBeTruthy();
+        const parentDismissals = failure === 'ignored_parent' ? 1 : 0;
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(parentDismissals);
+        expect(picker.trigger.clicks).toBe(1);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        expect(f.send.clicks).toBe(0);
+        // A later observation can never repeat either uncertain dismissal.
+        f.document.URL = originalURL;
+        if (failure === 'owner') f.world.__computaModelOwner = originalOwner;
+        await f.run('discoverModels');
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(parentDismissals);
+      }
+    });
+
+    if (provider === 'claude') test('discovery rejects a late parent closure even when its DOM signal wins the timer', async () => {
+      const { f, picker } = setup();
+      const now = Date.now;
+      let elapsed = 0;
+      Date.now = () => now() + elapsed;
+      try {
+        picker.nested.onDispatch = (event: any) => {
+          if (event.key === 'Escape') picker.nested.values.hidden = '';
+        };
+        picker.menu.onDispatch = (event: any) => {
+          if (event.key !== 'Escape') return;
+          queueMicrotask(() => {
+            elapsed = 1_801;
+            picker.menu.values.hidden = ''; picker.trigger.values['aria-expanded'] = 'false';
+            f.observers.at(-1).callback([]);
+          });
+        };
+        await f.run('discoverModels'); await f.run('discoverModels');
+        const result = await f.run('discoverModels');
+        expect(result.error).toBe('model_unverified');
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        await f.run('discoverModels');
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(f.send.clicks).toBe(0);
+      } finally { Date.now = now; }
+    });
+
+    if (provider === 'claude') test('discovery latches an observed context violation even if restored before continuation', async () => {
+      for (const changed of ['owner', 'url', 'model']) {
+        const { f, picker } = setup();
+        picker.nested.onDispatch = (event: any) => {
+          if (event.key === 'Escape') picker.nested.values.hidden = '';
+        };
+        picker.menu.onDispatch = (event: any) => {
+          if (event.key !== 'Escape') return;
+          queueMicrotask(() => {
+            const owner = f.world.__computaModelOwner, url = f.document.URL;
+            if (changed === 'owner') f.world.__computaModelOwner = 'foreign-owner';
+            if (changed === 'url') f.document.URL += '&changed=1';
+            if (changed === 'model') picker.selected('Haiku 4.5');
+            f.observers.at(-1).callback([]);
+            f.world.__computaModelOwner = owner; f.document.URL = url; picker.selected('Sonnet 5.5');
+            picker.menu.values.hidden = ''; picker.trigger.values['aria-expanded'] = 'false';
+          });
+        };
+        await f.run('discoverModels'); await f.run('discoverModels');
+        expect((await f.run('discoverModels')).error).toBe('model_unverified');
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        await f.run('discoverModels');
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
+        expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    if (provider === 'chatgpt') test('discovery waits for a fresh disabled closed trigger without claiming or clicking it', async () => {
+      const { f, picker } = setup();
+      picker.trigger.values['aria-disabled'] = 'true';
+      for (let read = 0; read < 3; read++) {
+        expect((await f.run('discoverModels')).pending).toBe(true);
+        expect(f.world.__computaModelDiscovery).toBeUndefined();
+        expect(picker.trigger.clicks).toBe(0);
+      }
+      delete picker.trigger.values['aria-disabled'];
+      const result = await advance(f, 'discoverModels');
+      expect(result.error).toBeUndefined();
+      expect(result.modelChoices).toEqual(['Instant', 'Medium', 'High', 'Extra High', 'GPT-6 Pro'].map(choice));
+      expect(f.composer.textContent).toBe('');
+      expect(f.composer.events).toHaveLength(0);
+    });
+
+    if (provider === 'chatgpt') test('disabled-trigger discovery waiting cannot hide ambiguity or relax selection', async () => {
+      for (const failure of ['duplicate', 'menu', 'expanded', 'selection']) {
+        const { f, picker } = setup();
+        picker.trigger.values['aria-disabled'] = 'true';
+        if (failure === 'duplicate') f.body.append(new Node('BUTTON', { 'aria-label': 'Select ChatGPT model', 'aria-disabled': 'true' }));
+        if (failure === 'menu') f.body.append(new Node('DIV', { role: 'menu' }));
+        if (failure === 'expanded') picker.trigger.values['aria-expanded'] = 'true';
+        const pending = f.run(failure === 'selection' ? 'selectModel' : 'discoverModels', { modelChoice: choice('High') });
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        f.advanceTime(1_801); f.flush();
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        f.flush();
+        const result = await pending;
+        expect(result.pending).not.toBe(true);
+        expect(result.error).toBeTruthy();
+        expect(picker.trigger.clicks).toBe(0);
+        expect(f.composer.textContent).toBe('');
+        expect(f.composer.events).toHaveLength(0);
+      }
+    });
+
+    if (provider === 'claude') test('discovery excludes credits-gated rows without excluding enabled Opus choices', async () => {
+      const { f, picker } = setup();
+      const fable = picker.add(picker.menu, 'Fable 5.1', 'For your toughest challenges');
+      fable.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('BUTTON', {}, 'Buy credits'));
+      const olderFable = picker.add(picker.nested, 'Fable 5', '');
+      olderFable.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('BUTTON', {}, 'Buy credits'));
+      const opus = picker.add(picker.menu, 'Opus 5.5', 'For complex work and everyday tasks');
+      const olderOpus = picker.add(picker.nested, 'Opus 4.6', '');
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+      expect(result.modelChoices.some((item: any) => item.label.startsWith('Fable '))).toBe(false);
+      expect([fable, olderFable, opus, olderOpus].every(row => row.clicks === 0)).toBe(true);
+      expect((await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') })).error).toBe('model_unavailable');
+      expect(fable.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('credits exclusion is exact, visible and scoped to its own model row', async () => {
+      const { f, picker } = setup();
+      picker.menu.append(new Node('BUTTON', {}, 'Buy credits'));
+      const opus = picker.add(picker.menu, 'Opus 5.5', 'This description mentions Buy credits without requiring it');
+      opus.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('SPAN', { hidden: '' }, 'Buy credits'));
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(result.modelChoices).toContainEqual(choice('Sonnet 5.5'));
+      expect(opus.clicks).toBe(0);
+    });
+
     if (provider === 'chatgpt') test('discovery resolves the newest plain family and never advertises Sol or a literal Latest', async () => {
       const { f, picker } = setup(); picker.selected('GPT-5.6 Sol');
       const sol = picker.familyOptions[1], newest = picker.familyOptions[0];
@@ -3340,7 +3529,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(JSON.stringify(result)).not.toContain('PRIVATE');
         }
       });
-      test('disabled readiness never applies to unknown generic discovery readonly or retained selections', async () => {
+      test('disabled selection readiness rejects unknown generic readonly and retained proof while discovery stays pending', async () => {
         for (const condition of ['unknown', 'generic', 'discovery', 'readonly', 'retained']) {
           const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
           if (condition === 'retained') expect((await f.run('selectModel', { modelChoice: choice('Instant') })).selected).toBe(true);
@@ -3353,7 +3542,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           const result = await f.run(condition === 'discovery' ? 'discoverModels' : condition === 'readonly' ? 'verifyModel' : 'selectModel',
             { modelChoice: choice('Instant'), ...(condition === 'readonly' ? { expectedModelChoice: choice('Instant') } : {}),
               operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
-          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          if (condition === 'discovery') {
+            expect(result.pending).toBe(true); expect(result.error).toBeUndefined();
+            expect(f.world.__computaModelDiscovery).toBeUndefined();
+          } else expect(result.error).toBeDefined();
+          expect(result.modelEvidence).toBeUndefined();
           expect(result.modelDiagnostic?.chatHeader?.readiness).toBeUndefined();
           expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
           expect(JSON.stringify(result)).not.toContain('PRIVATE');
