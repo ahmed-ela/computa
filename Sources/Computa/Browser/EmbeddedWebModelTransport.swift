@@ -1208,6 +1208,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // Retained finite metadata makes healthy and failed rounds
                     // comparable. A native claim is not backend acceptance.
                     Self.inspectionLog.error("outboundSize provider=chatgpt sequence=\(session.sequence) claimed=true outboundUTF16Count=\(outbound.utf16.count) outboundUTF8Count=\(outbound.utf8.count)")
+                } else if session.provider == .groq {
+                    // A local Send claim does not prove website acceptance.
+                    // Counts only; never log the body, marker or owner token.
+                    Self.inspectionLog.info("outboundSize provider=groq sequence=\(session.sequence) claimed=true promptUTF8Count=\(prompt.utf8.count) outboundUTF16Count=\(outbound.utf16.count) outboundUTF8Count=\(outboundBytes)")
                 }
                 if session.usesSubmissionOwnership {
                     guard let binding = session.preparedSubmission, binding.sequence == session.sequence else { throw Failure.invalidRequest }

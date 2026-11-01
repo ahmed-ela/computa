@@ -908,6 +908,10 @@ actor WebModelServer {
         if provider == "chatgpt" {
             // Finite sizes only: no prompt, account data, URLs or authority tokens.
             Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
+        } else if provider == "groq" {
+            // Measure the admitted request rather than inferring its size from
+            // retained message text. Native IDs correlate counts, not content.
+            Self.promptLog.info("promptSizes version=1 provider=groq task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(request.promptStatistics.diagnostic, privacy: .public)")
         }
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)

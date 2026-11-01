@@ -4,19 +4,21 @@
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 366 (0.8.0) is installed from `27c3f9c`. Its fresh GPT-OSS 120B marker
+Build 367 (0.8.0) is installed from `45ec979`. Its fresh GPT-OSS 120B marker
 passed submission and an initial first-user binding observation, then failed a
-later `user_count` ownership check. No completed answer was accepted; cleanup
-is unconfirmed. The exact failing count predicate remains unknown, and live
-support remains unqualified. Direct website probes below are not harness
-qualification.
+later `user_count` ownership check: the rejected read matched zero user and
+answer rows where one user was required. No completed answer was accepted;
+cleanup is unconfirmed and live support remains unqualified. A separate normal
+website test also returned an error for a longer synthetic prompt. Its request
+error remains unknown; a size limit is not established. Direct website probes
+below are not harness qualification.
 
 The observed menu contains these general chat choices:
 
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build366: count verification failed after initial binding |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build367: zero matching rows after initial binding |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -413,5 +415,46 @@ The Groq and version JavaScript suites passed 71 tests with 945 assertions.
 All 27 native Groq tests passed in 58.163 seconds, including finite-field and
 branch consistency checks; sources were unchanged during the run. Native log
 SHA-256: `9d82b50c57bd959b15a734f9d3c1828a0780012b54a72e9cacfd12b82d06645e`.
-A fresh installed diagnostic run remains pending. The build366 count mismatch
-is still unresolved.
+The installed diagnostic run below identifies the rejected branch; the cause
+of the missing matching rows remains unresolved.
+
+## Fresh installed diagnostic check — build367
+
+Case `groq-gptoss120b-marker367-b` on source `45ec979` failed in 2,553 ms
+with one inference, zero tool calls and no accepted answer. A native inspection
+at 07:48:30.960 UTC recorded one user, no pending submission or ownership check,
+zero responses and a busy page. The following rejection recorded
+`branch=expected_count`, `expectedUserCounts=[1]`, `userCount=0`, `answerCount=0`,
+both visible counts zero, `submitted=true` and `adapterFirstBound=true`.
+
+This proves the exact selector counts at the rejected read. It does not prove
+whether the website removed the nodes, changed their markup or would restore
+them. No remount retry or weaker ownership acceptance was added. Cleanup
+remained unconfirmed. The unused diagnostic arm was retired and its watcher
+exited; those actions do not confirm cleanup of the retained provider page.
+The independent review is retained under
+`evidence/groq-gptoss120b-marker367-b/independent-failure-review.json`, SHA-256
+`939751529a4054617b82e0fbaa152a134d9bfbcb63fc04415822af45a5260023`.
+
+A separate ordinary Groq tab on the same build submitted one harmless
+30,729-byte synthetic prompt to GPT OSS 120B. The website displayed
+“Something went wrong. Please, try again.” and restored the full draft. The
+earlier 5,313-byte probe succeeded, but this is not a simultaneous size control
+and no HTTP status or response error was captured. The exact request-failure
+cause must be inspected before changing submission or recovery behavior.
+
+The captured native input-message text totals 19,379 bytes; it is not the full
+outgoing prompt, which also contains schemas and framing. The next source
+diagnostic records existing prompt-component counts and actual transport byte
+counts without message content, URLs or authority tokens. It does not truncate
+the request, alter tool instructions, replay Send or claim provider acceptance.
+`finalPromptBytes` measures the prepared server prompt; the native
+`outboundUTF8Count` also includes its session marker. The four JSON component
+counts partition `compactRequestBytes`, not `presentedRequestBytes`; Groq's
+presentation remains unchanged. Server records carry native task/turn/inference
+identifiers. Transport counts have a sequence and require the existing journal,
+PID and time-window evidence for correlation; counts alone are not identity
+proof. This diagnostic has not yet been installed or exercised against Groq.
+The native build and 110 prompt-projection/response-codec tests passed with zero
+failures. Log SHA-256:
+`92d49db8f95502bced7a52d86c4fcdd228c23d81fbbae682843e76b179d8d9d6`.
