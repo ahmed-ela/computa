@@ -21,6 +21,9 @@ import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, type ActivityGroup } from './activityTimeline';
 import { formatWorkedFor } from './duration';
+import { TaskActivityIndicator } from './TaskActivityIndicator';
+import { isTaskActive, startSidebarClock } from './sidebarActivity';
+import { observeDisplayedCompletion } from './completionAcknowledgment';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
   dropQueuedPrompt,
@@ -93,6 +96,18 @@ function Sidebar({
   search: string;
   setSearch: (value: string) => void;
 }) {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  const hasActiveTasks = snapshot.tasks.some(isTaskActive);
+  useEffect(() => {
+    if (!hasActiveTasks) return;
+    return startSidebarClock(setNow, {
+      now: () => Date.now() / 1000,
+      everySecond: (tick) => {
+        const timer = window.setInterval(tick, 1_000);
+        return () => window.clearInterval(timer);
+      },
+    });
+  }, [hasActiveTasks]);
   const needle = search.trim().toLocaleLowerCase();
   const tasks = needle
     ? snapshot.tasks.filter((task) =>
@@ -151,7 +166,7 @@ function Sidebar({
               onClick={() => post({ action: 'selectTask', id: task.id })}
             >
               <span className="task-row-title">{task.title}</span>
-              <span className={`task-row-status ${toneClass(task.statusTone)} ${task.status === 'Running' ? 'is-running' : ''}`} title={task.status} aria-hidden="true" /><span className="sr-only">{task.status}</span>
+              <TaskActivityIndicator task={task} now={now} />
             </Button>
           ))
         )}
@@ -996,6 +1011,28 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
+  const currentSnapshot = useRef(snapshot);
+  currentSnapshot.current = snapshot;
+  const selectedTask = snapshot?.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
+
+  useEffect(() => observeDisplayedCompletion(() => currentSnapshot.current, {
+    visible: () => document.visibilityState === 'visible',
+    focused: () => document.hasFocus(),
+    afterRender: (callback) => {
+      const frame = window.requestAnimationFrame(callback);
+      return () => window.cancelAnimationFrame(frame);
+    },
+    onReturn: (callback) => {
+      window.addEventListener('focus', callback);
+      document.addEventListener('visibilitychange', callback);
+      return () => {
+        window.removeEventListener('focus', callback);
+        document.removeEventListener('visibilitychange', callback);
+      };
+    },
+  }, post), [snapshot?.selectedTaskID, selectedTask?.unreadCompletionID,
+    selectedTask?.hasUnreadCompletion, selectedTask?.status, selectedTask?.isBusy,
+    snapshot?.isSettingsPresented, snapshot?.isReviewPresented, snapshot?.pendingApprovalCount]);
 
   useEffect(() => {
     if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(setSnapshot);

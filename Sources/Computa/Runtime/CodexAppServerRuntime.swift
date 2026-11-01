@@ -2114,6 +2114,7 @@ private extension CodexAppServerRuntime {
                 threadForTask[taskID] = threadID
                 taskForThread[threadID] = taskID
                 contextForLoadedThread[threadID] = requestedContext
+                events.yield(.taskThreadBound(taskID: taskID, threadID: threadID))
             }
             dispatchProfile?.mark(.threadReady)
 
@@ -2564,11 +2565,15 @@ private extension CodexAppServerRuntime {
                                            failedCommandTurnID: String? = nil) {
             let generation = serverGeneration
             let turnID = turnIdentity.latestTurnID(for: taskID)
+            let threadID = threadForTask[taskID]
             let submission = latestSubmissionClaims[taskID]
             let browserCleanup = embeddedBrowserTaskCleanups[taskID].flatMap { $0.turnID == turnID ? $0.task : nil }
             let inferenceCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled, cleanupCause: cleanupCause)
             let commandCleanup = failedCommandTurnID.flatMap { scheduleTerminalCommandCleanup(taskID: taskID, turnID: $0) }
             guard browserCleanup != nil || inferenceCleanup != nil || commandCleanup != nil else {
+                if status == .completed, let threadID, let turnID {
+                    events.yield(.taskCompletionObserved(taskID: taskID, threadID: threadID, turnID: turnID))
+                }
                 events.yield(.taskStatusChanged(taskID: taskID, status: status))
                 return
             }
@@ -2579,7 +2584,11 @@ private extension CodexAppServerRuntime {
                 guard generation == serverGeneration,
                       submission == latestSubmissionClaims[taskID],
                       turnIdentity.latestTurnID(for: taskID) == turnID else { return }
-                events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty || status == .failed ? status : .waiting))
+                let settledStatus = issues.isEmpty || status == .failed ? status : .waiting
+                if settledStatus == .completed, let threadID, let turnID {
+                    events.yield(.taskCompletionObserved(taskID: taskID, threadID: threadID, turnID: turnID))
+                }
+                events.yield(.taskStatusChanged(taskID: taskID, status: settledStatus))
             }
         }
 
@@ -3136,6 +3145,7 @@ private extension CodexAppServerRuntime {
                 }
                 return AgentTask(
                     id: id,
+                    runtimeThreadID: threadID,
                     title: title,
                     summary: nonEmpty(preview) ?? "Local AI task",
                     status: status,

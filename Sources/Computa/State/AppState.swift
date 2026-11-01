@@ -2,6 +2,7 @@ import AutomationCore
 import CryptoKit
 import Foundation
 import Observation
+import OSLog
 
 private struct ActiveTurnTiming {
     let userEntryID: TimelineEntry.ID
@@ -18,6 +19,11 @@ final class AppState {
     @ObservationIgnored private var taskSelectionRevision: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let unreadCompletionStore: ChatUnreadCompletionStore?
+    @ObservationIgnored private var unreadCompletionStoreLoaded = true
+    private var unreadCompletions: [String: ChatUnreadCompletionStore.Record] = [:]
+    private(set) var unreadCompletionPersistenceFailed = false
+    private static let unreadLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ChatReadState")
     @ObservationIgnored private let cookieMaintenanceOnlyLaunch: Bool
     @ObservationIgnored private let cookieMaintenanceRunner: @MainActor (EmbeddedBrowserSession) async -> Void
     @ObservationIgnored private var embeddedModelTransport: EmbeddedWebModelTransport?
@@ -135,6 +141,7 @@ final class AppState {
         runtime: (any AgentRuntimeClient)? = nil,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
         preferences: UserDefaults = .standard,
+        unreadCompletionStore: ChatUnreadCompletionStore? = nil,
         browserSession: EmbeddedBrowserSession? = nil,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         cookieMaintenanceOnlyLaunch: Bool? = nil,
@@ -145,6 +152,13 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.unreadCompletionStore = unreadCompletionStore
+        do { unreadCompletions = try unreadCompletionStore?.load() ?? [:] }
+        catch {
+            unreadCompletionStoreLoaded = false
+            unreadCompletionPersistenceFailed = true
+            Self.unreadLog.error("chatReadState operation=load result=failed")
+        }
         let maintenanceHome = URL(fileURLWithPath: CodexAppServerRuntime.Configuration.localQwen.codexHomePath, isDirectory: true)
         self.cookieMaintenanceOnlyLaunch = cookieMaintenanceOnlyLaunch
             ?? ChatGPTCookieMaintenanceDiagnostic.hasArm(codexHome: maintenanceHome)
@@ -578,6 +592,7 @@ final class AppState {
     func selectTask(_ id: AgentTask.ID?) {
         taskSelectionRevision &+= 1
         selectedTaskID = id
+        if let id { markTaskCompletionRead(taskID: id) }
         requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
         updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
@@ -585,6 +600,62 @@ final class AppState {
         reviewRefresh?.cancel()
         review = nil
         if isReviewPresented, let id { requestReviewRefresh(taskID: id) }
+    }
+
+    func unreadCompletionID(for taskID: AgentTask.ID) -> String? {
+        guard let task = tasks.first(where: { $0.id == taskID }),
+              let threadID = ChatUnreadCompletionStore.identity(task.runtimeThreadID),
+              let record = unreadCompletions[threadID], record.hasUnreadCompletion else { return nil }
+        return record.completionID
+    }
+
+    func hasUnreadCompletion(for taskID: AgentTask.ID) -> Bool {
+        unreadCompletionID(for: taskID) != nil
+    }
+
+    /// The bridge additionally proves native window visibility/focus. Exact
+    /// completion identity prevents an old rendered snapshot reading a new turn.
+    @discardableResult
+    func acknowledgeTaskCompletion(taskID: AgentTask.ID, completionID: String) -> Bool {
+        guard selectedTaskID == taskID, !isBusy(taskID: taskID),
+              tasks.first(where: { $0.id == taskID })?.status == .completed,
+              unreadCompletionID(for: taskID) == completionID else { return false }
+        return markTaskCompletionRead(taskID: taskID)
+    }
+
+    @discardableResult
+    private func markTaskCompletionRead(taskID: AgentTask.ID) -> Bool {
+        guard let task = tasks.first(where: { $0.id == taskID }),
+              let threadID = ChatUnreadCompletionStore.identity(task.runtimeThreadID),
+              var record = unreadCompletions[threadID], record.hasUnreadCompletion else { return false }
+        record.hasUnreadCompletion = false
+        var next = unreadCompletions; next[threadID] = record
+        // A failed write cannot pretend that a durable unread marker was read.
+        guard persistUnreadCompletions(next) else { return false }
+        unreadCompletions = next
+        return true
+    }
+
+    private func persistUnreadCompletions(_ records: [String: ChatUnreadCompletionStore.Record]) -> Bool {
+        do {
+            guard unreadCompletionStoreLoaded else { throw ChatUnreadCompletionStore.Failure.invalid }
+            try unreadCompletionStore?.save(records)
+            unreadCompletionPersistenceFailed = false
+            return true
+        } catch {
+            unreadCompletionPersistenceFailed = true
+            Self.unreadLog.error("chatReadState operation=save result=failed")
+            return false
+        }
+    }
+
+    private func bindTaskThread(taskID: AgentTask.ID, threadID: String) -> Bool {
+        guard let stable = ChatUnreadCompletionStore.identity(threadID),
+              let index = tasks.firstIndex(where: { $0.id == taskID }),
+              tasks[index].runtimeThreadID == nil
+                || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
+        tasks[index].runtimeThreadID = stable
+        return true
     }
 
     /// Remember the native user's choice across launches. Missing or invalid
@@ -1377,7 +1448,14 @@ final class AppState {
             $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
         }
         discardAllMessageDrafts(except: retainedTaskIDs)
-        tasks = newTasks
+        let priorThreads = Dictionary(uniqueKeysWithValues: tasks.compactMap { task in
+            task.runtimeThreadID.map { (task.id, $0) }
+        })
+        tasks = newTasks.map { task in
+            var restored = task
+            if restored.runtimeThreadID == nil { restored.runtimeThreadID = priorThreads[task.id] }
+            return restored
+        }
         selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
             : newTasks.first?.id
@@ -1420,11 +1498,28 @@ final class AppState {
         case .tasksSnapshot(let snapshot):
             replaceTasks(with: snapshot)
 
+        case .taskThreadBound(let taskID, let threadID):
+            _ = bindTaskThread(taskID: taskID, threadID: threadID)
+
+        case .taskCompletionObserved(let taskID, let threadID, let turnID):
+            guard let stable = ChatUnreadCompletionStore.identity(threadID),
+                  let completionID = ChatUnreadCompletionStore.identity(turnID),
+                  bindTaskThread(taskID: taskID, threadID: stable),
+                  unreadCompletions[stable]?.completionID != completionID else { return }
+            var next = unreadCompletions
+            next[stable] = .init(completionID: completionID, hasUnreadCompletion: true)
+            // Completion must still be visible if local persistence fails. Do
+            // not change task status, discard the old file, or block completion.
+            _ = persistUnreadCompletions(next)
+            unreadCompletions = next
+
         case .taskUpserted(let task):
             discardAssistantDrafts(taskID: task.id)
             discardReasoningDrafts(taskID: task.id)
             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                tasks[index] = task
+                var replacement = task
+                if replacement.runtimeThreadID == nil { replacement.runtimeThreadID = tasks[index].runtimeThreadID }
+                tasks[index] = replacement
             } else {
                 tasks.insert(task, at: 0)
             }
@@ -1582,6 +1677,7 @@ final class AppState {
             discardReasoningDrafts(taskID: taskID)
 
         case .taskStatusChanged(let taskID, let status):
+            if status == .running { markTaskCompletionRead(taskID: taskID) }
             if status == .running,
                case .failed? = compactionStateByTask[taskID] {
                 compactionStateByTask.removeValue(forKey: taskID)

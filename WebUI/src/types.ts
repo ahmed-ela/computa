@@ -124,6 +124,8 @@ export interface TaskSnapshot {
   queuePaused: boolean;
   canSteer: boolean;
   isBusy: boolean;
+  hasUnreadCompletion: boolean;
+  unreadCompletionID?: string;
   websiteSessionCleanupAvailable?: boolean;
   websiteSessionCleanupInProgress?: boolean;
   websiteSessionCleanupOutcome?: 'closed' | 'no_owned_session' | 'unconfirmed';
@@ -165,6 +167,7 @@ export interface AppSnapshot {
 export type NativeAction =
   | { action: 'ready' }
   | { action: 'selectTask'; id: string }
+  | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
   | { action: 'chooseTaskWorkspace'; taskID: string }

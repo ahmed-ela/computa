@@ -29,7 +29,7 @@ function previewReview(taskID: string, scope: ReviewScope = 'lastTurn', referenc
   };
 }
 
-function makePreviewSnapshot(): AppSnapshot {
+export function makePreviewSnapshot(): AppSnapshot {
 const now = Math.floor(Date.now() / 1000);
 
 const longOutput = Array.from({ length: 48 }, (_, index) => {
@@ -42,8 +42,9 @@ const previewTasks: TaskSnapshot[] = [
     id: 'preview-response-formatting', title: 'Response formatting checks',
     summary: 'Synthetic paragraphs, lists, code, tables, and inert HTML.',
     status: 'Completed', statusTone: 'green', updatedAt: now - 100,
+    unreadCompletionID: 'preview-completion-formatting',
     workspace: previewWorkspace, model: modelCerebras, modelSelectable: true,
-    queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false,
+    queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: true,
     entries: [{
       id: 'preview-formatted-answer', kind: 'assistant', title: 'Computa', timestamp: now - 100,
       workedForSeconds: 65,
@@ -77,7 +78,7 @@ const previewTasks: TaskSnapshot[] = [
     queuedPrompts: [],
     queuePaused: false,
     canSteer: false,
-    isBusy: false,
+    isBusy: false, hasUnreadCompletion: false,
     branch: 'design/dashboard-pass',
     entries: [
       {
@@ -124,7 +125,7 @@ const previewTasks: TaskSnapshot[] = [
     queuedPrompts: [],
     queuePaused: false,
     canSteer: false,
-    isBusy: false,
+    isBusy: false, hasUnreadCompletion: false,
     entries: [],
   },
   {
@@ -144,7 +145,7 @@ const previewTasks: TaskSnapshot[] = [
     ],
     queuePaused: false,
     canSteer: true,
-    isBusy: true,
+    isBusy: true, hasUnreadCompletion: false,
     entries: [
       {
         id: 'preview-running-user', kind: 'user', title: 'You',
@@ -185,7 +186,7 @@ const previewTasks: TaskSnapshot[] = [
     }],
     queuePaused: true,
     canSteer: false,
-    isBusy: false,
+    isBusy: false, hasUnreadCompletion: false,
     entries: [
       {
         id: 'preview-failure-user', kind: 'user', title: 'You',
@@ -212,7 +213,7 @@ const previewTasks: TaskSnapshot[] = [
     queuedPrompts: [],
     queuePaused: false,
     canSteer: false,
-    isBusy: false,
+    isBusy: false, hasUnreadCompletion: false,
     entries: [
       {
         id: 'preview-long-user', kind: 'user', title: 'You',
@@ -238,6 +239,14 @@ const previewTasks: TaskSnapshot[] = [
     ],
   },
 ];
+
+const running = previewTasks.find((task) => task.id === 'preview-running')!;
+previewTasks.push(
+  { ...running, id: 'preview-running-seconds', title: 'Starting a short check', activeTurnStartedAt: now - 8,
+    updatedAt: now - 8, entries: [], queuedPrompts: [] },
+  { ...running, id: 'preview-running-hours', title: 'Long-running analysis', activeTurnStartedAt: now - 7_380,
+    updatedAt: now - 10, entries: [], queuedPrompts: [] },
+);
 
 return {
   revision: 1,
@@ -310,9 +319,22 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         publish({
           ...snapshot,
           selectedTaskID: task.id,
+          tasks: snapshot.tasks.map((candidate) => candidate.id === task.id ? {
+            ...candidate, hasUnreadCompletion: false, unreadCompletionID: undefined,
+          } : candidate),
           selectedEntryID: task.entries.at(-1)?.id,
           review: previewReview(task.id, snapshot.review?.scope, snapshot.review?.reference, snapshot.revision + 1),
         });
+        return;
+      }
+
+      case 'acknowledgeTaskCompletion': {
+        if (snapshot.selectedTaskID !== action.taskID || snapshot.isSettingsPresented
+          || snapshot.isReviewPresented || snapshot.pendingApprovalCount > 0) return;
+        const task = selectedTask();
+        if (!task || task.status !== 'Completed' || task.isBusy || !task.hasUnreadCompletion
+          || task.unreadCompletionID !== action.completionID) return;
+        updateTask(task.id, (candidate) => ({ ...candidate, hasUnreadCompletion: false, unreadCompletionID: undefined }));
         return;
       }
 
@@ -328,7 +350,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           summary: 'Draft task in the browser preview.', status: 'Draft', statusTone: 'neutral',
           updatedAt: Math.floor(Date.now() / 1000), workspace: previewWorkspace,
           model: snapshot.defaultModel, modelSelectable: true, entries: [],
-          queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false,
+          queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
         publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined });
         return;
@@ -391,6 +413,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
             title: candidate.entries.length === 0 ? prompt.slice(0, 64) : candidate.title,
             summary: prompt,
             status: 'Completed', statusTone: 'green', updatedAt: timestamp,
+            hasUnreadCompletion: true, unreadCompletionID: assistantEntry.id,
             entries: [...candidate.entries, userEntry, assistantEntry],
           } : candidate),
         });
@@ -503,7 +526,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           tasks: snapshot.tasks.map((candidate) => candidate.id === task.id ? {
             ...candidate, status: 'Waiting', statusTone: 'orange', modelSelectable: true,
             updatedAt: timestamp, entries: [...candidate.entries, entry],
-            queuePaused: true, canSteer: false, isBusy: false,
+            queuePaused: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
           } : candidate),
         });
         return;

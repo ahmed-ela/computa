@@ -83,6 +83,8 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .task-row-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-row.selected .task-row-title { font-weight: 500; }
 .task-row-status { flex: 0 0 5px; }
+.task-row-unread { color: var(--blue); width: 6px; height: 6px; flex-basis: 6px; }
+.task-row-elapsed { flex: 0 0 auto; color: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
 .sidebar-footer { padding: 12px 14px; border-top: 1px solid var(--border); }
@@ -190,7 +192,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .working-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
 .working-dots i:nth-child(2) { animation-delay: .16s; }
 .working-dots i:nth-child(3) { animation-delay: .32s; }
-.is-running { animation: pulse 1.8s ease-in-out infinite; }
 
 .is-empty .conversation-content { display: flex; align-items: center; justify-content: center; }
 .empty-conversation, .no-task-view { display: flex; width: 100%; align-items: center; justify-content: center; flex-direction: column; padding: 20px 0 36px; text-align: center; }
