@@ -270,6 +270,45 @@ This gives a concrete instruction-design hypothesis for a later controlled
 comparison, not a successful workflow or permission to reinterpret the refusal
 as an executable tool call.
 
+## Rejected-reply evidence gaps and prepared framing comparison, November 1
+
+Source inspection found two additional parser failures whose exact replies were
+not retained by the opt-in rejection recorder: invalid built-in-browser read
+arguments and whitespace-only replies. A literal empty response failed earlier
+as `providerFailed` and also bypassed capture. The diagnostic change routes these
+three existing failure paths through the same private, exact-task recorder after
+the existing response identity checks. It preserves the original errors, parser
+acceptance, correction rules, output release and cleanup. Unarmed tasks retain no
+raw reply, and an existing evidence file is never overwritten. This does not
+identify the cause of the historical build368 failure or repair a model refusal.
+
+The focused rejection-capture and Claude format-correction run passed all 42
+tests. The new fixtures cover both response modes, atomic rejection of a batch
+containing an otherwise valid first call, absent/foreign/unsafe diagnostic arms,
+an unconfigured recorder and an existing output file. Valid prose/JSON refusals
+and an empty JSON message remain accepted without capture or correction.
+Missing/non-string text and failed identity/model proofs retain their original
+errors and leave the diagnostic arm untouched. This source change is not in the
+already-signed candidate376 or the running build374.
+
+The separate `prompt-framing-ab376-a` experiment has two prepared prompts from
+the current native codec. Only two outer explanatory paragraphs differ; the
+canonical request, user task, native policies, schemas and refusal grammar are
+identical. The terminal schema is explicitly synthetic. A pure native export
+test passed, and an independent review checked 13 invariants. This design can
+test first-action wording sensitivity, not full workflow reliability.
+
+Neither prompt has been sent. In the ordinary build374 Incognito tab, the
+desktop AX setter reported success for the 43,725-byte original but readback
+and a screenshot showed only 3,196 bytes. A bounded shorter insertion verified
+2,000 characters plus the editor's trailing newline; selected-text insertion
+did not append, and a 4,000-character replacement again stopped at 3,196 bytes.
+The incomplete draft was cleared and its empty readback verified. The cause of
+this manual diagnostic-input limitation remains unknown; it is not evidence
+that Computa's separate production prompt-insertion path truncates requests.
+The empty test tab was closed. The full comparison requires verified complete
+insertion before either Send.
+
 ## Installed build368 results, November 1
 
 These fresh cases ran on source `2dea3d291cc414f76c1f0687b2e141cdafa5b4f1`,

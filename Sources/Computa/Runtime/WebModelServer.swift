@@ -1356,7 +1356,12 @@ actor WebModelServer {
                             }
                             submissionModelVerificationPending = false
                         }
-                        guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
+                        guard let text = value["text"] as? String else { throw Failure.providerFailed }
+                        guard !text.isEmpty else {
+                            captureRejectedReply(text, diagnostic: .emptyReply, taskID: taskID,
+                                inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            throw Failure.providerFailed
+                        }
                         let reply: WebModelResponseCodec.Reply
                         responseProfile?.mark(.codecStart)
                         do {
@@ -1383,6 +1388,12 @@ actor WebModelServer {
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             } else if case .customInputMustBeString = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .invalidCustomCallShape, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .invalidBrowserReadArguments = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .invalidBrowserReadArguments, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .emptyReply = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .emptyReply, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             }
                             throw error
@@ -1708,6 +1719,8 @@ actor WebModelServer {
         // diagnostic must not infer which predicate failed without the reply.
         case invalidFunctionCallShape
         case invalidCustomCallShape
+        case invalidBrowserReadArguments
+        case emptyReply
     }
 
     private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
@@ -1732,6 +1745,10 @@ actor WebModelServer {
             diagnosticFields = ["reason": "invalid_function_call_shape", "utf8Bytes": text.utf8.count]
         case .invalidCustomCallShape:
             diagnosticFields = ["reason": "invalid_custom_call_shape", "utf8Bytes": text.utf8.count]
+        case .invalidBrowserReadArguments:
+            diagnosticFields = ["reason": "invalid_browser_read_arguments", "utf8Bytes": text.utf8.count]
+        case .emptyReply:
+            diagnosticFields = ["reason": "empty_reply", "utf8Bytes": text.utf8.count]
         }
         var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
                                     "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),
