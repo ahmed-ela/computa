@@ -156,7 +156,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     });
 
     if (provider === 'claude') test('discovery never retries an uncertain popup dismissal or dismisses a changed parent', async () => {
-      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu']) {
+      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu', 'foreign_dialog']) {
         const { f, picker } = setup();
         const originalURL = f.document.URL, originalOwner = f.world.__computaModelOwner;
         if (failure === 'ignored_parent') picker.menu.onDispatch = () => {};
@@ -174,6 +174,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             f.body.append(new Node('DIV', { role: 'menu', id: 'model-picker-menu', 'aria-labelledby': 'model-picker-button' }));
           }
           if (failure === 'foreign_menu') f.body.append(new Node('DIV', { role: 'menu', id: 'unrelated' }));
+          if (failure === 'foreign_dialog') f.body.append(new Node('DIV', { role: 'dialog' }));
         };
         expect((await f.run('discoverModels')).pending).toBe(true);
         expect((await f.run('discoverModels')).pending).toBe(true);
@@ -290,6 +291,267 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(f.composer.events).toHaveLength(0);
       }
     });
+
+    if (provider === 'claude') {
+      const choice = (label: string) => ({ key: label, label });
+      const setup = () => {
+        const f = make();
+        const picker = installObservedModelPicker(f, 'claude', Node);
+        const fable = picker.add(picker.menu, 'Fable 5.1', '');
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        const oldOpus = picker.add(picker.nested, 'Opus 4.6', '');
+        return { f, picker, fable, opus, oldOpus };
+      };
+      const advance = async (f: any) => {
+        for (let index = 0; index < 6; index++) {
+          const result = await f.run('discoverModels');
+          if (!result.pending) return result;
+        }
+        throw new Error('Synthetic discovery exceeded six reads');
+      };
+      const noActions = (x: ReturnType<typeof setup>) => {
+        expect(x.picker.options.every((row: any) => row.clicks === 0)).toBe(true);
+        expect(x.f.composer.textContent).toBe('');
+        expect(x.f.send.clicks).toBe(0);
+      };
+      const distinctClose = (x: ReturnType<typeof setup>, afterChild: () => void = () => {}) => {
+        const events: string[] = [], parentClose = x.picker.menu.onDispatch!;
+        x.picker.nested!.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('child');
+          x.picker.nested!.values.hidden = '';
+          afterChild();
+        };
+        x.picker.menu.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('parent'); parentClose(event);
+        };
+        return events;
+      };
+
+      describe('Claude current discovery eligibility', () => {
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed']) {
+          test(`revalidation removes a primary choice that becomes ${drift} while More models opens`, async () => {
+            const x = setup();
+            const openNested = x.picker.secondary!.onClick!;
+            x.picker.secondary!.onClick = () => {
+              // This callback occurs after the primary choices were accumulated,
+              // before the next ordinary discovery read sees both associated menus.
+              openNested();
+              if (drift === 'purchase_label' || drift === 'purchase_role')
+                x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') {
+                x.fable.values.role = 'menuitem';
+                delete x.fable.values['aria-checked'];
+              }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed') x.fable.connected = false;
+            };
+            const result = await advance(x.f);
+            expect(result.error).toBeUndefined();
+            expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+            expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+            noActions(x);
+            expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+          });
+        }
+
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed', 'replacement']) {
+          test(`eligibility ${drift} during child dismissal fails without parent Escape or catalog publication`, async () => {
+            const x = setup();
+            const events = distinctClose(x, () => {
+              if (drift === 'purchase_label' || drift === 'purchase_role') x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') { x.fable.values.role = 'menuitem'; delete x.fable.values['aria-checked']; }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed' || drift === 'replacement') x.fable.connected = false;
+              if (drift === 'replacement') x.picker.add(x.picker.menu, 'Fable 5.1', '');
+            });
+            const result = await advance(x.f);
+            expect(result.error).toBe('model_unverified'); expect(result.modelChoices).toBeUndefined();
+            expect(events).toEqual(['child']);
+            await x.f.run('discoverModels');
+            expect(events).toEqual(['child']);
+            expect(x.picker.trigger.clicks).toBe(1); expect(x.picker.secondary!.clicks).toBe(1); noActions(x);
+          });
+        }
+
+        test('new hidden or inert purchase labels do not change ordinary eligibility during close', async () => {
+          const x = setup();
+          const events = distinctClose(x, () => {
+            for (const values of [{ 'aria-hidden': 'true' }, { inert: '' }]) {
+              const wrapper = new Node('SECTION'); wrapper.append(new Node('P', values, 'Buy credits')); x.opus.append(wrapper);
+            }
+          });
+          const result = await advance(x.f);
+          expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+          expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+          expect(events).toEqual(['child', 'parent']); noActions(x);
+        });
+      });
+    }
+
+    if (provider === 'claude') {
+      const expectedModelChoice = { key: 'Opus 5', label: 'Opus 5' };
+      const prompt = 'Offline synthetic display marker\n\n' + markerLine;
+      async function submitted() {
+        const { f, picker } = setup();
+        picker.add(picker.nested, 'Opus 5');
+        let selection: any;
+        for (let index = 0; index < 5; index++) {
+          selection = await f.run('selectModel', { modelChoice: expectedModelChoice });
+          if (selection.selected) break;
+        }
+        expect(selection.selected).toBe(true);
+        expect((await f.run('insert', { expectedModelChoice, prompt })).inserted).toBe(true);
+        expect((await f.run('submit', { expectedModelChoice, prompt })).submitted).toBe(true);
+        f.messages.append(f.article);
+        const before = await f.run('inspect', { expectedModelChoice });
+        expect(before.firstUserVerified).toBe(true);
+        expect(before.modelEvidence.selected).toEqual(expectedModelChoice);
+        expect(f.send.clicks).toBe(1);
+        return { f, picker, before, triggerClicks: picker.trigger.clicks, waits: f.delays.length };
+      }
+
+      describe('Claude post-submission header diagnostics', () => {
+        for (const variant of ['detached', 'display_none', 'visibility_hidden', 'aria_label_removed', 'new_label_prefix', 'nonbutton_layout', 'scan_cap']) {
+          test(`${variant} yields the same zero-trigger diagnostic without waiting or replay`, async () => {
+            const x = await submitted();
+            if (variant === 'detached') x.picker.trigger.connected = false;
+            if (variant === 'display_none') x.picker.trigger.values.hidden = '';
+            if (variant === 'visibility_hidden') x.picker.trigger.values.visibility = 'hidden';
+            if (variant === 'aria_label_removed') delete x.picker.trigger.values['aria-label'];
+            if (variant === 'new_label_prefix') x.picker.trigger.values['aria-label'] = 'Selected model Opus 5';
+            if (variant === 'nonbutton_layout') x.picker.trigger.tagName = 'DIV';
+            if (variant === 'scan_cap') {
+              const noise = new Node('DIV');
+              for (let i = 0; i < 256; i++) noise.append(new Node('BUTTON', { 'aria-label': 'Synthetic unrelated control' }));
+              noise.parentElement = x.f.body; x.f.body.children.unshift(noise);
+            }
+            const result = await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic).toMatchObject({ trigger: null, triggerCount: 0, triggerCandidates: [],
+              readStage: 'initial_observation', readContext: { scope: 'action_precheck', action: 'inspect' },
+              readAttempt: { observedProof: false, primaryOpened: false, secondaryOpened: false, closeAttempted: false } });
+            expect(result.modelEvidence).toBeUndefined();
+            const facts = result.modelDiagnostic.lastModelTrigger;
+            expect(facts.scope).toBe('same_context');
+            expect(facts.connected).toBe(variant !== 'detached');
+            expect(facts.physical).toBe(!['detached', 'display_none', 'visibility_hidden'].includes(variant));
+            expect(facts.labelKind).toBe(variant === 'aria_label_removed' ? 'missing' : variant === 'new_label_prefix' ? 'other' : 'recognized');
+            expect(facts.nodeKind).toBe(variant === 'nonbutton_layout' ? 'other' : 'button');
+            expect(facts.inTriggerScan).toBe(!['aria_label_removed', 'nonbutton_layout', 'scan_cap'].includes(variant));
+            expect(facts.triggerScanAtLimit).toBe(variant === 'scan_cap');
+            expect(JSON.stringify(facts).length).toBeLessThan(400);
+            expect(result.text).toBeUndefined();
+            expect(x.f.delays.length).toBe(x.waits);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        for (const variant of ['disabled', 'inert', 'unknown_effort_suffix']) {
+          test(`${variant} alone differs from the retained zero-candidate observation`, async () => {
+            const x = await submitted();
+            if (variant === 'disabled') x.picker.trigger.disabled = true;
+            if (variant === 'inert') x.picker.trigger.values.inert = '';
+            if (variant === 'unknown_effort_suffix') x.picker.trigger.values['aria-label'] = 'Model: Opus 5 Unobserved';
+            const result = await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic.triggerCandidates.length).toBe(1);
+            expect(result.modelDiagnostic.triggerCount).toBe(variant === 'unknown_effort_suffix' ? 0 : 1);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        test('a synthetic transient is terminal on that read; later exact proof is independently recomputed', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          const missing = await x.f.run('inspect', { expectedModelChoice });
+          expect(missing.error).toBe('model_unverified');
+          expect(missing.modelEvidence).toBeUndefined();
+          expect(x.f.delays.length).toBe(x.waits);
+          // Offline later read only, not an authorized app/provider retry.
+          x.picker.trigger.connected = true;
+          const restored = await x.f.run('inspect', { expectedModelChoice });
+          expect(restored.error).toBeUndefined(); expect(restored.firstUserVerified).toBe(true);
+          expect(restored.firstUserFingerprint).toBe(x.before.firstUserFingerprint);
+          expect(restored.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('restoration with a different model cannot use the cached selection', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          expect((await x.f.run('inspect', { expectedModelChoice })).error).toBe('model_unverified');
+          x.picker.trigger.connected = true; x.picker.selected('Sonnet 5');
+          const mismatch = await x.f.run('inspect', { expectedModelChoice });
+          expect(mismatch.error).toBe('model_mismatch'); expect(mismatch.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+      });
+
+      const shared = "const input = { provider: 'claude' };\n" + readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const diagnose = new Function('globalThis', 'document', 'state', shared + '\nreturn websiteClaudeModelTriggerDiagnostic(state);');
+      const remember = new Function('globalThis', 'document', 'provider', 'trigger', 'owner', 'url', shared + '\nwebsiteClaudeRememberModelTrigger(provider, trigger, owner, url);');
+      const privateOwner = 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30';
+      function rawFixture() {
+        const node = new Node('BUTTON', {'aria-label':'Model: Opus 5 High'});
+        const document = {URL:'https://claude.ai/new?incognito'};
+        const world:any = {__computaModelOwner:privateOwner};
+        const state = {physical:() => true, visible:() => true, outside:() => true, triggerScan:[node]};
+        return {node, document, world, state};
+      }
+      describe('finite diagnostic projection and noninterference', () => {
+        test('no recorded current proof preserves unknown rather than false/zero', () => {
+          const x = rawFixture(), output = diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('missing');
+          expect(Object.values(output).filter(v => v === null).length).toBe(8);
+        });
+        for (const drift of ['owner','document','URL']) test(`${drift} does not disclose or borrow another context's node`, () => {
+          const x = rawFixture(); remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          if(drift==='owner') x.world.__computaModelOwner='foreign-owner';
+          if(drift==='document') x.world.__computaClaudeLastModelTrigger.document={URL:x.document.URL};
+          if(drift==='URL') x.document.URL+='&changed';
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('different_context'); expect(output.connected).toBeNull(); expect(output.labelKind).toBeNull();
+        });
+        test('hostile values never serialize raw labels, roles, IDs, content or oversized strings', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.tagName='PRIVATE_TAG';x.node.values.role='PRIVATE_ROLE';x.node.values.id='PRIVATE_ID';x.node.text='PRIVATE_BODY';
+          for(const label of ['PRIVATE_SECRET', 'x'.repeat(100000), 'Model: PRIVATE_SECRET', 'Select ChatGPT model']) {
+            x.node.values['aria-label']=label;
+            const output=diagnose(x.world,x.document,x.state), serialized=JSON.stringify(output);
+            expect(Object.keys(output).sort()).toEqual(['kind','scope','connected','physical','visible','nodeKind','labelKind','authored','inTriggerScan','triggerScanAtLimit'].sort());
+            expect(serialized).not.toContain('PRIVATE');expect(serialized.length).toBeLessThan(400);
+            expect(['other','known_prefix_unrecognized']).toContain(output.labelKind);expect(output.nodeKind).toBe('other');
+          }
+        });
+        test('diagnostic collection exceptions remain finite unknowns', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.getAttribute=() => {throw new Error('PRIVATE_ERROR');};
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('unavailable');expect(output.connected).toBeNull();expect(JSON.stringify(output)).not.toContain('PRIVATE');
+        });
+        test('record write exceptions cannot alter successful inspection or add actions', async () => {
+          const x=await submitted();
+          Object.defineProperty(x.f.world,'__computaClaudeLastModelTrigger',{configurable:true,get:()=>undefined,set:()=>{throw new Error('PRIVATE_ERROR');}});
+          const result=await x.f.run('inspect',{expectedModelChoice});
+          expect(result.error).toBeUndefined();expect(result.firstUserVerified).toBe(true);expect(result.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('forged diagnostic state cannot promote missing model evidence or emit a response', async () => {
+          const x=await submitted();
+          x.f.world.__computaClaudeLastModelTrigger={owner:privateOwner,document:x.f.document,url:x.f.document.URL,node:x.picker.trigger};
+          x.picker.trigger.connected=false;
+          const result=await x.f.run('inspect',{expectedModelChoice});
+          expect(result.error).toBe('model_unverified');expect(result.modelEvidence).toBeUndefined();expect(result.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('other providers cannot acquire a Claude diagnostic reference', () => {
+          for (const other of ['chatgpt', 'gemini']) {
+            const x = rawFixture();
+            remember(x.world, x.document, other, x.node, privateOwner, x.document.URL);
+            expect(x.world.__computaClaudeLastModelTrigger).toBeUndefined();
+          }
+        });
+      });
+    }
 
     if (provider === 'claude') test('discovery excludes credits-gated rows without excluding enabled Opus choices', async () => {
       const { f, picker } = setup();
@@ -4762,6 +5024,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const serialized = JSON.stringify(result.modelDiagnostic);
       expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('Computa session marker');
       expect(serialized.length).toBeLessThanOrEqual(8192);
+      if (provider !== 'claude') expect(result.modelDiagnostic.lastModelTrigger).toBeUndefined();
     });
   });
 }

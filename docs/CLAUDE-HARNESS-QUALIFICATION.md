@@ -8,18 +8,86 @@ read-only inspection sent no prompt and changed no model; enabled picker control
 are availability observations, not successful inference or workflow evidence.
 The newly visible Opus choices still require independent qualification.
 
-As of November 1, build362 is installed and published as `v0.8.0-alpha.362`.
-PR #18 was squash-merged at `b595d10`; its tree exactly matches the actual build
-source `d9eae0a`. The signed bundle and frozen build inputs were revalidated
+As of November 1, build363 is installed and published as `v0.8.0-alpha.363`.
+PR #19 was squash-merged at `0c182d7`; its tree exactly matches the actual build
+source `e2a0fe4`. The signed bundle and frozen build inputs were revalidated
 before publication. The package is not notarized. Full Claude qualification
 remains open in issue #15; release publication does not establish model reliability.
 
 Current bounded evidence includes a successful Sonnet 5.5 workflow on build353
-and a successful Haiku 5.5 workflow on build361. Build362's Sonnet 5 marker
-received a valid refusal. Its Sonnet 4.6 marker passed, but the subsequent
-workflow failed on response formatting after code tests and browser submission
-had succeeded. Newly discovered Opus choices remain unqualified. These results
+and a successful Haiku 5.5 workflow on build361. Opus 5.5 completed one full
+workflow on build363. Build362's Sonnet 5 marker received a valid refusal.
+Sonnet 4.6 has passed markers but continues to fail full workflows on response
+formatting. Opus 5 lost verified model-header visibility after submission in
+its owned session; the remaining Opus choices still need workflows. These results
 are independent cases, not an all-model pass or a measured reliability rate.
+
+## Build363: live failures and candidate364
+
+Opus 5.5's marker passed in 6.048 seconds and its safe full workflow passed in
+73.365 seconds. Independent checks joined nine verified, closed website
+inferences and ten tool calls to the function-only edit, six protected tests,
+one accepted loopback submission, the unpredictable receipt in browser output
+and the final answer, and a model-issued close. This is one bounded pass.
+
+Sonnet 4.6's `sonnet46-workflow363-x` case passed its code tests but failed after
+six tool calls and eight inferences. Its first single-block response with outside
+narration used the existing one-correction allowance; a later malformed response
+ended the task before form submission or a final answer. All eight website
+sessions have saved closed cleanup receipts. A fresh `sonnet46-workflow363-y`
+diagnostic case instead failed its first inference in 9.593 seconds, before the
+post-browser-open recorder could arm. No tools executed. Its finite structure
+reported one invalid JSON code block, but did not retain the raw reply.
+
+The distinct `sonnet46-workflow363-z` case captured that first-response timing
+with an exact-task recorder. It failed in 9.899 seconds with zero tools executed.
+The 1,130-byte code body contains three proposed `exec_command` calls and extra
+closing braces after the first two objects. The 1,139-byte rendered response
+includes only the observed code-block chrome around it. The whole reply remains
+invalid JSON; neither code extraction nor a tool dispatch occurred. Exact model,
+submission, session identity and saved closed cleanup records agree. The raw
+capture's SHA-256 is
+`49ac6ff37f70c36febaa306e007fab62d0c4df5bbfd258a4626f4e5f0be6c183`.
+Both failed fixture servers and their one-shot diagnostic slots were retired.
+
+Candidate364 admits this narrowly isolated malformed JSON-block case to the
+existing one-attempt format correction. Structural evidence must identify one
+bounded JSON code block with only recognized provider chrome and no outside
+prose. It does not repair the JSON, execute a recovered prefix, or increase the
+correction allowance. The fresh same-model response must independently pass
+strict parsing, submission/ownership verification and saved cleanup within the
+original turn budget. Missing or contradictory evidence remains terminal.
+
+The candidate also replaces provisional catalog accumulation with the final
+complete owned-picker snapshot and rechecks eligibility while closing menus.
+Removed, disabled or newly purchase-gated rows cannot survive from an earlier
+read. Exact menu/control identity and context guards still apply. This addresses
+a reproduced catalog defect; live Fable 5.1 retirement still needs verification.
+
+Opus 5's owned-session failure occurred about one second after its verified
+submission: no recognized model trigger or candidate remained in the read.
+A separate normal-browser Incognito marker on build363 completed with the exact
+`Model: Opus 5 High` control visible before and after. That direct control does
+not qualify the harness or establish the cause of the earlier loss. Candidate364
+adds finite diagnostics for the last positively verified trigger: attachment,
+visibility, label category, scan membership and context. The cached node never
+supplies model, response, action or cleanup authority. No wait or retry is added.
+
+Candidate364 passed all 951 adapter and version tests (40,479 assertions) and
+208 selected native tests, with unchanged source throughout both runs. The
+native checks include real WebKit extraction of isolated malformed JSON and
+rejection of surrounding prose or a different language label, strict Boolean
+projection, preserved canonical tool history, fresh corrected-call release,
+valid refusals, cleanup and the one-correction limit. Diagnostic exceptions and
+empty extra controls have dedicated regressions. Log hashes are
+`46f14212003a3cde482bff6a477a65beeb46a6e4cf43eec710b706220b9f3730`
+for adapter/version tests and
+`3eeeaf79338474d9e012f99a2b8fad932a01f91f9d294b1ca692fb16fe720616`
+for native tests. Installation and live qualification remain pending.
+
+The published build363 package does not contain these candidate changes. Private evidence is
+retained under `work/claude-qualification-20261031/evidence/` in the named cases
+and `opus5-layout363-a/`; raw provider text is not included in this repository.
 
 ## Build362: duplicate code blocks stop the Sonnet 4.6 workflow
 

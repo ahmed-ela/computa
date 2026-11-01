@@ -2999,6 +2999,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard repeated is NSNull || CFGetTypeID(repeated as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
             safe["repeatedIdenticalToolCalls"] = repeated
         }
+        if let isolated = source["isolatedJSONCodeBlock"] {
+            guard isolated is NSNull || CFGetTypeID(isolated as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+            safe["isolatedJSONCodeBlock"] = isolated
+        }
         if let known = source["literalCodeKnownEnvelopeType"] {
             guard known is NSNull || ["message", "tool_calls", "unknown"].contains(known as? String ?? "") else { return nil }
             safe["literalCodeKnownEnvelopeType"] = known

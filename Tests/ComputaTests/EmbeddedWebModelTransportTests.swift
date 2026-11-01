@@ -12589,6 +12589,54 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeIsolatedMalformedCodeEvidenceNeverExtractsOrAcceptsTheOriginalReply() async throws {
+        let malformed = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf rejected-one"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-two"}}}]}"#
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "claude-native-fixture", "input": "Read the synthetic fixture", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]]]))
+        for scenario in ["isolated", "outside_prose", "python"] {
+            let page = Self.providerPage(.claude).replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                const wrapper=document.createElement('div'); wrapper.className='relative border-border-400';
+                const controls=document.createElement('div'); controls.className='absolute right-0 h-8 px-2 items-center inline-flex';
+                const codeCopy=document.createElement('button'); codeCopy.className='cds-reset relative isolate inline-flex shrink-0 items-center';
+                const icon=document.createElement('span'); icon.textContent='\u{E056}'; codeCopy.append(icon); controls.append(codeCopy);
+                const caption=document.createElement('div'); caption.className='text-secondary text-caption-regular font-sans pb-0';
+                caption.textContent=\(try matchedProbeJSON(scenario == "python" ? "python" : "json"));
+                const pre=document.createElement('pre'), code=document.createElement('code');
+                code.textContent=\(try matchedProbeJSON(malformed)); pre.append(code); wrapper.append(controls,caption,pre); body.replaceChildren(wrapper);
+                if (\(scenario == "outside_prose")) { const prose=document.createElement('p'); prose.textContent='I cannot perform this request.'; body.append(prose); }
+                document.getElementById('messages').appendChild(turn);
+                """)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.claude)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read the synthetic fixture"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            let text = try XCTUnwrap(complete["text"] as? String)
+            let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+            let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
+            XCTAssertEqual(structure["isolatedJSONCodeBlock"] as? Bool, scenario == "isolated", scenario)
+            XCTAssertEqual(structure["literalCodeValidJSON"] as? Bool, false)
+            XCTAssertEqual(structure["preCount"] as? Int, 1); XCTAssertEqual(structure["codeCount"] as? Int, 1)
+            XCTAssertEqual(structure["extractionReason"] as? String, "invalid_json")
+            XCTAssertEqual(structure["selectedExtraction"] as? String, "rendered_fallback")
+            let rendered = try await evaluate(view, "return document.querySelector('[data-perf-reply-text]').innerText.trim();") as? String
+            XCTAssertEqual(text, rendered); XCTAssertTrue(text.contains(malformed))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))
@@ -13540,6 +13588,25 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         for flag in [1, 0, "true", "private_canary", [], ["reply": "private_canary"]] as [Any] {
             var source = base; source["repeatedIdenticalToolCalls"] = flag
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+        }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Legacy missing evidence remains readable, not correction eligible")
+    }
+
+    func testCodeStructureIsolatedEvidenceIsStrictlyNullableBooleanAndContentFree() throws {
+        let base: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 0,
+            "outsideTextLength": 364, "outsideTruncated": false, "preParentTags": [String](),
+            "extractionReason": "invalid_json", "selectedExtraction": "rendered_fallback"]
+        for flag in [true, false, NSNull()] as [Any] {
+            var source = base; source["isolatedJSONCodeBlock"] = flag; source["reply"] = "private_canary"
+            let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            if flag is NSNull { XCTAssertTrue(value["isolatedJSONCodeBlock"] is NSNull) }
+            else { XCTAssertEqual(value["isolatedJSONCodeBlock"] as? Bool, flag as? Bool) }
+            XCTAssertFalse(encoded.contains("private_canary")); XCTAssertLessThanOrEqual(encoded.utf8.count, 8_192)
+        }
+        for flag in [1, 0, "true", "private_canary", [], ["reply": "private_canary"]] as [Any] {
+            var source = base; source["isolatedJSONCodeBlock"] = flag
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
         }
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Legacy missing evidence remains readable, not correction eligible")

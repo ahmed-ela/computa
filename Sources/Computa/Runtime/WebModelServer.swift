@@ -1492,6 +1492,15 @@ actor WebModelServer {
            CFGetTypeID(repeated) == CFBooleanGetTypeID(), repeated.boolValue {
             return true
         }
+        if receiptInteger(structure["preCount"], range: 1...1) == 1,
+           receiptInteger(structure["codeCount"], range: 1...1) == 1,
+           structure["extractionReason"] as? String == "invalid_json",
+           let isolated = structure["isolatedJSONCodeBlock"] as? NSNumber,
+           CFGetTypeID(isolated) == CFBooleanGetTypeID(), isolated.boolValue,
+           let valid = structure["literalCodeValidJSON"] as? NSNumber,
+           CFGetTypeID(valid) == CFBooleanGetTypeID(), !valid.boolValue {
+            return true
+        }
         guard receiptInteger(structure["preCount"], range: 1...1) == 1,
               let valid = structure["literalCodeValidJSON"] as? NSNumber,
               CFGetTypeID(valid) == CFBooleanGetTypeID(), valid.boolValue,
@@ -1635,6 +1644,11 @@ actor WebModelServer {
             safe["repeatedIdenticalToolCalls"] = NSNull()
         } else if let value = raw["repeatedIdenticalToolCalls"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
             safe["repeatedIdenticalToolCalls"] = value.boolValue
+        }
+        if raw["isolatedJSONCodeBlock"] is NSNull {
+            safe["isolatedJSONCodeBlock"] = NSNull()
+        } else if let value = raw["isolatedJSONCodeBlock"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
+            safe["isolatedJSONCodeBlock"] = value.boolValue
         }
         if raw["literalCodeKnownEnvelopeType"] is NSNull {
             safe["literalCodeKnownEnvelopeType"] = NSNull()

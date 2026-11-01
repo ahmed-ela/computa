@@ -40,10 +40,13 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
   Full Claude qualification remains incomplete. Sonnet 5.5 on build353 and
-  Haiku 5.5 on build361 have bounded full-workflow passes. Build362's Sonnet 5
-  marker returned a refusal; its Sonnet 4.6 workflow stopped on duplicate code
-  blocks after passing code tests and browser submission. The newly discovered
-  Opus choices remain unqualified. Diagnose the
+  Haiku 5.5 on build361 have bounded full-workflow passes, as does Opus 5.5 on
+  build363. Sonnet 5's marker returned a refusal; Sonnet 4.6 still fails on
+  malformed JSON, with the first-response brace defect captured on build363.
+  Opus 5 lost its verified model-header observation after submission; a direct
+  website marker passed separately. Other Opus choices remain unqualified.
+  Verify candidate364's isolated-block correction, catalog eligibility fix and
+  header diagnostics in the installed app. Diagnose the
   capability refusals and capture the earlier Haiku call-shape defect if it
   recurs; verify the outstanding quota-cleanup case separately. Complete and
   repeat fresh browser, terminal and file-editing fixtures for each available

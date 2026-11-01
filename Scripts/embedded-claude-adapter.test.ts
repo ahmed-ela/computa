@@ -19,7 +19,7 @@ function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string, cap
   const label = new Element("DIV", { class: captionClasses }, "json");
   const pre = new Element("PRE"), code = new Element("CODE", {}, raw); pre.append(code);
   wrapper.append(container, label, pre); f.answer.append(wrapper);
-  Object.defineProperty(f.answer, "innerText", { get: () => "\uE056\njson\n" + raw });
+  Object.defineProperty(f.answer, "innerText", { configurable: true, get: () => "\uE056\njson\n" + raw });
   return { wrapper, container, control, content, icon, label, pre, code };
 }
 
@@ -1478,4 +1478,70 @@ describe("embedded Claude fixed adapter", () => {
     expect(await pinned.run()).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
   });
 
+});
+
+describe("Claude isolated malformed JSON correction evidence", () => {
+  const raw = '{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf rejected-one"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-two"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-three"}}]}';
+  for (const scenario of ["extra_braces", "python_caption", "python_class", "multiple", "extra_code", "empty", "oversize", "utf8_oversize", "prose", "pre_control", "outside_button", "outside_input", "outside_role_button", "missing_caption", "unknown_control"]) {
+    test(`${scenario}: evidence never repairs or releases malformed source`, async () => {
+      const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+      const literal = scenario === "empty" ? " " : scenario === "oversize" ? "x".repeat(220_001)
+        : scenario === "utf8_oversize" ? "é".repeat(110_001) : raw;
+      const b = observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+      if (scenario === "python_caption") b.label.text = "python";
+      if (scenario === "python_class") b.code.values.class = "language-python";
+      if (scenario === "multiple") { const pre = new Element("PRE"); pre.append(new Element("CODE", {}, raw)); f.answer.append(pre); }
+      if (scenario === "extra_code") f.answer.append(new Element("CODE", {}, " "));
+      if (scenario === "prose") f.answer.append(new Element("P", {}, "I cannot perform this request."));
+      if (scenario === "pre_control") b.pre.append(new Element("BUTTON", {}, "Authored control"));
+      if (scenario === "outside_button") f.answer.append(new Element("BUTTON"));
+      if (scenario === "outside_input") f.answer.append(new Element("INPUT"));
+      if (scenario === "outside_role_button") f.answer.append(new Element("DIV", { role: "button" }));
+      if (scenario === "missing_caption") b.label.values.hidden = "";
+      if (scenario === "unknown_control") b.icon.text = "Copy private prose";
+      // Override the fixture's provider-chrome renderer only to include every
+      // deliberately added test node; no source bytes are omitted by the assertion.
+      Object.defineProperty(f.answer, "innerText", { configurable: true, get: () => f.answer.textContent });
+      const rendered = f.answer.innerText.trim();
+      const result = await f.run("inspect"), evidence = result.completionEvidence.codeStructure;
+      expect(result.error).toBeUndefined(); expect(result.answerComplete).toBe(true);
+      expect(result.text).toBe(rendered.slice(0, 220_001));
+      expect(evidence.selectedExtraction).toBe("rendered_fallback");
+      expect(evidence.isolatedJSONCodeBlock).toBe(scenario === "multiple" || scenario === "oversize" ? null : scenario === "extra_braces");
+      if (!["multiple", "oversize"].includes(scenario)) expect(evidence.literalCodeValidJSON).toBe(false);
+      expect(() => JSON.parse(result.text)).toThrow();
+      expect(f.send.clicks).toBe(0);
+    });
+  }
+  test("unavailable isolation diagnostics preserve malformed JSON rejection and original text", async () => {
+    const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+    const b = observedClaudeCodeBlock(f, raw, claudeCodeCaptionClasses[1]);
+    Object.defineProperty(b.code, "classList", { get: () => { throw new Error("Private diagnostic unavailable"); } });
+    const result = await f.run("inspect");
+    expect(result.error).toBeUndefined(); expect(result.text).toBe(f.answer.innerText.trim());
+    expect(result.completionEvidence.codeStructure).toMatchObject({ isolatedJSONCodeBlock: null,
+      literalCodeValidJSON: false, selectedExtraction: "rendered_fallback", extractionReason: "invalid_json" });
+    expect(f.send.clicks).toBe(0);
+  });
+  test("new diagnostic exceptions do not reject an otherwise valid literal envelope", async () => {
+    const literal = '{"type":"message","text":"I cannot perform this request."}';
+    const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+    const b = observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+    Object.defineProperty(b.code, "classList", { get: () => { throw new Error("Private diagnostic unavailable"); } });
+    const result = await f.run("inspect");
+    expect(result.error).toBeUndefined(); expect(result.text).toBe(literal);
+    expect(result.completionEvidence.codeStructure).toMatchObject({ isolatedJSONCodeBlock: null,
+      literalCodeValidJSON: true, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+    expect(f.send.clicks).toBe(0);
+  });
+  test("valid literal envelopes retain their original exact extraction", async () => {
+    for (const literal of ['{"type":"message","text":"I cannot perform this request."}', '{"type":"tool_calls","calls":[{"name":"browser_close","arguments":{}}]}']) {
+      const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+      observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+      const result = await f.run("inspect");
+      expect(result.text).toBe(literal); expect(result.completionEvidence.codeStructure).toMatchObject({
+        literalCodeValidJSON: true, isolatedJSONCodeBlock: true, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+      expect(f.send.clicks).toBe(0);
+    }
+  });
 });

@@ -1167,7 +1167,8 @@ function websiteModelPickerState(provider) {
       : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
-  const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
+  const triggerScan = nodes('button[aria-label], [role="button"][aria-label]');
+  const triggers = triggerScan.filter(node => physical(node) && outside(node) && isTrigger(node));
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
@@ -1280,7 +1281,41 @@ function websiteModelPickerState(provider) {
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
   return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
-    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
+    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family, triggerScan, outside };
+}
+function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
+  if (provider !== 'claude') return;
+  try {
+    if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
+      || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
+    // Diagnostic reference only, written after an existing positive proof.
+    // It must never supply selection, response, action, or cleanup authority.
+    globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
+  } catch { /* Diagnostics cannot change the already evaluated proof. */ }
+}
+function websiteClaudeModelTriggerDiagnostic(state) {
+  const empty = scope => ({ kind: 'claude_last_model_trigger_v1', scope,
+    connected: null, physical: null, visible: null, nodeKind: null, labelKind: null,
+    authored: null, inTriggerScan: null, triggerScanAtLimit: null });
+  try {
+    const record = globalThis.__computaClaudeLastModelTrigger;
+    if (!record) return empty('missing');
+    if (typeof record.owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.owner)
+      || record.owner !== globalThis.__computaModelOwner || record.document !== document || record.url !== document.URL)
+      return empty('different_context');
+    const node = record.node;
+    if (!node || typeof node.getAttribute !== 'function' || typeof node.closest !== 'function') return empty('unavailable');
+    const raw = node.getAttribute('aria-label');
+    const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+    const labelKind = raw == null || label === '' ? 'missing'
+      : label?.startsWith('Model: ') && websiteModelSafeTriggerLabel(label) ? 'recognized'
+      : label?.startsWith('Model: ') ? 'known_prefix_unrecognized' : 'other';
+    return { kind: 'claude_last_model_trigger_v1', scope: 'same_context',
+      connected: node.isConnected === true, physical: state.physical(node), visible: state.visible(node),
+      nodeKind: node.tagName === 'BUTTON' ? 'button' : node.getAttribute('role') === 'button' ? 'role_button' : 'other',
+      labelKind, authored: !state.outside(node),
+      inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
+  } catch { return empty('unavailable'); }
 }
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
@@ -1347,6 +1382,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
   }
+  if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
     const pin = globalThis.__computaChatPresetPin;
@@ -1700,8 +1736,11 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
-        return websiteModelChoiceEqual(captured.selected, expected) ? { modelEvidence: captured }
-          : { error: 'model_mismatch', modelEvidence: captured };
+        if (websiteModelChoiceEqual(captured.selected, expected)) {
+          websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
+          return { modelEvidence: captured };
+        }
+        return { error: 'model_mismatch', modelEvidence: captured };
       }
       if (!state.trigger || state.triggerCount !== 1) return failure('model_unverified');
       if (trigger && trigger !== state.trigger) return failure('model_unverified');
@@ -1774,7 +1813,18 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
   const selected = state.selected, owned = [top, nested].filter(Boolean);
   const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
   const current = () => websiteModelPickerState('claude');
-  let invalidated = false;
+  let invalidated = false, catalog = null;
+  const controlsFor = (view, menu) => view.controls.filter(control =>
+    control.node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu);
+  const eligibilityUnchanged = view => !catalog || catalog.every(snapshot => {
+    // A verified child dismissal may also close its parent. Only menus still
+    // physically present can contribute a later eligibility observation.
+    if (!view.physical(snapshot.menu)) return true;
+    if (!view.menus.includes(snapshot.menu)) return false;
+    const controls = controlsFor(view, snapshot.menu);
+    return controls.length === snapshot.controls.length && snapshot.controls.every(expected =>
+      controls.some(current => current.node === expected.node && websiteModelChoiceEqual(current.choice, expected.choice)));
+  });
   const unchanged = view => {
     const valid = window === window.top && document.URL === url
       && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
@@ -1783,13 +1833,24 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
       && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
       && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
-      && view.physicalMenus.every(menu => owned.includes(menu));
+      && view.physicalMenus.every(menu => owned.includes(menu)) && eligibilityUnchanged(view);
     // A wakeup can observe drift that is restored before the await resumes.
     // Its negative evidence remains decisive for this claimed close attempt.
     invalidated ||= !valid;
     return !invalidated;
   };
   try {
+    const initial = current();
+    if (Date.now() >= until || !unchanged(initial) || initial.topMenu !== top || initial.nestedMenu !== nested
+      || initial.secondary !== secondary || owned.some(menu => !initial.menus.includes(menu) || !initial.visible(menu))) return false;
+    // Earlier reads are provisional. Publish only this fresh, complete owned
+    // picker snapshot, then keep each still-open menu's eligibility unchanged
+    // throughout the existing guarded close. Never revive an accumulated row.
+    catalog = owned.map(menu => ({ menu, controls: controlsFor(initial, menu)
+      .map(control => ({ node: control.node, choice: { ...control.choice } })) }));
+    const choices = catalog.flatMap(snapshot => snapshot.controls.map(control => control.choice));
+    if (!choices.length || choices.length > 32 || choices.some((choice, index) =>
+      choices.some((other, otherIndex) => otherIndex !== index && websiteModelChoiceEqual(choice, other)))) return false;
     // A nested menu can consume Escape without closing its parent. Dismiss
     // each exact observed popup once, child first, with physical closure and
     // fresh context checks before the separate parent's dismissal.
@@ -1807,10 +1868,12 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
     }
     const after = current();
-    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+    const closed = Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
       && owned.every(menu => !after.physical(menu))
       && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    if (closed) attempt.choices = choices;
+    return closed;
   } catch { return false; }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {

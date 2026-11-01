@@ -1167,7 +1167,8 @@ function websiteModelPickerState(provider) {
       : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
-  const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
+  const triggerScan = nodes('button[aria-label], [role="button"][aria-label]');
+  const triggers = triggerScan.filter(node => physical(node) && outside(node) && isTrigger(node));
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
@@ -1280,7 +1281,41 @@ function websiteModelPickerState(provider) {
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
   return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
-    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
+    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family, triggerScan, outside };
+}
+function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
+  if (provider !== 'claude') return;
+  try {
+    if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
+      || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
+    // Diagnostic reference only, written after an existing positive proof.
+    // It must never supply selection, response, action, or cleanup authority.
+    globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
+  } catch { /* Diagnostics cannot change the already evaluated proof. */ }
+}
+function websiteClaudeModelTriggerDiagnostic(state) {
+  const empty = scope => ({ kind: 'claude_last_model_trigger_v1', scope,
+    connected: null, physical: null, visible: null, nodeKind: null, labelKind: null,
+    authored: null, inTriggerScan: null, triggerScanAtLimit: null });
+  try {
+    const record = globalThis.__computaClaudeLastModelTrigger;
+    if (!record) return empty('missing');
+    if (typeof record.owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.owner)
+      || record.owner !== globalThis.__computaModelOwner || record.document !== document || record.url !== document.URL)
+      return empty('different_context');
+    const node = record.node;
+    if (!node || typeof node.getAttribute !== 'function' || typeof node.closest !== 'function') return empty('unavailable');
+    const raw = node.getAttribute('aria-label');
+    const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+    const labelKind = raw == null || label === '' ? 'missing'
+      : label?.startsWith('Model: ') && websiteModelSafeTriggerLabel(label) ? 'recognized'
+      : label?.startsWith('Model: ') ? 'known_prefix_unrecognized' : 'other';
+    return { kind: 'claude_last_model_trigger_v1', scope: 'same_context',
+      connected: node.isConnected === true, physical: state.physical(node), visible: state.visible(node),
+      nodeKind: node.tagName === 'BUTTON' ? 'button' : node.getAttribute('role') === 'button' ? 'role_button' : 'other',
+      labelKind, authored: !state.outside(node),
+      inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
+  } catch { return empty('unavailable'); }
 }
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
@@ -1347,6 +1382,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
   }
+  if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
     const pin = globalThis.__computaChatPresetPin;
@@ -1700,8 +1736,11 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
-        return websiteModelChoiceEqual(captured.selected, expected) ? { modelEvidence: captured }
-          : { error: 'model_mismatch', modelEvidence: captured };
+        if (websiteModelChoiceEqual(captured.selected, expected)) {
+          websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
+          return { modelEvidence: captured };
+        }
+        return { error: 'model_mismatch', modelEvidence: captured };
       }
       if (!state.trigger || state.triggerCount !== 1) return failure('model_unverified');
       if (trigger && trigger !== state.trigger) return failure('model_unverified');
@@ -1774,7 +1813,18 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
   const selected = state.selected, owned = [top, nested].filter(Boolean);
   const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
   const current = () => websiteModelPickerState('claude');
-  let invalidated = false;
+  let invalidated = false, catalog = null;
+  const controlsFor = (view, menu) => view.controls.filter(control =>
+    control.node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu);
+  const eligibilityUnchanged = view => !catalog || catalog.every(snapshot => {
+    // A verified child dismissal may also close its parent. Only menus still
+    // physically present can contribute a later eligibility observation.
+    if (!view.physical(snapshot.menu)) return true;
+    if (!view.menus.includes(snapshot.menu)) return false;
+    const controls = controlsFor(view, snapshot.menu);
+    return controls.length === snapshot.controls.length && snapshot.controls.every(expected =>
+      controls.some(current => current.node === expected.node && websiteModelChoiceEqual(current.choice, expected.choice)));
+  });
   const unchanged = view => {
     const valid = window === window.top && document.URL === url
       && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
@@ -1783,13 +1833,24 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
       && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
       && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
-      && view.physicalMenus.every(menu => owned.includes(menu));
+      && view.physicalMenus.every(menu => owned.includes(menu)) && eligibilityUnchanged(view);
     // A wakeup can observe drift that is restored before the await resumes.
     // Its negative evidence remains decisive for this claimed close attempt.
     invalidated ||= !valid;
     return !invalidated;
   };
   try {
+    const initial = current();
+    if (Date.now() >= until || !unchanged(initial) || initial.topMenu !== top || initial.nestedMenu !== nested
+      || initial.secondary !== secondary || owned.some(menu => !initial.menus.includes(menu) || !initial.visible(menu))) return false;
+    // Earlier reads are provisional. Publish only this fresh, complete owned
+    // picker snapshot, then keep each still-open menu's eligibility unchanged
+    // throughout the existing guarded close. Never revive an accumulated row.
+    catalog = owned.map(menu => ({ menu, controls: controlsFor(initial, menu)
+      .map(control => ({ node: control.node, choice: { ...control.choice } })) }));
+    const choices = catalog.flatMap(snapshot => snapshot.controls.map(control => control.choice));
+    if (!choices.length || choices.length > 32 || choices.some((choice, index) =>
+      choices.some((other, otherIndex) => otherIndex !== index && websiteModelChoiceEqual(choice, other)))) return false;
     // A nested menu can consume Escape without closing its parent. Dismiss
     // each exact observed popup once, child first, with physical closure and
     // fresh context checks before the separate parent's dismissal.
@@ -1807,10 +1868,12 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
     }
     const after = current();
-    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+    const closed = Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
       && owned.every(menu => !after.physical(menu))
       && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    if (closed) attempt.choices = choices;
+    return closed;
   } catch { return false; }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {
@@ -1926,7 +1989,7 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
 function modelResponseExtraction(answer) {
-  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null,
+  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null, isolatedJSONCodeBlock: null,
     selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
   let rendered = '', blocks = [], code = null;
   const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
@@ -1958,34 +2021,68 @@ function modelResponseExtraction(answer) {
   if (raw.length > 220_000) return fallback('oversized_code');
   let envelope;
   try { envelope = JSON.parse(raw); flags.literalCodeValidJSON = true; }
-  catch { flags.literalCodeValidJSON = false; return fallback('invalid_json'); }
-  const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
-  flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
-  if (!knownType) return fallback('unknown_envelope_type');
-  // Observed Claude code chrome: the language label and icon control are
-  // siblings of this sole pre inside the provider's exact code-block wrapper.
-  // Only these verified nodes can be skipped; authored surrounding text cannot.
-  const wrapper = blocks[0].closest('div.relative.border-border-400');
-  const chrome = new Set();
-  if (wrapper && wrapper !== answer && answer.contains(wrapper)
-    && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
-    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
-      modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
-    const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
-      .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
-    if (labels.length === 1 && controls.length === 1) { chrome.add(labels[0]); chrome.add(controls[0]); }
+  catch { flags.literalCodeValidJSON = false; }
+  if (flags.literalCodeValidJSON) {
+    const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
+    flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
+    if (!knownType) return fallback('unknown_envelope_type');
   }
-  let visited = 0, scanLimit = false;
-  const onlyCodeAndWhitespace = node => {
-    if (++visited > 10_000) { scanLimit = true; return false; }
-    if (node === code || chrome.has(node)) return true;
-    if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
-    if (node.nodeType !== 1) return true;
-    // Actual controls inside this pre are code-block chrome, never surrounding prose.
-    if (node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return true;
-    return [...node.childNodes].every(onlyCodeAndWhitespace);
+  const inspectCodeScope = () => {
+    // Observed Claude code chrome: the language label and icon control are
+    // siblings of this sole pre inside the provider's exact code-block wrapper.
+    // Only these verified nodes can be skipped; authored surrounding text cannot.
+    const wrapper = blocks[0].closest('div.relative.border-border-400');
+    const chrome = new Set();
+    if (wrapper && wrapper !== answer && answer.contains(wrapper)
+      && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
+      const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
+        modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
+      const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
+        .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
+      if (labels.length === 1 && controls.length === 1) { chrome.add(labels[0]); chrome.add(controls[0]); }
+    }
+    let visited = 0, scanLimit = false, unrecognizedControl = false, controlDiagnosticUnavailable = false;
+    const onlyCodeAndWhitespace = node => {
+      if (++visited > 10_000) { scanLimit = true; return false; }
+      if (node === code || chrome.has(node)) return true;
+      if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
+      if (node.nodeType !== 1) return true;
+      // Empty controls must not qualify as isolated JSON. This extra fact is
+      // diagnostic only; preserve the existing text-extraction traversal.
+      try {
+        const tag = node.tagName.toLowerCase(), role = node.getAttribute('role');
+        unrecognizedControl ||= ['button', 'input', 'select', 'textarea', 'summary', 'iframe', 'object', 'embed'].includes(tag)
+          || tag === 'a' && node.getAttribute('href') !== null
+          || ['button', 'link', 'textbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'combobox', 'listbox', 'menuitem', 'menuitemradio', 'menuitemcheckbox'].includes(role)
+          || node.getAttribute('contenteditable') !== null && node.getAttribute('contenteditable') !== 'false';
+      } catch { controlDiagnosticUnavailable = true; }
+      // Actual controls inside this pre are code-block chrome for the legacy
+      // extraction path, but are not recognized isolation chrome above.
+      if (node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return true;
+      return [...node.childNodes].every(onlyCodeAndWhitespace);
+    };
+    const isolated = onlyCodeAndWhitespace(answer);
+    return { isolated, scanLimit, unrecognizedControl, controlDiagnosticUnavailable, chrome };
   };
-  if (!onlyCodeAndWhitespace(answer)) return fallback(scanLimit ? 'outside_scan_limit' : 'outside_content');
+  let scope;
+  try { scope = inspectCodeScope(); }
+  catch (error) {
+    // Unavailable diagnostic shape cannot change the malformed reply's error.
+    if (!flags.literalCodeValidJSON) return fallback('invalid_json');
+    throw error;
+  }
+  try {
+    // This structural fact restricts the existing one-shot format correction.
+    // Malformed JSON still returns the complete rendered reply, never repaired,
+    // extracted or dispatched. Only observed JSON chrome can surround this code.
+    if (!scope.controlDiagnosticUnavailable) flags.isolatedJSONCodeBlock = scope.isolated && !scope.scanLimit
+      && !scope.unrecognizedControl && scope.chrome.size === 2
+      && answer.querySelectorAll('code').length === 1 && raw.trim().length > 0
+      && new TextEncoder().encode(raw).length <= 220_000
+      && [...code.classList].filter(name => name.startsWith('language-')).every(name => name === 'language-json');
+  } catch { flags.isolatedJSONCodeBlock = null; }
+  if (!flags.literalCodeValidJSON) return fallback('invalid_json');
+  if (!scope.isolated) return fallback(scope.scanLimit ? 'outside_scan_limit' : 'outside_content');
   return { text: raw, blocks, code, flags: { ...flags, selectedExtraction: 'raw_code', extractionReason: 'accepted_literal_code' } };
 }
 
