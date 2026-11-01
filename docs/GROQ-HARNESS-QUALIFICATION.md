@@ -176,4 +176,45 @@ was replayed. This evidence does not distinguish the failed editor predicate
 or preparation action; those require a focused diagnostic/regression before
 another fresh check. Other model harness checks have not started.
 
+## Composer diagnostic and visible-area repair — 2026-11-01
+
+Build356 was installed from `309a451`, with all eleven native artifact and ten
+signed-derivative checks passing. A user-created `hi` task on Groq/GPT OSS 120B
+captured `composer_unavailable; action=sendReady; detail=editor_hit_test` at
+04:01:56Z. Its native turn lasted 2,685 ms, invoked zero tools, and closed with
+a saved `not_created` receipt. This is an incident record, not a controlled
+qualification pass. Bounded logs and exact native task/thread/turn journals
+are retained under `incidents/user-hi-groq120b356-01a19545-5cc1/`.
+
+The prepared marker356-b was never dispatched and its diagnostic watcher was
+never launched; it is retained as `not-dispatched.json`. No failed prompt was
+replayed. The incident proves which predicate rejected the editor; it does not
+record the live element's geometry. The real-WebKit regression independently
+reproduced that predicate with a long, expanded textarea whose geometric center
+fell outside the viewport while part remained visible.
+
+The repair checks one point at the center of the control's intersection with
+the viewport. It still requires a unique visible, enabled control and a hit on
+that exact node or its descendant. It does not scroll, search alternative
+points, or retry an action. Fully off-screen, invalid geometry and covered
+controls still fail; model, ownership, exact prompt and one-send gates remain.
+The targeted JavaScript suite passes 44 tests and 467 assertions, including
+clipping, overlays, stale prompt/route/model and lost acknowledgement cases.
+Installed verification of this repair remains pending.
+
+Native run K passed 21 of 22 cases; its new positive geometry case failed on a
+UUID-case assertion and cleanup in the synthetic layout. Run L captured the
+cause: the fixture's unclamped body was 1,602 px high, scrolling reached its
+1,042 px maximum, and Clear's center hit the fixed editor. Adding the observed
+five-line visual clamp preserved all body bytes and allowed the unchanged
+cleanup checks to pass. The corrected positive test passed in 2.203 seconds
+with one Send and one Clear; the other 21 cases were unchanged. Both runs have
+unchanged source snapshots, and the failed K evidence is retained. Log hashes:
+K `02bd509caa1acbf56a7f9cb0a51def7cf6b037b38a1124d023d3a94082fc0c83`;
+L `f1864c9bba68bb964f93e92ad87f52c01c44c25ae78253eaec7dceeb5350132d`.
+
+Reproducible native/signed356 candidate copies were retired after verifying the
+installed artifact and preserving full receipts/inventories. Installed356 and
+the installer backups remain; this storage cleanup is not a release operation.
+
 No live harness pass or release is claimed yet.

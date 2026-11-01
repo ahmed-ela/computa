@@ -123,6 +123,135 @@ describe('Groq fixed fresh-session adapter', () => {
     }
   });
 
+  test('hit testing uses one visible intersection point and leaves an in-view center unchanged', async () => {
+    const cases = [
+      [{ left: 24, top: 40, width: 600, height: 120 }, [324, 100]],
+      [{ left: 24, top: -2000, width: 600, height: 2744 }, [324, 372]],
+      [{ left: 24, top: 700, width: 600, height: 1000 }, [324, 734]],
+      [{ left: -2000, top: 40, width: 2600, height: 120 }, [300, 100]],
+      [{ left: 1000, top: 40, width: 600, height: 120 }, [1012, 100]],
+      [{ left: -1000, top: -2000, width: 4000, height: 5000 }, [512, 384]],
+    ] as const;
+    for (const [rect, point] of cases) {
+      const f = groqFixture(); await f.select(); f.f.editor.rect = { ...rect }; f.hitQueries.length = 0;
+      expect((await f.run('prepare')).prepared).toBe(true);
+      expect(f.hitQueries.map(({ x, y }) => [x, y])).toEqual([point]);
+      expect(f.hitQueries[0].node).toBe(f.f.editor);
+      expect(f.f.editor.value).toBe(''); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('empty, offscreen, nonfinite and invalid viewport geometry never falls back to another point', async () => {
+    const rectangles = [
+      { left: -100, top: 0, width: 100, height: 30 },
+      { left: 1024, top: 0, width: 100, height: 30 },
+      { left: 0, top: -30, width: 100, height: 30 },
+      { left: 0, top: 768, width: 100, height: 30 },
+      { left: 0, top: 0, width: 0, height: 30 },
+      { left: 0, top: 0, width: 100, height: -1 },
+      { left: NaN, top: 0, width: 100, height: 30 },
+      { left: 0, top: -Infinity, width: 100, height: 30 },
+      { left: 0, top: 0, width: Infinity, height: 30 },
+      { left: Number.MAX_VALUE, top: 0, width: Number.MAX_VALUE, height: 30 },
+    ];
+    const changes: ((f: ReturnType<typeof groqFixture>) => void)[] = rectangles.map(rect => f => { f.f.editor.rect = rect; });
+    for (const key of ['innerWidth', 'innerHeight']) for (const value of [0, -1, NaN, Infinity, undefined]) {
+      changes.push(f => { f.window[key] = value; });
+    }
+    for (const change of changes) {
+      const f = groqFixture(); await f.select(); change(f); f.hitQueries.length = 0;
+      expect(await f.run('prepare')).toEqual({ error: 'composer_unavailable', detail: 'editor_hit_test' });
+      expect(f.hitQueries).toEqual([]); expect(f.f.editor.value).toBe(''); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('an expanded editor still rejects an overlay or ancestor clipping at its sole visible point', async () => {
+    for (const returned of ['overlay', 'null', 'ancestor'] as const) {
+      const f = groqFixture(); await f.select(); f.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 };
+      const original = f.document.elementFromPoint;
+      f.document.elementFromPoint = (x: number, y: number) => {
+        original(x, y);
+        return returned === 'null' ? null : returned === 'ancestor' ? f.f.form : f.body;
+      };
+      f.hitQueries.length = 0;
+      expect(await f.run('prepare')).toEqual({ error: 'composer_unavailable', detail: 'editor_hit_test' });
+      expect(f.hitQueries.map(({ x, y }) => [x, y])).toEqual([[324, 372]]);
+      expect(f.f.editor.value).toBe(''); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('visible geometry does not authorize disabled, hidden, inert, ambiguous or human-draft editors', async () => {
+    const changes = [
+      (f: any) => { f.f.editor.disabled = true; },
+      (f: any) => { f.f.editor.setAttribute('aria-disabled', 'true'); },
+      (f: any) => { f.f.editor.setAttribute('hidden', ''); },
+      (f: any) => { f.f.form.setAttribute('inert', ''); },
+      (f: any) => { f.f.form.setAttribute('aria-hidden', 'true'); },
+      (f: any) => { f.f.mobileForm.removeAttribute('hidden'); },
+      (f: any) => { f.f.editor.value = 'Human draft'; },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.select(); f.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 };
+      change(f); const before = f.f.editor.value;
+      expect((await f.run('prepare')).error).toBeDefined();
+      expect(f.f.editor.value).toBe(before); expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('input-driven expansion gets a fresh hit check at readiness and again before one Send', async () => {
+    const f = groqFixture(); await f.select(); await f.run('prepare');
+    f.f.editor.oninput = () => { f.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 }; };
+    expect((await f.run('insert', { prompt: groqPrompt })).inserted).toBe(true);
+    f.hitQueries.length = 0;
+    expect((await f.run('sendReady', { prompt: groqPrompt })).sendReady).toBe(true);
+    expect(f.hitQueries.filter(({ node }) => node === f.f.editor).map(({ x, y }) => [x, y])).toEqual([[324, 372]]);
+    const original = f.document.elementFromPoint;
+    f.document.elementFromPoint = (x: number, y: number) => { const hit = original(x, y); return hit === f.f.editor ? f.body : hit; };
+    expect(await f.run('submit', { prompt: groqPrompt })).toEqual({ error: 'composer_unavailable', detail: 'editor_hit_test' });
+    expect(f.f.sendCount).toBe(0); expect(f.f.editor.value).toBe(groqPrompt);
+    // A separate fresh case proves the unobscured path, without retrying the blocked attempt.
+    const clear = groqFixture(); await clear.select(); await clear.run('prepare');
+    clear.f.editor.oninput = () => { clear.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 }; };
+    await clear.run('insert', { prompt: groqPrompt });
+    expect((await clear.run('sendReady', { prompt: groqPrompt })).sendReady).toBe(true);
+    expect((await clear.run('submit', { prompt: groqPrompt })).submitted).toBe(true);
+    expect((await clear.run()).firstUserVerified).toBe(true); expect(clear.f.sendCount).toBe(1);
+  });
+
+  test('a visible editor cannot bypass model, owner, document, prompt or Send-control changes after readiness', async () => {
+    const changes = [
+      (f: any) => { f.f.trigger.text = 'Other model'; },
+      (f: any) => { f.world.__computaModelOwner = 'foreign'; },
+      (f: any) => { f.document.URL += '&foreign=1'; },
+      (f: any) => { f.world.__computaGroqFreshSessionV1.generation = 'foreign'; },
+      (f: any) => { f.f.editor.value += 'changed'; },
+      (f: any) => { f.f.send.disabled = true; },
+      (f: any) => { f.f.send.rect = { left: 1024, top: 0, width: 100, height: 30 }; },
+      (f: any) => { const original = f.document.elementFromPoint;
+        f.document.elementFromPoint = (x: number, y: number) => { const hit = original(x, y); return hit === f.f.send ? f.body : hit; }; },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.select(); f.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 };
+      await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      expect((await f.run('sendReady', { prompt: groqPrompt })).sendReady).toBe(true);
+      change(f); expect((await f.run('submit', { prompt: groqPrompt })).error).toBeDefined();
+      expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('an expanded editor never grants another Send after a lost click acknowledgment', async () => {
+    for (const dispatched of [false, true]) {
+      const f = groqFixture(); await f.select(); f.f.editor.rect = { left: 24, top: -2000, width: 600, height: 2744 };
+      await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      const original = f.f.send.onclick;
+      f.f.send.onclick = (event: any) => { if (dispatched) original(event); throw new Error('Synthetic lost acknowledgment'); };
+      await expect(f.run('submit', { prompt: groqPrompt })).rejects.toThrow('Synthetic lost acknowledgment');
+      expect(f.f.sendCount).toBe(dispatched ? 1 : 0);
+      expect((await f.run('submit', { prompt: groqPrompt })).error).toBeDefined();
+      expect(f.f.send.clicks).toBe(1); expect(f.f.sendCount).toBe(dispatched ? 1 : 0);
+    }
+  });
+
   test('editor substitution and missing exact final marker stop before Send', async () => {
     const f = groqFixture(); await f.select(); await f.run('prepare');
     f.f.editor.oninput = () => { f.f.editor.value += 'changed'; };

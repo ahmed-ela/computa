@@ -11,9 +11,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 export function groqFixture(choice = groqChoice, options: { root?: boolean } = {}) {
   let currentHit: any = null, obstructed = false;
+  const hitQueries: { x: number; y: number; node: any }[] = [];
   const document: any = { URL: 'https://chat.groq.com/' + (options.root ? '' : '?model=' + choice.key), activeElement: null };
   class Node extends Element {
     onclick: any; onkeydown: any; oninput: any;
+    rect = { left: 0, top: 0, width: 100, height: 30 };
     setAttribute(name: string, value: string) { this.values[name] = value; }
     removeAttribute(name: string) { delete this.values[name]; }
     get textContent() { return super.textContent; }
@@ -30,7 +32,7 @@ export function groqFixture(choice = groqChoice, options: { root?: boolean } = {
       if (event.type === 'input') this.oninput?.(event);
       return true;
     }
-    getBoundingClientRect() { currentHit = this; return { left: 0, top: 0, width: 100, height: 30 }; }
+    getBoundingClientRect() { currentHit = this; return { ...this.rect }; }
   }
   class Textarea extends Node {
     private stored = '';
@@ -41,9 +43,16 @@ export function groqFixture(choice = groqChoice, options: { root?: boolean } = {
   Object.assign(document, { documentElement: html, body,
     createElement: (tag: string) => tag === 'textarea' ? new Textarea('TEXTAREA') : new Node(tag.toUpperCase()),
     querySelectorAll: (selector: string) => html.querySelectorAll(selector),
-    elementFromPoint: () => obstructed ? body : currentHit });
+    elementFromPoint: (x: number, y: number) => {
+      hitQueries.push({ x, y, node: currentHit });
+      if (![x, y].every(Number.isFinite) || x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return null;
+      if (obstructed) return body;
+      const r = currentHit?.rect;
+      return r && x >= r.left && x < r.left + r.width && y >= r.top && y < r.top + r.height ? currentHit : null;
+    } });
   const posted: any[] = [], observers: any[] = [];
-  const window: any = { history: { replaceState: (_state: any, _title: any, path: string) => { document.URL = new URL(path, document.URL).href; } },
+  const window: any = { innerWidth: 1024, innerHeight: 768,
+    history: { replaceState: (_state: any, _title: any, path: string) => { document.URL = new URL(path, document.URL).href; } },
     webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: any) => posted.push(value) } } },
     KeyboardEvent: class { constructor(public type: string, options: any) { Object.assign(this, options); } } };
   window.top = window;
@@ -77,7 +86,7 @@ export function groqFixture(choice = groqChoice, options: { root?: boolean } = {
     for (let i = 0; i < 4; i++) { result = await run('selectModel'); if (!result.pending) return result; }
     return result;
   };
-  return { f: window.groqFixture, document, window, location, world, html, body, Node, Textarea, run, select, posted, observers,
+  return { f: window.groqFixture, document, window, location, world, html, body, Node, Textarea, run, select, posted, observers, hitQueries,
     get fingerprint() { return fingerprint; }, blockHit: (value: boolean) => { obstructed = value; },
     onDigest: (callback: () => void) => { digestHook = callback; },
     submit: async (prompt = groqPrompt) => {
