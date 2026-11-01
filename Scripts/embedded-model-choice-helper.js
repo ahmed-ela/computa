@@ -1850,6 +1850,10 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
       claudeRemountStarted = true;
       readStage = 'trigger_remount_waiting';
       let rejection = null;
+      // Losing absence eligibility is permanent for this read, but does not
+      // reject a later exact header with ordinary fresh positive proof.
+      let noOutputPendingEligible = input.allowClaudeModelObservationPending === true
+        && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function';
       // Diagnostic rereads only. No extra observer, timer or action is installed,
       // and these snapshots never supply model, ownership or completion proof.
       const diagnosticStarted = Date.now();
@@ -1862,6 +1866,12 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         observations = Math.min(observations + 1, 1_000);
         if (rejection) return true;
         if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        if (noOutputPendingEligible) {
+          try {
+            const absent = context.claudeNoOutputPending();
+            if (!absent || typeof absent.busy !== 'boolean') noOutputPendingEligible = false;
+          } catch { noOutputPendingEligible = false; }
+        }
         const current = websiteModelPickerState(provider);
         if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
           || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
@@ -1888,6 +1898,19 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
       const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
         () => { rejection = 'model_unverified'; });
       if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        // Only an expired absence observation may return no-output pending.
+        // The native permission and fresh semantic callback cannot convert a
+        // mismatch, clock error, popup or previously observed context loss.
+        if (changed === false && !rejection && !claudeRemountTrigger && noOutputPendingEligible
+          && input.allowClaudeModelObservationPending === true && context.scope === 'action_precheck'
+          && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function'
+          && unchanged() && detachedClaudeTrigger() && observeRemount() === false) {
+          let pending = null;
+          try { pending = context.claudeNoOutputPending(); } catch { /* Preserve failure. */ }
+          if (pending && typeof pending.busy === 'boolean' && !rejection
+            && unchanged() && detachedClaudeTrigger() && observeRemount() === false && !rejection && noOutputPendingEligible)
+            return { claudeModelObservationPending: true };
+        }
         readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
         try {
           const elapsed = Date.now() - diagnosticStarted;

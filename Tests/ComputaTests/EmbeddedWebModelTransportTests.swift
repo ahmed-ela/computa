@@ -11054,6 +11054,262 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return try XCTUnwrap(result as? [String: Any])
     }
 
+    private static var claudeEmptyReplyPage: String {
+        modelChoicePage(.claude, basePage: providerPage(.claude)
+            .replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}'; answer.appendChild(body);", with: """
+                window.fixtureReleaseReply = () => {
+                  body.textContent = '{"type":"message","text":"Fixture reply"}';
+                  answer.appendChild(body); turn.appendChild(actions);
+                };
+                """)
+            .replacingOccurrences(of: "copy.textContent = 'Copy'; actions.appendChild(copy); turn.appendChild(actions);",
+                                  with: "copy.textContent = 'Copy'; actions.appendChild(copy);"))
+    }
+
+    func testClaudeModelObservationPendingRejectsNonemptyMalformedOrPositiveReceipts() throws {
+        let url = "https://claude.ai/new", fingerprint = String(repeating: "a", count: 64)
+        let valid: [String: Any] = ["claudeModelObservationPending": true, "url": url, "temporary": true,
+            "conversationIdentity": NSNull(), "userCount": 1, "firstUserIdentity": "fixture-user-1",
+            "firstUserFingerprint": fingerprint, "firstUserVerified": true, "firstUserMarkerVerified": true,
+            "responseCount": 0, "text": "", "answerComplete": false, "busy": false, "interrupted": false]
+        func accepts(_ value: [String: Any]) -> Bool {
+            EmbeddedWebModelTransport.isClaudeModelObservationPending(value, url: url, firstUserFingerprint: fingerprint)
+        }
+        XCTAssertTrue(accepts(valid))
+        var busy = valid; busy["busy"] = true; XCTAssertTrue(accepts(busy))
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertFalse(accepts(missing), "Missing \(key)")
+        }
+        let invalid: [(String, Any)] = [
+            ("claudeModelObservationPending", false), ("claudeModelObservationPending", 1),
+            ("temporary", 1), ("temporary", false), ("conversationIdentity", "conversation"),
+            ("userCount", true), ("userCount", 0), ("userCount", 2), ("firstUserIdentity", ""),
+            ("firstUserIdentity", String(repeating: "x", count: 257)), ("firstUserIdentity", NSNull()),
+            ("firstUserFingerprint", String(repeating: "b", count: 64)),
+            ("firstUserVerified", false), ("firstUserVerified", 1), ("firstUserMarkerVerified", false),
+            ("responseCount", false), ("responseCount", 1), ("text", "reply"), ("text", " "),
+            ("answerComplete", true), ("busy", 0), ("interrupted", true), ("url", url + "/changed"),
+            ("modelEvidence", [:]), ("completionEvidence", [:]), ("freshSessionSubmissionProof", [:]),
+            ("modelVerificationPending", true), ("unexpected", true)
+        ]
+        for (key, value) in invalid {
+            var changed = valid; changed[key] = value
+            XCTAssertFalse(accepts(changed), "Unexpected \(key)=\(value)")
+        }
+    }
+
+    func testClaudeEmptyDetachedHeaderWaitsWithoutProofThenRequiresFreshModelForReply() async throws {
+        let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.claude)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let prompt = "Wait for a fresh Claude header without replay"
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let bound = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(bound["responseCount"] as? Int, 0)
+        XCTAssertNotNil(sent["modelEvidence"])
+        let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        try await installClaudeHeaderRemountFixture(view, variant: "missing")
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(Set(pending.keys), ["provider", "sessionToken", "state", "text", "sequence", "modelVerificationPending",
+                                         "modelVerificationPendingReason", "freshSessionSubmissionCapability", "pendingSubmissionContext"])
+        XCTAssertEqual(pending["provider"] as? String, "claude")
+        XCTAssertEqual(pending["sessionToken"] as? String, token)
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["sequence"] as? Int, 1)
+        XCTAssertEqual(pending["text"] as? String, "")
+        XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+        XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "claude_detached_header_v1")
+        XCTAssertEqual(pending["freshSessionSubmissionCapability"] as? String, "fresh_session_submission_v1")
+        let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+        XCTAssertEqual(Set(context.keys), ["documentGeneration", "sequence", "baselineResponseCount", "responseCount",
+                                           "firstUserFingerprint", "submittedPromptFingerprint"])
+        XCTAssertEqual(context["documentGeneration"] as? String, bound["documentGeneration"] as? String)
+        XCTAssertEqual(context["sequence"] as? Int, 1)
+        XCTAssertEqual(context["responseCount"] as? Int, 0)
+        XCTAssertEqual(context["baselineResponseCount"] as? Int, 0)
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, bound["firstUserFingerprint"] as? String)
+        XCTAssertEqual(context["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        _ = try await claudeHeaderRemountLedger(view)
+        _ = try await evaluate(view, """
+            document.body.appendChild(globalThis.fixtureRemount.original);
+            return true;
+            """, world: .world(name: "computa-chatgpt-model-v1"))
+        // The recovered ordinary empty read must remove the pending flag and
+        // supply current selection proof before any reply can be accepted.
+        let recovered = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(recovered["state"] as? String, "running")
+        XCTAssertNil(recovered["modelVerificationPending"])
+        XCTAssertNil(recovered["pendingSubmissionContext"])
+        try assertChoiceEvidence(recovered, choice: choice)
+        _ = try await evaluate(view, "window.fixtureReleaseReply(); return true;")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        XCTAssertNotNil(complete["freshSessionSubmissionProof"])
+        XCTAssertNil(complete["modelVerificationPending"])
+        let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        XCTAssertEqual(actionsAfter, actionsBefore)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testClaudeEmptyDetachedHeaderKeepsOriginalResponseDeadlineWithoutReplay() async throws {
+        let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(3))
+        let began = ContinuousClock.now
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Pending keeps original deadline"])
+        try await installClaudeHeaderRemountFixture(view, variant: "missing")
+        let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A negative receipt cannot renew the inference deadline")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        XCTAssertGreaterThanOrEqual(began.duration(to: .now), .milliseconds(2_700))
+        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+        _ = try await claudeHeaderRemountLedger(view)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await assertHumanTabIntact(fixture, retaining: try XCTUnwrap(fixture.createdTabs.last))
+    }
+
+    func testClaudeEmptyDetachedHeaderRejectsMissingSendAcknowledgementAndAppearingReply() async throws {
+        for variant in ["unacknowledged", "reply"] {
+            let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "No pending authority for \(variant)"])
+            try await installClaudeHeaderRemountFixture(view, variant: "missing")
+            if variant == "unacknowledged" {
+                XCTAssertTrue(fixture.transport.revokeAcknowledgedSendForTesting(sessionToken: token))
+            } else {
+                let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+                _ = try await evaluate(view, "window.fixtureReleaseReply(); return true;")
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("Missing current model proof must reject \(variant)")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified, variant) }
+            _ = try await claudeHeaderRemountLedger(view)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        }
+    }
+
+    func testClaudeEmptyDetachedHeaderRechecksNativeBindingAfterCallback() async throws {
+        for closeView in [false, true] {
+            let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Recheck native pending authority"])
+            try await installClaudeHeaderRemountFixture(view, variant: "missing")
+            var invalidated = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !invalidated else { return }
+                invalidated = true
+                if closeView { fixture.browser.closeTab(tabID) }
+                else { XCTAssertTrue(fixture.transport.revokeAcknowledgedSendForTesting(sessionToken: token)) }
+            }
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A negative receipt cannot outlive its native binding")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, closeView ? .staleSession : .modelUnverified)
+            }
+            XCTAssertTrue(invalidated)
+            if !closeView {
+                _ = try await claudeHeaderRemountLedger(view)
+                try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            }
+            try await assertHumanTabIntact(fixture, retaining: closeView ? nil : tabID)
+        }
+    }
+
+    func testClaudeEmptyDetachedHeaderRejectsCancellationAndLateCallback() async throws {
+        for cancel in [true, false] {
+            let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Reject expired pending observation"])
+            try await installClaudeHeaderRemountFixture(view, variant: "missing")
+            fixture.transport.setInspectionTimeoutForTesting(.seconds(3))
+            var crossed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !crossed else { return }
+                crossed = true
+                if cancel { withUnsafeCurrentTask { $0?.cancel() } }
+                else { try? await Task.sleep(for: .milliseconds(1_500)) }
+            }
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+            let request = Task<Void, Error> {
+                _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            }
+            do { try await request.value; XCTFail("Cancelled or expired negative receipt must reject") }
+            catch {
+                if cancel { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+            }
+            XCTAssertTrue(crossed)
+            _ = try await claudeHeaderRemountLedger(view)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        }
+    }
+
+    func testClaudeEmptyDetachedHeaderCannotResumeAfterModelOrBodyDrift() async throws {
+        for changeModel in [true, false] {
+            let fixture = try Fixture(page: Self.claudeEmptyReplyPage)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Pending cannot excuse model or body drift"])
+            try await installClaudeHeaderRemountFixture(view, variant: "missing")
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+            _ = try await claudeHeaderRemountLedger(view)
+            _ = try await evaluate(view, """
+                const trigger = globalThis.fixtureRemount.original;
+                if (\(changeModel ? "true" : "false")) {
+                  trigger.setAttribute('aria-label', 'Model: Sonnet 5.5 Medium');
+                  trigger.querySelector('#fixture-model-header').textContent = 'Sonnet 5.5';
+                } else document.querySelector('[data-testid="user-message"]').textContent += ' changed';
+                document.body.appendChild(trigger);
+                return true;
+                """, world: .world(name: "computa-chatgpt-model-v1"))
+            _ = try await evaluate(view, "window.fixtureReleaseReply(); return true;")
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("Pending cannot authorize an answer after drift")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                               changeModel ? .modelMismatch : .ownershipFailure(.javaScriptFirstUser))
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        }
+    }
+
     func testClaudeSubmittedHeaderRemountUsesRealObserverBeforeStrictCompletion() async throws {
         let choice = Self.fixtureChoice(.claude)
         let fixture = try Fixture(page: Self.modelChoicePage(.claude))

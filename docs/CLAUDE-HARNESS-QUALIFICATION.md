@@ -9,10 +9,11 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build373 (`0b46593`) is installed and its launch is recorded.
+As of November 1, build374 (`c58d43d`) is installed and its launch is recorded.
 The latest full Claude workflow cases below ran on build368 (`2dea3d2`). A later
 Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
-on build371 is claimed. The separate build373 reproduction below failed. The
+on build371 is claimed. The separate build373 and build374 reproductions below
+failed. The
 `v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
@@ -44,7 +45,7 @@ replayed. The failed read did not retain its actual user-message count.
 This case also does not establish current Fable entitlement: the earlier
 ordinary picker marked Fable choices `Buy credits`.
 
-Installed build373 includes finite count and remount-completion diagnostics
+Build373 added finite count and remount-completion diagnostics
 first prepared in build372, plus the later Alibaba selector change. The count
 projection preserves the exact count used by the existing failed guard. Remount
 observations capture completion structure at entry and failed exit of the
@@ -98,8 +99,8 @@ ones and records bounded control counts and response subtree shapes. A
 separate native record joins the exact session, tab and document generation to
 view/host dimensions, clipping and window visibility before cleanup. Neither
 record supplies model or response authority, extends a deadline, retains the
-page or replays a prompt. The installed app is still build373; this candidate
-has not yet produced a live failure capture or established a repair.
+page or replays a prompt. The subsequent build374 capture is recorded below;
+these diagnostics do not themselves repair the failure.
 
 The candidate passed 969 cross-provider adapter tests (41,752 assertions),
 11 focused native tests and nine versioning tests. The native cases verify
@@ -110,6 +111,94 @@ exceptions, changed ownership and output-size limits. Source hashes were
 unchanged during both adapter and native runs. Their retained log SHA-256 values
 are `ee08a87d9bc6c862db5ae8547e6c3aea029026b4a1ac49c9d8e838fa5f3de4df`
 and `f299f34d047d4ce53d7a4b63abc4757da061e281ff3f00aed4200ed397eb6933`.
+
+## Installed build374 empty-response capture, November 1
+
+After the approved restart, process 19847 ran the exact signed build374
+(`c58d43d29b384fb7b6e56b12bf77702d9e2ea34a`). Installed executable and resources
+matched the package receipt. An ordinary picker independently showed Opus 5
+selected, enabled and without a credit requirement; the empty inspection tab
+was closed before the harness test. Fable choices still required usage credits.
+
+One fresh `opus5-marker374-a` prompt was sent at 18:57:44 UTC. It failed after
+5.856 seconds with one inference, zero tools and no final answer. The server
+journal had already verified Opus 5, the document generation and first-user
+fingerprint. The exact session subsequently closed with a saved cleanup receipt.
+The failed prompt was not replayed.
+
+The captured `trigger_remount_timeout` lasted 1,871 ms. Both completion samples
+had zero logical answers. At the failed exit, the bounded structural capture
+found no composer, Send/Stop button, model-prefix control or rendered reply.
+One visible assistant root had two descendants and zero UTF-16 text units;
+neither that traversal nor the root inventory was truncated. This supports an
+empty sampled response shell, rather than a completed response hidden by the
+expected reply selector. It does not establish the provider's internal state.
+
+The native record matched the journal's session and document generation. The
+view was attached, nonhidden and in a visible, nonoccluded window. Its frame
+was 1024 by 768, while the visible rectangle and host were 1024 by 650. This
+establishes vertical clipping geometry; it does not establish that clipping
+caused the empty shell or disappearance of the controls. The document itself
+reported visible and ready, with a 1024 by 768 viewport.
+
+All 13 finite events and seven diagnostic chunks were retained without
+omission. The independent audit passed 18 evidence checks and is retained in
+`evidence/opus5-marker374-a/failure-audit374.json`, SHA-256
+`7bbef73200820762ec6c8048ed0d5c38d8a1e64efdf3b48829048e2551706982`.
+The next change targets premature rejection of this strictly empty, already
+owned state. Any eventual answer still needs fresh model and ownership proof;
+neither an old picker observation nor this diagnostic can authorize it.
+
+## Candidate build375: bounded waiting without answer authority
+
+The candidate changes one previously terminal condition into an empty running
+observation: an already verified first Claude submission, unchanged ownership,
+a detached remembered model control, no current conflicting model or popup,
+and a fresh bounded read proving that no reply markup or assistant text exists.
+Hidden reply markup, nonempty assistant content, an incomplete traversal or
+ambiguous roots prevent that waiting state. Quota, sign-in, interruption and
+ownership changes keep their failure paths. A semantic blocker or output seen
+during a delivered observer callback permanently disqualifies the empty waiting
+branch for that read, even if it disappears before timeout. This does not prevent
+an ordinary positive read after the exact header returns. Diagnostics do not
+participate in the decision.
+
+Only ordinary native response polling can request this behavior. Its exact
+negative page receipt is checked against the acknowledged Send, pre-insertion
+prompt binding, native view, document generation, URL and first-user fingerprint.
+The server independently requires its own previously verified submission pins,
+the canonical submitted prompt hash, and no earlier observed output. The
+pending snapshot contains no model evidence, response text, tool proposal,
+completion proof or continuation capability. It cannot establish first ownership.
+
+The original response deadline remains in force. A later ordinary read must
+restore fresh model and ownership proof before response ingestion or completion.
+Output that appears while the control is still missing does not qualify for
+the empty waiting branch. There is no replay, extra Send, model-switch action
+or cached-model fallback. Finite pending/restored transition records identify
+the exact session, document generation and sequence without page content. They
+help distinguish an exercised recovery path from an unrelated successful run;
+they do not establish completion. Build374 remains installed; build375 still
+requires a fresh live test before any repair claim.
+
+Candidate validation passed 978 JavaScript tests (42,658 assertions): 573
+ChatGPT, 223 Claude and 182 Gemini cases, with unchanged source hashes. The
+server run passed 86 tests, including four new tests whose rejection matrix
+covers 33 invalid negative receipts. After the final adapter change, all 35
+Claude transport tests and five host-diagnostic tests passed. Those native
+cases cover restoration, cancellation, stale callbacks, appearing output and
+the original deadline. Nine versioning tests also passed.
+
+The final JavaScript and native transport log SHA-256 values are
+`d790b68efae6401d9eb9c3549a96cd21a0b0e9f505628947a69757956b8b1589`
+and `c04ffefca8c90e5981f39f6da6614e695cc1131437e5c8d85fe31cc74a63e489`.
+The server source and tests still match the earlier passing native receipt,
+whose log SHA-256 is
+`d3ccdd9111aa844fa3f318e4c4bc8e75a4b5070970ec80af0a3eafc6cff6327f`.
+The initial cross-provider run exposed a throwing-getter regression; its failed
+receipt is retained, and the final suite includes that corrected guard plus
+transient-blocker tests. These are synthetic/native validation results, not a
+live Opus 5 pass.
 
 ## Installed build368 results, November 1
 

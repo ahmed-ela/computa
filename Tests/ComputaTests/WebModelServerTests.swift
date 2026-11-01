@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
@@ -928,6 +929,169 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
             XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, 0)
         }
+    }
+
+    func testClaudePendingModelPollsKeepProvedSubmissionButWithholdCompletionUntilFreshProof() async throws {
+        for pendingCount in [1, 3] {
+            let label = "claude-pending-restored-\(pendingCount)"
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport()
+            let gate = WebListenerStartupGate()
+            let transport = PendingClaudeModelFixtureTransport(base: base, pendingCount: pendingCount, finalGate: gate)
+            await server.configureEmbeddedTransport(transport)
+            await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(3))
+            let data = try turnRequest(input: [["role": "user", "content": "Wait for the exact fresh Claude proof"]],
+                model: PendingClaudeModelFixtureTransport.choice.modelID)
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            addTeardownBlock { inference.cancel(); await gate.resume() }
+            try await gate.waitUntilEntered()
+
+            let pending = try turnJournal(root: root, task: label)
+            XCTAssertEqual(pending.compactMap { $0["phase"] as? String },
+                ["start_requested", "started", "submission_verified"])
+            let submission = try XCTUnwrap(pending.last)
+            XCTAssertNotNil(submission["modelEvidence"])
+            XCTAssertEqual(submission["responseCount"] as? Int, 0)
+            XCTAssertNil(submission["submissionProofPolicy"])
+            XCTAssertNil(submission["submittedPromptFingerprint"], "Pending polls cannot manufacture final fresh-submission proof")
+            let beforeFinal = await base.operations()
+            XCTAssertEqual(beforeFinal, ["webProviderStart", "webProviderSend"])
+            let observedPending = await transport.pendingPolls()
+            XCTAssertEqual(observedPending, pendingCount)
+            let pendingReceipts = await server.latestCleanupReceipts()
+            XCTAssertTrue(pendingReceipts.isEmpty)
+
+            await gate.resume()
+            let response = try await inference.value
+            try await gate.requireHealthy()
+            XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("OK"))
+            XCTAssertFalse(String(decoding: response, as: UTF8.self).contains("modelVerificationPending"))
+            let journal = try turnJournal(root: root, task: label)
+            XCTAssertEqual(journal.compactMap { $0["phase"] as? String },
+                ["start_requested", "started", "submission_verified", "complete", "release_verified"])
+            for record in journal.suffix(2) {
+                XCTAssertEqual(record["submissionProofPolicy"] as? String, "fresh_session_submission_v1")
+                XCTAssertEqual(record["responseCount"] as? Int, 1)
+                XCTAssertNotNil(record["modelEvidence"])
+                XCTAssertEqual((record["submittedPromptFingerprint"] as? String)?.count, 64)
+            }
+            let operations = await base.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertEqual(receipts.first?.outcome, .closed)
+            XCTAssertEqual(receipts.first?.receiptSaved, true)
+        }
+    }
+
+    func testClaudePendingModelContractRejectsMalformedUnboundOrChangedProofWithoutReplay() async throws {
+        for mutation in PendingClaudeModelMutation.allCases where mutation != .none {
+            let label = "claude-pending-invalid-" + mutation.rawValue
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport()
+            let transport = PendingClaudeModelFixtureTransport(base: base, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(2))
+            let data = try turnRequest(input: [["role": "user", "content": "Reject synthetic contradictory pending proof"]],
+                model: PendingClaudeModelFixtureTransport.choice.modelID)
+            do {
+                _ = try await server.fixtureInfer(data, taskID: label)
+                XCTFail("Malformed pending or restored-final proof published output: \(mutation)")
+            } catch {
+                if mutation == .missingFinalModel {
+                    guard case .modelUnverified? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected missing model proof rejection for \(mutation): \(error)"); continue
+                    }
+                } else {
+                    guard case .invalidRequest? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected strict snapshot rejection for \(mutation): \(error)"); continue
+                    }
+                }
+            }
+            let journal = try turnJournal(root: root, task: label)
+            XCTAssertEqual(journal.filter { $0["phase"] as? String == "submission_verified" }.count,
+                mutation == .initialUnboundPending ? 0 : 1, mutation.rawValue)
+            XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") }, mutation.rawValue)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1, mutation.rawValue)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1, mutation.rawValue)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count,
+                mutation == .missingFinalModel || mutation == .missingFinalFreshProof ? 1 : 0, mutation.rawValue)
+            let pendingPolls = await transport.pendingPolls()
+            XCTAssertEqual(pendingPolls, mutation == .initialUnboundPending ? 0 : 1,
+                "Reach the pending boundary after any ordinary output observation: \(mutation)")
+            XCTAssertFalse(operations.contains("webProviderFinish"), mutation.rawValue)
+            _ = await server.fixtureCancel(taskID: label)
+            let afterCancel = await base.operations()
+            XCTAssertEqual(afterCancel.filter { $0 == "webProviderSend" }.count, 1, "No correction or replay: \(mutation)")
+        }
+    }
+
+    func testClaudePendingModelPollsCannotRenewTheAbsoluteResponseDeadline() async throws {
+        let label = "claude-pending-deadline"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let transport = PendingClaudeModelFixtureTransport(base: base, repeatPending: true)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(150))
+        let data = try turnRequest(input: [["role": "user", "content": "Bound repeated empty pending observations"]],
+            model: PendingClaudeModelFixtureTransport.choice.modelID)
+        do {
+            _ = try await server.fixtureInfer(data, taskID: label)
+            XCTFail("Repeated pending observations extended the response deadline")
+        } catch {
+            guard case .deadline? = error as? WebModelServer.Failure else { return XCTFail("Expected response deadline: \(error)") }
+        }
+        let pendingCount = await transport.pendingPolls()
+        XCTAssertGreaterThan(pendingCount, 0)
+        let deadlineChanged = await transport.waitDeadlineChanged()
+        XCTAssertFalse(deadlineChanged)
+        let journal = try turnJournal(root: root, task: label)
+        XCTAssertEqual(journal.compactMap { $0["phase"] as? String }, ["start_requested", "started", "submission_verified", "failed"])
+        _ = await server.fixtureCancel(taskID: label)
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderCancel"])
+    }
+
+    func testClaudePendingModelCancellationWithholdsOutputAndClosesOnlySubmittedLease() async throws {
+        let label = "claude-pending-cancel"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let gate = WebListenerStartupGate()
+        let transport = PendingClaudeModelFixtureTransport(base: base, repeatPending: true, waitGate: gate)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(3))
+        let data = try turnRequest(input: [["role": "user", "content": "Cancel while the exact Claude model proof is pending"]],
+            model: PendingClaudeModelFixtureTransport.choice.modelID)
+        let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+        addTeardownBlock { inference.cancel(); await gate.resume() }
+        try await gate.waitUntilEntered()
+        let before = try turnJournal(root: root, task: label)
+        XCTAssertEqual(before.compactMap { $0["phase"] as? String }, ["start_requested", "started", "submission_verified"])
+        inference.cancel()
+        let stopping = Task { await server.fixtureCancel(taskID: label) }
+        for _ in 0..<100 {
+            if await server.isRetiringForTesting(taskID: websiteInferenceFixtureTaskID(label)) { break }
+            await Task.yield()
+        }
+        await gate.resume()
+        let issues = await stopping.value
+        XCTAssertTrue(issues.isEmpty)
+        do { _ = try await inference.value; XCTFail("Cancelled pending proof published output") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await gate.requireHealthy()
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderCancel"])
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.receiptSaved, true)
+        let journal = try turnJournal(root: root, task: label)
+        XCTAssertFalse(journal.contains { $0["phase"] as? String == "complete" })
     }
 
     func testInspectorArmIsNativeContextBoundChatGPTOnlyAndDoesNotEnterResponseOrOperations() async throws {
@@ -3315,6 +3479,135 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
             throw EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission)
         }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+private enum PendingClaudeModelMutation: String, CaseIterable, Sendable {
+    case none, falseFlag, numberFlag, stringFlag, nullFlag, missingReason, unknownReason, reasonWithoutFlag
+    case initialUnboundPending, wrongToken, wrongGeneration, wrongFirstFingerprint, wrongSubmittedFingerprint
+    case wrongSequence, wrongContextSequence, wrongBaseline, wrongResponseCount, missingContext, missingContextField, extraContextKey
+    case modelEvidence, proofContext, completionEvidence, freshProof, wrongProvider, missingCapability, wrongCapability
+    case extraKey, text, completeWithPending, missingFinalModel, missingFinalFreshProof
+    case previousResponseCount, previousRunningText
+}
+
+/// Mutates outside the normal synthetic proof adapter, so omitted or malformed
+/// pending/final fields cannot be repaired before reaching the server.
+private actor PendingClaudeModelFixtureTransport: WebModelTransport {
+    static let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+    private let base: WebsiteInferenceFixtureTransport
+    private let mutation: PendingClaudeModelMutation
+    private let pendingCount: Int
+    private let repeatPending: Bool
+    private let finalGate: WebListenerStartupGate?
+    private let waitGate: WebListenerStartupGate?
+    private var pending: Data?
+    private var previousRunning: Data?
+    private var emittedPending = 0
+    private var firstWaitDeadline: ContinuousClock.Instant?
+    private var changedDeadline = false
+
+    init(base: FixtureWebModelTransport, mutation: PendingClaudeModelMutation = .none,
+         pendingCount: Int = 1, repeatPending: Bool = false,
+         finalGate: WebListenerStartupGate? = nil, waitGate: WebListenerStartupGate? = nil) {
+        self.base = WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: Self.choice)
+        self.mutation = mutation; self.pendingCount = pendingCount; self.repeatPending = repeatPending
+        self.finalGate = finalGate; self.waitGate = waitGate
+    }
+
+    func pendingPolls() -> Int { emittedPending }
+    func waitDeadlineChanged() -> Bool { changedDeadline }
+    func changeRevision(sessionToken: String) -> UInt64? { UInt64(emittedPending) }
+    func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        if let firstWaitDeadline { changedDeadline = changedDeadline || firstWaitDeadline != deadline }
+        else { firstWaitDeadline = deadline }
+        if let waitGate { await waitGate.pause() }
+        try Task.checkCancellation()
+        if repeatPending { try await Task.sleep(for: .milliseconds(1)) }
+        return UInt64(emittedPending)
+    }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll", let previousRunning {
+            self.previousRunning = nil
+            return previousRunning
+        }
+        if operation == "webProviderPoll", let pending {
+            if repeatPending || emittedPending < pendingCount {
+                emittedPending += 1
+                return pending
+            }
+            if let finalGate { await finalGate.pause() }
+            try Task.checkCancellation()
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if operation == "webProviderSend" {
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            let prompt = try XCTUnwrap(input["prompt"])
+            let context = try XCTUnwrap(value["modelProofContext"] as? [String: Any])
+            let token = try XCTUnwrap(value["sessionToken"] as? String)
+            var pendingContext = context
+            pendingContext["submittedPromptFingerprint"] = SHA256.hash(data: Data(prompt.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            var observation: [String: Any] = ["provider": "claude", "sessionToken": token,
+                "state": "running", "text": "", "sequence": 1, "modelVerificationPending": true,
+                "modelVerificationPendingReason": "claude_detached_header_v1",
+                "freshSessionSubmissionCapability": "fresh_session_submission_v1", "pendingSubmissionContext": pendingContext]
+            switch mutation {
+            case .falseFlag: observation["modelVerificationPending"] = false
+            case .numberFlag: observation["modelVerificationPending"] = 1
+            case .stringFlag: observation["modelVerificationPending"] = "true"
+            case .nullFlag: observation["modelVerificationPending"] = NSNull()
+            case .missingReason: observation.removeValue(forKey: "modelVerificationPendingReason")
+            case .unknownReason: observation["modelVerificationPendingReason"] = "unknown_pending_reason"
+            case .reasonWithoutFlag: observation.removeValue(forKey: "modelVerificationPending")
+            case .wrongToken: observation["sessionToken"] = UUID().uuidString
+            case .wrongGeneration: pendingContext["documentGeneration"] = UUID().uuidString
+            case .wrongFirstFingerprint: pendingContext["firstUserFingerprint"] = String(repeating: "0", count: 64)
+            case .wrongSubmittedFingerprint: pendingContext["submittedPromptFingerprint"] = String(repeating: "0", count: 64)
+            case .wrongSequence: observation["sequence"] = 2
+            case .wrongContextSequence: pendingContext["sequence"] = 2
+            case .wrongBaseline: pendingContext["baselineResponseCount"] = 1
+            case .wrongResponseCount: pendingContext["responseCount"] = 1
+            case .missingContextField: pendingContext.removeValue(forKey: "submittedPromptFingerprint")
+            case .extraContextKey: pendingContext["unexpected"] = true
+            case .modelEvidence: observation["modelEvidence"] = value["modelEvidence"]
+            case .proofContext: observation["modelProofContext"] = context
+            case .completionEvidence: observation["completionEvidence"] = ["codeStructure": [:]]
+            case .freshProof: observation["freshSessionSubmissionProof"] = pendingContext
+            case .wrongProvider: observation["provider"] = "chatgpt"
+            case .missingCapability: observation.removeValue(forKey: "freshSessionSubmissionCapability")
+            case .wrongCapability: observation["freshSessionSubmissionCapability"] = "unknown_capability"
+            case .extraKey: observation["unexpected"] = true
+            case .text: observation["text"] = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"must never execute"}}]}"#
+            case .completeWithPending: observation["state"] = "complete"
+            case .none, .initialUnboundPending, .missingContext, .missingFinalModel, .missingFinalFreshProof,
+                 .previousResponseCount, .previousRunningText: break
+            }
+            if mutation == .missingContext { observation.removeValue(forKey: "pendingSubmissionContext") }
+            else { observation["pendingSubmissionContext"] = pendingContext }
+            pending = try JSONSerialization.data(withJSONObject: observation)
+            if mutation == .initialUnboundPending { return try XCTUnwrap(pending) }
+            if mutation == .previousResponseCount {
+                // The normal proved Send observes an answer before the later
+                // empty pending snapshot tries to erase that observation.
+                var observed = context
+                observed["responseCount"] = 1
+                value["modelProofContext"] = observed
+            } else if mutation == .previousRunningText {
+                // Exercise the ordinary running-poll path independently of
+                // the Send snapshot. This text is never a completed reply.
+                var observed = value
+                observed["text"] = "SYNTHETIC_PARTIAL_OUTPUT_MUST_NOT_BE_FORGOTTEN"
+                previousRunning = try JSONSerialization.data(withJSONObject: observed)
+            }
+        }
+        if operation == "webProviderPoll", value["state"] as? String == "complete" {
+            if mutation == .missingFinalModel { value.removeValue(forKey: "modelEvidence") }
+            if mutation == .missingFinalFreshProof { value.removeValue(forKey: "freshSessionSubmissionProof") }
+        }
+        return try JSONSerialization.data(withJSONObject: value)
     }
 }
 

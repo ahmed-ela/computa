@@ -462,6 +462,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var modelSelectionVerified = false
         // Running observations retain negative pins, but never claim a fresh picker proof.
         var modelVerificationPending = false
+        // Claude may temporarily detach its header before any reply exists.
+        // This separate negative state never carries model or answer proof.
+        var claudeModelObservationPending = false
         var loggedPendingModelVerification = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
@@ -2114,7 +2117,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     preferQuietChatGPTCompletion: true,
                     maximumWait: min(inspectionTimeout, deadline - .now))
             } else {
-                observed = try await page(session, action: "inspect", maximumWait: min(inspectionTimeout, deadline - .now))
+                observed = try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
+                    maximumWait: min(inspectionTimeout, deadline - .now))
             }
         }
         catch {
@@ -2166,6 +2170,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw error
         }
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
+        if observed["claudeModelObservationPending"] != nil {
+            guard session.claudeModelObservationPending else { throw Failure.modelUnverified }
+            return try snapshot(session)
+        }
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
@@ -4740,6 +4748,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
+                      allowPendingClaudeModelObservation: Bool = false,
                       preferQuietChatGPTCompletion: Bool = false,
                       pendingSubmissionProductRecheck: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
@@ -4921,6 +4930,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        let allowClaudeModelObservationPending = allowPendingClaudeModelObservation
+            && action == "inspect" && enforceModel && !allowBlockedProvider
+            && canObservePendingClaudeModel(session)
+        if allowClaudeModelObservationPending { input["allowClaudeModelObservationPending"] = true }
         if preferQuietChatGPTCompletion {
             guard action == "inspect", !allowBlockedProvider, allowPendingChatGPTModelVerification,
                   !recheckModelAfterAwait, !recheckProductAfterAwait,
@@ -5464,6 +5477,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             default: throw Failure.composerUnavailable
             }
         }
+        if observed["claudeModelObservationPending"] != nil {
+            // No ordinary field is adopted from this empty negative receipt.
+            // The invocation's exact view/generation/route fences have passed;
+            // require the original, already acknowledged first Send again.
+            guard allowClaudeModelObservationPending, action == "inspect", enforceModel, !allowBlockedProvider,
+                  canObservePendingClaudeModel(session), session.documentGeneration == generation,
+                  currentURL == url, session.conversationIdentity == nil,
+                  Self.isClaudeModelObservationPending(observed, url: currentURL.absoluteString,
+                      firstUserFingerprint: session.firstUserFingerprint ?? "") else { throw Failure.modelUnverified }
+            guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
+            if !session.claudeModelObservationPending {
+                Self.inspectionLog.notice("claudeModelObservation phase=pending sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
+            }
+            session.claudeModelObservationPending = true
+            return observed
+        }
         if session.provider == .groq, !observesLifecycle(observed, session: session) {
             throw Failure.explicitClearUnverified
         }
@@ -5735,7 +5764,58 @@ final class EmbeddedWebModelTransport: WebModelTransport {
            isCurrent(request, session: session), let receipt = readinessReceipt(preparedReadiness, request: request) {
             preparedReadinessSink?(receipt)
         }
+        if session.claudeModelObservationPending, provider == .claude, action == "inspect", enforceModel,
+           !allowBlockedProvider {
+            // Only an ordinary, fully validated read restores positive proof.
+            // A model-only callback or a cleanup read cannot clear this state.
+            _ = try validatedModelEvidence(observed, session: session, action: action)
+            session.claudeModelObservationPending = false
+            Self.inspectionLog.notice("claudeModelObservation phase=restored sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
+        }
         return observed
+    }
+
+    private func canObservePendingClaudeModel(_ session: Session) -> Bool {
+        guard !Task.isCancelled, session.provider == .claude, !session.isDiscovery, !session.isRecoveryProbe,
+              session.state == "running", session.terminalFailure == nil, session.submitted,
+              session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.confirmedUsers == 1, !session.pendingSubmission, session.baseline == 0,
+              session.conversationIdentity == nil,
+              session.observedResponseCount == 0, session.response.isEmpty, !session.profiledFirstPositive,
+              !session.completionCandidate, session.responseCodeStructure == nil,
+              session.freshSubmissionCompletion == nil, session.temporary, session.lifecycleVerified,
+              session.modelChoice != nil, session.modelSelectionVerified, session.modelEvidence != nil,
+              let binding = session.freshSubmissionBinding,
+              session.firstUserFingerprint == binding.outboundFingerprint,
+              session.documentGeneration == binding.generation,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == binding.generation else { return false }
+        return true
+    }
+
+    /// Exact shipped negative receipt, with no response, model or completion
+    /// fields. This shape alone grants nothing; page() applies the native pins.
+    static func isClaudeModelObservationPending(_ observed: [String: Any], url: String,
+                                               firstUserFingerprint: String) -> Bool {
+        let keys: Set<String> = ["claudeModelObservationPending", "url", "temporary", "conversationIdentity",
+            "userCount", "firstUserIdentity", "firstUserFingerprint", "firstUserVerified", "firstUserMarkerVerified",
+            "responseCount", "text", "answerComplete", "busy", "interrupted"]
+        guard Set(observed.keys) == keys,
+              firstUserDiagnosticBool(observed["claudeModelObservationPending"]) == true,
+              observed["url"] as? String == url, firstUserDiagnosticBool(observed["temporary"]) == true,
+              observed["conversationIdentity"] is NSNull,
+              ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 1,
+              let identity = observed["firstUserIdentity"] as? String, !identity.isEmpty, identity.utf16.count <= 256,
+              firstUserFingerprint.count == 64,
+              firstUserFingerprint.allSatisfy({ $0.isHexDigit && !$0.isUppercase }),
+              observed["firstUserFingerprint"] as? String == firstUserFingerprint,
+              firstUserDiagnosticBool(observed["firstUserVerified"]) == true,
+              firstUserDiagnosticBool(observed["firstUserMarkerVerified"]) == true,
+              ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+              observed["text"] as? String == "", firstUserDiagnosticBool(observed["answerComplete"]) == false,
+              firstUserDiagnosticBool(observed["busy"]) != nil,
+              firstUserDiagnosticBool(observed["interrupted"]) == false else { return false }
+        return true
     }
 
     /// Recognize only the shipped adapter's empty dispatch receipt. This does
@@ -6283,6 +6363,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
+        if session.claudeModelObservationPending, session.state == "running", cleanup == nil {
+            guard canObservePendingClaudeModel(session), let binding = session.freshSubmissionBinding else {
+                throw Failure.modelUnverified
+            }
+            return try JSONSerialization.data(withJSONObject: [
+                "provider": "claude", "sessionToken": session.token, "state": "running", "text": "", "sequence": 1,
+                "modelVerificationPending": true, "modelVerificationPendingReason": "claude_detached_header_v1",
+                "freshSessionSubmissionCapability": Self.freshSessionSubmissionCapability,
+                "pendingSubmissionContext": ["documentGeneration": binding.generation.uuidString, "sequence": 1,
+                    "baselineResponseCount": 0, "responseCount": 0, "firstUserFingerprint": binding.outboundFingerprint,
+                    "submittedPromptFingerprint": binding.promptFingerprint]
+            ])
+        }
         let pendingModel = session.provider == .chatgpt && session.state == "running" && session.modelVerificationPending
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": pendingModel ? "" : session.response, "sequence": session.sequence]
@@ -6325,7 +6418,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func freshSubmissionCompletion(_ session: Session, observation: [String: Any]) -> Session.FreshSubmissionCompletion? {
         guard session.supportsFreshSessionSubmission, session.state == "running", !Task.isCancelled,
-              session.terminalFailure == nil, session.sequence == 1, session.baseline == 0,
+              session.terminalFailure == nil, !session.claudeModelObservationPending,
+              session.sequence == 1, session.baseline == 0,
               session.submitted, session.acknowledgedSendSequence == 1,
               !session.pendingSubmission, session.confirmedUsers == 1, session.observedResponseCount == 1,
               session.temporary, session.modelChoice != nil, session.modelSelectionVerified,
@@ -6341,6 +6435,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               Self.firstUserDiagnosticBool(observation["interrupted"]) == false,
               Self.firstUserDiagnosticBool(observation["answerComplete"]) == true,
               observation["modelVerificationPending"] == nil,
+              observation["claudeModelObservationPending"] == nil,
               ComputerToolArgumentContract.exactInt64(observation["userCount"]) == 1,
               ComputerToolArgumentContract.exactInt64(observation["responseCount"]) == 1,
               let first = session.firstUserFingerprint, first == binding.outboundFingerprint,

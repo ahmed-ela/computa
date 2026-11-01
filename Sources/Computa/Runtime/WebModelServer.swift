@@ -147,6 +147,7 @@ actor WebModelServer {
         var baselineResponseCount = 0
         var documentGeneration: UUID?
         var firstUserFingerprint: String?
+        var hasObservedClaudeOutput = false
         var resolvedModel: WebsiteModelEvidence?
         var completedResponseCount: Int?
         var completedText: String?
@@ -1684,7 +1685,8 @@ actor WebModelServer {
     }
 
     private static func modelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
-        guard snapshot["modelVerificationPending"] == nil, snapshot["pendingSubmissionContext"] == nil else {
+        guard snapshot["modelVerificationPending"] == nil, snapshot["pendingSubmissionContext"] == nil,
+              snapshot["modelVerificationPendingReason"] == nil else {
             throw Failure.modelUnverified
         }
         if session.provider == "chatgpt" {
@@ -1811,16 +1813,47 @@ actor WebModelServer {
         if pendingModel {
             guard let flag = snapshot["modelVerificationPending"] as? NSNumber,
                   CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
-                  session.provider == "chatgpt",
-                  session.modelChoice?.chatGPTPower != nil, session.resolvedModel != nil,
                   !session.submittedPromptFingerprint.isEmpty,
                   snapshot["state"] as? String == "running",
                   snapshot["text"] as? String == "", snapshot["modelEvidence"] == nil,
-                  snapshot["modelProofContext"] == nil, snapshot["completionEvidence"] == nil,
-                  (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
+                  snapshot["modelProofContext"] == nil, snapshot["completionEvidence"] == nil else {
                 throw Failure.invalidRequest
             }
-        } else if snapshot["pendingSubmissionContext"] != nil { throw Failure.invalidRequest }
+            if session.provider == "claude" {
+                // This is only a negative observation after a normally proved
+                // submission. It cannot establish first ownership or publish
+                // text while Claude temporarily removes its model controls.
+                guard Set(snapshot.keys) == ["provider", "sessionToken", "state", "text", "sequence",
+                        "modelVerificationPending", "modelVerificationPendingReason",
+                        "freshSessionSubmissionCapability", "pendingSubmissionContext"],
+                      snapshot["provider"] as? String == "claude",
+                      snapshot["modelVerificationPendingReason"] as? String == "claude_detached_header_v1",
+                      session.modelChoice != nil, session.resolvedModel != nil,
+                      session.provesFreshSessionSubmission, !session.provesNativeContinuation,
+                      session.sequence == 1, session.baselineResponseCount == 0,
+                      !session.hasObservedClaudeOutput,
+                      let generation = session.documentGeneration,
+                      let fingerprint = session.firstUserFingerprint, !fingerprint.isEmpty,
+                      let context = snapshot["pendingSubmissionContext"] as? [String: Any],
+                      Set(context.keys) == ["documentGeneration", "sequence", "baselineResponseCount",
+                          "responseCount", "firstUserFingerprint", "submittedPromptFingerprint"],
+                      let rawGeneration = context["documentGeneration"] as? String,
+                      UUID(uuidString: rawGeneration) == generation,
+                      context["firstUserFingerprint"] as? String == fingerprint,
+                      context["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint,
+                      receiptInteger(context["responseCount"], range: 0...0) == 0 else {
+                    throw Failure.invalidRequest
+                }
+            } else {
+                guard session.provider == "chatgpt", session.modelChoice?.chatGPTPower != nil,
+                      session.resolvedModel != nil, snapshot["modelVerificationPendingReason"] == nil,
+                      (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
+                    throw Failure.invalidRequest
+                }
+            }
+        } else if snapshot["pendingSubmissionContext"] != nil || snapshot["modelVerificationPendingReason"] != nil {
+            throw Failure.invalidRequest
+        }
         guard let token = snapshot["sessionToken"] as? String,
               UUID(uuidString: token) == UUID(uuidString: session.token),
               receiptInteger(snapshot["sequence"], range: 1...1_024) == session.sequence,
@@ -1875,6 +1908,10 @@ actor WebModelServer {
         }
         session.documentGeneration = generation
         if !fingerprint.isEmpty { session.firstUserFingerprint = fingerprint }
+        if session.provider == "claude", !pendingModel,
+           responseCount > session.baselineResponseCount || !(snapshot["text"] as? String ?? "").isEmpty {
+            session.hasObservedClaudeOutput = true
+        }
     }
 
     private func recordTransactionEvidence(taskID: String, inferenceID: UUID, context: InferenceContext,

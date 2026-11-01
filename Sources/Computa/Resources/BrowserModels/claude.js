@@ -1850,6 +1850,10 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
       claudeRemountStarted = true;
       readStage = 'trigger_remount_waiting';
       let rejection = null;
+      // Losing absence eligibility is permanent for this read, but does not
+      // reject a later exact header with ordinary fresh positive proof.
+      let noOutputPendingEligible = input.allowClaudeModelObservationPending === true
+        && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function';
       // Diagnostic rereads only. No extra observer, timer or action is installed,
       // and these snapshots never supply model, ownership or completion proof.
       const diagnosticStarted = Date.now();
@@ -1862,6 +1866,12 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         observations = Math.min(observations + 1, 1_000);
         if (rejection) return true;
         if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        if (noOutputPendingEligible) {
+          try {
+            const absent = context.claudeNoOutputPending();
+            if (!absent || typeof absent.busy !== 'boolean') noOutputPendingEligible = false;
+          } catch { noOutputPendingEligible = false; }
+        }
         const current = websiteModelPickerState(provider);
         if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
           || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
@@ -1888,6 +1898,19 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
       const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
         () => { rejection = 'model_unverified'; });
       if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        // Only an expired absence observation may return no-output pending.
+        // The native permission and fresh semantic callback cannot convert a
+        // mismatch, clock error, popup or previously observed context loss.
+        if (changed === false && !rejection && !claudeRemountTrigger && noOutputPendingEligible
+          && input.allowClaudeModelObservationPending === true && context.scope === 'action_precheck'
+          && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function'
+          && unchanged() && detachedClaudeTrigger() && observeRemount() === false) {
+          let pending = null;
+          try { pending = context.claudeNoOutputPending(); } catch { /* Preserve failure. */ }
+          if (pending && typeof pending.busy === 'boolean' && !rejection
+            && unchanged() && detachedClaudeTrigger() && observeRemount() === false && !rejection && noOutputPendingEligible)
+            return { claudeModelObservationPending: true };
+        }
         readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
         try {
           const elapsed = Date.now() - diagnosticStarted;
@@ -2787,7 +2810,39 @@ if (ownedUserCount > 0) {
   return modelFirstUserFailure('first_missing');
 if (usageLimited && input.action !== 'stop') return modelUsageLimitFailure();
 
-let completionSnapshot = null;
+// A fresh negative decision, independent of diagnostic snapshots. Any reply
+// markup (even hidden), text in an alternative assistant wrapper, interruption,
+// sign-in, quota or dialog prevents this narrow zero-output state.
+function modelClaudeNoOutputPending(guard) {
+  try {
+    if (guard() !== true || modelUsageLimited() || modelVisibleDialog()) return null;
+    const authControls = document.querySelectorAll('a, button');
+    if (authControls.length > 256) return null;
+    for (const node of authControls) if (modelVisible(node)
+      && /^(?:Log in|Sign in)(?:\s|$)/i.test(node.getAttribute('aria-label') || (node.innerText || '').trim())) return null;
+    if (document.querySelectorAll('[data-perf-reply-text]').length !== 0) return null;
+    const roots = document.querySelectorAll('[data-testid="assistant-message"]');
+    if (roots.length > 1) return null;
+    let visited = 0;
+    for (const root of roots) {
+      const stack = [{ node: root, index: 0 }];
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (visited === 64) return null; // Incomplete traversal is not absence.
+        const child = children[frame.index++]; visited++;
+        if (child.nodeType === 3 && child.length !== 0) return null;
+        if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+    }
+    const current = modelCompletionObservation();
+    if (current.answers.length !== 0 || current.answer || current.message || current.copy
+      || current.scopedCopies !== 0 || current.enabledCopies !== 0 || current.interrupted
+      || current.answerComplete || typeof current.busy !== 'boolean' || guard() !== true) return null;
+    return { busy: current.busy };
+  } catch { return null; }
+}
+let completionSnapshot = null, claudePendingCheck = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('claude');
@@ -2807,8 +2862,29 @@ async function providerPageAction() {
       && globalThis.__computaModelFirstProof === submittedProof
       && (!submittedProof || submittedProof.marker === submittedMarker
         && submittedProof.fingerprint === firstUserFingerprint && submittedProof.identity === firstUserIdentity);
+    const pendingAllowed = input.allowClaudeModelObservationPending === true && input.action === 'inspect'
+      && input.allowFirstUserBinding === false && ownedUserCount === 1 && firstSnapshot && submittedProof
+      && Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1
+      && typeof input.expectedFirstUserFingerprint === 'string' && input.expectedFirstUserFingerprint === firstUserFingerprint
+      && submittedProof.fingerprint === firstUserFingerprint && submittedProof.identity === firstUserIdentity;
+    let rememberedTrigger = null;
+    if (pendingAllowed) {
+      try { rememberedTrigger = globalThis.__computaClaudeLastModelTrigger; } catch { /* No pending privilege. */ }
+    }
+    const pendingGuard = () => {
+      if (!pendingAllowed || !submittedReadGuard() || globalThis.__computaClaudeLastModelTrigger !== rememberedTrigger
+        || !rememberedTrigger || rememberedTrigger.owner !== input.ownerToken || rememberedTrigger.document !== document
+        || rememberedTrigger.url !== document.URL || rememberedTrigger.node?.isConnected !== false) return false;
+      const current = websiteModelPickerState('claude');
+      return !current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0
+        && current.triggerScan.length < 256 && !current.duplicate && !current.conflicting && !current.indicatorInvalid
+        && !current.selectionAmbiguous && !current.navigationAmbiguous && current.physicalMenus.length === 0 && current.allMenus.length === 0
+        && submittedReadGuard();
+    };
+    const pendingCheck = () => modelClaudeNoOutputPending(pendingGuard);
     const proof = await websiteModelReadEvidence('claude', input.expectedModelChoice, null,
       { scope: 'action_precheck', action: input.action,
+        ...(pendingAllowed ? { claudeNoOutputPending: pendingCheck } : {}),
         ...(['inspect', 'verifyModel'].includes(input.action) && firstSnapshot && firstUserFingerprint !== null
           && globalThis.__computaModelFirstSubmitted === true ? {
             claudeSubmittedReadGuard: submittedReadGuard,
@@ -2826,6 +2902,14 @@ async function providerPageAction() {
       { roots: modelUserRoots, body: modelUserBody, text: normalizedBody,
         identity: root => root.closest('[id]')?.getAttribute('id'), temporary: modelTemporaryVerified })
       || modelFirstUserFailure('snapshot_after_model_read');
+    if (proof.claudeModelObservationPending === true) {
+      const pending = pendingCheck();
+      if (!pending) return { error: 'model_unverified' };
+      claudePendingCheck = pendingCheck;
+      return { claudeModelObservationPending: true, url: document.URL, temporary: true, conversationIdentity: null,
+        userCount: 1, firstUserIdentity, firstUserFingerprint, firstUserVerified: true, firstUserMarkerVerified: true,
+        responseCount: 0, text: '', answerComplete: false, busy: pending.busy, interrupted: false };
+    }
     modelState.evidence = proof.modelEvidence;
   }
   if (input.action === 'verifyModel') return { modelEvidence: modelState.evidence };
@@ -2939,7 +3023,11 @@ async function providerPageAction() {
   send.click();
   return { submitted: true };
 }
-const observed = await websiteModelFinalGuard('claude', input, await providerPageAction(), modelTemporaryVerified);
+const pageObservation = await providerPageAction();
+// This explicitly negative result releases no model/answer/action proof. All
+// outer first-body, owner, count, mode and quota guards below still apply.
+const observed = pageObservation.claudeModelObservationPending === true && claudePendingCheck
+  ? pageObservation : await websiteModelFinalGuard('claude', input, pageObservation, modelTemporaryVerified);
 // The final model proof can yield while opening/closing the picker. Never
 // admit a stale completed response if its exact physical landmarks, text, latest
 // answer, or streaming state changed during that proof. A fresh read may qualify
@@ -2975,6 +3063,11 @@ if (firstSnapshot) {
     return { error: 'website_usage_limit' };
   if (!modelTemporaryVerified()) return modelTemporaryFailure('temporary_mode_unverified');
   if (observed.error) return observed;
+  if (observed.claudeModelObservationPending === true) {
+    const pending = claudePendingCheck?.();
+    if (!pending) return { error: 'model_unverified' };
+    observed.busy = pending.busy;
+  }
   if (!globalThis.__computaModelFirstProof) {
     if (observed.temporary !== true) return modelTemporaryFailure('temporary_mode_unverified');
     globalThis.__computaModelFirstProof = { marker: input.expectedFirstUserMarker, fingerprint: firstUserFingerprint,

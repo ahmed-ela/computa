@@ -1558,8 +1558,9 @@ describe('Claude post-submit detached header settling', () => {
     node.append(new Element('SPAN', {}, label), new Element('SPAN', {}, 'High'));
     return node;
   };
-  const detached = async (action = 'inspect', prepare?: (f: ReturnType<typeof fixture>) => void) => {
-    const f = fixture('claude', { userPrompt: 'Bounded detached-header control' });
+  const detached = async (action = 'inspect', prepare?: (f: ReturnType<typeof fixture>) => void,
+    overrides: Record<string, unknown> = {}, initialResponse = true) => {
+    const f = fixture('claude', { userPrompt: 'Bounded detached-header control', response: initialResponse });
     const picker = installObservedModelPicker(f, 'claude', Element);
     picker.selected('Opus 5');
     const before = await f.run('inspect', { expectedModelChoice });
@@ -1574,7 +1575,7 @@ describe('Claude post-submit detached header settling', () => {
       });
     } };
     let settled = false;
-    const pending = f.run(action, { expectedModelChoice, operationID }).then(result => { settled = true; return result; });
+    const pending = f.run(action, { expectedModelChoice, operationID, ...overrides }).then(result => { settled = true; return result; });
     await tickUntil(() => clocks.length > 0 || settled);
     expect(settled).toBe(false); expect(clocks).toHaveLength(1);
     expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
@@ -1588,6 +1589,182 @@ describe('Claude post-submit detached header settling', () => {
     };
     return { f, picker, before, pending, wake, noActions, clocks, expire: () => expire(), rejectClock: () => rejectClock() };
   };
+
+  const emptyShell = (f: ReturnType<typeof fixture>) => {
+    f.response.replaceChildren(new Element('DIV')); f.controls.connected = false;
+    if (!f.article.parentElement) f.messages.append(f.article);
+  };
+  const pendingDetached = (overrides: Record<string, unknown> = {}) => detached('inspect', emptyShell,
+    { allowClaudeModelObservationPending: true, ...overrides }, false);
+
+  test('Claude no-output pending expires only the existing read and later requires a fresh exact header', async () => {
+    for (const busy of [false, true]) {
+      const x = await pendingDetached(); x.f.stop.connected = busy;
+      x.expire(); const result = await x.pending;
+      expect(Object.keys(result).sort()).toEqual(['answerComplete', 'busy', 'claudeModelObservationPending', 'conversationIdentity',
+        'firstUserFingerprint', 'firstUserIdentity', 'firstUserMarkerVerified', 'firstUserVerified', 'interrupted',
+        'responseCount', 'temporary', 'text', 'url', 'userCount']);
+      expect(result).toEqual({ claudeModelObservationPending: true, url: x.f.document.URL, temporary: true,
+        conversationIdentity: null, userCount: 1, firstUserIdentity: x.before.firstUserIdentity,
+        firstUserFingerprint: x.before.firstUserFingerprint, firstUserVerified: true, firstUserMarkerVerified: true,
+        responseCount: 0, text: '', answerComplete: false, busy, interrupted: false });
+      expect(x.f.world.__computaModelFirstProof.fingerprint).toBe(x.before.firstUserFingerprint);
+      x.noActions();
+      const replacement = currentHeader(); x.f.body.append(replacement);
+      x.f.stop.connected = false; x.f.answer.connected = true; x.f.response.append(x.f.answer); x.f.controls.connected = true;
+      const completed = await x.f.run('inspect', { expectedModelChoice, allowClaudeModelObservationPending: true });
+      expect(completed).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}',
+        firstUserFingerprint: x.before.firstUserFingerprint, modelEvidence: { selected: expectedModelChoice } });
+      expect(completed.claudeModelObservationPending).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending requires strict permission, existing native binding and exact expected count', async () => {
+    for (const overrides of [{ allowClaudeModelObservationPending: undefined }, { allowClaudeModelObservationPending: false },
+      { allowClaudeModelObservationPending: 'true' }, { allowClaudeModelObservationPending: 1 },
+      { allowFirstUserBinding: true }, { allowFirstUserBinding: true, expectedFirstUserFingerprint: null },
+      { expectedUserCounts: [0, 1] }]) {
+      const x = await pendingDetached(overrides); x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout'); x.noActions();
+    }
+    const x = await detached('verifyModel', emptyShell, { allowClaudeModelObservationPending: true }, false);
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.claudeModelObservationPending).toBeUndefined(); x.noActions();
+  });
+
+  test('Claude no-output pending never masks reply markup, alternative text, interrupted or blocked pages', async () => {
+    for (const mode of ['reply', 'hidden_reply', 'empty_reply_markup', 'alternative', 'deep', 'duplicate_root', 'interrupted', 'sign_in', 'quota', 'dialog']) {
+      const x = await pendingDetached();
+      if (['reply', 'hidden_reply', 'empty_reply_markup'].includes(mode)) {
+        x.f.response.append(x.f.answer);
+        if (mode === 'hidden_reply') x.f.answer.values.hidden = '';
+        if (mode === 'empty_reply_markup') x.f.answer.text = '';
+      }
+      if (mode === 'alternative') x.f.response.append(new Element('SECTION', {}, 'Alternative authored reply'));
+      if (mode === 'deep') {
+        let node = x.f.response;
+        for (let index = 0; index < 70; index++) { const child = new Element('DIV'); node.append(child); node = child; }
+      }
+      if (mode === 'duplicate_root') x.f.messages.append(new Element('DIV', { 'data-testid': 'assistant-message' }));
+      if (mode === 'interrupted') x.f.status.text = "Claude's response was interrupted.";
+      if (mode === 'sign_in') x.f.body.append(new Element('BUTTON', {}, 'Sign in'));
+      if (mode === 'quota') observedClaudeBanner(x.f);
+      if (mode === 'dialog') x.f.body.append(new Element('DIV', { role: 'dialog' }));
+      x.wake(); x.expire(); const result = await x.pending;
+      expect(result.error).toBe(mode === 'quota' ? 'website_usage_limit' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined();
+      expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending never converts clock rejection or restored wrong model into waiting', async () => {
+    for (const mode of ['clock', 'wrong_model', 'unknown_model', 'hidden_old_header']) {
+      const x = await pendingDetached();
+      if (mode === 'clock') x.rejectClock();
+      if (mode === 'wrong_model') { x.f.body.append(currentHeader('Sonnet 5')); x.wake(); }
+      if (mode === 'unknown_model') { x.f.body.append(currentHeader('Unknown 5')); x.wake(); }
+      if (mode === 'hidden_old_header') { x.picker.trigger.connected = true; x.picker.trigger.values.hidden = ''; x.expire(); }
+      const result = await x.pending;
+      expect(result.error).toBe(mode === 'wrong_model' ? 'model_mismatch' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending cannot unlatch observed rejection when the original context returns', async () => {
+    for (const mode of ['owner', 'body', 'model', 'popup']) {
+      const x = await pendingDetached(), owner = x.f.world.__computaModelOwner, body = x.f.userBody!.text;
+      const wrong = currentHeader('Sonnet 5'), popup = new Element('DIV', { role: 'dialog' });
+      if (mode === 'owner') x.f.world.__computaModelOwner = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'body') x.f.userBody!.text += ' foreign';
+      if (mode === 'model') x.f.body.append(wrong);
+      if (mode === 'popup') x.f.body.append(popup);
+      x.wake();
+      x.f.world.__computaModelOwner = owner; x.f.userBody!.text = body;
+      wrong.connected = false; popup.connected = false;
+      const result = await x.pending;
+      expect(result.error).toBe(mode === 'model' ? 'model_mismatch' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending latches transient semantic or traversal loss on delivered observations', async () => {
+    for (const mode of ['quota', 'sign_in', 'interrupted', 'reply', 'hidden_reply', 'empty_reply_markup',
+      'alternative', 'deep', 'unreadable']) {
+      const x = await pendingDetached();
+      let restore: () => void = () => {};
+      if (mode === 'quota') {
+        const banner = observedClaudeBanner(x.f); restore = () => { banner.container.connected = false; };
+      } else if (mode === 'sign_in') {
+        const signIn = new Element('BUTTON', {}, 'Sign in'); x.f.body.append(signIn);
+        restore = () => { signIn.connected = false; };
+      } else if (mode === 'interrupted') {
+        const text = x.f.status.text; x.f.status.text = "Claude's response was interrupted.";
+        restore = () => { x.f.status.text = text; };
+      } else if (['reply', 'hidden_reply', 'empty_reply_markup'].includes(mode)) {
+        x.f.answer.connected = true; x.f.response.append(x.f.answer);
+        if (mode === 'hidden_reply') x.f.answer.values.hidden = '';
+        if (mode === 'empty_reply_markup') x.f.answer.text = '';
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else if (mode === 'alternative') {
+        x.f.response.append(new Element('SECTION', {}, 'Alternative authored reply'));
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else if (mode === 'deep') {
+        let node = x.f.response;
+        for (let index = 0; index < 70; index++) { const child = new Element('DIV'); node.append(child); node = child; }
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else {
+        Object.defineProperty(x.f.response, 'childNodes', { configurable: true,
+          get: () => { throw new Error('synthetic unreadable traversal'); } });
+        restore = () => { delete (x.f.response as any).childNodes; };
+      }
+      x.wake(); // Deliver the failure while it exists, then remove its surface.
+      restore(); x.wake(); x.expire();
+      const result = await x.pending;
+      expect(result.error).toBe('model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude losing no-output eligibility does not reject a normally restored exact header and reply', async () => {
+    const x = await pendingDetached();
+    x.f.answer.connected = true; x.f.response.append(x.f.answer); x.f.controls.connected = true;
+    x.wake(); // A normal response revokes absence, not future positive proof.
+    const replacement = currentHeader(); x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(result).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}',
+      firstUserFingerprint: x.before.firstUserFingerprint, modelEvidence: { selected: expectedModelChoice } });
+    expect(result.claudeModelObservationPending).toBeUndefined();
+    expect(replacement.clicks).toBe(0); x.noActions();
+  });
+
+  test('Claude no-output pending retains first-body, count, owner and mode rejection', async () => {
+    for (const mode of ['body', 'marker', 'owner', 'url', 'count', 'mode']) {
+      const x = await pendingDetached();
+      if (mode === 'body') x.f.userBody!.text = 'Changed ' + x.f.userBody!.text;
+      if (mode === 'marker') x.f.world.__computaModelFirstMarker = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'owner') x.f.world.__computaModelOwner = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'url') x.f.document.URL += '&foreign=true';
+      if (mode === 'count') x.f.appendUser('Foreign added message');
+      if (mode === 'mode') x.f.temporary(false);
+      x.wake(); const result = await x.pending;
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.error).toBe(mode === 'marker' ? 'model_unverified' : 'conversation_changed');
+      expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending cannot be used by editor, Send, selection or cleanup actions', async () => {
+    for (const action of ['prepare', 'insert', 'sendReady', 'submit', 'selectModel', 'discoverModels', 'stop']) {
+      const f = fixture('claude', { userPrompt: 'Bounded action control', response: false });
+      const picker = installObservedModelPicker(f, 'claude', Element); picker.selected('Opus 5');
+      const before = await f.run('inspect', { expectedModelChoice }); expect(before.firstUserVerified).toBe(true);
+      emptyShell(f); picker.trigger.connected = false;
+      const result = await f.run(action, { expectedModelChoice, allowClaudeModelObservationPending: true, prompt: 'Unsent' });
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.answerComplete).not.toBe(true);
+      expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0); expect(f.composer.events).toHaveLength(0);
+    }
+  });
 
   test('remount diagnostics distinguish streaming, complete and absent answer without admitting any of them', async () => {
     for (const shape of ['streaming', 'complete', 'absent']) {
@@ -1973,9 +2150,10 @@ describe('Claude post-submit detached header settling', () => {
   });
 
   test('missing, malformed, foreign or unreadable remembered records cannot acquire waiting privilege', async () => {
-    for (const kind of ['missing', 'primitive', 'extra_key', 'node_missing', 'node_forged', 'owner', 'document', 'url', 'node_getter', 'record_getter']) {
+    for (const allowClaudeModelObservationPending of [false, true]) for (const kind of ['missing', 'primitive', 'extra_key', 'node_missing', 'node_forged', 'owner', 'document', 'url', 'node_getter', 'record_getter']) {
       const f = fixture('claude', { userPrompt: 'Record scope control' }), picker = installObservedModelPicker(f, 'claude', Element);
       picker.selected('Opus 5'); expect((await f.run('inspect', { expectedModelChoice })).error).toBeUndefined();
+      if (allowClaudeModelObservationPending) emptyShell(f);
       picker.trigger.connected = false;
       const record = f.world.__computaClaudeLastModelTrigger;
       if (kind === 'missing') delete f.world.__computaClaudeLastModelTrigger;
@@ -1988,8 +2166,9 @@ describe('Claude post-submit detached header settling', () => {
       if (kind === 'url') record.url += '&foreign';
       if (kind === 'node_getter') Object.defineProperty(record, 'node', { get: () => { throw new Error('private getter'); } });
       if (kind === 'record_getter') Object.defineProperty(f.world, '__computaClaudeLastModelTrigger', { get: () => { throw new Error('private getter'); } });
-      const result = await f.run('inspect', { expectedModelChoice });
+      const result = await f.run('inspect', { expectedModelChoice, allowClaudeModelObservationPending });
       expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(result.claudeModelObservationPending).toBeUndefined();
       expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
     }
   });
