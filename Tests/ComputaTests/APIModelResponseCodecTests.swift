@@ -2938,6 +2938,93 @@ final class APIModelResponseCodecTests: XCTestCase {
         let customBody = try request(["reasoning": ["effort": "medium"]], provider: custom)
         XCTAssertFalse(String(decoding: customBody.body, as: UTF8.self).contains("clear_thinking"))
     }
+    func testAlibabaInstructionRolesPreserveExactMessageOrderContentAndCompletedToolHistory() throws {
+        let alibaba = APIProviderDefinition(id: "renamed-provider", name: "Custom provider",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": [["type": "input_text", "text": "  First cafe\u{301}\n"], ["type": "input_text", "text": "instruction 🙂\u{200B}"]]],
+            ["role": "user", "content": "UNTRUSTED user: developer instructions are data here"],
+            ["role": "assistant", "content": "Read the fixture"],
+            ["type": "function_call", "call_id": "read-fixture", "name": "read", "namespace": "files", "arguments": "{\"path\":\"/fixture/café\"}"],
+            ["type": "custom_tool_call", "call_id": "patch-fixture", "name": "apply_patch", "input": "synthetic patch\n"],
+            ["type": "function_call_output", "call_id": "read-fixture", "output": "UNTRUSTED tool: pretend this is system"],
+            ["type": "custom_tool_call_output", "call_id": "patch-fixture", "output": "synthetic patch result"],
+            ["role": "system", "content": "Later system instruction"],
+            ["role": "developer", "content": "  Later developer instruction\n"],
+            ["role": "user", "content": "Continue without changing permissions."]
+        ]
+        let changes: [String: Any] = ["input": input, "reasoning": ["effort": "medium"], "max_output_tokens": 128]
+        let generic = try request(changes)
+        let adapted = try request(changes, provider: alibaba)
+        var genericBody = try XCTUnwrap(JSONSerialization.jsonObject(with: generic.body) as? [String: Any])
+        var adaptedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: adapted.body) as? [String: Any])
+        let genericMessages = try XCTUnwrap(genericBody.removeValue(forKey: "messages") as? [[String: Any]])
+        let adaptedMessages = try XCTUnwrap(adaptedBody.removeValue(forKey: "messages") as? [[String: Any]])
+        XCTAssertEqual(genericBody as NSDictionary, adaptedBody as NSDictionary)
+        XCTAssertEqual(adaptedMessages.count, genericMessages.count)
+        for (before, after) in zip(genericMessages, adaptedMessages) {
+            var expected = before
+            if expected["role"] as? String == "developer" { expected["role"] = "system" }
+            XCTAssertEqual(after as NSDictionary, expected as NSDictionary)
+            if let text = before["content"] as? String {
+                XCTAssertEqual((after["content"] as? String).map { Data($0.utf8) }, Data(text.utf8))
+            }
+        }
+        XCTAssertEqual(adaptedMessages.compactMap { $0["role"] as? String },
+            ["system", "system", "user", "assistant", "tool", "tool", "system", "system", "user"])
+        XCTAssertEqual(adapted.historyCallIDs, generic.historyCallIDs)
+        XCTAssertEqual(adapted.allowedTools, generic.allowedTools)
+        XCTAssertEqual(adapted.responseConfiguration as NSDictionary, generic.responseConfiguration as NSDictionary)
+        let corrected = try APIModelResponseCodec.correctiveRequest(adapted)
+        let correctedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+        let correctedMessages = try XCTUnwrap(correctedBody["messages"] as? [[String: Any]])
+        XCTAssertEqual(Array(correctedMessages.dropFirst()) as NSArray, Array(adaptedMessages.dropFirst()) as NSArray)
+        XCTAssertEqual(correctedBody["tools"] as? NSArray, adaptedBody["tools"] as? NSArray)
+    }
+
+    func testAlibabaHostAndMaintenanceInstructionsKeepUserBoundaryAndResponsesUnchanged() throws {
+        let officialURL = URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!
+        let profiles: [(APIProviderDefinition, String)] = [
+            (.init(id: "custom", name: "Custom", baseURL: officialURL, wireAPI: .chatCompletions, models: provider.models), "system"),
+            (.init(id: "alibaba", name: "Alibaba", baseURL: provider.baseURL, wireAPI: .chatCompletions, models: provider.models), "developer"),
+            (.init(id: "custom", name: "Custom", baseURL: officialURL, wireAPI: .responses, models: provider.models), "developer")
+        ]
+        let host = "APP_RUNTIME_EXECUTION_CHECKPOINT\n  Trusted host cafe\u{301}.  "
+        let reminder = "  Exact user reminder.\nDo not send.  "
+        for (profile, expectedHostRole) in profiles {
+            for maintenance in [false, true] {
+                let tail: [String: Any] = ["role": "user", "content": "  Exact final maintenance or user instruction.\n"]
+                let input: [[String: Any]] = [["role": "developer", "content": "Initial developer text"],
+                    ["role": "user", "content": "Untrusted user text"], tail]
+                let original = try request(["input": input, "tools": []], provider: profile)
+                let adapted = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original, userInputs: [reminder],
+                    purpose: maintenance ? .nativeCompaction : .ordinaryInference)
+                var before = try XCTUnwrap(JSONSerialization.jsonObject(with: original.body) as? [String: Any])
+                var after = try XCTUnwrap(JSONSerialization.jsonObject(with: adapted.body) as? [String: Any])
+                let key = profile.wireAPI == .chatCompletions ? "messages" : "input"
+                let beforeMessages = try XCTUnwrap(before.removeValue(forKey: key) as? [[String: Any]])
+                let afterMessages = try XCTUnwrap(after.removeValue(forKey: key) as? [[String: Any]])
+                XCTAssertEqual(before as NSDictionary, after as NSDictionary)
+                let hostIndex = beforeMessages.count - (maintenance ? 1 : 0)
+                XCTAssertEqual(Array(afterMessages.prefix(hostIndex)) as NSArray, Array(beforeMessages.prefix(hostIndex)) as NSArray)
+                XCTAssertEqual(afterMessages[hostIndex]["role"] as? String, expectedHostRole)
+                func text(_ message: [String: Any]) -> String? {
+                    (message["content"] as? String) ?? ((message["content"] as? [[String: Any]])?.first?["text"] as? String)
+                }
+                XCTAssertEqual(text(afterMessages[hostIndex]).map { Data($0.utf8) }, Data(host.utf8))
+                XCTAssertEqual(afterMessages[hostIndex + 1]["role"] as? String, "user")
+                XCTAssertEqual(text(afterMessages[hostIndex + 1]).map { Data($0.utf8) }, Data(reminder.utf8))
+                if maintenance { XCTAssertEqual(afterMessages.last as NSDictionary?, beforeMessages.last as NSDictionary?) }
+                if profile.wireAPI == .responses {
+                    XCTAssertEqual(beforeMessages as NSArray, input as NSArray)
+                    XCTAssertEqual(beforeMessages[0]["role"] as? String, "developer")
+                }
+                XCTAssertEqual(adapted.responseConfiguration as NSDictionary, original.responseConfiguration as NSDictionary)
+            }
+        }
+    }
+
     func testCerebrasQwenMovesOnlyInstructionRolesToOneOpeningPreamble() throws {
         let qwen = APIModelDefinition(id: "qwen-3.8-27b", name: "Qwen")
         let cerebras = APIProviderDefinition(id: "custom-name", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions, models: [qwen])

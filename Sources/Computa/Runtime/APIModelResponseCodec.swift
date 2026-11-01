@@ -387,10 +387,11 @@ enum APIModelResponseCodec {
             guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
             let maintenance = try removeMaintenanceTail(from: &messages)
             // Preserve the provider's template after adding trusted host text.
-            // Qwen requires its system instructions in one opening message;
+            // Cerebras Qwen requires its system instructions in one opening message;
             // merely mapping developer to system would create a late system
             // message and revive the provider's wrong_api_format rejection.
-            let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
+            let role = APIProviderCatalog.Selection(provider: original.provider, model: original.model)
+                .chatCompletionsInstructionRole.rawValue
             messages.append(["role": role, "content": text])
             messages += userInputs.map { ["role": "user", "content": $0] }
             if let maintenance { messages.append(maintenance) }
@@ -720,7 +721,7 @@ enum APIModelResponseCodec {
                 }
             case "message":
                 guard let originalRole = item["role"] as? String, ["system", "developer", "user", "assistant"].contains(originalRole) else { throw Failure.invalidHistory }
-                let role = selection.provider.isCerebrasInference && selection.model.id == "qwen-3.8-27b" && originalRole == "developer" ? "system" : originalRole
+                let role = originalRole == "developer" ? selection.chatCompletionsInstructionRole.rawValue : originalRole
                 if selection.provider.isCerebrasInference, role != "user", containsImage(item["content"]) { throw Failure.unsupportedModality }
                 if role == "assistant", assistant == nil {
                     assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]

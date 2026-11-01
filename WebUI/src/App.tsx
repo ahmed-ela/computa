@@ -173,10 +173,12 @@ function Sidebar({
       </div>
 
       <div className="sidebar-footer">
+        {/* Runtime connection status is hidden from the sidebar for now.
         <div className="runtime-state">
           <span className={`connection-dot ${toneClass(snapshot.connection.tone)}`} />
           <span title={snapshot.connection.label}>{snapshot.connection.state === 'connected' ? 'Local runtime connected' : snapshot.connection.state === 'connecting' ? 'Connecting to runtime…' : snapshot.connection.state === 'failed' ? 'Connection needs attention' : 'Runtime disconnected'}</span>
         </div>
+        */}
         <Button variant="ghost" className="profile-button" onClick={() => post({ action: 'showSettings' })}>
           <Icon name="gear" size={17} /><span>Settings</span><kbd>⌘,</kbd>
         </Button>

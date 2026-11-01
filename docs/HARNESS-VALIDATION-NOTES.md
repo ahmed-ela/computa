@@ -5338,3 +5338,29 @@ Receipts (SHA-256):
 - Finite log: ad2ea1381e0206bdd9b11f7720c643e079b9a1869c7a6f013f87c70432db30c6.
 - Failed build-70 archive receipt: 997974c21fea98343c8bbab01434df1f597e0a80d57edb8f87ba8f28d395b707.
 - Failed build-70 ZIP: fd7ce7878bbf506545e2e9ca0b552dc8c7d2bda249bcfb5d3014ce29c5f12792.
+
+### Build 370 sidebar completion persistence
+
+On November 1, 2026, installed build 370 (`d87792bc`) passed one controlled
+completion/read-state sequence. The later `f928209d` change was documentation
+only. The synthetic `SIDEBAR370-PERSIST-14DA90` task completed with its exact
+expected answer and zero tool calls. Its persisted unread flag was `true` in
+PID 74402, remained `true` after restart into PID 85890, and became `false`
+after the operator opened that exact completed task. All three observations
+refer to the same completion turn and installed artifact; the store hash was
+unchanged across restart and changed after opening.
+
+The operator separately observed the blue unread indicator after restart,
+then the accessibility label change from `Completed, unread` to `Completed`
+after selecting the task. Retained screenshots include
+`live-unread-after-restart370.png` and `live-read-after-opening370.png`.
+The disk audit establishes persisted state and process identity; the visual
+and selection observations are operator evidence, not inferred from JSON.
+
+Evidence is retained privately under `work/sidebar-activity-20261101/`.
+`sidebar370-persistence-audit.json` has SHA-256
+`a8f6244a52208477ba2379628598a1dc1b1a3e5f117507dcf5b36c2f342b1a20`;
+its three snapshot hashes were independently checked against their files.
+This result covers the observed completion, restart and read sequence only;
+it does not establish timer accuracy, every concurrent-task/window case, or
+broader website-provider qualification.

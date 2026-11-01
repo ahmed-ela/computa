@@ -4,6 +4,40 @@ import XCTest
 @testable import Computa
 
 final class APIRejectedRequestCaptureTests: XCTestCase {
+    func testProjectionRequiresExactProviderInstructionRoleAndKeepsLiteralDeveloperFact() throws {
+        let cases: [(String, APIProviderDefinition.WireAPI, String)] = [
+            ("https://ws-fixture.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", .chatCompletions, "system"),
+            ("https://ws-fixture.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", .responses, "developer"),
+            ("https://ws-fixture.ap-southeast-1.maas.aliyuncs.com.foreign.example/compatible-mode/v1", .chatCompletions, "developer"),
+            ("https://private.example/v1", .chatCompletions, "developer"),
+        ]
+        for (url, wire, expectedRole) in cases {
+            let provider = APIProviderDefinition(id: "fixture", name: "Alibaba", baseURL: URL(string: url)!, wireAPI: wire, models: [])
+            let expected = APIProviderHTTPClient.RequestProjectionExpectation(provider: provider, modelID: "qwen3.7-flash",
+                hostMessage: "PRIVATE_HOST", userInputs: ["PRIVATE_USER"], userInputRevision: 0, checkpointRevision: 0)
+            for actualRole in ["system", "developer", "user"] {
+                let body = try JSONSerialization.data(withJSONObject: [wire == .chatCompletions ? "messages" : "input": [
+                    ["role": actualRole, "content": "PRIVATE_HOST"], ["role": "user", "content": "PRIVATE_USER"]]])
+                let report = expected.inspect(body)
+                XCTAssertTrue(report.supported)
+                XCTAssertEqual(report.expectedHostRole, expectedRole)
+                XCTAssertEqual(report.hostRoleMatchesExpected, actualRole == expectedRole)
+                XCTAssertEqual(report.hostRoleIsDeveloper, actualRole == "developer")
+                XCTAssertEqual(report.hostBytesAtExpectedPosition, true)
+                XCTAssertEqual(report.activeInputBytesAtTail, true)
+                let text = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+                XCTAssertFalse(text.contains("PRIVATE")); XCTAssertFalse(text.contains("aliyuncs"))
+            }
+        }
+        let excluded = APIProviderHTTPClient.RequestProjectionExpectation(provider: .cerebras, modelID: "qwen-3.8-27b",
+            hostMessage: "PRIVATE_HOST", userInputs: ["PRIVATE_USER"], userInputRevision: 0, checkpointRevision: 0)
+        let body = try JSONSerialization.data(withJSONObject: ["messages": [
+            ["role": "system", "content": "PRIVATE_HOST"], ["role": "user", "content": "PRIVATE_USER"]]])
+        XCTAssertFalse(excluded.inspect(body).supported)
+        XCTAssertNil(excluded.inspect(body).hostRoleMatchesExpected)
+        XCTAssertNil(excluded.inspect(body).hostRoleIsDeveloper)
+    }
+
     func testProjectionInspectsExactOutgoingBytesAndReportsOnlyFiniteMetadata() throws {
         let provider = APIProviderDefinition(id: "fixture", name: "Fixture", baseURL: URL(string: "https://private.example/v1")!,
             wireAPI: .chatCompletions, models: [.init(id: "PRIVATE_MODEL", name: "Fixture")])
