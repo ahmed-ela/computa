@@ -40,6 +40,7 @@ struct GroqToolCatalog: Sendable {
 
     enum Failure: Error, LocalizedError, Equatable {
         case invalidCatalog, invalidScope, staleRevision, invalidArguments, unavailableTool, selectionTooLarge
+        case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int)
         var errorDescription: String? {
             switch self {
             case .invalidCatalog: "The registered tool catalog could not be verified. No tool was loaded or executed."
@@ -47,9 +48,17 @@ struct GroqToolCatalog: Sendable {
             case .staleRevision: "The tool catalog changed. Use its current revision and inventory; no tool was loaded or executed."
             case .invalidArguments: "Tool loading requires the current catalog_revision and one to four unique inventory names. No tool was loaded or executed."
             case .unavailableTool: "A requested tool is not currently callable and allowed. No tool was loaded or executed."
+            case let .unavailableSelection(unavailable, denied, unknownCount):
+                "No tool was loaded or executed. Requested catalog names (data): unavailable=\(Self.namesJSON(unavailable)), denied=\(Self.namesJSON(denied)), unknown_count=\(unknownCount). Choose only callable, allowed names from the current inventory and load their exact schemas before use."
             case .selectionTooLarge:
                 "These schemas do not fit the current Groq request budget plus the estimated loader-history allowance. Previous selection retained; request fewer or smaller schemas. No tool was loaded or executed."
             }
+        }
+
+        private static func namesJSON(_ names: [String]) -> String {
+            // Only validated, registered names reach this case (at most four,
+            // each at most 256 UTF-8 bytes). Unknown requested text is not echoed.
+            String(decoding: (try? JSONSerialization.data(withJSONObject: names, options: [.withoutEscapingSlashes])) ?? Data("[]".utf8), as: UTF8.self)
         }
     }
 
@@ -62,8 +71,44 @@ struct GroqToolCatalog: Sendable {
     private static var argumentSchema: [String: Any] {
         ["type": "object", "properties": [
             "catalog_revision": ["type": "string"],
-            "names": ["type": "array", "items": ["type": "string"]],
+            "names": ["type": "array", "items": ["type": "string"],
+                      "minItems": 1, "maxItems": maximumLoadedTools, "uniqueItems": true],
         ], "required": ["catalog_revision", "names"], "additionalProperties": false]
+    }
+
+    // The pinned engine (4607249e430dac1c961df4dc615beae88e33cec8,
+    // tools/src/json_schema/types.rs) preserves minItems but its JsonSchema
+    // representation omits maxItems and uniqueItems. Accept only this exact
+    // reviewed projection alongside the complete native declaration.
+    private static var engineArgumentSchema: [String: Any] {
+        var schema = argumentSchema
+        var properties = schema["properties"] as! [String: Any]
+        var names = properties["names"] as! [String: Any]
+        names.removeValue(forKey: "maxItems")
+        names.removeValue(forKey: "uniqueItems")
+        properties["names"] = names
+        schema["properties"] = properties
+        return schema
+    }
+
+    private static func matchesRegisteredSchema(_ schema: [String: Any]) -> Bool {
+        guard let bytes = try? encoded(schema) else { return false }
+        return bytes == (try? encoded(argumentSchema)) || bytes == (try? encoded(engineArgumentSchema))
+    }
+
+    /// Called only for the server's admitted native compact presentation. This
+    /// restores loader bounds lost by the pinned engine; it never edits the
+    /// original request/history or normalizes any other tool's contract.
+    static func restoringRegisteredLoaderBounds(_ definition: [String: Any], namespace: String? = nil) -> [String: Any] {
+        guard namespace == nil || namespace == "functions",
+              definition["type"] as? String == "function", definition["name"] as? String == name else { return definition }
+        let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
+        guard !keys.isEmpty, keys.allSatisfy({ key in
+            (definition[key] as? [String: Any]).map(matchesRegisteredSchema) == true
+        }) else { return definition }
+        var result = definition
+        for key in keys { result[key] = argumentSchema }
+        return result
     }
 
     static func supports(modelID: String) -> Bool {
@@ -83,7 +128,7 @@ struct GroqToolCatalog: Sendable {
         guard !schemaKeys.isEmpty else { return false }
         return schemaKeys.allSatisfy { key in
             guard let schema = loader.definition[key] as? [String: Any] else { return false }
-            return (try? encoded(schema)) == (try? encoded(argumentSchema))
+            return matchesRegisteredSchema(schema)
         }
     }
 
@@ -165,9 +210,16 @@ struct GroqToolCatalog: Sendable {
         let baseline = try Self.baseline(for: state.seed)
         let loaderNames = Set(baseline.inventory.filter { $0.name == Self.name || $0.name == "functions." + Self.name }.map(\.name))
         guard !loaderNames.intersection(baseline.selectedNames).isEmpty,
-              requested.isDisjoint(with: loaderNames),
-              requested.isSubset(of: state.seed.callableNames.intersection(state.seed.allowedNames)) else {
+              requested.isDisjoint(with: loaderNames) else {
             throw Failure.unavailableTool
+        }
+        guard requested.isSubset(of: state.seed.callableNames.intersection(state.seed.allowedNames)) else {
+            let registered = Set(baseline.inventory.map(\.name))
+            let knownRequested = requested.intersection(registered)
+            throw Failure.unavailableSelection(
+                unavailable: knownRequested.subtracting(state.seed.callableNames).sorted(),
+                denied: knownRequested.intersection(state.seed.callableNames).subtracting(state.seed.allowedNames).sorted(),
+                unknownCount: requested.subtracting(registered).count)
         }
         let projection = Projection(revision: baseline.revision, inventory: baseline.inventory,
                                     selectedNames: baseline.selectedNames.union(requested))

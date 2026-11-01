@@ -54,6 +54,79 @@ final class GroqToolCatalogTests: XCTestCase {
         XCTAssertEqual(seed.registeredDefinitionsJSON, try makeSeed().registeredDefinitionsJSON)
     }
 
+    func testLoaderSchemaPublishesTheSameNameBoundsEnforcedAtRuntime() throws {
+        let loader = canonicalLoader()
+        let schema = try XCTUnwrap(loader["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let namesSchema = try XCTUnwrap(properties["names"] as? [String: Any])
+        XCTAssertEqual(namesSchema["minItems"] as? Int, 1)
+        XCTAssertEqual(namesSchema["maxItems"] as? Int, 4)
+        XCTAssertEqual(namesSchema["uniqueItems"] as? Bool, true)
+        // An old or weakened declaration cannot borrow the exact native loader.
+        for key in ["minItems", "maxItems", "uniqueItems"] {
+            var changedNames = namesSchema; changedNames.removeValue(forKey: key)
+            var changedProperties = properties; changedProperties["names"] = changedNames
+            var changedSchema = schema; changedSchema["properties"] = changedProperties
+            var changedLoader = loader; changedLoader["parameters"] = changedSchema
+            XCTAssertFalse(GroqToolCatalog.isRegisteredLoader([changedLoader]))
+        }
+
+        // Every requested name exists and is allowed, so the five-name rejection
+        // proves the cardinality boundary rather than an unavailable-tool error.
+        let names = ["fixture_a", "fixture_b", "fixture_c", "fixture_d", "fixture_e"]
+        let definitions = [loader] + names.map(function)
+        let all = Set(names + [GroqToolCatalog.name])
+        let seed = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(definitions),
+            callableNames: all, allowedNames: all, preloadNames: [], toolChoiceJSON: try encode("auto"))
+        let scope = makeScope()
+        var catalog = GroqToolCatalog()
+        let initial = try catalog.prepare(scope: scope, seed: seed)
+        for valid in [Array(names.prefix(1)), Array(names.prefix(4))] {
+            _ = try catalog.load(scope: scope, arguments: args(initial, valid))
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed).selectedNames,
+                           Set(valid + [GroqToolCatalog.name]))
+        }
+        let accepted = try catalog.prepare(scope: scope, seed: seed)
+        for invalid in [[], names, [names[0], names[0]]] as [[String]] {
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(initial, invalid))) {
+                XCTAssertEqual($0 as? GroqToolCatalog.Failure, .invalidArguments)
+            }
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), accepted)
+        }
+    }
+
+    func testOnlyExactPinnedEngineLoaderProjectionCanRestoreNativeBounds() throws {
+        let complete = canonicalLoader()
+        var schema = try XCTUnwrap(complete["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        var names = try XCTUnwrap(properties["names"] as? [String: Any])
+        names.removeValue(forKey: "maxItems")
+        names.removeValue(forKey: "uniqueItems")
+        properties["names"] = names; schema["properties"] = properties
+        var projected = complete; projected["parameters"] = schema
+        XCTAssertEqual(names["minItems"] as? Int, 1)
+        XCTAssertTrue(GroqToolCatalog.isRegisteredLoader([projected]))
+        XCTAssertTrue(GroqToolCatalog.isRegisteredLoader([["type": "namespace", "name": "functions", "tools": [projected]]]))
+        XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(projected)), try encode(complete))
+        XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(projected, namespace: "functions")), try encode(complete))
+        XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(projected, namespace: "foreign")), try encode(projected))
+
+        var missingMinimum = names; missingMinimum.removeValue(forKey: "minItems")
+        var changedMinimum = names; changedMinimum["minItems"] = 0
+        var partialMaximum = names; partialMaximum["maxItems"] = 4
+        var changedMaximum = names; changedMaximum["maxItems"] = 5; changedMaximum["uniqueItems"] = true
+        var changedUniqueness = names; changedUniqueness["maxItems"] = 4; changedUniqueness["uniqueItems"] = false
+        var unknownKeyword = names; unknownKeyword["unreviewed"] = true
+        for changed in [missingMinimum, changedMinimum, partialMaximum, changedMaximum, changedUniqueness, unknownKeyword] {
+            var changedProperties = properties; changedProperties["names"] = changed
+            var changedSchema = schema; changedSchema["properties"] = changedProperties
+            var changedDefinition = projected; changedDefinition["parameters"] = changedSchema
+            XCTAssertFalse(GroqToolCatalog.isRegisteredLoader([changedDefinition]))
+            XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(changedDefinition)), try encode(changedDefinition),
+                           "An unknown or changed contract must not be repaired into the native loader")
+        }
+    }
+
     func testNamespacedLoaderAndSameLocalNamesRemainDistinct() throws {
         var catalog = GroqToolCatalog()
         let definitions: [[String: Any]] = [
@@ -143,6 +216,40 @@ final class GroqToolCatalogTests: XCTestCase {
         for value in invalid {
             XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(value)))
             XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), loaded)
+        }
+    }
+
+    func testRejectedSelectionIdentifiesOnlyRegisteredOffendersAndKeepsPriorSelection() throws {
+        let definitions = [canonicalLoader(), function("exec_command"), function("browser_read"),
+                           function("browser_close"), function("fixture_denied")]
+        let seed = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(definitions),
+            callableNames: [GroqToolCatalog.name, "exec_command", "fixture_denied"],
+            allowedNames: [GroqToolCatalog.name, "exec_command"], preloadNames: [], toolChoiceJSON: try encode("auto"))
+        let scope = makeScope()
+        var catalog = GroqToolCatalog()
+        let initial = try catalog.prepare(scope: scope, seed: seed)
+        _ = try catalog.load(scope: scope, arguments: args(initial, ["exec_command"]))
+        let accepted = try catalog.prepare(scope: scope, seed: seed)
+        let unknown = "unknown_DO_NOT_ECHO_or_execute"
+        let cases: [([String], GroqToolCatalog.Failure)] = [
+            (["exec_command", "browser_read", "browser_close"],
+             .unavailableSelection(unavailable: ["browser_close", "browser_read"], denied: [], unknownCount: 0)),
+            (["browser_read", "fixture_denied", unknown],
+             .unavailableSelection(unavailable: ["browser_read"], denied: ["fixture_denied"], unknownCount: 1)),
+        ]
+        for (names, expected) in cases {
+            do {
+                _ = try catalog.load(scope: scope, arguments: args(initial, names))
+                XCTFail("Unavailable, denied or unknown names must reject the whole selection")
+            } catch {
+                XCTAssertEqual(error as? GroqToolCatalog.Failure, expected)
+                let message = error.localizedDescription
+                XCTAssertTrue(message.contains("No tool was loaded or executed"))
+                XCTAssertTrue(message.contains("current inventory"))
+                XCTAssertFalse(message.contains(unknown))
+                XCTAssertFalse(message.contains("exec_command"), "Do not label an allowed requested tool as an offender")
+            }
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), accepted)
         }
     }
 

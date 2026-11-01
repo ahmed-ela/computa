@@ -312,6 +312,12 @@ enum WebModelResponseCodec {
         let stream = try booleanParameter("stream", in: object, defaultValue: false, nullable: false)
         let parallel = try booleanParameter("parallel_tool_calls", in: object, defaultValue: true)
         var policy = try toolPolicy(object["tool_choice"], tools: offered)
+        // Native availability and the complete callable catalog establish the
+        // entry route even when its exact schema has not been loaded yet.
+        let groqEntryTools = isGroq ? offered.filter {
+            policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0
+                && ["browser_open", "browser_bind"].contains($0.value.name)
+        } : [:]
         let groqToolCatalogSeed: GroqToolCatalog.Seed?
         if isGroq, GroqToolCatalog.isRegisteredLoader(registeredDefinitions) {
             let loaderAllowed = [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
@@ -333,12 +339,14 @@ enum WebModelResponseCodec {
                    let children = definition["tools"] as? [[String: Any]] {
                     let selected = children.filter { child in
                         (child["name"] as? String).map { selection.selectedNames.contains(namespace + "." + $0) } ?? false
+                    }.map {
+                        GroqToolCatalog.restoringRegisteredLoaderBounds($0, namespace: namespace)
                     }
                     guard !selected.isEmpty else { return nil }
                     var result = definition; result["tools"] = selected; return result
                 }
                 guard let name = definition["name"] as? String, selection.selectedNames.contains(name) else { return nil }
-                return definition
+                return GroqToolCatalog.restoringRegisteredLoaderBounds(definition)
             }
             object["tools"] = schemas
             toolDefinitionsChanged = true
@@ -399,7 +407,8 @@ enum WebModelResponseCodec {
         let requestContext = compactGroq ? ComputaAgentInstructions.groqRequestContext
             : ComputaAgentInstructions.requestContext(compactLiteralJSON: isGroq)
         let browserHandoff = compactGroq
-            ? currentGroqBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
+            ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
+                                       availability: browserToolAvailability)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty)
@@ -448,7 +457,7 @@ enum WebModelResponseCodec {
         let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
         let loaded = String(decoding: try encoder.encode(projection.selectedNames.sorted()), as: UTF8.self)
         let unavailable = String(decoding: try encoder.encode(projection.inventory.filter { !$0.callable }.map(\.name)), as: UTF8.self)
-        let denied = String(decoding: try encoder.encode(projection.inventory.filter { !$0.allowed }.map(\.name)), as: UTF8.self)
+        let denied = String(decoding: try encoder.encode(projection.inventory.filter { $0.callable && !$0.allowed }.map(\.name)), as: UTF8.self)
         let loader = projection.inventory.first { $0.name == GroqToolCatalog.name || $0.name == "functions." + GroqToolCatalog.name }?.name
             ?? GroqToolCatalog.name
         return """
@@ -462,12 +471,17 @@ enum WebModelResponseCodec {
     }
 
     private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
+                                                  entryTools: [String: OfferedTool],
                                                   availability: EmbeddedBrowserToolAvailability?) -> String {
+        if availability == .unbound, !entryTools.isEmpty {
+            let bind = entryTools.first { $0.value.name == "browser_bind" }.map {
+                " \($0.key) needs this turn's observed tab_id."
+            } ?? ""
+            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). Load its schema if needed, then execute it; loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision to load page tools. Empty tabs do not prove denied access."
+        }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }
         switch availability {
-        case .unbound:
-            return "Current browser state: unbound. browser_open creates and binds; browser_bind needs this turn's observed tab_id. Empty tabs do not prove denied access. Use loaded exact schemas."
         case .bound:
             return "Current browser state: native page bound. Fresh browser_read needs no cursor; browser_continue requires an observed next_cursor. Use loaded exact schemas and current refs."
         default: return ""

@@ -88,15 +88,57 @@ receipt and release only after cleanup. No prompt was replayed.
 
 This proves a fresh reply on that installed provider/model pair. Browser,
 terminal and file-edit qualification with the compact loader remains pending.
-UI actions were held when the model menu changed unexpectedly after the marker;
-no second provider request was dispatched. The synthetic code/browser workflow
-is prepared separately. The saved native evidence remains independent of the
-subsequent menu selection.
+The later model-menu changes were confirmed to be user interaction, not an
+established application selection bug.
 
 Installed executable SHA-256:
 `d784f14793296035360c8c1b4fefb95fc290f90141e473a6bf8e46ce360cc352`.
 Private evidence: `evidence/groq-gptoss120b-marker368-a/capture/` and
 `live368-prompt-counts.jsonl`. Developer settings were not enabled for this check.
+
+### Combined workflow failure and loader recovery fixes
+
+The fresh `groq-gptoss120b-workflow368-b` task asked GPT OSS 120B to repair a
+synthetic Python function, run three tests, read a loopback page in the built-in
+browser and close that page. It stopped after 138,825 ms. Its first loader call
+requested five schemas and was rejected by the four-schema limit. Its next call
+requested four, including browser operations unavailable before page binding,
+and was rejected without changing the loaded selection. A third website reply
+contained 412 bytes of invalid JSON and was rejected before any tool dispatch.
+All three owned website sessions have saved transcript-clear receipts.
+
+No command or browser action ran; both fixture files remained unchanged and the
+loopback server received no request. This is a failed workflow, not a tool-use
+qualification pass. The native engine's generic high-demand error is not
+evidence of a provider quota error; the retained website failure is
+`malformed_website_reply` / `invalid_json`. The malformed bytes were not captured
+in this case, so their precise syntax or extraction cause is not established.
+
+The follow-up loader schema explicitly publishes the existing array count and
+uniqueness constraints. Catalog presentation distinguishes unavailable tools
+from callable tools denied by tool choice. Rejections identify known offending
+names without echoing unknown names and preserve the prior selection. These
+changes retain native admission, response parsing and cleanup verification.
+A fresh controlled task must verify their effect in the installed app.
+
+The pinned engine preserves `minItems` but omits `maxItems` and `uniqueItems`
+from its forwarded tool schema. Recognition accepts only the complete native
+schema or that exact engine projection; the trusted compact presentation restores
+the two omitted constraints without editing canonical history or other schemas.
+The changed specification also changes the thread-registration digest. Existing
+build-368 chats do not migrate to this schema version; use a fresh chat for its
+qualification. Same-version restart/resume remains independently supported.
+
+The follow-up passed 218 focused catalog, codec, server and runtime-routing
+tests with zero failures and unchanged production/test source during the run.
+This includes the exact engine projection, rejection of changed schema bounds,
+atomic failed loads and native browser availability transitions. Private log:
+`groq368-loader-clarity-native-a.log`, SHA-256
+`db703d3b5376cebd44b3fe30bbc67c51de424708611b9efadbb020a0e8467966`.
+
+Private evidence: `evidence/groq-gptoss120b-workflow368-b/capture/`. Baseline
+`workflow368-a` used an incorrect model label and was superseded before dispatch;
+it is not a separate provider attempt.
 
 ## Prior diagnosis and provider scope — 2026-11-01
 

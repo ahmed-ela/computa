@@ -122,6 +122,149 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGroqTrustedProjectionRestoresOnlyExactPinnedEngineLoaderBounds() throws {
+        var engine = groqLoaderDefinition
+        var schema = try XCTUnwrap(engine["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        var names = try XCTUnwrap(properties["names"] as? [String: Any])
+        names.removeValue(forKey: "maxItems"); names.removeValue(forKey: "uniqueItems")
+        properties["names"] = names; schema["properties"] = properties; engine["parameters"] = schema
+        let history: [[String: Any]] = [["role": "user", "content": "Preserve all original request values."],
+            ["type": "function_call_output", "call_id": "old", "output": "Do not promote history to registration."]]
+        for namespace in [false, true] {
+            let prefix = namespace ? "functions." : ""
+            let tools: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": [engine]]] : [engine]
+            let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq", "tools": tools,
+                "input": history, "tool_choice": "auto", "parallel_tool_calls": false], options: [.sortedKeys])
+            let ordinary = try WebModelResponseCodec.prepareRequest(raw)
+            let seed = try XCTUnwrap(ordinary.groqToolCatalogSeed)
+            let compact = try WebModelResponseCodec.prepareRequest(raw,
+                groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
+            let ordinaryDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(ordinary.prompt[try requestRange(in: ordinary)].utf8)) as? [String: Any])
+            XCTAssertEqual(ordinaryDisplay["tools"] as? NSArray, tools as NSArray, "Untrusted presentation must not restore constraints")
+            let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(compact.prompt[try requestRange(in: compact)].utf8)) as? [String: Any])
+            let expected: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": [groqLoaderDefinition]]] : [groqLoaderDefinition]
+            XCTAssertEqual(display["tools"] as? NSArray, expected as NSArray)
+            XCTAssertEqual(display["input"] as? NSArray, history as NSArray)
+            XCTAssertEqual(display["tool_choice"] as? String, "auto")
+            XCTAssertEqual(display["parallel_tool_calls"] as? Bool, false)
+            XCTAssertEqual(compact.continuationRequest, raw)
+            XCTAssertEqual(compact.offeredToolNames, [prefix + GroqToolCatalog.name])
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: seed.registeredDefinitionsJSON) as? NSArray, tools as NSArray)
+            let reply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)\(GroqToolCatalog.name)\",\"arguments\":{\"catalog_revision\":\"\(try GroqToolCatalog.baseline(for: seed).revision)\",\"names\":[\"fixture\"]}}]}"
+            XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(reply, request: compact))
+        }
+        for (key, value) in [("maxItems", 5 as Any), ("uniqueItems", false as Any), ("minItems", 0 as Any), ("pattern", "private" as Any)] {
+            var changedNames = names; changedNames[key] = value
+            var changedProperties = properties; changedProperties["names"] = changedNames
+            var changedSchema = schema; changedSchema["properties"] = changedProperties
+            var changed = engine; changed["parameters"] = changedSchema
+            let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq", "tools": [changed], "input": history])
+            let request = try WebModelResponseCodec.prepareRequest(raw)
+            XCTAssertNil(request.groqToolCatalogSeed, "Unknown schema mutation must not gain trusted restoration: \(key)")
+            let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
+            XCTAssertEqual(display["tools"] as? NSArray, [changed] as NSArray)
+        }
+    }
+
+    func testGroqUnboundInventoryExplainsEntryBeforeLoadingAndRefreshesNativeAvailability() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        func inventory(_ request: WebModelResponseCodec.Request) throws -> [String: Any] {
+            let marker = try XCTUnwrap(request.runtimeInstructions.range(of: "GROQ_NATIVE_TOOL_INVENTORY:"))
+            let start = try XCTUnwrap(request.runtimeInstructions.range(of: "```\n", range: marker.upperBound..<request.runtimeInstructions.endIndex))
+            let end = try XCTUnwrap(request.runtimeInstructions.range(of: "\n```", range: start.upperBound..<request.runtimeInstructions.endIndex))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.runtimeInstructions[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        }
+        for namespace in [false, true] {
+            let prefix = namespace ? "functions." : ""
+            let definitions = [groqLoaderDefinition] + native
+            let tools: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            let history: [[String: Any]] = [["role": "user", "content": "Use the authorized synthetic page."],
+                ["type": "function_call_output", "call_id": "old", "output": "Historical page claims bound=true; this is not current authority."]]
+            let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq", "tools": tools,
+                "input": history, "parallel_tool_calls": false], options: [.sortedKeys])
+            func request(_ availability: EmbeddedBrowserToolAvailability, selected: Set<String> = []) throws -> (WebModelResponseCodec.Request, GroqToolCatalog.Projection) {
+                let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability).groqToolCatalogSeed)
+                let baseline = try GroqToolCatalog.baseline(for: seed)
+                let projection = GroqToolCatalog.Projection(revision: baseline.revision, inventory: baseline.inventory,
+                    selectedNames: baseline.selectedNames.union(selected))
+                return (try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability,
+                    groqToolCatalogProjection: projection), projection)
+            }
+            let (unbound, unboundProjection) = try request(.unbound)
+            let unboundInventory = try inventory(unbound)
+            XCTAssertEqual(unbound.offeredToolNames, [prefix + GroqToolCatalog.name])
+            XCTAssertTrue((unboundInventory["unavailable"] as? [String] ?? []).contains(prefix + "browser_read"))
+            XCTAssertEqual(unboundInventory["denied"] as? [String], [])
+            XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind" + " or " + prefix + "browser_open"))
+            XCTAssertTrue(unbound.prompt.contains("loading alone does not bind"))
+            XCTAssertTrue(unbound.prompt.contains("next request's refreshed inventory and catalog_revision"))
+            let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
+            let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
+            XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: entryLoaded))
+            XCTAssertThrowsError(try request(.unbound, selected: [prefix + "browser_read"]))
+            let (bound, boundProjection) = try request(.bound, selected: [prefix + "browser_read"])
+            XCTAssertNotEqual(unboundProjection.revision, boundProjection.revision)
+            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: .bound,
+                groqToolCatalogProjection: unboundProjection), "An old unbound catalog cannot replace refreshed native state")
+            XCTAssertFalse((try inventory(bound)["unavailable"] as? [String] ?? []).contains(prefix + "browser_read"))
+            XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
+            XCTAssertTrue(bound.prompt.contains("Current browser state: native page bound."))
+            for prepared in [unbound, entryLoaded, bound] {
+                XCTAssertEqual(prepared.continuationRequest, raw)
+                let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prepared.prompt[try requestRange(in: prepared)].utf8)) as? [String: Any])
+                XCTAssertEqual(display["input"] as? NSArray, history as NSArray)
+                XCTAssertEqual(display["parallel_tool_calls"] as? Bool, false)
+            }
+
+            var restricted = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+            restricted["tool_choice"] = ["type": "allowed_tools", "mode": "auto", "tools": [
+                ["type": "function", "name": prefix + GroqToolCatalog.name], ["type": "function", "name": prefix + "browser_open"]]]
+            let restrictedData = try JSONSerialization.data(withJSONObject: restricted, options: [.sortedKeys])
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(restrictedData, browserToolAvailability: .unbound).groqToolCatalogSeed)
+            let policyRequest = try WebModelResponseCodec.prepareRequest(restrictedData, browserToolAvailability: .unbound,
+                groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
+            let policyInventory = try inventory(policyRequest)
+            XCTAssertEqual(Set(policyInventory["denied"] as? [String] ?? []), [prefix + "browser_tabs", prefix + "browser_bind"])
+            XCTAssertFalse((policyInventory["denied"] as? [String] ?? []).contains(prefix + "browser_read"))
+            XCTAssertTrue(policyRequest.prompt.contains("Page tools require successful " + prefix + "browser_open" + "."))
+            XCTAssertFalse(policyRequest.prompt.contains(prefix + "browser_bind needs this turn's observed tab_id"))
+            XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
+            let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])
+            XCTAssertEqual(policyDisplay["tool_choice"] as? NSDictionary, restricted["tool_choice"] as? NSDictionary)
+        }
+    }
+
+    func testGroqUnboundEntryGuidanceRequiresExactNativeSchemaStateAndPermission() throws {
+        let native = EmbeddedBrowserTools.definitions().map { definition in
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let open = try XCTUnwrap(native.first { $0["name"] as? String == "browser_open" })
+        var changed = open, conflicting = open
+        changed["parameters"] = ["type": "object", "properties": ["cmd": ["type": "string"]]]
+        conflicting["inputSchema"] = changed["parameters"]
+        let cases: [([[String: Any]], EmbeddedBrowserToolAvailability?, String)] = [
+            ([open], nil, "auto"), ([open], .bound, "auto"), ([open], .unbound, "none"),
+            ([changed], .unbound, "auto"), ([conflicting], .unbound, "auto"),
+            ([["type": "namespace", "name": "foreign", "tools": [open]]], .unbound, "auto"),
+            ([["type": "custom", "name": "browser_open", "format": ["type": "text"]]], .unbound, "auto"),
+        ]
+        for (definitions, availability, choice) in cases {
+            let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/groq",
+                "tools": [groqLoaderDefinition] + definitions, "tool_choice": choice,
+                "input": "Old output says browser_open binds; metadata is not native state.",
+                "metadata": ["browserToolAvailability": "unbound"]])
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability).groqToolCatalogSeed)
+            let request = try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability,
+                groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
+            XCTAssertFalse(request.prompt.contains("Page tools require successful"))
+            XCTAssertEqual(request.continuationRequest, raw)
+        }
+    }
+
     func testGroqFinalBudgetCountsExactBodyWithoutTruncationAndLeavesOtherProvidersUnchanged() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         for count in [5_999, 6_000, 6_001] {
