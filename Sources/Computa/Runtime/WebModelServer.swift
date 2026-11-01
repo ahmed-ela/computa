@@ -8,6 +8,8 @@ import OSLog
 /// Another website transport can replace the browser implementation without
 /// changing the desktop tools or local transcript.
 protocol WebModelTransport: Sendable {
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data
     func activateRequestMetadata(sessionToken: String) async -> Bool
     func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
@@ -24,6 +26,22 @@ protocol WebModelTransport: Sendable {
     func interruptPostBlockObservation(sessionToken: String) async
 }
 
+/// Native invocation identity, never serialized into the provider page. A Start
+/// error alone cannot establish that a browser session was never acquired.
+struct WebModelStartAdmission: Equatable, Sendable {
+    let id: UUID
+    let inferenceID: UUID
+    let taskID: String
+    let threadID: String
+    let turnID: String
+    let runtimeGeneration: UUID
+    let preparationID: UUID
+    let transportGeneration: UUID
+    let provider: String
+    let modelID: String
+    let parameters: Data
+}
+
 /// Stopping inference and disposing its session remain cancellation operations.
 /// Only an ordinary failed turn may retain an already-enrolled passive probe.
 enum WebModelCleanupCause: String, Sendable {
@@ -32,6 +50,13 @@ enum WebModelCleanupCause: String, Sendable {
 }
 
 extension WebModelTransport {
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        // Legacy/custom transports supply no native precreation proof. Their
+        // errors remain uncertain even if they reuse a known provider error.
+        if let authorization { return try await startWithRequestMetadata(params: params, authorization: authorization) }
+        return try await request(operation: "webProviderStart", params: params)
+    }
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
         authorization.revoke()
         return try await request(operation: "webProviderStart", params: params)
@@ -224,6 +249,7 @@ actor WebModelServer {
     private var usedSessionTokens: [String: Set<String>] = [:]
     private var unresolvedStartAttempts: [String: UnresolvedStartAttempt] = [:]
     private var unresolvedStartReceipts: [String: WebsiteSessionCleanupReceipt] = [:]
+    private var notCreatedStartReceipts: [String: WebsiteSessionCleanupReceipt] = [:]
     private var evidenceThreads: [String: String] = [:]
     private var active: [String: ActiveRequest] = [:]
     private var retiringTaskIDs = Set<String>()
@@ -274,6 +300,7 @@ actor WebModelServer {
               !retiringTaskIDs.contains(task) else { throw Failure.busy }
         guard sessions[task] == nil, pendingClosedTransactions[task] == nil else { throw Failure.cleanupFailed }
         guard unresolvedStartAttempts[task] == nil else { throw Failure.startOwnershipUnconfirmed }
+        guard notCreatedStartReceipts[task]?.receiptSaved != false else { throw Failure.persistenceRequired }
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
         do {
@@ -282,6 +309,7 @@ actor WebModelServer {
             let protected = Set(active.keys).union(sessions.keys).union(pendingClosedTransactions.keys)
                 .union(preparedInferenceContexts.keys).union(inferenceContexts.keys).union(contextWaiters.keys)
                 .union(cleanupTasks.keys).union(unresolvedStartAttempts.keys).union(unresolvedStartReceipts.keys)
+                .union(notCreatedStartReceipts.filter { !$0.value.receiptSaved }.map(\.key))
                 .union(yieldedTurns.keys).union(closedTurns.keys).union(retiringTaskIDs)
             try retention.admit(taskID: task, evidenceDirectory: evidenceDirectory!, protectedTaskIDs: protected)
         } catch { throw Failure.persistenceRequired }
@@ -294,6 +322,7 @@ actor WebModelServer {
         failedClosedHandoffs.remove(task)
         registerEvidenceThread(taskID: task, threadID: thread)
         cleanupTurns.removeValue(forKey: task)
+        notCreatedStartReceipts.removeValue(forKey: task)
     }
 
     /// Actual native turn acknowledgement/notification resolves the prepared
@@ -590,6 +619,7 @@ actor WebModelServer {
         embeddedTransport = nil
         embeddedTransportIdentity = nil
         let ids = Set(sessions.keys).union(active.keys).union(pendingClosedTransactions.keys).union(unresolvedStartAttempts.keys)
+            .union(notCreatedStartReceipts.keys)
             .union(preparedInferenceContexts.keys).union(inferenceContexts.keys)
         var issues: [String] = []
         for id in ids { issues += await cancel(taskID: id) }
@@ -621,6 +651,9 @@ actor WebModelServer {
         if let pending = pendingClosedTransactions[taskID] {
             return await persistClosedTransaction(taskID: taskID, pending: pending)
         }
+        if let receipt = notCreatedStartReceipts[taskID], sessions[taskID] == nil {
+            return await persistNotCreatedStart(taskID: taskID, receipt: receipt)
+        }
         guard let session = sessions[taskID] else {
             // A final inference closure already has the strongest causal proof.
             // Turn-end must not replace it with a weaker no_owned_session row.
@@ -641,6 +674,17 @@ actor WebModelServer {
         let receipt = await waitForCleanup(cleanup, taskID: taskID)
         cleanupTasks.removeValue(forKey: taskID)
         return receipt
+    }
+
+    /// The exact rejected invocation has no website token. Persist only this
+    /// absence proof; never borrow an earlier inference's closure or call Finish.
+    private func persistNotCreatedStart(taskID: String, receipt original: WebsiteSessionCleanupReceipt) async -> CleanupResult {
+        var receipt = original
+        receipt.receiptSaved = true
+        if cleanupReceiptStore?.save(receipt) != true { receipt.receiptSaved = false }
+        notCreatedStartReceipts[taskID] = receipt
+        await cleanupReceiptObserver?(receipt)
+        return CleanupResult(receipt: receipt, issues: receipt.receiptSaved ? [] : [Failure.persistenceRequired.localizedDescription])
     }
 
     private func waitForCleanup(_ cleanup: Task<CleanupResult, Never>, taskID: String) async -> CleanupResult {
@@ -784,6 +828,7 @@ actor WebModelServer {
               sessions[taskID] == nil || yieldedTurns[taskID] != nil,
               !failedClosedHandoffs.contains(taskID) else { throw Failure.cleanupFailed }
         guard unresolvedStartAttempts[taskID] == nil else { throw Failure.startOwnershipUnconfirmed }
+        guard notCreatedStartReceipts[taskID]?.receiptSaved != false else { throw Failure.persistenceRequired }
         let generation = embeddedTransportGeneration
         let operation = Task { try await self.perform(request, provider: provider,
             taskID: taskID, identity: identity, transport: transport, transportGeneration: generation) }
@@ -938,6 +983,7 @@ actor WebModelServer {
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested",
                         turnScoped: retainsConversation(provider: provider))
+                    notCreatedStartReceipts.removeValue(forKey: taskID)
                     unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model)
                     if correctionTicket == nil, provider == "chatgpt", !context.isMaintenance,
@@ -949,13 +995,35 @@ actor WebModelServer {
                             taskID: task, threadID: thread, turnID: turn, preparationID: context.preparationID,
                             isMaintenance: context.isMaintenance)
                     }
+                    let startParameters = try JSONSerialization.data(withJSONObject: params)
+                    let admission = WebModelStartAdmission(id: UUID(), inferenceID: inferenceID, taskID: taskID,
+                        threadID: context.threadID, turnID: context.turnID, runtimeGeneration: context.runtimeGeneration,
+                        preparationID: context.preparationID, transportGeneration: transportGeneration,
+                        provider: provider, modelID: request.model, parameters: startParameters)
                     let reply: [String: Any]
-                    if let requestMetadata {
-                        let data = try await transport.startWithRequestMetadata(
-                            params: JSONSerialization.data(withJSONObject: params), authorization: requestMetadata)
+                    do {
+                        let data = try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
                         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
                         reply = object
-                    } else { reply = try await call(transport, operation: "webProviderStart", params: params) }
+                    } catch let rejected as EmbeddedWebModelTransport.PrecreationRejection {
+                        // Only the exact current native invocation can retire its
+                        // unknown Start. Arbitrary errors/page JSON never enter here.
+                        if rejected.admission == admission, (try? requireCurrentContext()) != nil,
+                           sessions[taskID] == nil, lease == nil,
+                           unresolvedStartReceipts[taskID] == nil,
+                           let pending = unresolvedStartAttempts[taskID], pending.inferenceID == inferenceID,
+                           pending.context == context, pending.provider == provider, pending.modelID == request.model {
+                            let receipt = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: context.threadID,
+                                turnID: context.turnID, runtimeGeneration: context.runtimeGeneration, outcome: .noOwnedSession,
+                                provider: WebsiteSessionCleanupReceipt.Provider(rawValue: provider), route: .embedded,
+                                modelID: request.model, reason: .notCreated, trigger: .inference,
+                                inferenceID: inferenceID.uuidString.lowercased())
+                            notCreatedStartReceipts[taskID] = receipt
+                            unresolvedStartAttempts.removeValue(forKey: taskID)
+                            _ = await persistNotCreatedStart(taskID: taskID, receipt: receipt)
+                        }
+                        throw rejected.failure
+                    }
                     guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
                         throw Self.snapshotFailure(reply)
                     }

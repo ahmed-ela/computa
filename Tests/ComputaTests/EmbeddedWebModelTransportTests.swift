@@ -4641,6 +4641,233 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture, retaining: id)
     }
 
+    // Keep XCTestCase on the main actor; only the Sendable server actor and
+    // temporary URL cross suspension points and enter the teardown closure.
+    private func makePrecreationFixtureServer(storageDirectory: URL? = nil) async throws -> WebModelServer {
+        let root = storageDirectory ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("computa-website-inference-fixture-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let server = WebModelServer()
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
+            runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+        await server.setBrowserToolAvailabilityProvider { _ in .bound }
+        addTeardownBlock {
+            _ = await server.shutdown()
+            try? FileManager.default.removeItem(at: root)
+        }
+        return server
+    }
+
+    private func precreationQuotaFixture() async throws -> (Fixture, String, UUID) {
+        let fixture = try Fixture(page: Self.freshClaudeQuotaBannerPage.replacingOccurrences(
+            of: "id=\"fixture-quota-banner\"", with: "id=\"fixture-quota-banner\" hidden"))
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String), id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await evaluate(view, "document.getElementById('fixture-quota-banner').hidden = false; return true;")
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        return (fixture, token, id)
+    }
+
+    private var precreationRequest: Data {
+        Data(#"{"model":"browser/claude","input":"Synthetic precreation check; no tools.","tools":[]}"#.utf8)
+    }
+
+    func testNativePrecreationQuotaRejectionHasExactNoSessionReceiptWithoutClosingOldFailure() async throws {
+        let (fixture, oldToken, oldID) = try await precreationQuotaFixture()
+        defer { fixture.shutdown() }
+        let server = try await makePrecreationFixtureServer()
+        await server.configureEmbeddedTransport(fixture.transport)
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "native-precreation"); XCTFail("Quota must still fail") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
+        let observed = await server.latestCleanupReceipts(), receipt = try XCTUnwrap(observed.last)
+        XCTAssertEqual(receipt.schemaVersion, 4); XCTAssertTrue(receipt.isPrecreationRejectionLinked)
+        XCTAssertEqual(receipt.outcome, .noOwnedSession); XCTAssertEqual(receipt.reason, .notCreated)
+        XCTAssertTrue(receipt.receiptSaved); XCTAssertNil(receipt.sessionToken)
+        XCTAssertEqual(receipt.taskID, websiteInferenceFixtureTaskID("native-precreation"))
+        XCTAssertEqual(receipt.threadID, websiteInferenceFixtureTaskID("native-precreation:thread"))
+        XCTAssertEqual(receipt.turnID, websiteInferenceFixtureTaskID("native-precreation:turn"))
+        XCTAssertEqual(receipt.provider, .claude); XCTAssertEqual(receipt.modelID, "browser/claude")
+        let issues = await server.fixtureFinish(taskID: "native-precreation")
+        XCTAssertEqual(issues, [])
+        let retried = await server.retryWebsiteSessionCleanup(taskID: receipt.taskID,
+            runtimeGeneration: websiteInferenceFixtureGeneration)
+        XCTAssertEqual(retried, receipt, "Persistence/manual cleanup reuses only this no-session receipt")
+        XCTAssertEqual(fixture.createdTabs.count, 1, "Rejected new invocation created no page")
+        let oldView = try XCTUnwrap(fixture.browser.webView(for: oldID))
+        for name in ["fixtureInputCount", "fixtureFocusCount", "fixtureQuotaClicks"] {
+            let value = try await evaluate(oldView, "return window.\(name);") as? Int
+            XCTAssertEqual(value, 0)
+        }
+        let oldCleanup = try await call(fixture.transport, "webProviderFinish", ["sessionToken": oldToken])
+        XCTAssertEqual(oldCleanup["cleanup"] as? String, "failed", "New absence proof cannot repair the older owned failure")
+        XCTAssertTrue(fixture.browser.webView(for: oldID) === oldView)
+        do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]); XCTFail("Gate remains latched") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
+        try await assertHumanTabIntact(fixture, retaining: oldID)
+    }
+
+    func testPrecreationProofRejectsForeignBindingsPageClaimsAndUntypedErrors() async throws {
+        let (fixture, _, oldID) = try await precreationQuotaFixture()
+        defer { fixture.shutdown() }
+        let mutations = ["untyped", "json", "id", "inferenceID", "taskID", "threadID", "turnID",
+                         "runtimeGeneration", "preparationID", "transportGeneration", "provider", "modelID", "parameters"]
+        for mutation in mutations {
+            let server = try await makePrecreationFixtureServer()
+            let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            do { _ = try await server.fixtureInfer(precreationRequest, taskID: mutation); XCTFail(mutation) } catch { }
+            let issues = await server.fixtureFinish(taskID: mutation)
+            XCTAssertEqual(issues, [WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription], mutation)
+            let observed = await server.latestCleanupReceipts(), receipt = try XCTUnwrap(observed.last)
+            XCTAssertEqual(receipt.schemaVersion, 3, mutation); XCTAssertEqual(receipt.outcome, .unconfirmed, mutation)
+            XCTAssertNil(receipt.sessionToken); XCTAssertEqual(transport.operations, ["start"], mutation)
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertHumanTabIntact(fixture, retaining: oldID)
+    }
+
+    func testPrecreationProofCannotBeReplayedOrAcceptedAfterTransportChangeOrCancellation() async throws {
+        let (fixture, _, oldID) = try await precreationQuotaFixture()
+        defer { fixture.shutdown() }
+        for mutation in ["replay", "transport_changed", "cancelled"] {
+            let server = try await makePrecreationFixtureServer()
+            let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            if mutation == "replay" {
+                do { _ = try await server.fixtureInfer(precreationRequest, taskID: "first"); XCTFail() } catch { }
+                let receipts = await server.latestCleanupReceipts()
+                XCTAssertTrue(receipts.contains { $0.isPrecreationRejectionLinked })
+            } else if mutation == "transport_changed" {
+                transport.beforeReject = { await server.configureEmbeddedTransport(fixture.transport) }
+            } else {
+                transport.beforeReject = { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+            do { _ = try await server.fixtureInfer(precreationRequest, taskID: mutation); XCTFail() } catch { }
+            let issues = await server.fixtureFinish(taskID: mutation)
+            XCTAssertEqual(issues, [WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription])
+            let observed = await server.latestCleanupReceipts()
+            let receipt = try XCTUnwrap(observed.first { $0.taskID == websiteInferenceFixtureTaskID(mutation) })
+            XCTAssertEqual(receipt.schemaVersion, 3); XCTAssertEqual(receipt.outcome, .unconfirmed)
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertHumanTabIntact(fixture, retaining: oldID)
+    }
+
+    func testPrecreationRejectionCannotBorrowEarlierSameTurnClosure() async throws {
+        let (fixture, _, oldID) = try await precreationQuotaFixture()
+        defer { fixture.shutdown() }
+        let server = try await makePrecreationFixtureServer()
+        let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: "prefix")
+        transport.prefix = makeCompletedPrecreationFixtureTransport()
+        await server.configureEmbeddedTransport(transport)
+        _ = try await server.fixtureInfer(precreationRequest, taskID: "prior-closed")
+        let before = await server.latestCleanupReceipts(), closed = try XCTUnwrap(before.last)
+        XCTAssertEqual(closed.outcome, .closed)
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "prior-closed"); XCTFail() }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
+        let issues = await server.fixtureFinish(taskID: "prior-closed")
+        XCTAssertEqual(issues, [])
+        let after = await server.latestCleanupReceipts(), absent = try XCTUnwrap(after.last)
+        XCTAssertEqual(absent.schemaVersion, 4); XCTAssertEqual(absent.outcome, .noOwnedSession)
+        XCTAssertNotEqual(absent.inferenceID, closed.inferenceID); XCTAssertNotEqual(absent.attemptID, closed.attemptID)
+        XCTAssertEqual(absent.turnID, closed.turnID); XCTAssertNil(absent.sessionToken)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertHumanTabIntact(fixture, retaining: oldID)
+    }
+
+    func testPrecreationReceiptPersistenceFailureBlocksAdmissionAndRetriesWithoutTransport() async throws {
+        let (fixture, _, oldID) = try await precreationQuotaFixture()
+        defer { fixture.shutdown() }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PrecreationSave-\(UUID())")
+        let server = try await makePrecreationFixtureServer(storageDirectory: root)
+        let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: "save_failure")
+        let taskID = websiteInferenceFixtureTaskID("save-failure")
+        let summary = root.appendingPathComponent("cleanup/\(taskID).jsonl")
+        transport.beforeReject = { try? Data("corrupt\n".utf8).write(to: summary) }
+        await server.configureEmbeddedTransport(transport)
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "save-failure"); XCTFail() }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: summary.path))
+        let failedSave = await server.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: websiteInferenceFixtureGeneration)
+        XCTAssertTrue(failedSave.isPrecreationRejectionLinked); XCTAssertFalse(failedSave.receiptSaved)
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "save-failure"); XCTFail("Save-only retry must precede new admission") }
+        catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.persistenceRequired.localizedDescription) }
+        try FileManager.default.removeItem(at: summary)
+        let saved = await server.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: websiteInferenceFixtureGeneration)
+        var expected = failedSave; expected.receiptSaved = true
+        XCTAssertEqual(saved, expected)
+        XCTAssertEqual(transport.operations, ["start"], "Saving proof must not poll, finish, send or restart a page")
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertHumanTabIntact(fixture, retaining: oldID)
+    }
+
+    func testQuotaThrowAfterNativeSessionAcquisitionRemainsUnconfirmed() async throws {
+        let fixture = try Fixture(page: Self.providerPage(.claude))
+        defer { fixture.shutdown() }
+        let server = try await makePrecreationFixtureServer()
+        let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: "after_session")
+        await server.configureEmbeddedTransport(transport)
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "created-then-error"); XCTFail() }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
+        let issues = await server.fixtureFinish(taskID: "created-then-error")
+        XCTAssertEqual(issues, [WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription])
+        let observed = await server.latestCleanupReceipts(), receipt = try XCTUnwrap(observed.last)
+        XCTAssertEqual(receipt.schemaVersion, 3); XCTAssertEqual(receipt.outcome, .unconfirmed)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdTabs.last)))
+    }
+
+    @MainActor
+    private final class PrecreationFixtureTransport: WebModelTransport {
+        let native: EmbeddedWebModelTransport
+        let mutation: String
+        var operations: [String] = []
+        var beforeReject: (() async -> Void)?
+        var saved: EmbeddedWebModelTransport.PrecreationRejection?
+        var prefix: (any WebModelTransport)?
+        init(native: EmbeddedWebModelTransport, mutation: String) { self.native = native; self.mutation = mutation }
+
+        func start(params: Data, admission a: WebModelStartAdmission,
+                   authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+            operations.append("start")
+            if let prefix, operations == ["start"] { return try await prefix.request(operation: "webProviderStart", params: params) }
+            if mutation == "untyped" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
+            if mutation == "json" {
+                return Data(#"{"state":"failed","error":"website_usage_limit","noSessionCreated":true,"cleanup":"not_created"}"#.utf8)
+            }
+            if mutation == "replay", let saved { throw saved }
+            let changed = WebModelStartAdmission(id: mutation == "id" ? UUID() : a.id,
+                inferenceID: mutation == "inferenceID" ? UUID() : a.inferenceID,
+                taskID: mutation == "taskID" ? UUID().uuidString.lowercased() : a.taskID,
+                threadID: mutation == "threadID" ? UUID().uuidString.lowercased() : a.threadID,
+                turnID: mutation == "turnID" ? UUID().uuidString.lowercased() : a.turnID,
+                runtimeGeneration: mutation == "runtimeGeneration" ? UUID() : a.runtimeGeneration,
+                preparationID: mutation == "preparationID" ? UUID() : a.preparationID,
+                transportGeneration: mutation == "transportGeneration" ? UUID() : a.transportGeneration,
+                provider: mutation == "provider" ? "gemini" : a.provider,
+                modelID: mutation == "modelID" ? "browser/gemini" : a.modelID,
+                parameters: mutation == "parameters" ? Data("{}".utf8) : a.parameters)
+            do {
+                let result = try await native.start(params: params, admission: changed, authorization: authorization)
+                if mutation == "after_session" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
+                return result
+            } catch let rejection as EmbeddedWebModelTransport.PrecreationRejection {
+                saved = rejection
+                await beforeReject?()
+                throw rejection
+            }
+        }
+        func request(operation: String, params: Data) async throws -> Data {
+            operations.append(operation)
+            guard let prefix else { throw WebModelServer.Failure.invalidRequest }
+            return try await prefix.request(operation: operation, params: params)
+        }
+    }
+
     func testSavedVerificationSurvivesSameProfileTransportRecreationUntilExplicitRecovery() async throws {
         let suiteName = "ComputaVerificationGateTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -226,6 +226,44 @@ final class AppStateWebsiteSessionCleanupTests: XCTestCase {
         XCTAssertEqual(state.websiteSessionCleanupReceipts[taskID], saved, "A replay cannot downgrade saved evidence")
     }
 
+    func testUnsavedPrecreationReceiptRetriesOnlyPersistenceAndKeepsTaskAndQueuePaused() async throws {
+        let runtime = CleanupUIRuntime()
+        let tested = fixture(runtime: runtime)
+        tested.tasks[0].status = .failed
+        tested.queuedPrompts[taskID] = [QueuedPrompt(text: "Unsent follow-up")]
+        tested.pausedQueueTaskIDs.insert(taskID)
+        let original = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: taskID, turnID: UUID().uuidString,
+            runtimeGeneration: UUID(), outcome: .noOwnedSession, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .notCreated, trigger: .inference,
+            inferenceID: UUID().uuidString)
+        XCTAssertTrue(original.isValid); XCTAssertTrue(original.isPrecreationRejectionLinked)
+        tested.apply(.websiteSessionCleanupUpdated(original))
+        XCTAssertTrue(tested.canRetryWebsiteSessionCleanup(taskID: taskID))
+        XCTAssertTrue(tested.requestWebsiteSessionCleanup(taskID: taskID))
+        XCTAssertFalse(tested.requestWebsiteSessionCleanup(taskID: taskID))
+        try await wait { await runtime.calls.count == 1 }
+        var saved = original; saved.receiptSaved = true
+        await runtime.finish(saved)
+        try await wait { !tested.websiteSessionCleanupTaskIDs.contains(self.taskID) }
+        XCTAssertEqual(tested.websiteSessionCleanupReceipts[taskID], saved)
+        XCTAssertFalse(tested.canRetryWebsiteSessionCleanup(taskID: taskID))
+        XCTAssertEqual(tested.tasks[0].status, .failed)
+        XCTAssertEqual(tested.queuedPrompts[taskID]?.map(\.text), ["Unsent follow-up"])
+        XCTAssertTrue(tested.pausedQueueTaskIDs.contains(taskID))
+        let submissions = await runtime.submissions, calls = await runtime.calls
+        XCTAssertTrue(submissions.isEmpty); XCTAssertEqual(calls, [taskID])
+        tested.apply(.websiteSessionCleanupUpdated(original))
+        XCTAssertEqual(tested.websiteSessionCleanupReceipts[taskID], saved)
+        // An invalid lookalike must not gain this persistence-only affordance.
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        raw["reason"] = "cleanup_unverified"
+        let invalid = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
+        XCTAssertFalse(invalid.isValid)
+        tested.apply(.websiteSessionCleanupUpdated(invalid))
+        XCTAssertEqual(tested.websiteSessionCleanupReceipts[taskID], saved)
+        XCTAssertFalse(tested.canRetryWebsiteSessionCleanup(taskID: taskID))
+    }
+
     func testEqualAttemptCannotChangeItsClosureIdentityWhenPersistenceSucceeds() throws {
         let state = fixture(runtime: CleanupUIRuntime())
         let original = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: taskID, turnID: UUID().uuidString,

@@ -1875,7 +1875,8 @@ final class WebModelServerTests: XCTestCase {
                 expected["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: provider)]
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
                 XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
-                XCTAssertTrue(prompt.hasSuffix("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
+                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             }
             let providers = await transport.startedProviders()
             XCTAssertEqual(providers, provider == "gemini" ? [provider] : [provider, provider])
@@ -2622,6 +2623,11 @@ private actor WebListenerStartupGate {
         expired = true
         resume()
     }
+}
+
+/// Reuse the normal successful protocol fixture before a native gate rejection.
+func makeCompletedPrecreationFixtureTransport() -> any WebModelTransport {
+    WebsiteInferenceFixtureTransport(FixtureWebModelTransport())
 }
 
 private actor FixtureWebModelTransport: WebModelTransport {

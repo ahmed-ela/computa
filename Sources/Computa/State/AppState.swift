@@ -772,7 +772,8 @@ final class AppState {
         else { return false }
         if let receipt = currentWebsiteSessionCleanupReceipt(taskID: taskID) {
             guard receipt.outcome == .unconfirmed
-                    || (receipt.outcome == .closed && receipt.isTransactionLinked && !receipt.receiptSaved) else { return false }
+                    || (receipt.outcome == .closed && receipt.isTransactionLinked && !receipt.receiptSaved)
+                    || (receipt.isPrecreationRejectionLinked && receipt.isValid && !receipt.receiptSaved) else { return false }
             if receipt.provider != nil, receipt.route != nil,
                receipt.modelID.map(LocalModelCatalog.isWebBrowser) == true { return true }
         }

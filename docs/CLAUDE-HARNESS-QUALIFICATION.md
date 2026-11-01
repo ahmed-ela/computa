@@ -393,6 +393,49 @@ path remained byte-identical and all JavaScript verification predicates remained
 equivalent. Tests cover private/unknown fields, malformed types, bounded counts,
 reserved failure slots and a page changing during diagnostic extraction.
 
+### Evening recovery and rejected startup (October 31, 2026)
+
+After the user reported that quota should have reset, the app was still running
+build349 in its original process. A new Haiku 5.5 `hi` request failed between
+`start_requested` and `website_usage_limit` in 18 ms, without a session token,
+`started` event or submission. Code and native logs establish rejection by
+Computa's remembered provider gate before tab creation. This is not a fresh
+observation of Claude's account limit. The gate currently has no timer; a
+verified explicit catalog recheck or app restart is needed after recovery.
+
+One separately authorized cleanup-only retry ran against the original Sonnet
+4.6 session at 9:11:42 p.m. Eastern. Its fresh page diagnostic preceded a new
+manual receipt by 9 ms. Cleanup remained unconfirmed: the physical Incognito
+header and exit were present, but neither was strictly visible. No prompt was
+sent, no inference was restarted, and the original website and tool traces
+remained unchanged. The exact cause of the disabled background remains unknown.
+
+The new Haiku attempt exposed a separate bookkeeping defect. The server marks a
+Start as unresolved before calling the native transport. An ordinary thrown
+error cannot prove whether a page was acquired, so that conservative behavior
+is required for unknown failures. However, the native provider-gate rejection
+occurs before any page is reserved or created, and the server previously had
+no way to distinguish it. It therefore displayed an unverified-cleanup warning
+for an attempt that never created a session.
+
+Candidate build351 adds a native-only proof bound to the exact Start invocation
+and its context. Only that initial gate rejection may produce the proof. A
+matching current proof records a durable, inference-linked `no_owned_session`
+receipt; it grants no session-closure or model-response authority. Arbitrary
+errors, page JSON, stale or foreign proofs, and failures after page acquisition
+remain unresolved. A failed receipt save can retry persistence without calling
+the transport or resuming the model. Earlier cleanup failures, including the
+original Sonnet session, remain separate and unverified.
+
+Focused native validation selected 142 tests: 141 passed, one opt-in persistence
+microbenchmark was skipped, and none failed. This includes the six real-WebKit
+precreation regressions, eight new receipt-store cases, AppState persistence-only
+retry, server continuation/cleanup checks and six bundled-runtime restart cases.
+The source and tests remained unchanged during the passing run. Earlier runs
+exposed a test-helper actor-isolation error and an outdated handoff suffix
+assertion; both were corrected without changing production prompt instructions
+or dropping assertions. Live build351 qualification remains pending.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and

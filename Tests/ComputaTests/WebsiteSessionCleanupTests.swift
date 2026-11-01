@@ -176,6 +176,155 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             inferenceID: inference ?? scope.inference)
     }
 
+    private func precreationRejection(_ scope: Scope, turn: String? = nil, inference: String? = nil) -> WebsiteSessionCleanupReceipt {
+        WebsiteSessionCleanupReceipt(taskID: scope.task, threadID: scope.thread, turnID: turn ?? scope.turn,
+            runtimeGeneration: scope.generation, outcome: .noOwnedSession, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .notCreated, trigger: .inference, receiptSaved: true,
+            inferenceID: inference ?? scope.inference)
+    }
+
+    func testPrecreationRejectionRequiresExactCausalScopeWithoutLeaseOrClosureAuthority() throws {
+        let scope = Scope(), rejected = precreationRejection(scope)
+        XCTAssertEqual(rejected.schemaVersion, 4); XCTAssertTrue(rejected.isValid)
+        XCTAssertTrue(rejected.isPrecreationRejectionLinked)
+        XCTAssertFalse(rejected.isStartupAttemptLinked); XCTAssertFalse(rejected.isTransactionLinked)
+        XCTAssertEqual(rejected.outcome, .noOwnedSession); XCTAssertEqual(rejected.reason, .notCreated)
+        XCTAssertNil(rejected.sessionToken)
+        for field in ["inferenceID", "threadID", "turnID", "provider", "route", "modelID"] {
+            XCTAssertFalse(try changed(rejected, [:], removing: [field]).isValid, field)
+        }
+        for field in ["attemptID", "taskID", "threadID", "turnID", "runtimeGeneration", "inferenceID"] {
+            XCTAssertFalse(try changed(rejected, [field: "invalid"]).isValid, field)
+            XCTAssertFalse(try changed(rejected, [field: UUID().uuidString.uppercased()]).isValid, field)
+        }
+        let invalid: [[String: Any]] = [
+            ["sessionToken": scope.token], ["outcome": "closed"], ["outcome": "unconfirmed"],
+            ["reason": "no_owned_session"], ["reason": "deleted"], ["reason": "cleanup_unverified"],
+            ["route": "chrome"], ["trigger": "manual"], ["provider": "gemini"], ["modelID": "browser/gemini"],
+            ["schemaVersion": 1], ["schemaVersion": 2], ["schemaVersion": 3]
+        ]
+        for fields in invalid { XCTAssertFalse(try changed(rejected, fields).isValid, String(describing: fields)) }
+        XCTAssertEqual(startup(scope).schemaVersion, 3, "Unknown startup ownership keeps its existing meaning")
+        XCTAssertEqual(receipt(scope).schemaVersion, 2)
+        XCTAssertEqual(legacy(scope.task).schemaVersion, 1)
+    }
+
+    func testPrecreationRejectionPersistsOnlyAsJournalObservationAndIsIdempotent() throws {
+        let root = try directory(), scope = Scope(), rejected = precreationRejection(scope)
+        let store = WebsiteSessionCleanupStore(directory: root)
+        XCTAssertTrue(store.save(rejected)); let bytes = try Data(contentsOf: journalFile(root, scope))
+        XCTAssertTrue(store.save(rejected)); XCTAssertEqual(try Data(contentsOf: journalFile(root, scope)), bytes)
+        XCTAssertFalse(store.saveTransaction(rejected), "No acknowledged session or response-release authority exists")
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [rejected])
+        XCTAssertEqual(WebsiteSessionCleanupStore(directory: root).latest(), [rejected])
+        let forged = try changed(rejected, ["trigger": "automatic"])
+        XCTAssertFalse(store.save(forged)); XCTAssertEqual(try Data(contentsOf: journalFile(root, scope)), bytes)
+    }
+
+    func testPrecreationRejectionCannotConvertAnUnresolvedStartupOrAcknowledgedSessionInEitherDirection() throws {
+        let scope = Scope(), rejected = precreationRejection(scope)
+        for prior in [startup(scope), receipt(scope, outcome: .unconfirmed), receipt(scope)] {
+            for reversed in [false, true] {
+                let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
+                let first = reversed ? rejected : prior, second = reversed ? prior : rejected
+                XCTAssertTrue(first.isValid); XCTAssertTrue(second.isValid); XCTAssertTrue(store.save(first))
+                let bytes = try Data(contentsOf: journalFile(root, scope))
+                XCTAssertFalse(store.save(second), "The same inference cannot change startup/lease meaning")
+                XCTAssertEqual(try Data(contentsOf: journalFile(root, scope)), bytes)
+                XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [first])
+                XCTAssertEqual(store.latest(), [first])
+            }
+        }
+    }
+
+    func testPrecreationRejectionRejectsContradictoryPersistedInferenceSchemas() throws {
+        let scope = Scope(), rejected = precreationRejection(scope)
+        for prior in [startup(scope), receipt(scope, outcome: .unconfirmed)] {
+            for reversed in [false, true] {
+                let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
+                XCTAssertTrue(store.save(rejected))
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                var forged = Data()
+                for row in reversed ? [rejected, prior] : [prior, rejected] {
+                    forged.append(try encoder.encode(row)); forged.append(0x0A)
+                }
+                try forged.write(to: journalFile(root, scope), options: .atomic)
+                XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+                XCTAssertTrue(store.latest().isEmpty); XCTAssertFalse(store.save(rejected))
+                XCTAssertEqual(try Data(contentsOf: journalFile(root, scope)), forged)
+            }
+        }
+    }
+
+    func testPrecreationRejectionCannotMaskAnotherUnresolvedInferenceAcrossTurnsOrSummaryCompaction() throws {
+        for pendingStartup in [false, true] {
+            for anotherTurn in [false, true] {
+                let root = try directory(), scope = Scope()
+                var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryRecords = 1
+                let store = WebsiteSessionCleanupStore(directory: root, limits: limits)
+                let pending = pendingStartup ? startup(scope) : receipt(scope, outcome: .unconfirmed)
+                let newTurn = anotherTurn ? UUID().uuidString.lowercased() : scope.turn
+                let rejected = precreationRejection(scope, turn: newTurn, inference: UUID().uuidString.lowercased())
+                XCTAssertTrue(store.save(pending)); XCTAssertTrue(store.save(rejected))
+                XCTAssertEqual(WebsiteSessionCleanupStore(directory: root, limits: limits).latest(), [pending],
+                               "A rejection of another Start never resolves existing ownership uncertainty")
+                let expected = anotherTurn ? [pending] : [pending, rejected]
+                XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), expected)
+                if anotherTurn { XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: newTurn), [rejected]) }
+            }
+        }
+    }
+
+    func testPrecreationRejectionScopeCannotBeReboundAcrossNativeIdentity() throws {
+        let root = try directory(), scope = Scope(), rejected = precreationRejection(scope)
+        let store = WebsiteSessionCleanupStore(directory: root); XCTAssertTrue(store.save(rejected))
+        let mutations: [[String: Any]] = [
+            ["taskID": UUID().uuidString.lowercased()], ["threadID": UUID().uuidString.lowercased()],
+            ["turnID": UUID().uuidString.lowercased()], ["runtimeGeneration": UUID().uuidString.lowercased()],
+            ["provider": "gemini", "modelID": "browser/gemini"]
+        ]
+        for mutation in mutations {
+            var fields = mutation; fields["attemptID"] = UUID().uuidString.lowercased()
+            let rebound = try changed(rejected, fields)
+            XCTAssertTrue(rebound.isValid); XCTAssertFalse(store.save(rebound))
+        }
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [rejected])
+    }
+
+    func testPrecreationRejectionKeepsPersistenceUncertaintyAndFiniteJournalBudgets() throws {
+        let root = try directory(), scope = Scope(), rejected = precreationRejection(scope)
+        let store = WebsiteSessionCleanupStore(directory: root)
+        var unsaved = rejected; unsaved.receiptSaved = false
+        XCTAssertFalse(store.save(unsaved)); XCTAssertFalse(FileManager.default.fileExists(atPath: journalFile(root, scope).path))
+        let summary = root.appendingPathComponent(scope.task + ".jsonl")
+        try FileManager.default.createDirectory(at: summary, withIntermediateDirectories: true)
+        XCTAssertFalse(store.save(rejected), "Journal durability does not excuse a failed summary write")
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [rejected])
+        try FileManager.default.removeItem(at: summary)
+        XCTAssertTrue(store.save(rejected)); XCTAssertEqual(store.latest(), [rejected])
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.transactionRecords = 1
+        let bounded = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        XCTAssertTrue(bounded.save(rejected))
+        XCTAssertFalse(bounded.save(precreationRejection(scope, inference: UUID().uuidString.lowercased())))
+        XCTAssertEqual(try bounded.transactionRecords(for: scope.task, turnID: scope.turn), [rejected])
+    }
+
+    func testFullSummaryCacheRetainsPrecreationRejectionWithoutClaimingAnAcknowledgedLease() throws {
+        let root = try directory(), scope = Scope(), oldScope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryTasks = 1
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits), old = legacy(oldScope.task)
+        XCTAssertTrue(store.save(old)); let rejected = precreationRejection(scope)
+        XCTAssertTrue(store.save(rejected)); XCTAssertTrue(store.save(rejected))
+        XCTAssertFalse(store.saveTransaction(rejected))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(scope.task + ".jsonl").path))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [rejected])
+        XCTAssertEqual(Set(store.latest().map(\.attemptID)), Set([old.attemptID, rejected.attemptID]))
+        let file = journalFile(root, scope), validBytes = try Data(contentsOf: file)
+        try Data("corrupt\n".utf8).write(to: file)
+        XCTAssertFalse(store.save(rejected))
+        try validBytes.write(to: file)
+    }
+
     func testStartupAttemptHasCausalIdentityButCannotClaimLeaseOrClosure() throws {
         let scope = Scope(), pending = startup(scope)
         XCTAssertEqual(pending.schemaVersion, 3)

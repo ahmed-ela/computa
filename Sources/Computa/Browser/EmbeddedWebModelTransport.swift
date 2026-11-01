@@ -798,6 +798,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
     }
 
+    /// No public/memberwise initializer: only this native transport can attest
+    /// rejection before it has reserved or acquired any inference page.
+    struct PrecreationRejection: Error, Sendable {
+        let admission: WebModelStartAdmission
+        let failure: Failure
+
+        fileprivate init(admission: WebModelStartAdmission, failure: Failure) {
+            self.admission = admission
+            self.failure = failure
+        }
+    }
+
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        guard admission.parameters == params,
+              let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
+              let selection = WebsiteModelCatalog.inferenceSelection(for: admission.modelID),
+              values["provider"] == admission.provider, selection.provider == admission.provider,
+              selection.choice?.canonicalJSONString == values["modelChoice"],
+              authorization == nil || admission.provider == "chatgpt" else {
+            authorization?.revoke()
+            throw Failure.invalidRequest
+        }
+        return try await start(values, requestMetadata: authorization, admission: admission)
+    }
+
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               values["provider"] == "chatgpt" else { authorization.revoke(); throw Failure.invalidRequest }
@@ -845,7 +871,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil) async throws -> Data {
+    private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil,
+                       admission: WebModelStartAdmission? = nil) async throws -> Data {
         try Task.checkCancellation()
         guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
         guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
@@ -861,7 +888,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try Task.checkCancellation()
         }
         synchronizeProviderGate(provider)
-        if let gate = providerGates[provider] { throw gate.failure }
+        if let gate = providerGates[provider] {
+            // This is the sole mint point. Do not move below any reservation,
+            // prewarm acquisition, cookie-profile creation, or createSession.
+            if let admission { throw PrecreationRejection(admission: admission, failure: gate.failure) }
+            throw gate.failure
+        }
         let pending = pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
         guard sessions.values.filter({ !$0.isDiscovery }).count + pending < 4 else { throw Failure.capacity }
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
