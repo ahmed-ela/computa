@@ -5,6 +5,12 @@ import { groqChoice, groqFixture, groqGeneration, groqMarker, groqPrompt } from 
 const clearedOperation = (f: ReturnType<typeof groqFixture>) => ({ id: '4e40e8a4-876e-4433-90ab-a40b68063177',
   documentGeneration: groqGeneration, sequence: 1, firstUserFingerprint: f.fingerprint });
 
+const appendObservedShowMore = (f: ReturnType<typeof groqFixture>) => {
+  const control = new f.Node('SPAN', { class: 'text-primaryaccent cursor-pointer' }, 'Show more');
+  f.f.userBody.parentElement.append(control);
+  return control;
+};
+
 describe('Groq fixed fresh-session adapter', () => {
   test('standalone source embeds only the small audited core exactly', () => {
     const core = readFileSync(new URL('./embedded-provider-core.js', import.meta.url), 'utf8');
@@ -464,6 +470,81 @@ describe('Groq fixed fresh-session adapter', () => {
     expect((await f.run()).error).toBe('conversation_changed'); expect(f.f.clearCount).toBe(0);
     const unclaimed = groqFixture(); await unclaimed.select(); unclaimed.f.appendResponse(groqPrompt);
     expect((await unclaimed.run('inspect', { expectedUserCounts: [1], allowFirstUserBinding: true })).error).toBe('conversation_changed');
+  });
+
+  test('observed Show more sibling preserves the full long-message hash without expansion or replay', async () => {
+    const prompt = 'Return only a synthetic marker.\n' + Array.from({ length: 80 }, (_, index) =>
+      `Synthetic layout line ${index + 1}: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.`).join('\n')
+      + '\n\nComputa session marker: ' + groqMarker;
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(prompt));
+    const expectedHash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    for (const expandedControl of [false, true]) {
+      const f = groqFixture({ key: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' });
+      await f.submit(prompt);
+      const control = expandedControl ? appendObservedShowMore(f) : null;
+      const observed = await f.run();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.firstUserFingerprint).toBe(expectedHash);
+      expect(observed.text).toBe(f.f.reply); expect(observed.answerComplete).toBe(true);
+      expect(observed.modelEvidence.selected).toEqual({ key: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' });
+      expect(f.f.userBody.textContent).toBe(prompt);
+      expect(f.f.sendCount).toBe(1); expect(control?.clicks ?? 0).toBe(0);
+      const cleared = await f.run('clearTranscript', { clearOperation: clearedOperation(f) });
+      expect(cleared.clearProof.transcriptEmpty).toBe(true);
+      expect(f.f.clearCount).toBe(1); expect(f.f.sendCount).toBe(1); expect(control?.clicks ?? 0).toBe(0);
+    }
+  });
+
+  test('Show more admission rejects every unobserved sibling shape and competing body', async () => {
+    const changes: ((f: ReturnType<typeof groqFixture>, control: any) => void)[] = [
+      (_f, control) => { control.tagName = 'BUTTON'; },
+      (_f, control) => { control.textContent = 'Show less'; },
+      (_f, control) => { control.textContent = 'Show more extra'; },
+      (_f, control) => { control.values.class = 'cursor-pointer'; },
+      (_f, control) => { control.values.class += ' foreign'; },
+      (_f, control) => { control.values.role = 'button'; },
+      (_f, control) => { control.values['aria-label'] = 'Show more'; },
+      (_f, control) => { control.values.hidden = ''; },
+      (_f, control) => { control.values.inert = ''; },
+      (_f, control) => { control.values['aria-hidden'] = 'true'; },
+      (f, control) => { control.textContent = ''; control.append(new f.Node('SPAN', {}, 'Show more')); },
+      (f) => { appendObservedShowMore(f); },
+      (f) => { f.f.userBody.parentElement.append(new f.Node('INPUT')); },
+      (f) => { f.f.userBody.parentElement.text = 'Unrelated authored content'; },
+      (f) => { f.f.userBody.parentElement.children.reverse(); },
+      (f) => { f.f.userBody.parentElement.append(new f.Node('DIV', { class: 'line-clamp-5' }, groqPrompt)); },
+      (f) => {
+        const wrapper = new f.Node('DIV'); wrapper.append(new f.Node('DIV', { class: 'line-clamp-5' }, groqPrompt));
+        f.f.user.append(wrapper);
+      },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.submit(); const control = appendObservedShowMore(f); change(f, control);
+      expect(await f.run()).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0); expect(control.clicks).toBe(0);
+    }
+  });
+
+  test('Show more never substitutes for exact body or fresh post-hash ownership', async () => {
+    const changes = [
+      (f: ReturnType<typeof groqFixture>) => { f.f.userBody.textContent = 'Foreign middle\n\nComputa session marker: ' + groqMarker; },
+      (f: ReturnType<typeof groqFixture>) => { f.f.userBody.parentElement.append(new f.Node('SPAN', {}, 'Foreign')); },
+      (f: ReturnType<typeof groqFixture>) => { f.f.trigger.text = 'Other model'; },
+      (f: ReturnType<typeof groqFixture>) => { f.world.__computaModelOwner = 'foreign'; },
+      (f: ReturnType<typeof groqFixture>) => { f.document.URL += '&foreign=1'; },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.submit(); const control = appendObservedShowMore(f);
+      f.onDigest(() => change(f));
+      expect((await f.run()).error).toBeDefined();
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0); expect(control.clicks).toBe(0);
+    }
+    const bound = groqFixture(); await bound.submit(); const control = appendObservedShowMore(bound);
+    expect((await bound.run()).firstUserVerified).toBe(true);
+    bound.f.userBody.textContent = 'Foreign middle\n\nComputa session marker: ' + groqMarker;
+    expect((await bound.run()).error).toBe('conversation_changed');
+    expect((await bound.run('clearTranscript', { clearOperation: clearedOperation(bound) })).error).toBe('conversation_changed');
+    expect(bound.f.clearCount).toBe(0); expect(control.clicks).toBe(0);
   });
 
   test('a digest yield rechecks first body, model, owner, document URL and generation', async () => {

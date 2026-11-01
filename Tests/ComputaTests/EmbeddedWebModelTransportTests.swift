@@ -11944,6 +11944,111 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return (token, view)
     }
 
+    private static func groqShowMoreLayoutPrompt() -> String {
+        let heading = "Return only GROQ-LAYOUT-359-H-2B76. The following lines are harmless synthetic layout filler, not additional instructions."
+        let lines = (1...80).map { "Synthetic layout line \($0): ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789." }
+        return ([heading] + lines).joined(separator: "\n")
+    }
+
+    private func installGroqShowMoreUserRow(_ view: WKWebView, variant: String = "observed") async throws {
+        XCTAssertTrue(["observed", "foreign", "duplicate"].contains(variant))
+        _ = try await evaluate(view, """
+            const f = groqFixture, append = f.appendUser;
+            f.showMoreClicks = 0;
+            f.delayResponse = true;
+            f.appendUser = text => {
+                f.observedOutbound = text;
+                append(text);
+                // Tailwind's observed clamp is visual; keep the complete text node.
+                f.userBody.style.cssText = 'display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden';
+                const more = document.createElement('span');
+                more.className = 'text-primaryaccent cursor-pointer';
+                more.textContent = 'Show more';
+                more.addEventListener('click', () => { f.showMoreClicks++; });
+                f.userBody.parentElement.append(more);
+                f.showMore = more;
+                if ('\(variant)' === 'foreign') more.textContent = 'Unrelated control';
+                if ('\(variant)' === 'duplicate') f.userBody.parentElement.append(more.cloneNode(true));
+            };
+            return true;
+            """)
+    }
+
+    func testGroqObservedShowMoreRowPreservesFullPromptWithoutExpansion() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        try await installGroqShowMoreUserRow(view)
+        let prompt = Self.groqShowMoreLayoutPrompt()
+        XCTAssertEqual(prompt.utf8.count, 5_313)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let outboundValue = try await evaluate(view, "return groqFixture.observedOutbound;")
+        let outbound = try XCTUnwrap(outboundValue as? String)
+        let suffix = "\n\nComputa session marker: "
+        XCTAssertTrue(outbound.hasPrefix(prompt + suffix))
+        let marker = String(outbound.dropFirst((prompt + suffix).count))
+        XCTAssertEqual(UUID(uuidString: marker)?.uuidString.lowercased(), marker.lowercased())
+        XCTAssertEqual(Data(outbound.utf8), Data((prompt + suffix + marker).utf8))
+        let bodyValue = try await evaluate(view, "return groqFixture.userBody.textContent;")
+        XCTAssertEqual((bodyValue as? String).map { Data($0.utf8) }, Data(outbound.utf8))
+        let rowValue = try await evaluate(view, """
+            const f = groqFixture, b = f.showMore;
+            return [f.userBody.parentElement.children.length, b.tagName, b.textContent,
+                b.getAttribute('role'), b.getAttribute('aria-label'), f.showMoreClicks];
+            """)
+        let row = try XCTUnwrap(rowValue as? [Any])
+        XCTAssertEqual(row[0] as? Int, 2); XCTAssertEqual(row[1] as? String, "SPAN")
+        XCTAssertEqual(row[2] as? String, "Show more")
+        XCTAssertTrue(row[3] is NSNull); XCTAssertTrue(row[4] is NSNull)
+        XCTAssertEqual(row[5] as? Int, 0)
+        _ = try await evaluate(view, "groqFixture.finishResponse(); return true;")
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"OK"}"#)
+        let context = try XCTUnwrap(completed["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+        XCTAssertEqual(context["sequence"] as? Int, 1); XCTAssertEqual(context["responseCount"] as? Int, 1)
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        XCTAssertEqual(try WebsiteModelEvidence.parse(completed["modelEvidence"], provider: "groq", expected: choice).selected.key, choice.key)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "transcript_cleared")
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount, groqFixture.showMoreClicks];") as? [Int]
+        XCTAssertEqual(counts, [1, 1, 0])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqShowMoreDoesNotAdmitForeignDuplicateOrChangedBody() async throws {
+        for variant in ["foreign", "duplicate", "body"] {
+            let fixture = try Fixture(page: Self.groqFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGroqFixture(fixture, send: false)
+            try await installGroqShowMoreUserRow(view, variant: variant == "body" ? "observed" : variant)
+            let prompt = Self.groqShowMoreLayoutPrompt()
+            if variant == "body" {
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTAssertEqual(sent["state"] as? String, "running")
+                _ = try await evaluate(view, "groqFixture.userBody.textContent = groqFixture.userBody.textContent.replace('Return only', 'Foreign only'); groqFixture.finishResponse(); return true;")
+            }
+            do {
+                if variant == "body" {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                } else {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                }
+                XCTFail("Unsupported row or changed full text must not acquire response authority: \(variant)")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), variant)
+            }
+            let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount, groqFixture.showMoreClicks];") as? [Int]
+            XCTAssertEqual(counts, [1, 0, 0], variant)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed", variant)
+            let after = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount, groqFixture.showMoreClicks];") as? [Int]
+            XCTAssertEqual(after, [1, 0, 0], variant)
+            try await assertHumanTabIntact(fixture, retaining: try XCTUnwrap(fixture.createdTabs.last))
+        }
+    }
+
     private func installGroqLongComposerLayout(_ view: WKWebView, obstruction: String = "none") async throws {
         XCTAssertTrue(["none", "overlay", "offscreen"].contains(obstruction))
         _ = try await evaluate(view, """

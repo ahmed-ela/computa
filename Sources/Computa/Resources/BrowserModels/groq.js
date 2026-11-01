@@ -117,8 +117,21 @@ try {
     let first = null, answer = null, block = null;
     if (users.length) {
       const root = users[0], wrappers = [...root.children].filter(node => node.tagName === 'DIV'
-        && node.children.length === 1 && token(node.children[0], 'line-clamp-5'));
+        && token(node.children[0], 'line-clamp-5'));
       const wrapper = c.unique(wrappers, 'conversation_changed', 'first_user_message'), body = wrapper.children[0];
+      // Long messages retain their complete leaf text and add this observed
+      // presentation control. Never expand it or hash the wrapper's chrome.
+      if (wrapper.children.length !== 1) {
+        const more = wrapper.children[1];
+        if (wrapper.children.length !== 2 || body.tagName !== 'DIV' || more.tagName !== 'SPAN'
+          || more.children.length !== 0 || more.textContent !== 'Show more'
+          || [...more.classList].length !== 2 || !token(more, 'text-primaryaccent') || !token(more, 'cursor-pointer')
+          || more.getAttribute('role') !== null || more.getAttribute('aria-label') !== null || !c.visible(more)
+          || c.nodes(root, '.line-clamp-5', 64).length !== 1
+          || ![...wrapper.childNodes].every(node => node === body || node === more
+            || node.nodeType === 3 && /^\s*$/.test(node.textContent || '')))
+          c.fail('conversation_changed', 'first_user_message');
+      }
       if (!c.visible(root) || !c.visible(body) || body.children.length > 0) c.fail('conversation_changed', 'first_user_message');
       const parent = root.parentElement;
       if (!token(parent, 'flex-col') || !token(parent, '[word-break:break-word]')) c.fail('conversation_changed', 'first_user_message');

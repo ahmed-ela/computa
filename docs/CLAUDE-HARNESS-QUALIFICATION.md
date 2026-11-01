@@ -9,7 +9,7 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build364 (`06b9463`) is installed for qualification. The
+As of November 1, build365 (`ed8e86e`) is installed for qualification. The
 published release remains `v0.8.0-alpha.363`. PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
@@ -180,10 +180,56 @@ for body/owner changes. The final tests require that exact ownership rejection;
 no production guard was changed to satisfy them. Passing log hashes are
 `2fb6034cf4d67e027d450f12bd79edc0d9922b02d27c16df5addd467472daa9c`
 and `bc586ca832e06d49e0c23a0429d12a4eac8c71b665efe762eb76c5da30d54221`.
-Build, installation and fresh live remount qualification remain pending.
-Catalog startup failure,
-refusal behavior and the historical unconfirmed quota-cleanup record remain
-separate open issues; this candidate does not establish their resolution.
+Build365 was installed from `ed8e86e`; its separate live results follow.
+Refusal behavior and the historical unconfirmed quota-cleanup record remain
+open issues. The bounded observation path does not establish their resolution.
+
+## Installed build365 results, November 1
+
+Automatic startup discovery persisted a fresh Claude catalog containing ten
+eligible choices. The complete finite picker diagnostic agrees with the saved
+catalog: both purchase-gated Fable entries were removed, while six Opus and four
+Sonnet/Haiku choices remained. Other providers' cached choices did not change.
+The native discovery path returns choices only after disposing its prompt-free
+owned page, but discovery has no separate durable per-session closure receipt.
+This establishes this launch's catalog refresh, not successful use of every
+listed model or the cause of build364's startup failure.
+
+| Case | Duration | Inferences / tool calls | Result |
+| --- | ---: | ---: | --- |
+| `opus5-marker365-a` | 4.960 s | 1 / 0 | Submission verified, then current model proof failed at `trigger_remount_timeout`. No answer was released; exact saved owned-session cleanup was closed. |
+| `sonnet55-marker365-a` | 4.632 s | 1 / 0 | Exact marker passed with selected-model, fresh submission, response and saved closed-cleanup evidence. |
+| `sonnet55-workflow365-a` | Not submitted | 0 / 0 | The selected chat changed before Send; the pre-send guard stopped the test. No fresh exact-prompt turn or diagnostic arm was created, and the fixture ledger remained empty. No model-failure or workflow-pass verdict applies. |
+
+Opus 5's finite timeout diagnostic again found zero current recognized model
+controls and a disconnected previous control. This confirms that the bounded
+remount observation did not recover valid model proof for this case; it does not
+prove continuous absence throughout the wait, distinguish an unrecognized new
+control, or show that a header would never return. The last published inspection
+had no complete answer. No uncertain prompt was replayed.
+
+The interrupted Sonnet workflow's watcher and fixture server were stopped,
+its original files were retained, and both diagnostic paths were clear. A later
+workflow needs a fresh controlled baseline and binding. The successful marker
+alone does not qualify browser, terminal or file tools on this installed build.
+
+The retained records are `evidence/catalog365-startup-finite/`,
+`evidence/opus5-marker365-a/`, `evidence/sonnet55-marker365-a/` and
+`evidence/sonnet55-workflow365-a/interrupted-unsent-review.json`. A separate
+ordinary-browser Groq inspection on build365 reproduced a full-length user body
+with a sibling `Show more` span and returned its exact synthetic marker. That
+inspection was cleared and its test tab closed, with developer settings restored;
+it is not Groq harness qualification and does not resolve the original failed
+Groq task or its cleanup warning.
+
+An offline production-host rendering diagnostic was prepared to compare a
+synthetic animation-frame header remount under an opaque sibling and without
+that cover. The available display could not fit its required 1024 by 768
+viewport, so the initial run stopped before creating the experiment. No frame
+measurements were made and no conclusion about Claude or background rendering
+is supported. The diagnostic now requires `COMPUTA_MODEL_RAF_DIAGNOSTIC=1`
+and skips unsuitable displays; it changes no production configuration,
+verification deadline or provider behavior.
 
 ## Build362: duplicate code blocks stop the Sonnet 4.6 workflow
 

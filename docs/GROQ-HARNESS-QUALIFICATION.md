@@ -320,8 +320,43 @@ was archived; no prompt was replayed. Bounded native log SHA-256:
 `1c7f98911c95aa09c14217b029cb14b2d5339c1b2037eb4493cf714c21732bb9`.
 Those log lines are correlated by process and time; they carry no task ID.
 
-The adapter currently requires a one-child user-message wrapper and a leaf
+The build359 adapter requires a one-child user-message wrapper and a leaf
 `line-clamp-5` body. Different long-message markup is a hypothesis, not an
 established cause. A separate harmless unsent long draft is prepared for a
 bounded inspection; the failed owned page is untouched. All workflow359-g
 cases remain unstarted pending an independently verified marker pass.
+
+## Observed long-message structure — November 1, build365
+
+The previously unsent layout359-H probe was recreated in a new ordinary Groq
+tab under the user's bounded inspection approval. Its exact 5,313-byte,
+80-line-break synthetic prompt was sent once to GPT OSS 120B and returned
+`GROQ-LAYOUT-359-H-2B76`. The submitted body remained a leaf `DIV.line-clamp-5`
+containing the full text. Its wrapper had two children: that body and a leaf
+`SPAN.text-primaryaccent.cursor-pointer` containing `Show more`, with no role
+or accessible label. The one-child predicate rejected this observed structure
+before first-user fingerprint binding. This establishes a concrete long-message
+ownership bug; the original failed `hi` task's submitted body was not captured,
+so its exact historical cause remains unproved.
+
+Only this test exchange was cleared, its tab closed, and both developer settings
+restored. The direct website response is not harness qualification. The original
+failed owned task and its cleanup warning were not replayed or cleared. The
+inspection receipt is `layout365-recreated-evidence-receipt.json`, SHA-256
+`ca48c6b8f12bc6e086e1f7cdad3d52a25d94822912d23b4d161acedb5a656430`.
+
+Candidate build366 admits only that exact optional presentation sibling. It
+continues hashing the complete leaf body, never clicks `Show more`, and retains
+the existing model, document, owner, full-prompt and cleanup checks. Unexpected
+extra content, controls, duplicate bodies and changes during hashing fail closed.
+The integrated Groq and version JavaScript suites passed 66 tests with 855
+assertions. All 25 native Groq tests passed in 57.793 seconds, including the
+observed long body, one Send, exact full-prompt fingerprint, verified response,
+one Clear and zero expansion clicks. Negative cases retained failures and did
+not clear uncertain transcripts. The combined run's only failure was an
+unrelated optional rendering experiment's unavailable display precondition;
+the Groq test sources and production sources stayed unchanged throughout.
+Log SHA-256:
+`938ccf993201024eeb224f8fa326143029cf59dbe6f6020ed8952dbd326de4f4`.
+Installed harness qualification remains pending; this candidate is not a public
+release.
