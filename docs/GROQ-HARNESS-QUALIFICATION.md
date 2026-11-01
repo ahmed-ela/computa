@@ -68,18 +68,41 @@ inventory only and 5,159 with the exact `browser_read` schema loaded. Loading
 6,056 tokens and remains rejected. The same three schemas fit the initial
 request at 4,834 tokens. The loader preflight also reserves 256 units for its
 pending history; measurements below 6,000 do not by themselves guarantee a
-selection will pass that stricter preflight. These are source/fixture results,
-not yet installed-build or live Groq qualification.
+selection will pass that stricter preflight. These offline fixture measurements
+do not themselves establish installed-build or live Groq qualification.
 
 Private evidence: `groq368-compact-native-e-receipt.json` (log SHA-256
 `2b7ee6d1c0ab5607c7239028a23976e73425d1bf8e34c873bf308a159fb6ca27`),
 `offline-prompt369-f/manifest.json` and `offline-prompt369-g/manifest.json`.
 
-## Scope and status — 2026-11-01
+## First compact-loader installed check — build 368
+
+Computa 0.8.0 (368) was built from `2dea3d2`, passed all eleven artifact and ten
+signed-derivative checks, and was installed with its predecessor preserved.
+The exact GPT OSS 120B marker case `groq-gptoss120b-marker368-a` completed in
+4,939 ms with zero tool calls. Its actual final prompt was 13,358 UTF-8 bytes /
+3,129 ordinary-body tokens, including the compact catalog presentation.
+The independent audit passed all nineteen top-level checks: exact response,
+model selection, ownership, one completed inference, durable transcript-clear
+receipt and release only after cleanup. No prompt was replayed.
+
+This proves a fresh reply on that installed provider/model pair. Browser,
+terminal and file-edit qualification with the compact loader remains pending.
+UI actions were held when the model menu changed unexpectedly after the marker;
+no second provider request was dispatched. The synthetic code/browser workflow
+is prepared separately. The saved native evidence remains independent of the
+subsequent menu selection.
+
+Installed executable SHA-256:
+`d784f14793296035360c8c1b4fefb95fc290f90141e473a6bf8e46ce360cc352`.
+Private evidence: `evidence/groq-gptoss120b-marker368-a/capture/` and
+`live368-prompt-counts.jsonl`. Developer settings were not enabled for this check.
+
+## Prior diagnosis and provider scope — 2026-11-01
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 367 (0.8.0) is installed from `45ec979`. Its fresh GPT-OSS 120B marker
+Build 367 (0.8.0), previously installed from `45ec979`, ran a fresh GPT-OSS 120B marker that
 passed submission and an initial first-user binding observation, then failed a
 later `user_count` ownership check: the rejected read matched zero user and
 answer rows where one user was required. No completed answer was accepted;
@@ -95,7 +118,7 @@ The observed menu contains these general chat choices:
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build367: zero matching rows after initial binding |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build368 exact marker passed; compact tool workflow pending |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
