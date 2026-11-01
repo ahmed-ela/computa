@@ -5,6 +5,15 @@ Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6; Fable and Opus choices are upgra
 gated. The prior cached Haiku 4.5 choice was absent from the observed menu.
 These account-specific observations are not model qualification results.
 
+As of October 31, build353 is installed from `f9e938a`. Its new exact-submission
+proof and bounded correction passed native tests and live transaction checks.
+The latest Sonnet 5 and Sonnet 4.6 workflows returned refusals, so neither is
+qualified for tool workflows. Haiku 5.5 passed a fresh response control but its
+next workflow failed on a rejected call shape. Sonnet 5.5 completed the fresh
+build353 workflow; earlier successful build349 workflows remain separate
+evidence. Candidate354 adds capture for the missing rejection category. PR #14 remains a draft;
+the public `v0.7.0-alpha.346` package is unchanged.
+
 ## Baseline: completion remains unverified
 
 Signed installed Computa 0.7.0 (340), source
@@ -523,8 +532,68 @@ across restart, canonical tool-output history, cancellation, saved cleanup,
 original deadlines and finite inference budgets. The first attempt exposed a
 test-only call passing `nil` to a nonoptional transport API; the fixture now
 uses a distinct real transport wrapper to test generation changes. No
-production guard was removed to pass that test. Live candidate353 qualification
-remains pending.
+production guard was removed to pass that test.
+
+Build353 passed all 11 source-build checks and 10 Developer ID signing checks,
+then the installed executable/resources matched the signed receipt. The live
+Sonnet 4.6 workflow reproduced narration outside its second response's JSON.
+Native proof confirmed the exact submitted prompt on Claude's actual page.
+The rejected inference closed with a saved receipt before one new correction
+inference began. That reply was a refusal, accepted as a message without any
+tool authority. The task ended after 25.801 seconds with only the first README
+read dispatched; all three sessions closed. No file edit, test execution,
+browser action or form submission occurred. The correction store's
+`response_validated` outcome proves response/transaction validation, not task
+completion. The workflow remains failed, with its original rejection and
+correction records preserved separately.
+
+Haiku 5.5's separate explained display control returned the exact marker in
+4.136 seconds with zero tools, the new native submission proof and confirmed
+cleanup. Both runs have matching before/pre-arm/after witnesses for the installed
+executable, process ID and process start time. They do not establish repeated
+reliability or replace the required current-build tool-workflow checks.
+
+Haiku's ensuing build353 workflow failed after 46.439 seconds. It proposed three
+separate unchanged pre-edit test runs, then read the source, edited only
+`summarize`, opened the loopback form and passed all six protected tests. The
+three repeats had distinct inference and call IDs; they were model proposals,
+not app replay. It never ran the requested reference-printing command, filled
+or submitted the form, or obtained a receipt. The independent fixture grader
+confirmed the edited function's output, which is separate from model execution.
+
+Its eighth website reply failed `argumentsMustBeObject`; no calls from that
+reply were released. This error also covers missing or extra call fields, so
+the exact malformed shape cannot be inferred from its name. All eight website
+sessions closed with saved receipts. Computa reported closing the task-created
+browser tab during cleanup; that is not a model-issued close or proof of task
+completion. The rejected-reply recorder did not cover this error category, so
+the actual rejected text was not retained and the unused opt-in arm was archived.
+
+Candidate354 fills only that diagnostic gap. Exact-task, opt-in capture now
+recognizes function-call and custom-call shape failures with finite diagnostic
+reason codes. The original parser error, whole-reply rejection, correction
+eligibility and cleanup remain unchanged. In particular, it neither normalizes
+arguments nor retries a parsed call-shape failure. Capturing a fresh failure is
+necessary before attributing it to an argument value type or instruction issue.
+All 56 focused capture/correction native tests passed with unchanged source,
+including 28 new matrix cases across two test methods. They cover both response
+stream modes, valid-call prefixes that must not escape rejection, missing and
+extra fields, wrong value types, exact-task opt-in and private-file permissions,
+unconfigured or mismatched capture requests, existing-record preservation and
+ordinary cleanup without correction or replay.
+
+Sonnet 5.5's independent build353 workflow completed in 53.443 seconds: nine
+verified and closed website inferences, eight tool calls, and no returned tool
+errors. It edited only `summarize`, passed all six protected tests, printed the
+correct reference, filled the loopback form, submitted exactly once, observed
+the unpredictable receipt through the browser and included it in its final
+answer. A model-issued `browser_close` released its task tab. The independent
+fixture audit passed; the ordinary browser panel was empty afterward. The
+initial diagnostic watcher expired before the prompt was sent during an
+operator interruption; its untouched receipt was archived after checking that
+no matching task or capture arm existed. The unchanged watcher then armed for
+one Send. Before/pre-arm/after installed-process witnesses matched. This is one
+current-build workflow pass, not a reliability rate or an all-model pass.
 
 ## Qualification contract
 

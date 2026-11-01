@@ -1221,6 +1221,12 @@ actor WebModelServer {
                             } else if case .unsupportedWebsiteResponse = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unsupportedWebsiteResponse, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .argumentsMustBeObject = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .invalidFunctionCallShape, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .customInputMustBeString = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .invalidCustomCallShape, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             }
                             throw error
                         }
@@ -1524,6 +1530,10 @@ actor WebModelServer {
         case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         case unofferedTool
         case unsupportedWebsiteResponse
+        // These codec failures cover both field sets and value types; the
+        // diagnostic must not infer which predicate failed without the reply.
+        case invalidFunctionCallShape
+        case invalidCustomCallShape
     }
 
     private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
@@ -1544,6 +1554,10 @@ actor WebModelServer {
             diagnosticFields = ["reason": "unoffered_tool", "utf8Bytes": text.utf8.count]
         case .unsupportedWebsiteResponse:
             diagnosticFields = ["reason": "unsupported_website_response", "utf8Bytes": text.utf8.count]
+        case .invalidFunctionCallShape:
+            diagnosticFields = ["reason": "invalid_function_call_shape", "utf8Bytes": text.utf8.count]
+        case .invalidCustomCallShape:
+            diagnosticFields = ["reason": "invalid_custom_call_shape", "utf8Bytes": text.utf8.count]
         }
         var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
                                     "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),
