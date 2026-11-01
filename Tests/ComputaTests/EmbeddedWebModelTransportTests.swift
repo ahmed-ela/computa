@@ -11360,6 +11360,30 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqComposerFailureDiagnosticUsesOnlyClosedActionAndReasonSets() throws {
+        let actions = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel", "prepare",
+            "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
+        let reasons = ["editor_missing", "editor_ambiguous", "form_missing", "form_hidden", "form_editor_count",
+            "editor_disabled", "editor_hit_test", "editor_not_fresh"]
+        let invalidValues: [Any?] = [nil, NSNull(), false, 1, [], ["editor_hit_test": true],
+            "https://private.invalid/?PROMPT_SECRET", "editor_hit_test\nPROMPT_SECRET",
+            "EDITOR_HIT_TEST", String(repeating: "PROMPT_SECRET", count: 1_000)]
+        for action in actions {
+            for reason in reasons {
+                let detail = try XCTUnwrap(EmbeddedWebModelTransport.groqComposerFailureDiagnostic(action: action, detail: reason))
+                XCTAssertEqual(detail, "composer_unavailable; action=\(action); detail=\(reason)")
+                XCTAssertLessThan(detail.utf8.count, 128)
+            }
+            for invalid in invalidValues {
+                XCTAssertEqual(EmbeddedWebModelTransport.groqComposerFailureDiagnostic(action: action, detail: invalid),
+                               "composer_unavailable; action=\(action); detail=unknown")
+            }
+        }
+        for action in ["", "prepare\nPROMPT_SECRET", "PREPARE", "https://private.invalid/", String(repeating: "x", count: 1_000)] {
+            XCTAssertNil(EmbeddedWebModelTransport.groqComposerFailureDiagnostic(action: action, detail: "editor_hit_test"))
+        }
+    }
+
     private static func groqFixturePage() throws -> String {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -11392,6 +11416,57 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64)
         }
         return (token, view)
+    }
+
+    /// A controlled geometry reproduction, not evidence that the live site
+    /// resized this way. Keep this expected rejection until a separately reviewed
+    /// hit-target change is justified; never bypass occlusion or retry insertion.
+    func testGroqLongComposerReportsCenterHitFailureWithoutSending() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        _ = try await evaluate(view, """
+            const f = groqFixture;
+            f.form.style.cssText = 'position:fixed;left:24px;bottom:24px;width:900px;height:120px;z-index:1';
+            f.editor.style.cssText = 'position:absolute;left:0;bottom:0;width:600px;height:120px';
+            f.send.style.cssText = 'position:absolute;left:650px;bottom:0';
+            f.editor.addEventListener('input', () => {
+                f.editor.style.height = 'auto';
+                f.editor.style.height = f.editor.scrollHeight + 'px';
+            });
+            return true;
+            """)
+        let prompt = Array(repeating: "SAFE synthetic multiline geometry fixture", count: 280).joined(separator: "\n")
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            XCTFail("The current center-only hit check must reject this controlled layout")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                           .editorFailure("composer_unavailable; action=sendReady; detail=editor_hit_test"))
+        }
+        let rawGeometry = try await evaluate(view, """
+            const e = groqFixture.editor, r = e.getBoundingClientRect();
+            const x = r.left + r.width / 2, y = r.top + r.height / 2;
+            const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+            return {viewportWidth:innerWidth, viewportHeight:innerHeight,
+                tallerThanViewport:r.height > innerHeight, centerOutside:y < 0 || y >= innerHeight,
+                centerHit:e.contains(document.elementFromPoint(x, y)),
+                visibleInterior:bottom > top && e.contains(document.elementFromPoint(x, (top + bottom) / 2)),
+                inserted:e.value.startsWith('SAFE synthetic multiline geometry fixture'),
+                sends:groqFixture.sendCount, clears:groqFixture.clearCount};
+            """)
+        let geometry = try XCTUnwrap(rawGeometry as? [String: Any])
+        XCTAssertEqual(geometry["viewportWidth"] as? Int, 1_024)
+        XCTAssertEqual(geometry["viewportHeight"] as? Int, 768)
+        XCTAssertEqual(geometry["tallerThanViewport"] as? Bool, true)
+        XCTAssertEqual(geometry["centerOutside"] as? Bool, true)
+        XCTAssertEqual(geometry["centerHit"] as? Bool, false)
+        XCTAssertEqual(geometry["visibleInterior"] as? Bool, true)
+        XCTAssertEqual(geometry["inserted"] as? Bool, true)
+        XCTAssertEqual(geometry["sends"] as? Int, 0); XCTAssertEqual(geometry["clears"] as? Int, 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testGroqStreamingFooterCannotCompleteUntilComposerIsEnabledAndEmpty() async throws {

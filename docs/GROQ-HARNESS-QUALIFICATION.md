@@ -4,15 +4,16 @@
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-The installed app remains build 354 until a complete adapter passes validation.
-Direct website probes below are not yet Computa harness qualification.
+Build 355 (0.8.0) is installed from `5e86f34`. Its first GPT-OSS 120B
+harness marker failed before Send with `composer_unavailable`; live support
+remains unqualified. Direct website probes below are not harness qualification.
 
 The observed menu contains these general chat choices:
 
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Pending |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build355: pre-Send composer failure |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -124,6 +125,15 @@ is not copied into this repository.
 - A subsequent focused native test passed after correcting Groq's transaction
   diagnostic to `explicit_clear_per_inference`. Its source hashes stayed
   unchanged; existing providers' labels, schema and versions remained covered.
+- Composer-diagnostic native run J: 21 tests passed with zero failures in
+  29.524 seconds, with unchanged source hashes. This covers 16 Groq native
+  cases and five server, cleanup-receipt and verification-store cases. The new
+  diagnostic admits only finite action/reason labels. A controlled oversized
+  composer reproduced a center hit-test rejection at `sendReady`, with zero
+  Send or Clear actions; this does not establish the live build355 failure's
+  cause or change its rejection behavior. Evidence:
+  `native-groq-diagnostic-j-receipt.json`, log SHA-256
+  `50f61b8677cf819a6d9a834831a4d9f11e94133dcbbb672f6e715d57ab7a0524`.
 
 These checks do not replace live per-model terminal, file-edit and browser-task
 qualification. Three independent fixture cases have been prepared with the
@@ -142,4 +152,28 @@ inspection tab was then closed. Evidence includes
 `oss20-code-verified.txt`, `oss20-scope-verified.txt`,
 `oss20-clear-reload-ui.txt`, and `safari-develop-restored-final.txt`.
 
-No Groq-enabled package, live harness pass, or release is claimed yet.
+## First installed check — build 355
+
+The native build passed 11 artifact checks and the signed derivative passed ten
+checks. Signing initially failed with Code Signing subsystem internal error;
+a retry passed after removing the failed stage and rebuildable test index and
+binaries (about 494 MB). This is consistent with scratch-space pressure, not
+proof that it was the only cause. Installed executable SHA-256:
+`0a2d965dfe9e0e0f09bf7c0f25902f6ba52368b55031cf589ffb7c97db81b7e0`.
+Build354 remains in the installer's rollback directory. The reproducible native
+candidate was removed only after signed and installed bytes were verified;
+its receipts and symbols remain. Before preparing diagnostic build356, the
+duplicate signed355 artifact was also retired after every recorded bundle-file
+hash matched installed355. Its complete inventory was retained in
+`pre356-generated-prune.json`; installed355 and rollback354 were preserved.
+
+Fresh case `groq-gptoss120b-marker355-a` selected GPT OSS 120B and failed in
+2.139 seconds with `composer_unavailable`, before any Send or tool call. Its
+owned view closed with a durable `not_created` receipt. The exact task, journal,
+error and unchanged installed-process identity were retained. The unused,
+exact-task rejected-reply diagnostic arm was verified and archived. No prompt
+was replayed. This evidence does not distinguish the failed editor predicate
+or preparation action; those require a focused diagnostic/regression before
+another fresh check. Other model harness checks have not started.
+
+No live harness pass or release is claimed yet.

@@ -122,9 +122,12 @@ try {
     return { users, answers, first, answer, block };
   }
   function composer() {
-    const editor = c.unique(c.nodes(document, 'textarea#chat', 8).filter(c.visible), 'composer_unavailable');
+    const editors = c.nodes(document, 'textarea#chat', 8).filter(c.visible);
+    const editor = c.unique(editors, 'composer_unavailable', editors.length ? 'editor_ambiguous' : 'editor_missing');
     const form = editor.closest('form');
-    if (!form || !c.visible(form) || c.nodes(form, 'textarea#chat', 4).filter(c.visible).length !== 1) c.fail('composer_unavailable');
+    if (!form) c.fail('composer_unavailable', 'form_missing');
+    if (!c.visible(form)) c.fail('composer_unavailable', 'form_hidden');
+    if (c.nodes(form, 'textarea#chat', 4).filter(c.visible).length !== 1) c.fail('composer_unavailable', 'form_editor_count');
     const sends = c.nodes(form, 'button[type="submit"]', 8).filter(node => c.visible(node)
       && c.nodes(node, 'svg[aria-label="send"]', 4).length === 1);
     const send = c.unique(sends, 'send_unavailable');
@@ -355,7 +358,11 @@ try {
   if (input.action === 'verifyModel') return { ...initial.output, modelEvidence: model };
   if (input.action === 'stop') return { ...initial.output, modelEvidence: model, stopped: false };
   const form = composer();
-  if (!c.enabled(form.editor) || !c.hit(form.editor) || !fresh() && !state.inserted) c.fail('composer_unavailable');
+  // Finite details identify the actual rejecting predicate without logging
+  // page text, URLs or input. Preserve the original short-circuit order.
+  if (!c.enabled(form.editor)) c.fail('composer_unavailable', 'editor_disabled');
+  if (!c.hit(form.editor)) c.fail('composer_unavailable', 'editor_hit_test');
+  if (!fresh() && !state.inserted) c.fail('composer_unavailable', 'editor_not_fresh');
   if (input.action === 'prepare') {
     if (!fresh() || state.prepared) c.fail('composer_not_empty');
     claimURL();

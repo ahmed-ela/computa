@@ -453,6 +453,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedCodeResponseCount: Int?
         var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
+        var loggedGroqComposerFailure = false
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
@@ -4124,6 +4125,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return records
     }
 
+    /// Finite evaluated-branch metadata only. Unknown page details never enter
+    /// errors or logs; this diagnostic has no action or recovery authority.
+    static func groqComposerFailureDiagnostic(action: String, detail: Any?) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel",
+            "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
+        let reasons: Set<String> = ["editor_missing", "editor_ambiguous", "form_missing", "form_hidden",
+            "form_editor_count", "editor_disabled", "editor_hit_test", "editor_not_fresh"]
+        guard actions.contains(action) else { return nil }
+        let reason = (detail as? String).flatMap { reasons.contains($0) ? $0 : nil } ?? "unknown"
+        return "composer_unavailable; action=\(action); detail=\(reason)"
+    }
+
     static func insertionDifferenceDiagnostic(_ observed: [String: Any]) -> String? {
         guard let index = observed["firstDifference"] as? Int, (0...360_000).contains(index) else { return nil }
         func scalar(_ key: String) -> String? {
@@ -5267,7 +5280,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 throw Failure.submissionObservationPending
             case "not_fresh": throw Failure.notFresh
             case "temporary_mode_unavailable", "temporary_mode_unverified": throw Failure.temporaryUnverified
-            case "composer_unavailable", "composer_not_empty", "prompt_not_inserted", "send_unavailable", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
+            case "composer_unavailable":
+                if provider == .groq, let diagnostic = Self.groqComposerFailureDiagnostic(action: action, detail: observed["detail"]) {
+                    if !session.loggedGroqComposerFailure {
+                        session.loggedGroqComposerFailure = true
+                        Self.inspectionLog.notice("composerFailure provider=groq \(diagnostic, privacy: .public)")
+                    }
+                    throw Failure.editorFailure(diagnostic)
+                }
+                throw Failure.editorFailure(error)
+            case "composer_not_empty", "prompt_not_inserted", "send_unavailable", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
             default: throw Failure.composerUnavailable
             }
         }

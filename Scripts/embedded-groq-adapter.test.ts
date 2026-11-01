@@ -97,6 +97,32 @@ describe('Groq fixed fresh-session adapter', () => {
     expect(occluded.f.editor.value).toBe(''); expect(occluded.f.sendCount).toBe(0);
   });
 
+  test('composer failures return only the actual closed predicate and preserve short-circuit order', async () => {
+    const cases = [
+      ['editor_missing', (f: any) => { f.f.editor.setAttribute('hidden', ''); }],
+      ['editor_ambiguous', (f: any) => { f.f.mobileForm.removeAttribute('hidden'); }],
+      ['form_missing', (f: any) => {
+        const original = f.f.editor.closest.bind(f.f.editor);
+        f.f.editor.closest = (selector: string) => selector === 'form' ? null : original(selector);
+      }],
+      ['form_hidden', (f: any) => { f.f.form.values.visibility = 'hidden'; }],
+      ['form_editor_count', (f: any) => {
+        const original = f.f.form.querySelectorAll.bind(f.f.form);
+        f.f.form.querySelectorAll = (selector: string) => selector === 'textarea#chat' ? [] : original(selector);
+      }],
+      ['editor_disabled', (f: any) => { f.f.editor.disabled = true; f.blockHit(true); f.f.editor.value = 'private draft'; }],
+      ['editor_hit_test', (f: any) => { f.blockHit(true); f.f.editor.value = 'private draft'; }],
+      ['editor_not_fresh', (f: any) => { f.f.editor.value = 'private draft'; }],
+    ] as const;
+    for (const [detail, mutate] of cases) {
+      const f = groqFixture(); await f.select(); mutate(f);
+      const result = await f.run('prepare');
+      expect(result).toEqual({ error: 'composer_unavailable', detail });
+      expect(JSON.stringify(result)).not.toContain('private draft');
+      expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
   test('editor substitution and missing exact final marker stop before Send', async () => {
     const f = groqFixture(); await f.select(); await f.run('prepare');
     f.f.editor.oninput = () => { f.f.editor.value += 'changed'; };
