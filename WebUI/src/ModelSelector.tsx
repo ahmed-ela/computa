@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'octane';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@octanejs/shadcn/Select';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal,
+  DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSub,
+  DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
+} from '@octanejs/shadcn/DropdownMenu';
 import { Button } from '@octanejs/shadcn/Button';
+import { Icon } from './Icon';
 import { ModelProviderIcon } from './ModelProviderIcon';
 import type { ModelOption, NativeAction, WebsiteModelProvider } from './types';
 
@@ -37,32 +42,81 @@ function isVisibleModel(model: string): boolean {
   return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
 }
 
+const providerNames: Record<string, string> = {
+  chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq',
+  cerebras: 'Cerebras', alibaba: 'Alibaba', openai: 'OpenAI',
+};
+
+type ModelProviderGroup = { id: string; name: string; iconModel: string; options: ModelOption[] };
+
+export function groupModelOptions(options: ModelOption[], model: string): ModelProviderGroup[] {
+  const visibleOptions = options.filter((option) => isVisibleModel(option.id));
+  // Preserve an unavailable saved selection without substituting another model.
+  if (isVisibleModel(model) && !visibleOptions.some((option) => option.id === model)) {
+    visibleOptions.push({ id: model, label: model, detail: model, highMemory: false, available: false });
+  }
+  const groups = new Map<string, ModelProviderGroup>();
+  for (const option of visibleOptions) {
+    const provider = option.id.split('/')[1];
+    let group = groups.get(provider);
+    if (!group) {
+      const label = fullModelLabel(option);
+      const separator = label.indexOf(' / ');
+      const name = Object.hasOwn(providerNames, provider) ? providerNames[provider]
+        : separator > 0 ? label.slice(0, separator) : provider;
+      group = { id: provider, name, iconModel: option.id, options: [] };
+      groups.set(provider, group);
+    }
+    group.options.push(option);
+  }
+  return [...groups.values()];
+}
+
 export function ModelSelector({ options, model, label, disabled = false, className,
   onSelect }: { options: ModelOption[]; model: string; label: string; disabled?: boolean;
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
-  const visibleOptions = options.filter((option) => isVisibleModel(option.id));
+  const groups = groupModelOptions(options, model);
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
-  // Preserve a missing remote selection without silently choosing another model.
-  if (isVisibleModel(model) && !visibleOptions.some((option) => option.id === model)) {
-    visibleOptions.push({ id: model, label: model, detail: model, highMemory: false, available: false });
-  }
+  const selectModel = (value: string) => {
+    if (disabled || !groups.some((group) => group.options.some((option) => option.id === value && option.available !== false))) return;
+    if (value !== model) onSelect(value);
+    setOpen(false);
+  };
   return (
-    <Select value={model} disabled={disabled} open={open && !disabled} onOpenChange={setOpen}
-      onValueChange={(value: string) => { if (!disabled) onSelect(value); }}>
-      <SelectTrigger className={`model-selector-trigger ${className ?? ''}`}
-        aria-label={`${label}: ${selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
-        <SelectValue><ModelLabel model={model} option={selected} /></SelectValue>
-      </SelectTrigger>
-      <SelectContent className="model-selector-content" position="popper" align="start">
-        {visibleOptions.map((option) => <SelectItem key={option.id} value={option.id}
-          textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
-          <ModelLabel model={option.id} option={option} />
-          {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
-        </SelectItem>)}
-      </SelectContent>
-    </Select>
+    <DropdownMenu open={open && !disabled} onOpenChange={(next: boolean) => setOpen(next && !disabled)}>
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button type="button" variant="outline" size="sm" disabled={disabled}
+          className={`model-selector-trigger ${className ?? ''}`}
+          aria-label={`${label}: ${selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
+          <ModelLabel model={model} option={selected} />
+          <span className="model-selector-chevron"><Icon name="chevron" size={12} /></span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="model-selector-content" align="start" collisionPadding={12} aria-label="Model providers">
+        {groups.map((group) => <DropdownMenuSub key={group.id}>
+          <DropdownMenuSubTrigger disabled={disabled} textValue={group.name} className="model-provider-option"
+            data-provider={group.id}>
+            <ModelProviderIcon model={group.iconModel} />
+            <span className="model-provider-name">{group.name}</span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12}
+              aria-label={`${group.name} models`}>
+              <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
+                {group.options.map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
+                  textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
+                  <span className="model-option-name">{modelOptionLabel(option)}</span>
+                  {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
+                </DropdownMenuRadioItem>)}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuPortal>
+        </DropdownMenuSub>)}
+        {groups.length === 0 && <DropdownMenuItem disabled>No models available</DropdownMenuItem>}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

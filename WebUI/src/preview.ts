@@ -262,9 +262,17 @@ return {
   defaultModel: modelChatGPT,
   modelOptions: [
     { id: modelChatGPT, label: 'ChatGPT / Instant · Built-in browser', detail: 'Preview ChatGPT model; no provider request is made.', highMemory: false },
+    ...['Medium', 'High', 'Extra High', 'Pro'].map((name) => ({
+      id: `browser/chatgpt/choice/preview-${name.toLowerCase().replaceAll(' ', '-')}`,
+      label: `ChatGPT / ${name} · Built-in browser`, detail: 'Preview ChatGPT model; no provider request is made.', highMemory: false,
+    })),
     { id: modelGemini, label: 'Gemini / 3.5 Flash-Lite · Built-in browser', detail: 'Preview Gemini model; no provider request is made.', highMemory: false },
     { id: modelClaude, label: 'Claude / Sonnet 5.5 · Built-in browser', detail: 'Preview Claude model; no provider request is made.', highMemory: false },
+    { id: 'browser/claude/choice/preview-haiku', label: 'Claude / Haiku 5.5 · Built-in browser', detail: 'Preview Claude model; no provider request is made.', highMemory: false },
+    { id: 'browser/claude/choice/preview-unavailable', label: 'Claude / Sonnet 4.6 · Built-in browser', detail: 'Unavailable preview choice.', highMemory: false, available: false },
+    { id: 'browser/groq/choice/preview-120b', label: 'Groq / GPT-OSS 120B · Built-in browser', detail: 'Preview Groq model; no provider request is made.', highMemory: false },
     { id: modelCerebras, label: 'Cerebras / gpt-oss-120b', detail: 'Preview API model; no provider request is made.', highMemory: false },
+    { id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen3.7 Flash · API', detail: 'Preview API model; no provider request is made.', highMemory: false },
   ],
   showToolPayloads: false,
   isInspectorPresented: false,
