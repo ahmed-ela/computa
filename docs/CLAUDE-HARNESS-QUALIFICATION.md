@@ -5,13 +5,15 @@ Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6; Fable and Opus choices are upgra
 gated. The prior cached Haiku 4.5 choice was absent from the observed menu.
 These account-specific observations are not model qualification results.
 
-As of October 31, build353 is installed from `f9e938a`. Its new exact-submission
+As of October 31, build354 is installed from `38dde74`. The build353 exact-submission
 proof and bounded correction passed native tests and live transaction checks.
 The latest Sonnet 5 and Sonnet 4.6 workflows returned refusals, so neither is
 qualified for tool workflows. Haiku 5.5 passed a fresh response control but its
 next workflow failed on a rejected call shape. Sonnet 5.5 completed the fresh
 build353 workflow; earlier successful build349 workflows remain separate
-evidence. Candidate354 adds capture for the missing rejection category. PR #14 remains a draft;
+evidence. Build354 adds capture for the missing rejection category; its fresh
+Haiku workflow ended in a capability refusal after verified tool execution.
+PR #14 remains a draft;
 the public `v0.7.0-alpha.346` package is unchanged.
 
 ## Baseline: completion remains unverified
@@ -594,6 +596,32 @@ operator interruption; its untouched receipt was archived after checking that
 no matching task or capture arm existed. The unchanged watcher then armed for
 one Send. Before/pre-arm/after installed-process witnesses matched. This is one
 current-build workflow pass, not a reliability rate or an all-model pass.
+
+Build354 passed all 11 source-build and 10 Developer ID signing checks and was
+installed with the exact signed executable and resources. Its fresh Haiku
+workflow ended after 62.033 seconds with nine verified, closed website
+inferences and nine dispatched calls. Two separate pre-edit test calls failed
+on the original bug; after the function-only edit, all six tests passed and
+`python3 reconcile.py` printed the correct reference. The browser opened the
+ready fixture with usable fill/click references, and a tab inventory confirmed
+the bound page. The final response then said Computa's tools were unavailable.
+No fill, submission, receipt or model-issued close occurred. Computa reported
+closing the task tab during cleanup. The workflow failed despite successful
+transport and preserved history; no call-shape error occurred on this run, so
+the earlier argument-shape defect remains unproven resolved. The unused exact
+diagnostic arm was archived after terminal capture and independent audit.
+
+Review found no concrete contradiction or omitted handoff in this run's relay
+contract. It already distinguishes JSON action proposals from website-native
+tool execution, identifies host execution and matching outputs, and resends
+current schemas and the response contract with complete canonical history.
+The refusal itself accurately recalls the earlier edit, tests, reference and
+page fields. Fresh per-inference website sessions could still influence model
+behavior, but this evidence does not establish that causal explanation. No
+parser relaxation, speculative prompt change or automatic retry was made. A
+second fresh fixture was prepared but remains unsubmitted; the partial task
+was not replayed. Current evidence supports a bounded Sonnet 5.5 workflow pass,
+not reliable tool support for every Claude model.
 
 ## Qualification contract
 
