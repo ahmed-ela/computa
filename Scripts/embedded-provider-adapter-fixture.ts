@@ -372,7 +372,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
   if (provider === "claude") article.append(response, controls); else { response.append(controls); article.append(response); }
   if (options.response ?? options.userPrompt !== undefined) messages.append(article);
   const location = { origin, pathname: provider === "claude" ? "/new" : "/app" };
-  const document: any = { URL: origin + location.pathname, documentElement: html, activeElement: null,
+  const document: any = { URL: origin + location.pathname, documentElement: html, body, activeElement: null,
     querySelectorAll: (selector: string) => html.querySelectorAll(selector),
     createElement: (tag: string) => new Element(tag.toUpperCase()), createTextNode: (text: string) => new Element("#text", {}, text),
     createRange: () => { const range: any = { node: null, selectNodeContents: (node: Element) => { range.node = node; }, collapse: () => {} }; return range; },
@@ -436,7 +436,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
       const result = await execute({ provider, action, expectedURL: document.URL, expectedUserCounts: expectedCounts, ownerToken, bindOwner: true,
         expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
         allowFirstUserBinding: nativeFingerprint === undefined, ...overrides }, document, window, location,
-        options.computedStyle ?? ((node: Element) => ({ visibility: node.values.visibility || "visible" })), Observer,
+        options.computedStyle ?? ((node: Element) => ({ visibility: node.values.visibility || "visible", display: node.values.display || "block" })), Observer,
         (callback: () => void, delay: number) => { timers.push(callback); delays.push(delay); }, world,
         { subtle: { digest: async (algorithm: string, data: Uint8Array) => { const digest = await crypto.subtle.digest(algorithm, data); digestHook?.(); digestHook = undefined; return digest; } } }, TextArea, FixtureInputEvent);
       if (adopt && result.firstUserVerified) nativeFingerprint = result.firstUserFingerprint;

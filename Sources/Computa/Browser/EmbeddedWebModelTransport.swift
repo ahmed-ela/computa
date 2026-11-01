@@ -227,7 +227,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
-        case usageLimited(Provider), responseFailed(Provider), responseRenderingFailed
+        case usageLimited(Provider), responseFailed(Provider), responseBlocked(Provider), responseRenderingFailed
         case responseStreamFailed(ChatGPTResponseCompletion.StreamFailureReason)
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
@@ -239,6 +239,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in_required"
             case .usageLimited: "website_usage_limit"
             case .responseFailed: "website_response_failed"
+            case .responseBlocked: "website_response_blocked"
             case .responseRenderingFailed: "website_response_rendering_failed"
             case .responseStreamFailed: "website_response_stream_failed"
             case .unexpectedPage: "unexpected_website_page"
@@ -256,6 +257,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in"
             case .usageLimited: "wait_for_quota_reset"
             case .responseFailed: "inspect_website"
+            case .responseBlocked: "inspect_website"
             case .responseRenderingFailed: "inspect_website"
             case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
@@ -302,6 +304,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .responseFailed(let provider): "\(provider.displayName)'s website reported that the response failed to load. Check its page in Computa's built-in browser before starting a new task. No prompt was replayed."
+            case .responseBlocked(let provider): "\(provider.displayName)'s website paused this response with a reasoning-extraction warning. No response was accepted and no prompt was replayed. Check its page in Computa's built-in browser before starting a new task."
             case .responseRenderingFailed: "ChatGPT could not render its response. The failed response supplied no tool calls or final answer."
             case .responseStreamFailed(let reason): reason == .emptyStream
                 ? "ChatGPT finished its response stream without an answer. No prompt was replayed and no tool calls were released."
@@ -4260,6 +4263,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return records
     }
 
+    /// Only the fixed Claude adapter's exact pause category is a typed block.
+    /// This negative result cannot establish ownership or release a response.
+    static func websiteResponseBlockFailure(provider: Provider, detail: Any?) -> Failure? {
+        guard provider == .claude, detail as? String == "reasoning_extraction" else { return nil }
+        return .responseBlocked(.claude)
+    }
+
     /// Finite evaluated-branch metadata only. Unknown page details never enter
     /// errors or logs; this diagnostic has no action or recovery authority.
     static func groqComposerFailureDiagnostic(action: String, detail: Any?) -> String? {
@@ -4762,6 +4772,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       refreshReadOnlyObservation: Bool = true,
                       allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
+                      requireClaudeSafeguardPause: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       allowPendingClaudeModelObservation: Bool = false,
                       preferQuietChatGPTCompletion: Bool = false,
@@ -4774,6 +4785,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         let explicitClearAction = ["clearTranscript", "observeClearTranscript"].contains(action)
         guard explicitClearAction == (explicitClearOperation != nil) else { throw Failure.invalidRequest }
+        if requireClaudeSafeguardPause {
+            guard session.provider == .claude, action == "stop", allowBlockedProvider, !enforceModel,
+                  session.submitted, session.firstUserFingerprint != nil else { throw Failure.invalidRequest }
+        }
         if let explicitClearOperation {
             guard isCurrent(explicitClearOperation, session: session), enforceModel,
                   !recheckModelAfterAwait, !recheckProductAfterAwait else { throw Failure.staleSession }
@@ -4897,6 +4912,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if requireClaudeSafeguardPause { input["requireClaudeSafeguardPause"] = true }
         if provider == .groq { input["documentGeneration"] = generation.uuidString }
         if let explicitClearOperation { input["clearOperation"] = explicitClearOperation.dictionary }
         if pendingSubmissionProductRecheck {
@@ -5441,6 +5457,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.routeContext = currentContext
                 }
                 throw recordedWebsiteBlocker(.usageLimited(provider), session: session)
+            case "website_response_blocked":
+                guard let failure = Self.websiteResponseBlockFailure(provider: provider, detail: observed["detail"]) else {
+                    throw Failure.composerUnavailable
+                }
+                throw failure
             case "submission_observation_pending":
                 if provider == .chatgpt {
                     // The acknowledged Send's optimistic SPAN is not a durable
@@ -6327,14 +6348,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true)
                 }
                 catch {
-                    guard let failure = error as? Failure, case .usageLimited(let provider) = failure,
-                          provider == session.provider, session.submitted, session.firstUserFingerprint != nil else { throw error }
-                    // Only the fixed adapter's exact quota surface can expose
-                    // physical temporary indicators for cleanup. The ordinary
-                    // first-message and session proofs remain mandatory.
-                    observed = try await page(session, action: "stop", allowBlockedProvider: true)
-                    guard observed["usageLimited"] as? Bool == true, observed["busy"] as? Bool == false else {
-                        throw Failure.temporaryUnverified
+                    guard let failure = error as? Failure,
+                          session.submitted, session.firstUserFingerprint != nil else { throw error }
+                    switch failure {
+                    case .usageLimited(let provider) where provider == session.provider:
+                        // Only the fixed adapter's exact quota surface can expose
+                        // physical temporary indicators for cleanup. The ordinary
+                        // first-message and session proofs remain mandatory.
+                        observed = try await page(session, action: "stop", allowBlockedProvider: true)
+                        guard observed["usageLimited"] as? Bool == true, observed["busy"] as? Bool == false else {
+                            throw Failure.temporaryUnverified
+                        }
+                    case .responseBlocked(.claude) where session.provider == .claude:
+                        // A paused response grants no ownership. This read must
+                        // re-prove the pinned first body and ordinary Incognito
+                        // indicators; its stop branch performs no click.
+                        observed = try await page(session, action: "stop", enforceModel: false,
+                            allowBlockedProvider: true, requireClaudeSafeguardPause: true)
+                        guard observed["responseBlocked"] as? Bool == true,
+                              observed["busy"] as? Bool == false, observed["stopped"] as? Bool == false else {
+                            throw Failure.temporaryUnverified
+                        }
+                    default: throw error
                     }
                 }
                 guard observed["ownershipPending"] as? Bool != true else {

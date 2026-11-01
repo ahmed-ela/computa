@@ -2367,6 +2367,75 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+// Abort-only recognition of the observed provider safeguard pause. No authored
+// message, editor, quoted code, or arbitrary surrounding text supplies authority.
+// AX supplied exact text/control semantics, not a stable DOM wrapper/testid.
+let modelObservedSafeguardPause = false;
+function modelSafeguardsPaused() {
+  if (modelObservedSafeguardPause) return true;
+  try {
+    const boundary = '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"]';
+    const excluded = node => !!node.closest(boundary + ', [hidden], [inert], [aria-hidden="true"]')
+      || ['hidden', 'collapse'].includes(getComputedStyle(node).visibility) || getComputedStyle(node).display === 'none';
+    const normalized = value => value.replace(/\s+/g, ' ').trim().replace(/’/g, "'");
+    const labels = [], controls = [];
+    // Traverse only bounded non-authored UI. A clipped scan cannot establish
+    // the complete conjunction or unique controls. Never retain page text.
+    const stack = [{ node: document.body, index: 0 }];
+    if (!document.body) return false;
+    let visited = 0;
+    const controlLabel = node => {
+      const aria = node.getAttribute('aria-label');
+      if (aria !== null) return aria.length <= 160 ? normalized(aria) : null;
+      const parts = [], frames = [{ node, index: 0 }]; let count = 0, length = 0;
+      while (frames.length) {
+        const frame = frames.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { frames.pop(); continue; }
+        if (++count > 32) return null;
+        const child = children[frame.index++];
+        if (child.nodeType === 3) {
+          if (!modelVisible(child.parentElement) || child.length > 160) continue;
+          const text = child.textContent || ''; length += text.length;
+          if (length > 160) return null;
+          parts.push(text);
+        } else if (child.nodeType === 1 && !excluded(child)) frames.push({ node: child, index: 0 });
+      }
+      return normalized(parts.join(''));
+    };
+    while (stack.length) {
+      const frame = stack.at(-1), children = frame.node.childNodes;
+      if (frame.index >= children.length) { stack.pop(); continue; }
+      if (++visited > 2_048) return false;
+      const child = children[frame.index++];
+      if (child.nodeType === 3) {
+        if (child.length > 256 || !modelVisible(child.parentElement)) continue;
+        const label = normalized(child.textContent || '');
+        if (label) labels.push(label);
+      } else if (child.nodeType === 1 && !excluded(child)) {
+        if ((child.tagName === 'BUTTON' || child.getAttribute('role') === 'button') && modelEnabled(child)) {
+          const label = controlLabel(child);
+          if (label !== null) controls.push(label);
+        }
+        stack.push({ node: child, index: 0 });
+      }
+    }
+    const warnings = labels.map(label => label.match(/^(.+)'s safeguards flagged this message\. This sometimes happens with safe, normal conversations\.$/))
+      .filter(match => match && websiteModelFamilyLabel('claude', match[1]) === match[1]);
+    if (warnings.length !== 1 || labels.filter(label => label === 'Paused').length !== 1
+      || labels.filter(label => label === '[reasoning_extraction]').length !== 1) return false;
+    const family = warnings[0][1], retry = controls.filter(label => label.startsWith('Retry with '));
+    const continuation = controls.filter(label => label.startsWith('Continue with '));
+    if (retry.length !== 1 || retry[0] !== 'Retry with ' + family || continuation.length !== 1) return false;
+    const other = continuation[0].slice('Continue with '.length);
+    if (other === family || websiteModelFamilyLabel('claude', other) !== other) return false;
+    modelObservedSafeguardPause = true;
+    return true;
+  } catch { return false; }
+}
+function modelSafeguardFailure() { return { error: 'website_response_blocked', detail: 'reasoning_extraction' }; }
+function modelOwnershipRejected(observed) {
+  return ['document_changed', 'conversation_changed', 'first_user_observation_replaced'].includes(observed.error);
+}
 // Completion belongs to the latest response's single message-actions bar.
 // Claude has changed the Copy button's testid; its observed accessible name
 // remains Copy. Author content and unrelated/nested toolbars cannot supply it.
@@ -2809,13 +2878,14 @@ if (ownedUserCount > 0) {
 } else if (input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof)
   return modelFirstUserFailure('first_missing');
 if (usageLimited && input.action !== 'stop') return modelUsageLimitFailure();
+if (input.action !== 'stop' && modelSafeguardsPaused()) return modelSafeguardFailure();
 
 // A fresh negative decision, independent of diagnostic snapshots. Any reply
 // markup (even hidden), text in an alternative assistant wrapper, interruption,
 // sign-in, quota or dialog prevents this narrow zero-output state.
 function modelClaudeNoOutputPending(guard) {
   try {
-    if (guard() !== true || modelUsageLimited() || modelVisibleDialog()) return null;
+    if (guard() !== true || modelUsageLimited() || modelSafeguardsPaused() || modelVisibleDialog()) return null;
     const authControls = document.querySelectorAll('a, button');
     if (authControls.length > 256) return null;
     for (const node of authControls) if (modelVisible(node)
@@ -2917,6 +2987,12 @@ async function providerPageAction() {
   const { action, prompt, expectedFirstUserMarker } = input;
   const usageLimited = modelUsageLimited();
   if (usageLimited && action !== 'stop') return modelUsageLimitFailure();
+  const safeguardsPaused = modelSafeguardsPaused();
+  if (safeguardsPaused && action !== 'stop') return modelSafeguardFailure();
+  // Native's pause-cleanup read may only observe the same block. If it vanished,
+  // it must never fall through to the ordinary clickable Stop branch.
+  if (action === 'stop' && input.requireClaudeSafeguardPause === true && !safeguardsPaused)
+    return { error: 'model_unverified' };
   const composer = modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]']);
   const completion = modelCompletionObservation();
   const { answers, answer, stop, message, article, busy, interrupted, scopedCopies, enabledCopies, answerComplete } = completion;
@@ -2949,6 +3025,7 @@ async function providerPageAction() {
   }
   if (!temporary) return modelTemporaryFailure('temporary_mode_unverified');
   if (action === 'stop') {
+    if (safeguardsPaused) return { ...state, responseBlocked: true, busy: false, stopped: false, text: '', answerComplete: false };
     if (usageLimited) return { ...state, usageLimited: true, busy: false, stopped: false };
     if (modelEnabled(stop)) stop.click();
     return { ...state, stopped: !!stop };
@@ -3023,7 +3100,11 @@ async function providerPageAction() {
   send.click();
   return { submitted: true };
 }
-const pageObservation = await providerPageAction();
+const actionObservation = await providerPageAction();
+const pauseContextIntact = () => window === window.top && document.URL === input.expectedURL
+  && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === ownedUserCount;
+const pageObservation = pauseContextIntact() && !modelOwnershipRejected(actionObservation)
+  && input.action !== 'stop' && modelSafeguardsPaused() ? modelSafeguardFailure() : actionObservation;
 // This explicitly negative result releases no model/answer/action proof. All
 // outer first-body, owner, count, mode and quota guards below still apply.
 const observed = pageObservation.claudeModelObservationPending === true && claudePendingCheck
@@ -3062,6 +3143,7 @@ if (firstSnapshot) {
   if (observed.error === 'website_usage_limit' || input.action !== 'stop' && modelUsageLimited())
     return { error: 'website_usage_limit' };
   if (!modelTemporaryVerified()) return modelTemporaryFailure('temporary_mode_unverified');
+  if (!modelOwnershipRejected(observed) && input.action !== 'stop' && modelSafeguardsPaused()) return modelSafeguardFailure();
   if (observed.error) return observed;
   if (observed.claudeModelObservationPending === true) {
     const pending = claudePendingCheck?.();
@@ -3078,4 +3160,6 @@ if (firstSnapshot) {
   return { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };
 }
 if (observed.freshQuotaAbort === true) return observed;
+if (pauseContextIntact() && !modelOwnershipRejected(observed) && input.action !== 'stop' && modelSafeguardsPaused())
+  return modelSafeguardFailure();
 return { ...observed, firstUserVerified: false, firstUserFingerprint: null };

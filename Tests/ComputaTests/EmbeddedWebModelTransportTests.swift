@@ -14027,6 +14027,171 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
     }
 
+    func testClaudeSafeguardsPauseMappingRequiresExactProviderAndReason() {
+        let failure = EmbeddedWebModelTransport.Failure.responseBlocked(.claude)
+        XCTAssertEqual(EmbeddedWebModelTransport.websiteResponseBlockFailure(
+            provider: .claude, detail: "reasoning_extraction"), failure)
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .gemini, .groq] {
+            XCTAssertNil(EmbeddedWebModelTransport.websiteResponseBlockFailure(
+                provider: provider, detail: "reasoning_extraction"))
+        }
+        for detail: Any? in [nil, NSNull(), true, 1, "", "unknown", "Reasoning_extraction",
+                             "reasoning_extraction ", ["reasoning_extraction"]] {
+            XCTAssertNil(EmbeddedWebModelTransport.websiteResponseBlockFailure(provider: .claude, detail: detail))
+        }
+        XCTAssertEqual(failure.diagnosticCode, "website_response_blocked")
+        XCTAssertEqual(failure.requiredAction, "inspect_website")
+        XCTAssertFalse(failure.blocksProviderUntilRefresh)
+        XCTAssertTrue(failure.localizedDescription.contains("Claude's website paused this response with a reasoning-extraction warning"))
+        XCTAssertTrue(failure.localizedDescription.contains("No response was accepted and no prompt was replayed"))
+    }
+
+    func testClaudeSafeguardsPauseAbortsBeforeCompletionWithoutReplayAndKeepsCleanupOwnership() async throws {
+        for scenario in ["valid", "header_replaced", "missing_mode", "changed_body", "replaced_body", "route_drift", "callback_route_drift", "send_bound_without_poll", "pause_disappears"] {
+            let base = Self.providerPage(.claude)
+            let page = base.replacingOccurrences(
+                of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';", with: "body.textContent = '';")
+            XCTAssertNotEqual(page, base)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            if scenario == "callback_route_drift" {
+                // Bind a real conversation first, so the later callback cannot
+                // be mistaken for the allowed initial conversation promotion.
+                _ = try await evaluate(view, """
+                    document.getElementById('fixture-send').addEventListener('click', () => {
+                        history.replaceState({}, '', '/chat/safeguards-owned?incognito');
+                    }); return true;
+                    """)
+            }
+            let prompt = "Stop when Claude's safeguards pause the response"
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            if scenario == "send_bound_without_poll" {
+                // Send's ordinary post-await inspection already supplies the
+                // first-body proof; omitting an extra Poll does not erase it.
+                let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64, scenario)
+            } else {
+                let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["state"] as? String, "running", scenario)
+                XCTAssertEqual(pending["text"] as? String, "", scenario)
+                let proof = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64, scenario)
+            }
+            _ = try await evaluate(view, """
+                document.querySelector('[data-perf-reply-text]').textContent = '{"type":"message","text":"Must not be accepted"}';
+                const paused = document.createElement('aside'); paused.id = 'fixture-safeguards-pause';
+                for (const text of ['Paused', "Opus 5's safeguards flagged this message. This sometimes happens with safe, normal conversations.", '[reasoning_extraction]']) {
+                    const label = document.createElement('p'); label.textContent = text; paused.appendChild(label);
+                }
+                window.fixtureSafeguardClicks = 0;
+                window.fixtureSafeguardStopClicks = 0;
+                for (const text of ['Retry with Opus 5', 'Continue with Sonnet 4.6']) {
+                    const button = document.createElement('button'); button.textContent = text;
+                    button.addEventListener('click', () => window.fixtureSafeguardClicks++); paused.appendChild(button);
+                }
+                document.body.appendChild(paused);
+                const status = document.createElement('div');
+                status.setAttribute('role', 'status'); status.setAttribute('data-testid', 'response-status-announcer');
+                status.textContent = 'Claude finished the response'; document.body.appendChild(status);
+                return true;
+                """)
+            var evaluations: [String] = []
+            var crossedRoute = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                evaluations.append(action)
+                if scenario == "callback_route_drift", action == "inspect", !crossedRoute {
+                    crossedRoute = true
+                    _ = try? await self.evaluate(view, "history.replaceState({}, '', '/chat/safeguards-foreign?incognito'); return true;")
+                }
+            }
+            let expectedFailure: EmbeddedWebModelTransport.Failure = scenario == "callback_route_drift"
+                ? .ownershipFailure(.routeAfter) : .responseBlocked(.claude)
+            let began = ContinuousClock.now
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The provider pause must beat a finished live-region and complete answer controls: \(scenario)")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expectedFailure, scenario) }
+            // The injected callback performs another WK evaluation; it still
+            // must fail well before the five-minute response deadline.
+            XCTAssertLessThan(ContinuousClock.now - began,
+                scenario == "callback_route_drift" ? .seconds(15) : .seconds(3), scenario)
+            XCTAssertTrue(evaluations.contains("inspect"), scenario)
+            XCTAssertEqual(crossedRoute, scenario == "callback_route_drift")
+            let failureEvaluations = evaluations
+            for operation in ["webProviderPoll", "webProviderSend"] {
+                var params = ["sessionToken": token]
+                if operation == "webProviderSend" { params["prompt"] = "Never replay or continue this response" }
+                do {
+                    _ = try await call(fixture.transport, operation, params)
+                    XCTFail("A provider pause must remain terminal: \(scenario)")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expectedFailure, scenario) }
+            }
+            XCTAssertEqual(evaluations, failureEvaluations, "Terminal calls must not evaluate the adapter again: \(scenario)")
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            // The failed read supplies no cleanup authority. Mutate only the
+            // current page after failure to exercise the ordinary Finish proof.
+            _ = try await evaluate(view, """
+                const scenario = \(try matchedProbeJSON(scenario));
+                if (scenario === 'header_replaced') {
+                    document.getElementById('fixture-model-trigger').remove();
+                    document.getElementById('fixture-model-menu').remove();
+                }
+                if (scenario === 'missing_mode') document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                if (scenario === 'changed_body') document.querySelector('[data-testid="user-message"]').textContent += ' changed';
+                if (scenario === 'replaced_body') {
+                    const first = document.querySelector('[data-testid="user-message"]');
+                    const replacement = first.cloneNode(true); replacement.id = 'foreign-user'; first.replaceWith(replacement);
+                }
+                if (scenario === 'route_drift') history.replaceState({}, '', '/settings?incognito');
+                return true;
+                """)
+            var cleanupActions: [String] = []
+            var pauseDisappeared = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                cleanupActions.append(action)
+                if scenario == "pause_disappears", action == "inspect", !pauseDisappeared {
+                    pauseDisappeared = true
+                    _ = try? await self.evaluate(view, """
+                        document.getElementById('fixture-safeguards-pause').remove();
+                        const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop response');
+                        stop.textContent = 'Stop'; stop.addEventListener('click', () => window.fixtureSafeguardStopClicks++);
+                        document.body.appendChild(stop); return true;
+                        """)
+                }
+            }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            if scenario == "pause_disappears" {
+                XCTAssertTrue(pauseDisappeared)
+                XCTAssertTrue(cleanupActions.contains("stop"), "The stale inspect must reach the restricted cleanup read")
+            }
+            let mayClose = ["valid", "header_replaced", "send_bound_without_poll"].contains(scenario)
+            XCTAssertEqual(finished["cleanup"] as? String, mayClose ? "not_created" : "failed", scenario)
+            XCTAssertEqual(finished["text"] as? String, "", "The pause must release no answer: \(scenario)")
+            if mayClose { XCTAssertNil(fixture.browser.webView(for: tabID)) }
+            else { XCTAssertTrue(fixture.browser.webView(for: tabID) === view, scenario) }
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, [prompt], scenario)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let clicks = try await evaluate(view, "return window.fixtureSafeguardClicks;")
+            XCTAssertEqual(clicks as? Int, 0, scenario)
+            let stopClicks = try await evaluate(view, "return window.fixtureSafeguardStopClicks;")
+            XCTAssertEqual(stopClicks as? Int, 0, "Cleanup must not click Stop after a pause disappears: \(scenario)")
+            try await assertHumanTabIntact(fixture, retaining: mayClose ? nil : tabID)
+            if scenario == "valid" {
+                let next = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+                let nextToken = try XCTUnwrap(next["sessionToken"] as? String)
+                _ = try await waitForState("ready", fixture.transport, token: nextToken)
+                _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": nextToken])
+            }
+        }
+    }
+
     func testInterruptedClaudeResponseFailsWithoutReplayAndStillClosesOwnedIncognitoTab() async throws {
         let fixture = try Fixture(page: Self.providerPage(.claude))
         defer { fixture.shutdown() }

@@ -47,6 +47,21 @@ function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM",
   container.append(warning, upgrade); f.body.append(container);
   return { container, warning, support, upgrade };
 }
+function observedClaudePause(f: ReturnType<typeof fixture>, family = "Opus 5", continuation = "Sonnet 4.6") {
+  // Observed AX semantics; deliberately no invented provider wrapper/testid.
+  const surface = new Element("SECTION"), paused = new Element("SPAN", {}, "Paused");
+  const warning = new Element("P", {}, `${family}'s safeguards flagged this message. This sometimes happens with safe, normal conversations.`);
+  const details = new Element("SPAN", {}, "[reasoning_extraction]");
+  const retry = new Element("BUTTON", {}, `Retry with ${family}`);
+  const fallback = new Element("DIV", { role: "button", "aria-label": `Continue with ${continuation}` });
+  surface.append(paused, retry, warning, fallback, new Element("SPAN", {}, "Details:"), details);
+  f.body.append(surface);
+  const finished = new Element("DIV", { "data-testid": "response-status-announcer", role: "status" }, "Claude finished the response");
+  f.body.append(finished);
+  return { surface, paused, warning, details, retry, fallback, finished };
+}
+const safeguardFailure = { error: "website_response_blocked", detail: "reasoning_extraction" };
+
 const freshQuotaReceipt = (f: ReturnType<typeof fixture>) => ({ error: "website_usage_limit", freshQuotaAbort: true,
   url: f.document.URL, userCount: 0, responseCount: 0 });
 
@@ -584,6 +599,134 @@ describe("embedded Claude fixed adapter", () => {
     f.toggle.disabled = true;
     expect(await f.run("enableTemporary")).toMatchObject({ error: "temporary_mode_unavailable" });
     expect(f.toggle.clicks).toBe(0);
+  });
+
+  test("Claude safeguard pause wins over finished and complete-looking responses without any action", async () => {
+    for (const action of ["inspect", "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const pause = observedClaudePause(f); f.stop.connected = true;
+      expect(await f.run(action, { prompt: outbound })).toEqual(safeguardFailure);
+      for (const control of [f.send, f.stop, f.toggle, f.exit, pause.retry, pause.fallback]) expect(control.clicks).toBe(0);
+      expect(f.composer.innerText).toBe("");
+    }
+  });
+
+  test("Claude safeguard family labels are validated and Retry must match the exact warning family", async () => {
+    for (const [family, next] of [["Opus 5", "Sonnet 4.6"], ["Opus 5.5", "Haiku 5.5"], ["Sonnet 4.6", "Opus 5"]]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); observedClaudePause(f, family, next);
+      expect(await f.run()).toEqual(safeguardFailure);
+    }
+    for (const mutation of ["unknown_family", "mismatch_retry", "unknown_continuation", "same_continuation", "different_reason", "different_warning", "missing_pause", "missing_reason", "missing_retry", "missing_continuation", "duplicate_warning", "duplicate_retry", "disabled_retry"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (mutation === "unknown_family") { p.warning.text = p.warning.text.replace("Opus 5", "Unknown 5"); p.retry.text = "Retry with Unknown 5"; }
+      if (mutation === "mismatch_retry") p.retry.text = "Retry with Opus 5.5";
+      if (mutation === "unknown_continuation") p.fallback.values["aria-label"] = "Continue with External 4";
+      if (mutation === "same_continuation") p.fallback.values["aria-label"] = "Continue with Opus 5";
+      if (mutation === "different_reason") p.details.text = "[unknown_private_reason]";
+      if (mutation === "different_warning") p.warning.text += " Extra";
+      if (mutation === "missing_pause") p.paused.connected = false;
+      if (mutation === "missing_reason") p.details.connected = false;
+      if (mutation === "missing_retry") p.retry.connected = false;
+      if (mutation === "missing_continuation") p.fallback.connected = false;
+      if (mutation === "duplicate_warning") p.surface.append(p.warning.cloneNode(true));
+      if (mutation === "duplicate_retry") p.surface.append(p.retry.cloneNode(true));
+      if (mutation === "disabled_retry") p.retry.disabled = true;
+      expect((await f.run()).error, mutation).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard quotations in authored messages, tool code, editors and hidden UI never classify", async () => {
+    for (const location of ["user", "assistant", "tool_code", "editor", "hidden", "aria_hidden", "inert", "visibility", "display"]) {
+      const f = fixture(provider, { userPrompt: prompt }); const p = observedClaudePause(f);
+      f.body.children = f.body.children.filter(node => node !== p.surface);
+      if (location === "user") {
+        f.userBody!.text = prompt + "\n";
+        f.userBody!.append(p.surface, new Element("#text", {}, "\n\n" + markerLine));
+        f.world.__computaModelFirstPrompt = f.userBody!.innerText;
+      } else if (location === "assistant") f.answer.append(p.surface);
+      else if (location === "tool_code") { const pre = new Element("PRE"); pre.append(p.surface); f.body.append(pre); }
+      else if (location === "editor") f.composer.append(p.surface);
+      else {
+        if (location === "hidden") p.surface.values.hidden = "";
+        if (location === "aria_hidden") p.surface.values["aria-hidden"] = "true";
+        if (location === "inert") p.surface.values.inert = "";
+        if (location === "visibility") p.surface.values.visibility = "hidden";
+        if (location === "display") p.surface.values.display = "none";
+        f.body.append(p.surface);
+      }
+      expect((await f.run()).error, location).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard scan is bounded and cannot leak unknown UI or turn a partial scan into a block", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run();
+    for (let n = 0; n < 2100; n++) f.body.append(new Element("SPAN", {}, "private-canary"));
+    const p = observedClaudePause(f);
+    const result = await f.run(); expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("private-canary"); expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    const g = fixture(provider, { userPrompt: prompt }); await g.run(); const q = observedClaudePause(g);
+    Object.defineProperty(q.surface, "childNodes", { get: () => { throw new Error("private-canary"); } });
+    const unavailable = await g.run(); expect(unavailable.error).toBeUndefined();
+    expect(JSON.stringify(unavailable)).not.toContain("private-canary"); expect(q.retry.clicks + q.fallback.clicks).toBe(0);
+  });
+
+  test("Claude safeguard cleanup retains ordinary exact first body and Incognito proof and never clicks", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); const bound = await f.run(); const p = observedClaudePause(f);
+    f.stop.connected = true;
+    expect(await f.run("stop")).toMatchObject({ responseBlocked: true, busy: false, stopped: false, text: "", answerComplete: false,
+      temporary: true, firstUserVerified: true, firstUserFingerprint: bound.firstUserFingerprint, firstUserMarkerVerified: true });
+    for (const control of [f.send, f.stop, f.toggle, f.exit, p.retry, p.fallback]) expect(control.clicks).toBe(0);
+    const unbound = fixture(provider, { userPrompt: prompt }); observedClaudePause(unbound);
+    expect(await unbound.run()).toEqual(safeguardFailure); expect(unbound.world.__computaModelFirstProof).toBeUndefined();
+    expect(await unbound.run("stop")).toMatchObject({ error: "conversation_changed", detail: "first_user_message" });
+    for (const mutation of ["body", "owner", "temporary"]) {
+      const g = fixture(provider, { userPrompt: prompt }); await g.run(); const q = observedClaudePause(g);
+      if (mutation === "body") g.userBody!.text += " changed";
+      if (mutation === "owner") g.world.__computaModelOwner = "foreign";
+      if (mutation === "temporary") g.badge.connected = false;
+      expect((await g.run("stop")).error).toBeTruthy();
+      expect(q.retry.clicks + q.fallback.clicks + g.stop.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard cleanup cannot fall through to clickable Stop after the pause disappears", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+    expect(await f.run()).toEqual(safeguardFailure);
+    p.surface.connected = false; f.stop.connected = true;
+    expect(await f.run("stop", { requireClaudeSafeguardPause: true })).toEqual({ error: "model_unverified" });
+    expect(f.stop.clicks + p.retry.clicks + p.fallback.clicks).toBe(0);
+    // The new restriction changes only native's explicitly tagged read.
+    expect(await f.run("stop")).toMatchObject({ stopped: true }); expect(f.stop.clicks).toBe(1);
+  });
+
+  test("Claude safeguard arrival cannot replace fresh-page ownership rejection after model-proof await", async () => {
+    const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
+    picker.selected("Opus 5"); let tracked = false, value: unknown;
+    Object.defineProperty(f.world, "__computaModelReadUI", { configurable: true,
+      get: () => value, set: next => {
+        value = next; if (tracked) return; tracked = true;
+        queueMicrotask(() => { observedClaudePause(f); f.world.__computaModelOwner = "foreign"; });
+      } });
+    const result = await f.run("inspect", { expectedModelChoice: { key: "Opus 5", label: "Opus 5" } });
+    expect(tracked).toBe(true); expect(result).toMatchObject({ error: "model_unverified" });
+    expect(result.detail).not.toBe("reasoning_extraction");
+    expect(f.send.clicks).toBe(0);
+  });
+
+  test("Claude safeguard arrival during the first-user digest aborts while ownership drift still wins", async () => {
+    for (const drift of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      let p: ReturnType<typeof observedClaudePause>;
+      f.onDigest(() => {
+        p = observedClaudePause(f);
+        if (drift) f.world.__computaModelOwner = "foreign";
+      });
+      const result = await f.run();
+      expect(result).toMatchObject(drift ? { error: "conversation_changed", detail: "first_user_message" } : safeguardFailure);
+      expect(p!.retry.clicks + p!.fallback.clicks + f.send.clicks).toBe(0);
+    }
   });
 
   test("the exact quota popup reports its limit before any inference action or blocked control click", async () => {
@@ -1596,6 +1739,44 @@ describe('Claude post-submit detached header settling', () => {
   };
   const pendingDetached = (overrides: Record<string, unknown> = {}) => detached('inspect', emptyShell,
     { allowClaudeModelObservationPending: true, ...overrides }, false);
+
+  test('Claude safeguard pause observed during detached-header waiting wins pending and cannot be unlatched', async () => {
+    for (const transient of [false, true]) {
+      const x = await pendingDetached(), pause = observedClaudePause(x.f);
+      x.wake(); for (let tick = 0; tick < 12; tick++) await Promise.resolve();
+      if (transient) {
+        pause.surface.connected = false;
+        x.f.body.append(currentHeader()); x.wake();
+      } else x.expire();
+      const result = await x.pending;
+      expect(result).toEqual(safeguardFailure); expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.text).toBeUndefined(); expect(pause.retry.clicks + pause.fallback.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('Claude safeguard pause does not override ownership loss observed during the same wait', async () => {
+    const x = await pendingDetached(), pause = observedClaudePause(x.f);
+    x.f.world.__computaModelOwner = 'foreign'; x.wake(); x.expire();
+    const result = await x.pending;
+    expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(pause.retry.clicks + pause.fallback.clicks).toBe(0); x.noActions();
+  });
+
+  test('Claude safeguard pause arriving at the final model-proof await withdraws completion', async () => {
+    const x = await detached(), replacement = currentHeader();
+    let tracked = false, trackedValue: any, pause: ReturnType<typeof observedClaudePause>;
+    Object.defineProperty(x.f.world, '__computaModelReadUI', { configurable: true,
+      get: () => trackedValue, set: value => {
+        trackedValue = value;
+        if (tracked) return;
+        tracked = true; queueMicrotask(() => { pause = observedClaudePause(x.f); });
+      } });
+    x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(tracked).toBe(true); expect(result).toEqual(safeguardFailure);
+    expect(result.text).toBeUndefined(); expect(result.answerComplete).toBeUndefined();
+    expect(pause!.retry.clicks + pause!.fallback.clicks).toBe(0); x.noActions();
+  });
 
   test('Claude no-output pending expires only the existing read and later requires a fresh exact header', async () => {
     for (const busy of [false, true]) {

@@ -392,8 +392,12 @@ enum WebModelResponseCodec {
         let fullDisplaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let displaySource = compactGroq ? try groqTrustedNativeProjection(originalJSON, object: object,
+        let taskDisplaySource = compactGroq ? try groqTrustedNativeProjection(originalJSON, object: object,
             schemas: schemas, domains: groqDomains) : fullDisplaySource
+        // API response/transport controls are validated above and retained in
+        // the canonical request. They must not become website instructions to
+        // supply unsupported reasoning output or transport metadata.
+        let displaySource = WebsitePromptProjection.omittingAPIOnlyTopLevelFields(taskDisplaySource)
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
         // Groq receives one compact JSON line inside a literal code block.
         // Valid JSON strings cannot contain raw CR/LF, so quoted backticks cannot

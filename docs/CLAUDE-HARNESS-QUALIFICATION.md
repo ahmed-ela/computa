@@ -9,14 +9,18 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build377 (`481f6e1`) is installed and its launch is recorded.
-Its fresh Opus 5 marker reached the five-minute deadline after a verified
-submission and an exact-session pending-model observation, with no answer.
-A separate short direct Opus 5 prompt passed in an ordinary foreground tab;
-that different payload and presentation do not establish the timeout's cause.
+As of November 1, build378 (`68ce26b`) is installed and its launch is recorded.
+Its captured Opus 5 request reached the five-minute deadline after a verified
+submission, with no answer. A separate foreground Incognito comparison using
+the captured prompt exposed Claude's safeguards pause, tagged
+`reasoning_extraction`. That notice was missed by the adapter; it does not
+identify which input field caused the provider decision, or prove the exact
+state of the already-closed native page. See the build378 comparison below.
+A separate short direct Opus 5 prompt on build377 had passed;
+that different payload and presentation did not establish the timeout's cause.
 A fresh Opus 4.8 workflow returned a valid refusal without tool use. The latest
 bounded Opus 4.6 full-workflow pass remains build374; build377 has not established
-a new Claude workflow pass. Earlier build374 Opus 4.8 and Opus 4.7 workflows
+a new Claude workflow pass, nor has build378. Earlier build374 Opus 4.8 and Opus 4.7 workflows
 returned valid refusals, and Opus 3 failed with two malformed replies and no
 tool use. The earlier Sonnet
 5.5 full workflow ran on build368 (`2dea3d2`). A later
@@ -1695,3 +1699,87 @@ The retained receipt is
 `work/claude-qualification-20261031/claude-first-request-capture-a/result.json`,
 SHA-256 `cef772a4257c0eb9a770d5bbc7c464d9a151518d4e6ae01c6f7f27225930c1b7`.
 These are local diagnostic checks, not a live provider repair or qualification.
+
+## Build378: same-prompt foreground comparison, November 1
+
+Build378 (`68ce26b`) was installed and verified at the installed application
+path, PID7021. Launching by application name initially selected the build-folder
+copy; that process was closed without sending a prompt. All results below use
+the subsequently verified installed copy.
+
+Case `opus5-payload378-a` sent one new 104-byte synthetic user request for `HI`
+with no tools requested. The private capture retained the 47,462-byte canonical
+request, 62,106-byte server prompt and 62,168-byte native insertion argument,
+including its session marker. The later native first-user fingerprint matched
+the captured argument's canonical fingerprint. The task timed out after 301.171
+seconds with one inference, zero tools and no answer; the exact session has a
+saved closed cleanup receipt. The diagnostic records insertion bytes, not HTTP
+bytes. Its original global output was archived after exact identity/hash checks;
+the arm and output slots were clear afterward.
+
+Case `opus5-direct378-b` used an ordinary foreground Incognito tab with
+`Opus 5 High` selected. The captured text was copied from its private text file;
+Claude initially represented the paste as an attachment. Its existing
+`Edit Pasted text` control restored the full inline composer. AX readback matched
+the captured 62,168 bytes plus one trailing line feed before the single Send.
+No harness tools or local actions were dispatched by this direct comparison.
+
+The website displayed `Paused`, stated that Opus 5's safeguards flagged the
+message, and showed `[reasoning_extraction]`. It also displayed `Claude finished
+the response`; that live-region announcement is not evidence of an answer when
+the provider has blocked the response. Neither Retry nor the offered alternate
+model was selected. The test-created tab was closed and the unmodified text
+document was closed afterward. No Inspector or developer settings changed.
+
+This directly establishes a safeguard block for the foreground copy of the
+captured prompt. The native timed-out page had already closed, so its exact
+warning was not observed. The matching prompt and missing block handling explain
+a concrete compatibility gap, but do not identify a uniquely causal token or
+prove a provider-side root cause. The original canonical request includes
+`include: ["reasoning.encrypted_content"]` and a reasoning-summary option. These
+are API-only outputs that the website adapter does not produce; passing them
+through the displayed JSON is distinct from the user's request for a greeting.
+Any presentation fix must preserve the original request, user/history/tool
+content, permissions and verification, and must respect provider refusals.
+
+Evidence is retained under `evidence/opus5-payload378-a/` and
+`evidence/opus5-direct378-b/`. The exact outbound SHA-256 is
+`6f4ce7046c873abb1974da9eef67974aba2cbd4feacf7551e2e6f8646fab3f34`;
+the direct-comparison result SHA-256 is
+`b3e5a8f0de603f30874fd6712c9799ad47ed1feac3d992bf0a41909b7f4ff93e`.
+These are negative qualification results, not a successful Claude workflow.
+
+## Build379: website presentation and safeguard-pause handling
+
+Website presentation now omits only eleven top-level API output/transport
+fields: `include`, `reasoning`, `client_metadata`, `prompt_cache_key`, `metadata`,
+`safety_identifier`, `stream`, `stream_options`, `store`, `background` and
+`service_tier`. Validation still runs first. The canonical continuation request
+and native response configuration remain unchanged; retained task/history,
+permissions, tool schemas, nested matching keys, unknown fields, numeric lexemes
+and escapes remain intact. The website contract requests an answer or permitted
+action proposal and continues to allow refusals. This removes unsupported API
+output requests, not provider safeguards or binding task restrictions.
+
+Claude's adapter recognizes the observed pause only from the complete bounded
+conjunction of visible non-authored labels and unique matching Retry/Continue
+controls. It reports `website_response_blocked` with the allowlisted
+`reasoning_extraction` category ahead of completion or the empty-model wait.
+Quoted messages, hidden/partial/ambiguous controls and unrelated providers cannot
+supply that result. Ownership failures retain priority. No Retry, fallback,
+answer or tool execution is authorized by the warning.
+
+Cleanup still requires the native submitted/first-body binding and ordinary
+document, route, owner and Incognito proofs. Its narrow paused-response read
+cannot click Stop; if the pause disappears, it fails closed. A missing model
+header alone does not prevent closing an otherwise proven owned Incognito tab.
+
+Validation passed 234 Claude adapter tests (6,473 assertions) and 234 affected
+native tests. The native run includes nine real-WebKit pause/cleanup scenarios,
+the request codec and projection suites, agent instructions, first-request and
+existing capture tests, benchmark capture, and the server capture-scope test.
+The initial native run's failures were corrected fixture assumptions: metadata
+canaries now live under retained data without relaxing exact comparisons; route
+drift uses an already-bound supported conversation; Send's existing first-body
+proof is asserted rather than incorrectly treated as absent. Production did not
+change during those fixture corrections. Live build379 qualification is pending.
