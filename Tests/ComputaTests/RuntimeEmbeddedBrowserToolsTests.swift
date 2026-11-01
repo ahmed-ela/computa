@@ -1,4 +1,5 @@
 @testable import AutomationCore
+import Darwin
 import Foundation
 import XCTest
 @testable import Computa
@@ -26,9 +27,29 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 #"{"type":"tool_calls","calls":[{"name":"browser_tabs","arguments":{}}]}"#,
                 #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}"#,
             ])
-            let evidenceRoot = harness.root.appendingPathComponent("haiku-projection")
+            // The private capture deliberately rejects symlink ancestors;
+            // macOS's ordinary temporary directory can begin with /var.
+            let resolvedParent = try XCTUnwrap(realpath(harness.root.path, nil))
+            defer { free(resolvedParent) }
+            let evidenceRoot = URL(fileURLWithPath: String(cString: resolvedParent), isDirectory: true)
+                .appendingPathComponent("haiku-projection")
             try FileManager.default.createDirectory(at: evidenceRoot, withIntermediateDirectories: true)
-            let server = WebModelServer()
+            let captureDirectory = evidenceRoot.appendingPathComponent(ClaudeRequestCapture.directoryName)
+            try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            let captureArm = captureDirectory.appendingPathComponent("arm.json")
+            let captureOutput = captureDirectory.appendingPathComponent("request.json")
+            let captureDate = ISO8601DateFormatter()
+            captureDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let arm = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1, "purpose": ClaudeRequestCapture.purpose,
+                "nonce": UUID().uuidString.lowercased(), "taskID": native.taskID.lowercased(),
+                "turnID": native.turnID.lowercased(), "modelID": choice.modelID,
+                "trigger": "after_browser_tabs", "expiresAt": captureDate.string(from: Date().addingTimeInterval(120)),
+            ])
+            try arm.write(to: captureArm)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: captureArm.path)
+            let server = WebModelServer(rejectedReplyDirectory: evidenceRoot.appendingPathComponent("rejected"))
             await server.configureEvidenceDirectory(evidenceRoot.appendingPathComponent("evidence"))
             await server.configureCleanupReceipts(directory: evidenceRoot.appendingPathComponent("cleanup"),
                 runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
@@ -54,13 +75,17 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["role": "user", "content": "Inspect the fixture only; do not fill or submit. Keep exact e\u{0301}, 🧭, {quoted} and \\n text."],
             ]
             var expectedHistories: [NSArray] = []
+            var canonicalRequests: [Data] = []
             var actualOutputs: [[[String: String]]] = []
             for index in 0..<3 {
                 expectedHistories.append(history as NSArray)
                 let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": history,
                     "tools": tools, "stream": false, "tool_choice": "auto", "parallel_tool_calls": false])
+                canonicalRequests.append(request)
                 let bytes = try await server.fixtureInfer(request, taskID: native.taskID, threadID: native.threadID,
                     turnID: native.turnID, preparationID: native.preparationID)
+                XCTAssertEqual(FileManager.default.fileExists(atPath: captureOutput.path), index == 2)
+                XCTAssertEqual(FileManager.default.fileExists(atPath: captureArm.path), index < 2)
                 let response = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
                 let output = try XCTUnwrap(response["output"] as? [[String: Any]])
                 let call = try XCTUnwrap(output.first)
@@ -134,6 +159,21 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             }
             let completed = journal.filter { $0["phase"] as? String == "complete" }
             XCTAssertEqual(completed.count, 3)
+            let captured = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: captureOutput)) as? [String: Any])
+            XCTAssertEqual(captured["prompt"] as? String, prompts[2], "Capture must match the actual transport payload before its session marker")
+            var expectedCanonical = try XCTUnwrap(JSONSerialization.jsonObject(with: canonicalRequests[2]) as? [String: Any])
+            expectedCanonical["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(
+                taskID: native.taskID, threadID: native.threadID, turnID: native.turnID)]
+            let capturedCanonical = try XCTUnwrap(captured["canonicalRequest"] as? String)
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(capturedCanonical.utf8)) as? NSDictionary,
+                expectedCanonical as NSDictionary, "Retain original definitions before browser projection and native turn metadata")
+            XCTAssertEqual(captured["promptSHA256"] as? String, completed[2]["submittedPromptFingerprint"] as? String)
+            for key in ["taskID", "threadID", "turnID", "inferenceID", "sessionToken", "preparationID"] {
+                XCTAssertEqual(captured[key] as? String, completed[2][key] as? String, key)
+            }
+            XCTAssertEqual(captured["stage"] as? String, "pre_send")
+            XCTAssertEqual(captured["submissionVerified"] as? Bool, false)
+            XCTAssertEqual((captured["toolCatalog"] as? [String: Any])?["binding"] as? String, "bound")
             XCTAssertEqual(completed.compactMap { $0["submittedPromptFingerprint"] as? String },
                            prompts.map(EmbeddedWebModelTransport.promptFingerprint))
             XCTAssertTrue(completed.allSatisfy { $0["submissionProofPolicy"] as? String == "fresh_session_submission_v1" })
