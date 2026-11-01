@@ -10,6 +10,14 @@ enum ClaudeRequestCapture {
     static let maximumLifetime: TimeInterval = 600
     static let maximumRecordBytes = WebModelResponseCodec.maximumPromptBytes * 12 + 8_192
 
+    private enum Trigger: String {
+        case afterBrowserTabs = "after_browser_tabs"
+        case afterBrowserFill = "after_browser_fill"
+
+        var callName: String { self == .afterBrowserTabs ? "browser_tabs" : "browser_fill" }
+        var purpose: String { "claude_post_\(callName)_request_v1" }
+    }
+
     struct Context: Sendable {
         let taskID: UUID
         let threadID: UUID
@@ -54,12 +62,13 @@ enum ClaudeRequestCapture {
                       let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
                       Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt"],
                       ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == 1,
-                      value["purpose"] as? String == purpose,
+                      let triggerText = value["trigger"] as? String,
+                      let trigger = Trigger(rawValue: triggerText),
+                      value["purpose"] as? String == trigger.purpose,
                       let nonce = canonicalID(value["nonce"]),
                       value["taskID"] as? String == context.taskID.uuidString.lowercased(),
                       value["turnID"] as? String == context.turnID.uuidString.lowercased(),
                       value["modelID"] as? String == context.modelID,
-                      value["trigger"] as? String == "after_browser_tabs",
                       let expiryText = value["expiresAt"] as? String, expiryText.utf8.count == 24,
                       let expiry = timestampFormatter().date(from: expiryText),
                       timestampFormatter().string(from: expiry) == expiryText,
@@ -67,14 +76,14 @@ enum ClaudeRequestCapture {
                 // Default-disabled and mismatched arms do not parse history,
                 // re-encode the catalog or allocate a raw diagnostic payload.
                 guard let canonical = String(data: request.continuationRequest, encoding: .utf8),
-                      let callID = postBrowserTabsCallID(request.continuationRequest),
+                      let callID = precedingCallID(request.continuationRequest, trigger: trigger),
                       let catalogData = try? catalogEncoder().encode(request.toolCatalogDiagnostic),
                       let catalog = try? JSONSerialization.jsonObject(with: catalogData) else { return nil }
                 // Monotonic elapsed time prevents an expiry extension while the
                 // synchronous file claim/write is in flight, including clock changes.
                 deadline = started + .milliseconds(Int64(expiry.timeIntervalSince(now) * 1_000))
                 let record: [String: Any] = [
-                    "schemaVersion": 1, "purpose": purpose, "stage": "pre_send",
+                    "schemaVersion": 1, "purpose": trigger.purpose, "stage": "pre_send",
                     "submissionVerified": false, "automaticReplay": false,
                     "nonce": nonce.uuidString.lowercased(), "expiresAt": expiryText,
                     "capturedAt": timestampFormatter().string(from: now), "provider": "claude",
@@ -85,7 +94,7 @@ enum ClaudeRequestCapture {
                     "preparationID": context.preparationID.uuidString.lowercased(),
                     "inferenceID": context.inferenceID.uuidString.lowercased(),
                     "sessionToken": context.sessionToken.uuidString.lowercased(), "modelID": context.modelID,
-                    "trigger": "after_browser_tabs", "triggerCallID": callID,
+                    "trigger": trigger.rawValue, "triggerCallID": callID,
                     "canonicalRequest": canonical,
                     "canonicalRequestSHA256": sha256(request.continuationRequest),
                     "canonicalRequestUTF8Bytes": request.continuationRequest.count,
@@ -101,7 +110,7 @@ enum ClaudeRequestCapture {
     /// Select only the immediate native call/output suffix. Historical mentions,
     /// duplicated call IDs, later input and parallel/intervening calls cannot
     /// claim the arm. This is diagnostic selection, never execution evidence.
-    private static func postBrowserTabsCallID(_ data: Data) -> String? {
+    private static func precedingCallID(_ data: Data, trigger: Trigger) -> String? {
         guard APIModelCorrectionJSON.isUnambiguous(data),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let input = value["input"] as? [[String: Any]], input.count >= 2,
@@ -109,7 +118,7 @@ enum ClaudeRequestCapture {
               let callID = output["call_id"] as? String, !callID.isEmpty, callID.utf8.count <= 256,
               output["output"] is String || output["output"] is [[String: Any]] else { return nil }
         let call = input[input.count - 2]
-        guard call["type"] as? String == "function_call", call["name"] as? String == "browser_tabs",
+        guard call["type"] as? String == "function_call", call["name"] as? String == trigger.callName,
               call["call_id"] as? String == callID,
               input.filter({ $0["call_id"] as? String == callID }).count == 2 else { return nil }
         return callID

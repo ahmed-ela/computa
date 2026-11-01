@@ -1208,7 +1208,14 @@ function websiteModelPickerState(provider) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
-      if (upgrades) continue;
+      // Claude's observed Fable rows advertise a separate credits purchase.
+      // Only exact visible purchase controls inside this option exclude it;
+      // unrelated page text or another row cannot change model eligibility.
+      const creditsRequired = provider === 'claude'
+        && [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
+          .some(node => visible(node) && /^Buy credits$/.test(
+            websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
+      if (upgrades || creditsRequired) continue;
       const choice = family(option);
       // Gemini also selects a separate thinking-effort row in this menu.
       // Its indicator neither proves nor invalidates the model selection.

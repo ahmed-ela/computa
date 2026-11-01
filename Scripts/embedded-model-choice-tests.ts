@@ -130,6 +130,34 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(picker.trigger.clicks).toBeLessThanOrEqual(provider === 'chatgpt' ? 3 : 2);
     });
 
+    if (provider === 'claude') test('discovery excludes credits-gated rows without excluding enabled Opus choices', async () => {
+      const { f, picker } = setup();
+      const fable = picker.add(picker.menu, 'Fable 5.1', 'For your toughest challenges');
+      fable.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('BUTTON', {}, 'Buy credits'));
+      const olderFable = picker.add(picker.nested, 'Fable 5', '');
+      olderFable.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('BUTTON', {}, 'Buy credits'));
+      const opus = picker.add(picker.menu, 'Opus 5.5', 'For complex work and everyday tasks');
+      const olderOpus = picker.add(picker.nested, 'Opus 4.6', '');
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+      expect(result.modelChoices.some((item: any) => item.label.startsWith('Fable '))).toBe(false);
+      expect([fable, olderFable, opus, olderOpus].every(row => row.clicks === 0)).toBe(true);
+      expect((await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') })).error).toBe('model_unavailable');
+      expect(fable.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('credits exclusion is exact, visible and scoped to its own model row', async () => {
+      const { f, picker } = setup();
+      picker.menu.append(new Node('BUTTON', {}, 'Buy credits'));
+      const opus = picker.add(picker.menu, 'Opus 5.5', 'This description mentions Buy credits without requiring it');
+      opus.append(new Node('SPAN', {}, 'Requires usage credits'), new Node('SPAN', { hidden: '' }, 'Buy credits'));
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+      expect(result.modelChoices).toContainEqual(choice('Sonnet 5.5'));
+      expect(opus.clicks).toBe(0);
+    });
+
     if (provider === 'chatgpt') test('discovery resolves the newest plain family and never advertises Sol or a literal Latest', async () => {
       const { f, picker } = setup(); picker.selected('GPT-5.6 Sol');
       const sol = picker.familyOptions[1], newest = picker.familyOptions[0];

@@ -45,6 +45,10 @@ final class AppState {
     }
     #endif
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
+    @ObservationIgnored private var startupWebsiteModelProviders: [String] = []
+    @ObservationIgnored private var startupWebsiteModelAttemptedProviders: Set<String> = []
+    @ObservationIgnored private var startupWebsiteModelRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var startupWebsiteModelIdleObservation: UUID?
     @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
@@ -291,10 +295,9 @@ final class AppState {
         else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false, preserveUnusedRoot: preserveUnusedRoot) }
     }
 
-    /// Called after the privileged WebUI is ready and its background render host
-    /// is attached. Saved choices are immediately usable; only providers with
-    /// no saved choices need startup discovery. An explicit refresh can replace
-    /// the saved catalog without adding provider page loads on every launch.
+    /// Keep missing-provider discovery, then revalidate only the selected
+    /// provider's cached menu. Other cached providers wait for selection demand.
+    /// Each provider has at most one automatic attempt per launch, while idle.
     func refreshWebsiteModelsIfNeeded() {
         guard !cookieMaintenanceOnlyLaunch, !didStartWebsiteModelDiscovery,
               runtime != nil || websiteModelDiscovery != nil else { return }
@@ -303,9 +306,57 @@ final class AppState {
         let missing = WebsiteModelCatalog.providers.filter { provider in
             !websiteModelChoices.contains { $0.provider == provider }
         }
-        guard !missing.isEmpty else { return }
-        Task { @MainActor [weak self] in
-            await self?.refreshWebsiteModels(providers: missing, retryBlocked: false)
+        startupWebsiteModelProviders = missing.filter { !startupWebsiteModelAttemptedProviders.contains($0) }
+        requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
+        scheduleStartupWebsiteModelRefresh()
+    }
+
+    private func requestAutomaticWebsiteModelRefresh(for modelID: String) {
+        guard didStartWebsiteModelDiscovery, !cookieMaintenanceOnlyLaunch, !isShuttingDown,
+              let provider = WebsiteModelCatalog.selection(for: modelID)?.provider,
+              !startupWebsiteModelAttemptedProviders.contains(provider),
+              !startupWebsiteModelProviders.contains(provider) else { return }
+        startupWebsiteModelProviders.append(provider)
+        scheduleStartupWebsiteModelRefresh()
+    }
+
+    private func scheduleStartupWebsiteModelRefresh() {
+        guard didStartWebsiteModelDiscovery, !isShuttingDown,
+              !startupWebsiteModelProviders.isEmpty, startupWebsiteModelRefreshTask == nil,
+              startupWebsiteModelIdleObservation == nil else { return }
+        let observation = UUID()
+        startupWebsiteModelIdleObservation = observation
+        let idle = withObservationTracking {
+            humanWebsiteRecoveryIsIdle && !websiteModelsRefreshing
+        } onChange: { [weak self] in
+            // Observation fires before the mutation. The actor hop reads the
+            // resulting state and a generation rejects superseded callbacks.
+            Task { @MainActor [weak self] in
+                guard let self, self.startupWebsiteModelIdleObservation == observation else { return }
+                self.startupWebsiteModelIdleObservation = nil
+                self.scheduleStartupWebsiteModelRefresh()
+            }
+        }
+        guard idle else { return }
+        startupWebsiteModelIdleObservation = nil
+        startupWebsiteModelRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.startupWebsiteModelRefreshTask = nil
+                self.scheduleStartupWebsiteModelRefresh()
+            }
+            guard !Task.isCancelled, !self.isShuttingDown, self.humanWebsiteRecoveryIsIdle,
+                  !self.websiteModelsRefreshing, !self.startupWebsiteModelProviders.isEmpty else { return }
+            // Claim one pending demand. The discovery entry below spends its
+            // launch attempt only after its current idle guard succeeds.
+            let provider = self.startupWebsiteModelProviders.removeFirst()
+            await self.refreshWebsiteModels(providers: [provider], retryBlocked: false)
+            // Activity may begin before the refresh task enters discovery. Only
+            // an actual attempt spends the launch budget; untouched demand waits.
+            if !self.isShuttingDown, !self.startupWebsiteModelAttemptedProviders.contains(provider),
+               !self.startupWebsiteModelProviders.contains(provider) {
+                self.startupWebsiteModelProviders.insert(provider, at: 0)
+            }
         }
     }
 
@@ -397,18 +448,23 @@ final class AppState {
         websiteModelRefreshGeneration = generation
         websiteModelsRefreshing = true
         updateWebsitePrewarming()
-        websiteModelsError = nil
+        // A launch revalidates providers one at a time. Keep prior automatic
+        // failures visible while later providers succeed; an explicit refresh
+        // retains its existing fresh error aggregation semantics.
+        let priorErrors = intents.allSatisfy { !$0.retryBlocked }
+            ? websiteModelsError?.components(separatedBy: "\n") ?? [] : []
+        websiteModelsError = priorErrors.isEmpty ? nil : priorErrors.joined(separator: "\n")
         let refresh = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
-            var errors: [String] = []
+            var errors = priorErrors
             while !self.websiteModelRefreshIntents.isEmpty {
                 guard !Task.isCancelled, !self.isShuttingDown else { break }
                 let intent = self.websiteModelRefreshIntents.removeFirst()
                 self.websiteModelRefreshCurrentIntent = intent
                 defer { self.websiteModelRefreshCurrentIntent = nil }
                 let provider = intent.provider
-                let manual = intent.retryBlocked && intent.candidate == nil
-                guard !manual || self.canRefreshWebsiteModels else { continue }
+                let requiresIdle = intent.candidate == nil
+                guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
                 if let candidate = intent.candidate {
                     guard self.recoveryCandidateIsCurrent(candidate) else {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
@@ -418,6 +474,10 @@ final class AppState {
                     self.browserSession.recordHumanVerificationRecovery(candidate, phase: .probing, reason: .healthyHumanDocument)
                 }
                 do {
+                    // A real manual/recovery attempt also satisfies the launch
+                    // budget, so a pending automatic probe cannot duplicate it.
+                    self.startupWebsiteModelProviders.removeAll { $0 == provider }
+                    self.startupWebsiteModelAttemptedProviders.insert(provider)
                     #if DEBUG
                     self.websiteModelRefreshObserverForTesting?(provider, intent.retryBlocked)
                     #endif
@@ -427,7 +487,7 @@ final class AppState {
                         var validator: (@MainActor () -> Bool)?
                         if let candidate = intent.candidate {
                             validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
-                        } else if manual {
+                        } else if requiresIdle {
                             // This existing validator runs before page creation
                             // and immediately before any saved gate is cleared.
                             validator = { [weak self] in self?.canRefreshWebsiteModels == true }
@@ -437,7 +497,7 @@ final class AppState {
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
-                    guard !manual || self.canRefreshWebsiteModels else { continue }
+                    guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
                     // Injection is not checkpoint-clearance authority. Production
                     // discovery clears only behind its cleanup/identity validator.
                     if let candidate = intent.candidate,
@@ -446,6 +506,7 @@ final class AppState {
                         continue
                     }
                     try WebsiteModelCatalog.validateObserved(choices, provider: provider)
+                    errors.removeAll { $0.hasPrefix(WebsiteModelCatalog.providerLabel(provider) + ": ") }
                     self.websiteModelChoices.removeAll { $0.provider == provider }
                     self.websiteModelChoices.append(contentsOf: choices)
                     WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
@@ -517,6 +578,7 @@ final class AppState {
     func selectTask(_ id: AgentTask.ID?) {
         taskSelectionRevision &+= 1
         selectedTaskID = id
+        requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
         updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
         reviewGeneration &+= 1
@@ -722,6 +784,7 @@ final class AppState {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
+        requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         return true
     }
@@ -733,6 +796,7 @@ final class AppState {
               canChangeModel(for: taskID)
         else { return false }
         tasks[index].model = modelID
+        requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         contextUsageByTask.removeValue(forKey: taskID)
         compactionStateByTask.removeValue(forKey: taskID)
@@ -1228,6 +1292,9 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        startupWebsiteModelIdleObservation = nil
+        startupWebsiteModelProviders.removeAll()
+        startupWebsiteModelRefreshTask?.cancel()
         browserSession.observeGeminiCookieShutdownRequested()
         queuedDispatchProfiles.removeAll()
         updateWebsitePrewarming()

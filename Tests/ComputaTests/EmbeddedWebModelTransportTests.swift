@@ -4291,6 +4291,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testAutomaticDiscoveryOfSavedBlockedProvidersCreatesNoOwnedPage() async throws {
+        for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini, .groq] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+            defer { fixture.shutdown() }
+            fixture.browser.recordHumanVerificationRequired(provider: provider.rawValue)
+            let checkpoint = fixture.browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
+            for _ in 0..<3 {
+                do {
+                    _ = try await fixture.transport.discoverModels(provider: provider.rawValue, retryBlocked: false)
+                    XCTFail("Automatic catalog demand must not bypass a saved provider block")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(provider))
+                }
+            }
+            XCTAssertTrue(fixture.createdTabs.isEmpty, "A blocked catalog request must not create/load an owned provider page")
+            XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs[provider.rawValue], checkpoint)
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testProviderGateStopsNewTasksAndDiscoveryUntilExplicitSuccessfulRefresh() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
         defer { fixture.shutdown() }
@@ -4632,7 +4652,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(finished["state"] as? String, "failed")
         do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]); XCTFail("A cleanup-only quota observation must gate future tasks") }
         catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude)) }
-        XCTAssertEqual(fixture.createdTabs.count, 1)
+        for _ in 0..<2 {
+            do {
+                _ = try await fixture.transport.discoverModels(provider: "claude", retryBlocked: false)
+                XCTFail("A quota block must also reject automatic catalog revalidation")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+            }
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 1, "Automatic demand cannot load another page or retry uncertain cleanup")
         XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty, "Quota retains the existing memory-only policy")
         for variable in ["fixtureInputCount", "fixtureFocusCount", "fixtureQuotaClicks"] {
             let value = try await evaluate(view, "return window.\(variable);") as? Int
