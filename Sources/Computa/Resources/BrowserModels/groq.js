@@ -79,6 +79,7 @@ function computaProviderCore(request, provider, origin, actions) {
 
 // Groq chat is a fresh explicit-clear session, never a temporary conversation.
 // The native transport owns lifecycle receipts, document generations and URLs.
+let groqUserCountDiagnostic = null;
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'modelDiagnostic', 'verifyModel',
     'prepare', 'insert', 'sendReady', 'submit', 'stop', 'clearTranscript', 'observeClearTranscript'];
@@ -109,11 +110,29 @@ try {
     && !['meta-llama/llama-prompt-guard-2-22m', 'meta-llama/llama-prompt-guard-2-86m',
       'openai/gpt-oss-safeguard-20b'].includes(choice.key)
     && !/(?:^|\/)(?:whisper|distil-whisper|playai-tts|canopylabs\/orpheus)(?:[-/]|$)/i.test(choice.key);
+  function failUserCount(branch, users, answers) {
+    // Snapshot the arrays from this rejected evaluation; no transcript reread.
+    // Visibility is diagnostic only and unknown if its getters cannot be read.
+    try {
+      const visibleCount = nodes => { try { return nodes.filter(c.visible).length; } catch { return null; } };
+      const expected = input.expectedUserCounts;
+      const validExpected = Array.isArray(expected) && (expected.length === 1 && [0, 1].includes(expected[0])
+        || expected.length === 2 && expected[0] === 0 && expected[1] === 1);
+      const expectedUserCounts = validExpected ? [...expected] : null;
+      const submitted = state.submitted === true, adapterFirstBound = !!state.first;
+      groqUserCountDiagnostic = { kind: 'groq_user_count_v1', action: input.action, branch,
+        userCount: users.length, answerCount: answers.length,
+        visibleUserCount: visibleCount(users), visibleAnswerCount: visibleCount(answers),
+        expectedUserCounts, submitted, adapterFirstBound };
+    } catch { groqUserCountDiagnostic = null; }
+    c.fail('conversation_changed', 'user_count');
+  }
   function transcript() {
     const users = c.nodes(document, '[class*="group/input"]', 64).filter(node => token(node, 'group/input'));
     const answers = c.nodes(document, '.font-inter', 64).filter(node =>
       node.parentElement && token(node.parentElement, 'font-normal') && token(node.parentElement, 'text-base'));
-    if (users.length > 1 || answers.length > 1) c.fail('conversation_changed', 'user_count');
+    if (users.length > 1 || answers.length > 1)
+      failUserCount(users.length > 1 ? 'multiple_users' : 'multiple_answers', users, answers);
     let first = null, answer = null, block = null;
     if (users.length) {
       const root = users[0], wrappers = [...root.children].filter(node => node.tagName === 'DIV'
@@ -141,7 +160,7 @@ try {
         if (block.parentElement !== parent || [...parent.children].indexOf(block) <= [...parent.children].indexOf(root)
           || !c.visible(answer) || !c.visible(block)) c.fail('conversation_changed', 'response_scope');
       }
-    } else if (answers.length) c.fail('conversation_changed', 'user_count');
+    } else if (answers.length) failUserCount('answer_without_user', users, answers);
     return { users, answers, first, answer, block };
   }
   function composer() {
@@ -322,7 +341,8 @@ try {
   if (!Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length < 1 || input.expectedUserCounts.length > 2
     || input.expectedUserCounts.some(value => !Number.isInteger(value) || value < 0 || value > 1)
     || input.expectedUserCounts.length === 2 && (input.expectedUserCounts[0] !== 0 || input.expectedUserCounts[1] !== 1)
-    || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
+    || !input.expectedUserCounts.includes(initial.t.users.length))
+    failUserCount('expected_count', initial.t.users, initial.t.answers);
   if (state.submitted && !initial.output.modelEvidence) c.fail('model_unverified');
   if (initial.t.first) {
     const first = initial.t.first, marker = input.expectedFirstUserMarker, markerLine = `Computa session marker: ${marker}`;
@@ -456,6 +476,8 @@ try {
   // cannot bind the newly appended user body or prove response completion.
   return { ...initial.output, submitted: true };
 } catch (error) {
-  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}) };
+  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.error === 'conversation_changed' && error.detail === 'user_count' && groqUserCountDiagnostic
+      ? { groqUserCountDiagnostic } : {}) };
   throw error;
 }

@@ -413,6 +413,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var submittedUTF8Count = 0
         var usesSubmissionOwnership: Bool { !isDiscovery && (provider == .gemini || provider == .chatgpt) }
         var usesBoundedTurn: Bool { usesSubmissionOwnership && provider == .chatgpt }
+        var loggedGroqUserCountDiagnostic = false
         var confirmedUsers = 0
         var pendingSubmission = false
         var baseline = 0
@@ -3086,6 +3087,48 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+    /// A rejection-only projection of the exact Groq count decision. It never
+    /// supplies lineage, response, retry or cleanup authority.
+    static func sanitizedGroqUserCountDiagnostic(_ raw: Any?, provider: Provider, action: String) -> String? {
+        let keys: Set<String> = ["kind", "action", "branch", "userCount", "answerCount", "visibleUserCount",
+            "visibleAnswerCount", "expectedUserCounts", "submitted", "adapterFirstBound"]
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel",
+            "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
+        guard provider == .groq, actions.contains(action), let value = raw as? [String: Any],
+              Set(value.keys) == keys, value["kind"] as? String == "groq_user_count_v1",
+              value["action"] as? String == action, let branch = value["branch"] as? String,
+              ["multiple_users", "multiple_answers", "answer_without_user", "expected_count"].contains(branch),
+              let users = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...64).contains(users),
+              let answers = ComputerToolArgumentContract.exactInt64(value["answerCount"]), (0...64).contains(answers),
+              let submitted = firstUserDiagnosticBool(value["submitted"]),
+              let bound = firstUserDiagnosticBool(value["adapterFirstBound"]), !bound || submitted else { return nil }
+        var safe: [String: Any] = ["kind": "groq_user_count_v1", "action": action, "branch": branch,
+            "userCount": users, "answerCount": answers, "submitted": submitted, "adapterFirstBound": bound]
+        for (key, total) in [("visibleUserCount", users), ("visibleAnswerCount", answers)] {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let visible = ComputerToolArgumentContract.exactInt64(value[key]), (0...total).contains(visible) else { return nil }
+            safe[key] = visible
+        }
+        var expected: [Int64]?
+        if value["expectedUserCounts"] is NSNull { safe["expectedUserCounts"] = NSNull() }
+        else {
+            guard let rawCounts = value["expectedUserCounts"] as? [Any], (1...2).contains(rawCounts.count) else { return nil }
+            let counts = rawCounts.compactMap { ComputerToolArgumentContract.exactInt64($0) }
+            guard counts.count == rawCounts.count, counts == [0] || counts == [1] || counts == [0, 1] else { return nil }
+            expected = counts; safe["expectedUserCounts"] = counts
+        }
+        switch branch {
+        case "multiple_users": guard users > 1 else { return nil }
+        case "multiple_answers": guard users <= 1, answers > 1 else { return nil }
+        case "answer_without_user": guard users == 0, answers == 1 else { return nil }
+        default:
+            guard users <= 1, answers <= 1, users != 0 || answers == 0,
+                  expected == nil || expected?.contains(users) == false else { return nil }
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     static func sanitizedUserCountDiagnostic(_ raw: Any?, action: String) -> String? {
         let flags = ["topFrame", "urlMatches", "originMatches", "ownerMatches", "expectedCountMatches"]
         let baseKeys = Set(flags + ["kind", "stage", "action", "entryUserCount", "currentUserCount", "expectedUserCounts"])
@@ -5147,6 +5190,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
         let userCountDiagnostic = Self.sanitizedUserCountDiagnostic(observed.removeValue(forKey: "userCountDiagnostic"), action: action)
+        let groqUserCountDiagnostic = Self.sanitizedGroqUserCountDiagnostic(
+            observed.removeValue(forKey: "groqUserCountDiagnostic"), provider: provider, action: action)
         if provider == .chatgpt, action == "inspect" {
             session.completionMatchDiagnostic = completionDiagnostic
         }
@@ -5263,6 +5308,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
+                if provider == .groq, error == "conversation_changed", observed["detail"] as? String == "user_count",
+                   !session.loggedGroqUserCountDiagnostic, let groqUserCountDiagnostic {
+                    session.loggedGroqUserCountDiagnostic = true
+                    Self.inspectionLog.error("userCountDiagnostic provider=groq \(groqUserCountDiagnostic, privacy: .public)")
+                }
                 if provider == .chatgpt, observed["detail"] as? String == "user_count", let userCountDiagnostic {
                     #if DEBUG
                     userCountDiagnosticObserverForTesting?(userCountDiagnostic)

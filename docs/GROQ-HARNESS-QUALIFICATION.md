@@ -4,18 +4,19 @@
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 359 (0.8.0) is installed from `92b4b3e`. Its fresh GPT-OSS 120B marker
-verified the one-shot Send reveal, then failed initial first-message ownership
-before binding its fingerprint. Cleanup is unconfirmed and the page is retained;
-live support remains unqualified. Direct website probes
-below are not harness qualification.
+Build 366 (0.8.0) is installed from `27c3f9c`. Its fresh GPT-OSS 120B marker
+passed submission and an initial first-user binding observation, then failed a
+later `user_count` ownership check. No completed answer was accepted; cleanup
+is unconfirmed. The exact failing count predicate remains unknown, and live
+support remains unqualified. Direct website probes below are not harness
+qualification.
 
 The observed menu contains these general chat choices:
 
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build359: initial message ownership failed |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build366: count verification failed after initial binding |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -358,5 +359,59 @@ unrelated optional rendering experiment's unavailable display precondition;
 the Groq test sources and production sources stayed unchanged throughout.
 Log SHA-256:
 `938ccf993201024eeb224f8fa326143029cf59dbe6f6020ed8952dbd326de4f4`.
-Installed harness qualification remains pending; this candidate is not a public
-release.
+The installed check below remains a failed qualification; this candidate is not
+a public release.
+
+
+## Fresh installed check — build366
+
+Case `groq-gptoss120b-marker366-a` on source `27c3f9c` failed in 2,469 ms
+with `website_ownership_unverified` / `user_count`. It had one inference,
+zero tool calls and no accepted final answer. Selected GPT OSS 120B and Send
+acknowledgment were recorded before the failure.
+
+The submission journal initially contained an empty first-user fingerprint.
+A later completed native inspection recorded one user, sequence one,
+`pending=false`, `ownershipPending=false`, zero responses and `busy=true`.
+Together with the exact built source's validation order, this supports an
+initial first-user binding before the count rejection. The later fingerprint
+value was not persisted. The finite inspection is correlated by exact app PID
+and time window rather than its own task/session identifiers; it is not a
+standalone fingerprint receipt.
+
+The adapter uses `user_count` for multiple user nodes, multiple answer nodes,
+an answer without a user, or a mismatch with the expected user count. This
+build did not record the failing branch or its counts. The result therefore
+does not establish duplication, a missing row, a selector mismatch or any
+particular website rendering cause.
+
+The exact cleanup receipt was saved with outcome `unconfirmed` and reason
+`cleanup_unverified`. No rejected-reply payload existed because no completed
+reply reached format parsing; the unused task-bound diagnostic arm was archived
+separately. That retirement does not confirm provider-page cleanup. The prepared
+full workflow was not started because the marker did not pass.
+
+The native trace, model/source/process identity, journals, UI and finite logs
+are retained under `evidence/groq-gptoss120b-marker366-a/`. Its
+`independent-failure-review-v2.json` corrects the earlier report's assumption
+that an empty dispatch-time fingerprint meant binding never succeeded; both
+reports are preserved. This failure does not weaken the full-prompt ownership,
+response, one-shot action or transcript-clearing requirements.
+
+## Count-rejection diagnostics — candidate build367
+
+The next candidate preserves each original rejection and adds a finite snapshot
+of that exact decision: multiple users, multiple answers, an answer without a
+user, or an unexpected user count. Total and visible counts come from the same
+already-collected arrays; visibility failures are recorded as unknown. The
+native transport accepts only a bounded, exact-field projection and logs it at
+most once per owned session after its existing callback ownership checks.
+No page text, second DOM query, retry, extended wait or new action is introduced.
+The diagnostic cannot grant response or cleanup authority.
+
+The Groq and version JavaScript suites passed 71 tests with 945 assertions.
+All 27 native Groq tests passed in 58.163 seconds, including finite-field and
+branch consistency checks; sources were unchanged during the run. Native log
+SHA-256: `9d82b50c57bd959b15a734f9d3c1828a0780012b54a72e9cacfd12b82d06645e`.
+A fresh installed diagnostic run remains pending. The build366 count mismatch
+is still unresolved.

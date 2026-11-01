@@ -1583,6 +1583,77 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqUserCountDiagnosticIsFiniteBranchBoundAndRejectsPrivateOrMalformedFields() throws {
+        let base: [String: Any] = ["kind": "groq_user_count_v1", "action": "inspect", "branch": "multiple_users",
+            "userCount": 2, "answerCount": 0, "visibleUserCount": 1, "visibleAnswerCount": 0,
+            "expectedUserCounts": [1], "submitted": true, "adapterFirstBound": true]
+        func project(_ value: [String: Any], provider: EmbeddedWebModelTransport.Provider = .groq,
+                     action: String = "inspect") -> String? {
+            EmbeddedWebModelTransport.sanitizedGroqUserCountDiagnostic(value, provider: provider, action: action)
+        }
+        let encoded = try XCTUnwrap(project(base))
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 512)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(decoded.keys), Set(base.keys))
+        XCTAssertEqual(decoded["userCount"] as? Int, 2)
+        XCTAssertEqual(decoded["visibleUserCount"] as? Int, 1, "Hidden duplicates remain distinguishable")
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .claude, .gemini] {
+            XCTAssertNil(project(base, provider: provider))
+        }
+        XCTAssertNil(project(base, action: "submit"))
+        XCTAssertNil(project(base, action: "PRIVATE"))
+        for (key, badValue): (String, Any) in [("kind", "PRIVATE"), ("action", "PRIVATE"), ("branch", "PRIVATE"),
+            ("userCount", true), ("userCount", -1), ("userCount", 65), ("answerCount", 0.5),
+            ("visibleUserCount", 3), ("visibleAnswerCount", 1), ("visibleUserCount", false),
+            ("expectedUserCounts", []), ("expectedUserCounts", [1, 0]), ("expectedUserCounts", [1, 1]),
+            ("expectedUserCounts", [true]), ("expectedUserCounts", [0, 1, 2]), ("expectedUserCounts", ["PRIVATE"]),
+            ("submitted", 1), ("submitted", false), ("adapterFirstBound", NSNull()), ("text", "PRIVATE"),
+            ("branch", String(repeating: "PRIVATE", count: 1_000))] {
+            var bad = base; bad[key] = badValue
+            XCTAssertNil(project(bad), key)
+        }
+        for key in base.keys {
+            var missing = base; missing.removeValue(forKey: key); XCTAssertNil(project(missing), key)
+        }
+        for expected: Any in [[0], [1], [0, 1], NSNull()] {
+            var valid = base; valid["expectedUserCounts"] = expected
+            XCTAssertNotNil(project(valid))
+        }
+        var unknown = base; unknown["visibleUserCount"] = NSNull(); unknown["visibleAnswerCount"] = NSNull()
+        let preserved = try XCTUnwrap(project(unknown))
+        let unknownFields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(preserved.utf8)) as? [String: Any])
+        XCTAssertTrue(unknownFields["visibleUserCount"] is NSNull)
+        XCTAssertTrue(unknownFields["visibleAnswerCount"] is NSNull)
+        var maximum = base
+        maximum["userCount"] = 64; maximum["answerCount"] = 64
+        maximum["visibleUserCount"] = 64; maximum["visibleAnswerCount"] = 64
+        maximum["expectedUserCounts"] = [0, 1]; maximum["action"] = "observeClearTranscript"
+        XCTAssertLessThanOrEqual(try XCTUnwrap(project(maximum, action: "observeClearTranscript")).utf8.count, 512)
+    }
+
+    func testGroqUserCountDiagnosticPreservesExactRejectionBranchSemantics() throws {
+        func value(_ branch: String, users: Int, answers: Int, expected: Any = [1]) -> [String: Any] {
+            ["kind": "groq_user_count_v1", "action": "inspect", "branch": branch,
+             "userCount": users, "answerCount": answers, "visibleUserCount": users, "visibleAnswerCount": answers,
+             "expectedUserCounts": expected, "submitted": true, "adapterFirstBound": true]
+        }
+        func accepts(_ raw: [String: Any]) -> Bool {
+            EmbeddedWebModelTransport.sanitizedGroqUserCountDiagnostic(raw, provider: .groq, action: "inspect") != nil
+        }
+        XCTAssertTrue(accepts(value("multiple_users", users: 2, answers: 2)))
+        XCTAssertTrue(accepts(value("multiple_answers", users: 1, answers: 2)))
+        XCTAssertTrue(accepts(value("answer_without_user", users: 0, answers: 1)))
+        XCTAssertTrue(accepts(value("expected_count", users: 0, answers: 0)))
+        XCTAssertTrue(accepts(value("expected_count", users: 1, answers: 0, expected: NSNull())))
+        for invalid in [value("multiple_users", users: 1, answers: 2),
+            value("multiple_answers", users: 2, answers: 2), value("multiple_answers", users: 1, answers: 1),
+            value("answer_without_user", users: 1, answers: 1), value("answer_without_user", users: 0, answers: 2),
+            value("expected_count", users: 0, answers: 1), value("expected_count", users: 2, answers: 0),
+            value("expected_count", users: 1, answers: 1), value("expected_count", users: 0, answers: 0, expected: [0, 1])] {
+            XCTAssertFalse(accepts(invalid))
+        }
+    }
+
     func testUserCountDiagnosticProjectionIsFiniteAndRejectsForeignOrMalformedFields() throws {
         let valid: [String: Any] = ["kind": "chatgpt_user_count_v1", "stage": "action_precheck", "action": "inspect",
             "entryUserCount": 1, "currentUserCount": 1, "expectedUserCounts": [1],

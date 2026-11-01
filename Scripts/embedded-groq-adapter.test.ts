@@ -472,6 +472,107 @@ describe('Groq fixed fresh-session adapter', () => {
     expect((await unclaimed.run('inspect', { expectedUserCounts: [1], allowFirstUserBinding: true })).error).toBe('conversation_changed');
   });
 
+  test('user-count diagnostics identify the original branch and hidden duplicates without actions or raw text', async () => {
+    const answer = (f: ReturnType<typeof groqFixture>) => {
+      const parent = new f.Node('DIV', { class: 'font-normal text-base' });
+      const child = new f.Node('DIV', { class: 'font-inter' }, 'PRIVATE ANSWER'); parent.append(child); f.body.append(parent); return child;
+    };
+    const scenarios = [
+      { branch: 'multiple_users', users: 2, answers: 0, visibleUsers: 1, visibleAnswers: 0,
+        mutate: (f: ReturnType<typeof groqFixture>) => {
+          f.body.append(new f.Node('DIV', { class: 'group/input' }, 'PRIVATE USER'));
+          f.body.append(new f.Node('DIV', { class: 'group/input', hidden: '' }, 'PRIVATE HIDDEN USER'));
+        } },
+      { branch: 'multiple_answers', users: 0, answers: 2, visibleUsers: 0, visibleAnswers: 1,
+        mutate: (f: ReturnType<typeof groqFixture>) => { answer(f); answer(f).setAttribute('hidden', ''); } },
+      { branch: 'answer_without_user', users: 0, answers: 1, visibleUsers: 0, visibleAnswers: 1,
+        mutate: (f: ReturnType<typeof groqFixture>) => { answer(f); } },
+    ];
+    for (const scenario of scenarios) {
+      const f = groqFixture(); await f.select(); scenario.mutate(f);
+      let userQueries = 0, answerQueries = 0;
+      const query = f.document.querySelectorAll;
+      f.document.querySelectorAll = (selector: string) => {
+        if (selector === '[class*="group/input"]') userQueries++;
+        if (selector === '.font-inter') answerQueries++;
+        return query(selector);
+      };
+      const result = await f.run();
+      expect(result).toEqual({ error: 'conversation_changed', detail: 'user_count', groqUserCountDiagnostic: {
+        kind: 'groq_user_count_v1', action: 'inspect', branch: scenario.branch,
+        userCount: scenario.users, answerCount: scenario.answers,
+        visibleUserCount: scenario.visibleUsers, visibleAnswerCount: scenario.visibleAnswers,
+        expectedUserCounts: [0], submitted: false, adapterFirstBound: false } });
+      expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      expect([userQueries, answerQueries]).toEqual([1, 1]);
+      expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0); expect(f.f.pickerOpens).toBe(1);
+    }
+  });
+
+  test('user-count diagnostic distinguishes a bound missing row from an allowed initial render gap', async () => {
+    const f = groqFixture(); f.f.delayResponse = true; await f.submit();
+    const user = f.f.user; user.remove();
+    const pending = await f.run();
+    expect(pending.error).toBeUndefined(); expect(pending.userCount).toBe(0);
+    expect(pending.groqUserCountDiagnostic).toBeUndefined();
+    f.f.turn.append(user); user.connected = true;
+    const bound = await f.run(); expect(bound.firstUserVerified).toBe(true);
+    user.remove();
+    expect(await f.run()).toEqual({ error: 'conversation_changed', detail: 'user_count', groqUserCountDiagnostic: {
+      kind: 'groq_user_count_v1', action: 'inspect', branch: 'expected_count', userCount: 0, answerCount: 0,
+      visibleUserCount: 0, visibleAnswerCount: 0, expectedUserCounts: [1], submitted: true, adapterFirstBound: true } });
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('user-count diagnostics keep malformed expected counts unknown and preserve original error priority', async () => {
+    for (const expectedUserCounts of [null, [], [1, 0], [1, 1], [false], [0, 1, 2], ['PRIVATE'], [1]]) {
+      const f = groqFixture(); await f.select();
+      const result = await f.run('inspect', { expectedUserCounts });
+      expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('user_count');
+      expect(result.groqUserCountDiagnostic.branch).toBe('expected_count');
+      expect(result.groqUserCountDiagnostic.expectedUserCounts).toEqual(expectedUserCounts?.length === 1 && expectedUserCounts[0] === 1 ? [1] : null);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE'); expect(f.f.sendCount).toBe(0);
+    }
+    const f = groqFixture(); await f.select();
+    for (let i = 0; i < 2; i++) {
+      f.body.append(new f.Node('DIV', { class: 'group/input' }));
+      const parent = new f.Node('DIV', { class: 'font-normal text-base' }); parent.append(new f.Node('DIV', { class: 'font-inter' })); f.body.append(parent);
+    }
+    expect((await f.run()).groqUserCountDiagnostic.branch).toBe('multiple_users');
+    expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('user-count diagnostic getter failures stay unknown and cannot replace the original rejection', async () => {
+    const f = groqFixture(); await f.select();
+    const one = new f.Node('DIV', { class: 'group/input' }), two = new f.Node('DIV', { class: 'group/input' });
+    f.body.append(one, two);
+    one.getClientRects = () => { throw new Error('PRIVATE VISIBILITY'); };
+    const result = await f.run();
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('user_count');
+    expect(result.groqUserCountDiagnostic.userCount).toBe(2);
+    expect(result.groqUserCountDiagnostic.visibleUserCount).toBeNull();
+    expect(result.groqUserCountDiagnostic.visibleAnswerCount).toBe(0);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    Object.defineProperty(f.world.__computaGroqFreshSessionV1, 'first', { get() { throw new Error('PRIVATE BINDING'); } });
+    expect(await f.run()).toEqual({ error: 'conversation_changed', detail: 'user_count' });
+    expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('user-count diagnostic counts are the rejected arrays, not a second DOM search', async () => {
+    const f = groqFixture(); await f.select();
+    const one = new f.Node('DIV', { class: 'group/input' }), two = new f.Node('DIV', { class: 'group/input' });
+    f.body.append(one, two);
+    const rects = one.getClientRects.bind(one); let changed = false;
+    one.getClientRects = () => {
+      if (!changed) { changed = true; f.body.append(new f.Node('DIV', { class: 'group/input' })); }
+      return rects();
+    };
+    const result = await f.run();
+    expect(result.detail).toBe('user_count'); expect(result.groqUserCountDiagnostic.userCount).toBe(2);
+    expect(f.document.querySelectorAll('[class*="group/input"]').length).toBe(3);
+    expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+  });
+
   test('observed Show more sibling preserves the full long-message hash without expansion or replay', async () => {
     const prompt = 'Return only a synthetic marker.\n' + Array.from({ length: 80 }, (_, index) =>
       `Synthetic layout line ${index + 1}: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.`).join('\n')
