@@ -9,9 +9,10 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build370 (`d87792b`) is installed and its launch is recorded.
-The latest Claude qualification cases below ran on build368 (`2dea3d2`), before
-that installation; no Claude qualification on build370 is claimed. The
+As of November 1, build371 (`c7186ae`) is installed and its launch is recorded.
+The latest full Claude workflow cases below ran on build368 (`2dea3d2`). A later
+Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
+on build371 is claimed. The
 `v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
@@ -31,6 +32,28 @@ earlier verified response failed its exact-marker task. Remaining workflows
 are still required.
 These results are independent cases, not an all-model pass or a measured
 reliability rate.
+
+## Subsequent ownership failure and diagnostic candidate
+
+The fresh `fable51-marker370` task verified the selected model and first-user
+submission, then failed `website_ownership_unverified` with
+`ownership_reason=user_count` after 2.346 seconds. It executed no tools and
+returned no final answer. Its own cleanup journal records `unconfirmed`;
+restarting into build371 did not establish cleanup, and the prompt was not
+replayed. The failed read did not retain its actual user-message count.
+This case also does not establish current Fable entitlement: the earlier
+ordinary picker marked Fable choices `Buy credits`.
+
+Build373's candidate includes finite count and remount-completion diagnostics
+first prepared in build372, plus the later Alibaba selector change. The count
+projection preserves the exact count used by the existing failed guard. Remount
+observations capture completion structure at entry and failed exit of the
+existing wait. Neither projection changes verification, deadlines, parsing,
+cleanup or action dispatch. Source checks and evidence limits are recorded in
+`HARNESS-VALIDATION-NOTES.md`; installed371 lacks these diagnostics. A fresh
+Opus 5 marker is the next controlled reproduction, after current picker
+eligibility is confirmed. Fable testing requires its own current eligibility
+proof. These candidates do not establish a root cause or repair.
 
 ## Installed build368 results, November 1
 
