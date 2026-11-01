@@ -1558,13 +1558,14 @@ describe('Claude post-submit detached header settling', () => {
     node.append(new Element('SPAN', {}, label), new Element('SPAN', {}, 'High'));
     return node;
   };
-  const detached = async (action = 'inspect') => {
+  const detached = async (action = 'inspect', prepare?: (f: ReturnType<typeof fixture>) => void) => {
     const f = fixture('claude', { userPrompt: 'Bounded detached-header control' });
     const picker = installObservedModelPicker(f, 'claude', Element);
     picker.selected('Opus 5');
     const before = await f.run('inspect', { expectedModelChoice });
     expect(before).toMatchObject({ firstUserVerified: true, modelEvidence: { selected: expectedModelChoice } });
     expect(f.world.__computaClaudeLastModelTrigger.node).toBe(picker.trigger);
+    prepare?.(f);
     picker.trigger.connected = false;
     const clocks: any[] = []; let expire: () => void = () => {}, rejectClock: () => void = () => {};
     f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => {
@@ -1588,6 +1589,95 @@ describe('Claude post-submit detached header settling', () => {
     return { f, picker, before, pending, wake, noActions, clocks, expire: () => expire(), rejectClock: () => rejectClock() };
   };
 
+  test('remount diagnostics distinguish streaming, complete and absent answer without admitting any of them', async () => {
+    for (const shape of ['streaming', 'complete', 'absent']) {
+      const x = await detached('inspect', f => {
+        f.answer.text = 'PRIVATE_REPLY_CANARY';
+        if (shape === 'streaming') { f.stop.connected = true; f.response.values['data-is-streaming'] = 'true'; }
+        if (shape === 'absent') f.answer.connected = false;
+      });
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      const d = result.modelDiagnostic.remountObservation;
+      expect(Object.keys(d).sort()).toEqual(['elapsedMs', 'entry', 'kind', 'observations', 'terminal']);
+      expect(d.kind).toBe('claude_remount_observation_v1');
+      expect(d.elapsedMs).toBeGreaterThanOrEqual(0); expect(d.elapsedMs).toBeLessThanOrEqual(10000);
+      expect(d.observations).toBeGreaterThanOrEqual(2); expect(d.observations).toBeLessThanOrEqual(1000);
+      expect(d.entry).toEqual(d.terminal);
+      expect(Object.keys(d.entry).sort()).toEqual(['answerComplete', 'busy', 'enabledCopies', 'interrupted', 'logicalAnswerCount', 'messageStreamingState', 'scopedCopies']);
+      expect(d.entry).toEqual({ logicalAnswerCount: shape === 'absent' ? 0 : 1,
+        busy: shape === 'streaming', interrupted: false, messageStreamingState: shape === 'absent' ? 'no_message' : shape === 'streaming' ? 'true' : 'false',
+        scopedCopies: shape === 'absent' ? 0 : 1, enabledCopies: shape === 'absent' ? 0 : 1,
+        answerComplete: shape === 'complete' });
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_REPLY_CANARY');
+      expect(JSON.stringify(d).length).toBeLessThan(1000); x.noActions();
+    }
+  });
+
+  test('remount diagnostics preserve entry separately from the later completion reread', async () => {
+    const x = await detached('inspect', f => { f.stop.connected = true; f.response.values['data-is-streaming'] = 'true'; });
+    x.f.stop.connected = false; x.f.response.values['data-is-streaming'] = 'false'; x.wake();
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    expect(result.modelDiagnostic.remountObservation.entry).toMatchObject({ busy: true, answerComplete: false, messageStreamingState: 'true' });
+    expect(result.modelDiagnostic.remountObservation.terminal).toMatchObject({ busy: false, answerComplete: true, messageStreamingState: 'false' });
+    x.noActions();
+  });
+
+  test('remount diagnostic exceptions become unknown while the original timeout and actions are preserved', async () => {
+    for (const phase of ['entry', 'terminal']) {
+      const failRead = (f: ReturnType<typeof fixture>) => {
+        const original = f.response.getAttribute.bind(f.response);
+        f.response.getAttribute = name => { if (name === 'data-is-streaming') throw new Error('PRIVATE_DIAGNOSTIC_CANARY'); return original(name); };
+      };
+      const x = await detached('inspect', phase === 'entry' ? failRead : undefined);
+      if (phase === 'terminal') failRead(x.f);
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      const d = result.modelDiagnostic.remountObservation;
+      expect(d.terminal).toBeNull();
+      if (phase === 'entry') expect(d.entry).toBeNull(); else expect(d.entry.answerComplete).toBe(true);
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_DIAGNOSTIC_CANARY'); x.noActions();
+    }
+  });
+
+  test('remount diagnostics do not inspect completion after the original owned context is lost', async () => {
+    let reads = 0;
+    const x = await detached('inspect', f => {
+      const original = f.response.getAttribute.bind(f.response);
+      f.response.getAttribute = name => { if (name === 'data-is-streaming') reads++; return original(name); };
+    });
+    const entryReads = reads; expect(entryReads).toBeGreaterThan(0);
+    x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER'; x.wake();
+    const result = await x.pending;
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('first_user_message');
+    expect(reads).toBe(entryReads); expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+    x.noActions();
+  });
+
+  test('remount diagnostic elapsed time is bounded without extending the original clock', async () => {
+    const x = await detached(); const originalNow = Date.now, future = originalNow() + 30000;
+    try {
+      Date.now = () => future;
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.modelDiagnostic.remountObservation.elapsedMs).toBe(10000);
+      expect(result.text).toBeUndefined(); x.noActions();
+    } finally { Date.now = originalNow; }
+  });
+
+  test('remount diagnostic enums and counters stay finite without copying page attributes', async () => {
+    const x = await detached('verifyModel', f => { f.response.values['data-is-streaming'] = 'PRIVATE_ATTRIBUTE_CANARY'; });
+    for (let i = 0; i < 1005; i++) x.wake();
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.remountObservation.observations).toBe(1000);
+    expect(result.modelDiagnostic.remountObservation.entry.messageStreamingState).toBe('other');
+    expect(result.modelDiagnostic.remountObservation.terminal.messageStreamingState).toBe('other');
+    expect(JSON.stringify(result.modelDiagnostic.remountObservation)).not.toContain('PRIVATE_ATTRIBUTE_CANARY');
+    expect(result.text).toBeUndefined(); x.noActions();
+  });
+
   test('a new exact current header after Send supplies fresh proof without any picker or editor action', async () => {
     for (const action of ['inspect', 'verifyModel']) {
       const x = await detached(action), replacement = currentHeader(); x.f.body.append(replacement); x.wake();
@@ -1595,6 +1685,7 @@ describe('Claude post-submit detached header settling', () => {
       expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: x.before.firstUserFingerprint,
         modelEvidence: { selected: expectedModelChoice, verification: 'website_selection', source: 'model_picker_label' } });
       if (action === 'inspect') expect(result).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}' });
+      expect(result.modelDiagnostic?.remountObservation).toBeUndefined();
       expect(x.f.world.__computaClaudeLastModelTrigger.node).toBe(replacement);
       expect(replacement.clicks).toBe(0); x.noActions();
       x.expire(); await Bun.sleep(0); x.noActions();

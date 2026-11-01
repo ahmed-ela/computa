@@ -1382,6 +1382,8 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readStage = readObservation.readStage;
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
+    if (state.provider === 'claude' && readObservation.remountObservation)
+      diagnostic.remountObservation = readObservation.remountObservation;
   }
   if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
@@ -1630,7 +1632,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     && openingRecovery.attempt.settled === true && openingRecovery.attempt.completed !== true
     && typeof openingRecovery.guard === 'function' ? openingRecovery : null;
   const readDocument = document;
-  let claudeRemountStarted = false, claudeRemountTrigger = null;
+  let claudeRemountStarted = false, claudeRemountTrigger = null, remountObservation = null;
   const submittedReadIntact = () => {
     try { return context.claudeSubmittedReadGuard() === true; } catch { return false; }
   };
@@ -1685,6 +1687,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         selectionAttemptPresent: selectionPresent, selectionClicked: selectionPresent && selection.clicked === true,
         selectionSettled: selectionPresent && selection.settled === true, selectionCompleted: selectionPresent && selection.completed === true,
         recoveryEligible: !!recovery },
+      ...(remountObservation ? { remountObservation } : {}),
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof: !!captured,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
@@ -1761,7 +1764,16 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
       claudeRemountStarted = true;
       readStage = 'trigger_remount_waiting';
       let rejection = null;
+      // Diagnostic rereads only. No extra observer, timer or action is installed,
+      // and these snapshots never supply model, ownership or completion proof.
+      const diagnosticStarted = Date.now();
+      let observations = 0;
+      const completionDiagnostic = () => {
+        try { return context.claudeRemountCompletionDiagnostic?.() ?? null; } catch { return null; }
+      };
+      const entry = completionDiagnostic();
       const observeRemount = () => {
+        observations = Math.min(observations + 1, 1_000);
         if (rejection) return true;
         if (!unchanged()) { rejection = 'model_unverified'; return true; }
         const current = websiteModelPickerState(provider);
@@ -1791,6 +1803,12 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         () => { rejection = 'model_unverified'; });
       if (!changed || Date.now() >= until || !observeRemount() || rejection) {
         readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
+        try {
+          const elapsed = Date.now() - diagnosticStarted;
+          remountObservation = { kind: 'claude_remount_observation_v1',
+            elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.min(10_000, Math.floor(elapsed))) : null,
+            observations, entry, terminal: completionDiagnostic() };
+        } catch { /* Unavailable diagnostics cannot replace the original failure. */ }
         return failure(rejection || 'model_unverified');
       }
       readStage = 'trigger_remount_observed';
