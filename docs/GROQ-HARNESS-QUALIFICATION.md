@@ -4,9 +4,10 @@
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 358 (0.8.0) is installed from `b83693d`. Its fresh GPT-OSS 120B marker
-identified an offscreen Send button after prompt insertion. A one-shot reveal
-repair is under test; live support remains unqualified. Direct website probes
+Build 359 (0.8.0) is installed from `92b4b3e`. Its fresh GPT-OSS 120B marker
+verified the one-shot Send reveal, then failed initial first-message ownership
+before binding its fingerprint. Cleanup is unconfirmed and the page is retained;
+live support remains unqualified. Direct website probes
 below are not harness qualification.
 
 The observed menu contains these general chat choices:
@@ -14,7 +15,7 @@ The observed menu contains these general chat choices:
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build358: Send outside viewport |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build359: initial message ownership failed |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -296,3 +297,31 @@ The corrected seven-scenario negative test passed in native run P (8.618 seconds
 unchanged source hashes). The other 28 cases and all production sources remained
 unchanged from O. P log SHA-256:
 `acc62ee1df2c7982fbaea798bca29c4837b30b7cc56c6940f40a1b575d019d9f`.
+
+## Fresh installed check — build 359
+
+The clean `92b4b3e` source passed all eleven native artifact checks and ten
+signed-derivative checks. Installed executable SHA-256:
+`c278911ed3ceb69e4aa78f93380f26307e7571ce32cc3d977fd77efeb7a6e396`.
+This is an installed diagnostic build, not a notarized/public release.
+
+Fresh case `groq-gptoss120b-marker359-f` failed in 2,352 ms with
+`website_ownership_unverified` / `first_user_message`. The finite log records
+one Send reveal from `outside_viewport` to a valid hit at 04:42:23.899552Z.
+The journal then records submission acknowledgment at 04:42:23.952Z with an
+empty first-user fingerprint; 26 ms later the first ownership read failed.
+Thus the reveal was exercised successfully, but message ownership was never
+established. No model result was released and zero tools ran.
+
+Cleanup remains unconfirmed, with the failed page retained. The native trace,
+task/model/source/process identity, UI, journals and an independent failed
+qualification audit are saved under this case. The exact unused diagnostic arm
+was archived; no prompt was replayed. Bounded native log SHA-256:
+`1c7f98911c95aa09c14217b029cb14b2d5339c1b2037eb4493cf714c21732bb9`.
+Those log lines are correlated by process and time; they carry no task ID.
+
+The adapter currently requires a one-child user-message wrapper and a leaf
+`line-clamp-5` body. Different long-message markup is a hypothesis, not an
+established cause. A separate harmless unsent long draft is prepared for a
+bounded inspection; the failed owned page is untouched. All workflow359-g
+cases remain unstarted pending an independently verified marker pass.
