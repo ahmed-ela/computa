@@ -5364,3 +5364,39 @@ its three snapshot hashes were independently checked against their files.
 This result covers the observed completion, restart and read sequence only;
 it does not establish timer accuracy, every concurrent-task/window case, or
 broader website-provider qualification.
+
+### November 1, 2026 — Claude failure diagnostics for build372
+
+A fresh Fable 5.1 exact-marker task on installed build370 passed model selection
+and submission verification, then failed conversation ownership with
+`ownership_reason=user_count` after 2.346 seconds. It returned no answer and
+executed no tools. Cleanup remained unconfirmed. The exact task, journal and
+failure screenshot were retained before the user-approved build371 restart;
+the prompt was not replayed. The last healthy inspection saw one user message,
+but the failed read did not record its actual count. Zero or duplicate messages
+and a transient rendering cause therefore remain unproved.
+
+The count diagnostic now records the count already used by that failed guard,
+its saturation flag and bounded expected counts. It performs no additional DOM
+read and does not access uninitialized first-message state. Native logging
+accepts only this exact finite shape on Claude's existing `user_count` failure;
+its original error and failed-cleanup behavior remain unchanged. Native action
+context distinguishes the initial failure from a later cleanup inspection.
+
+The separate Opus 5 remount diagnostic records finite completion structure at
+entry and failure exit of the existing detached-header wait. It also records
+bounded elapsed time and predicate observations, not observer wake counts.
+These are diagnostic rereads, never current-model or completion authority.
+The original 1.8-second deadline, ownership checks and action count are retained.
+The clipped-host rendering experiment failed its unoccluded-window precondition
+in all three phases and supplies no causal conclusion.
+
+The remount change passed 957 cross-provider JavaScript tests. The count change
+passed 207 Claude tests; five focused native tests passed, including real WebKit
+ownership-loss, remount and cleanup regressions. Nine versioning tests passed.
+These changes are prepared for build372; installed build371 does not contain
+them. Full Claude qualification remains incomplete and tracked in issue #15.
+
+Private evidence: `work/claude-qualification-20261031/evidence/fable51-marker370/`,
+`claude-remount371-js-validation-a.json`, `claude-user-count371-js-validation-a.json`
+and `claude-diagnostics372-native-test.log`.

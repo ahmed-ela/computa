@@ -51,6 +51,7 @@ actor APIModelServer {
         let cause: any Error
         var argumentDiagnostic: ArgumentFailureDiagnostic? = nil
         var responseDiagnostic: ResponseFailureDiagnostic? = nil
+        var toolDiagnostic: ToolFailureDiagnostic? = nil
     }
     struct ArgumentFailureDiagnostic: Codable, Sendable {
         enum Gate: String, Codable, Sendable {
@@ -64,6 +65,10 @@ actor APIModelServer {
     }
     struct ResponseFailureDiagnostic: Codable, Sendable {
         let validation: APIModelResponseCodec.InvalidResponseDiagnostic
+        let attempt: Int
+    }
+    struct ToolFailureDiagnostic: Codable, Sendable {
+        let validation: APIModelResponseCodec.InvalidToolDiagnostic
         let attempt: Int
     }
     struct FailureDiagnosticContext: Codable, Sendable {
@@ -717,7 +722,8 @@ actor APIModelServer {
             let stage = (error as? StagedFailure)?.stage ?? failureStage
             if let stage, let record = Self.failureDiagnostic(cause, stage: stage,
                 argumentDiagnostic: (error as? StagedFailure)?.argumentDiagnostic,
-                responseDiagnostic: (error as? StagedFailure)?.responseDiagnostic, context: failureContext) {
+                responseDiagnostic: (error as? StagedFailure)?.responseDiagnostic,
+                toolDiagnostic: (error as? StagedFailure)?.toolDiagnostic, context: failureContext) {
                 Self.responseLog.error("failureStage \(record, privacy: .public)")
 #if DEBUG
                 failureDiagnosticsObserverForTesting?(record)
@@ -769,13 +775,16 @@ actor APIModelServer {
         let outcome: APIModelResponseCodec.DecodeOutcome
         var firstDiagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic?
         var firstResponseDiagnostic: APIModelResponseCodec.InvalidResponseDiagnostic?
+        var firstToolDiagnostic: APIModelResponseCodec.InvalidToolDiagnostic?
         do { outcome = try APIModelResponseCodec.decodeForCorrection(first, request: original,
-            onArgumentRejection: { firstDiagnostic = $0 }, onInvalidResponse: { firstResponseDiagnostic = $0 }) }
+            onArgumentRejection: { firstDiagnostic = $0 }, onInvalidResponse: { firstResponseDiagnostic = $0 },
+            onInvalidTool: { firstToolDiagnostic = $0 }) }
         catch {
             captureProjection(.decodeFailed)
             throw StagedFailure(stage: .decode, cause: error,
                 argumentDiagnostic: firstDiagnostic.map { .init(validation: $0, gate: .decoderExcluded, attempt: 1) },
-                responseDiagnostic: firstResponseDiagnostic.map { .init(validation: $0, attempt: 1) })
+                responseDiagnostic: firstResponseDiagnostic.map { .init(validation: $0, attempt: 1) },
+                toolDiagnostic: firstToolDiagnostic.map { .init(validation: $0, attempt: 1) })
         }
         switch outcome {
         case .reply(let reply):
@@ -805,6 +814,7 @@ actor APIModelServer {
             var terminal = APIModelCorrectionAccounting.Outcome.decodeFailed
             var secondDiagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic?
             var secondResponseDiagnostic: APIModelResponseCodec.InvalidResponseDiagnostic?
+            var secondToolDiagnostic: APIModelResponseCodec.InvalidToolDiagnostic?
             do {
                 guard correctionsUsed[taskID] != context else {
                     terminal = .budgetExhausted; throw APIModelResponseCodec.Failure.invalidArguments
@@ -830,7 +840,8 @@ actor APIModelServer {
                     body: correction.body, modelID: correction.model.id, onRejection: onRejection)
                 secondStage = .decode; terminal = .decodeFailed
                 switch try APIModelResponseCodec.decodeForCorrection(second, request: correction,
-                    onArgumentRejection: { secondDiagnostic = $0 }, onInvalidResponse: { secondResponseDiagnostic = $0 }) {
+                    onArgumentRejection: { secondDiagnostic = $0 }, onInvalidResponse: { secondResponseDiagnostic = $0 },
+                    onInvalidTool: { secondToolDiagnostic = $0 }) {
                 case .argumentsRejected(let usage, _):
                     secondUsage = usage; terminal = .argumentsRejected
                     throw APIModelResponseCodec.Failure.invalidArguments
@@ -858,7 +869,8 @@ actor APIModelServer {
                 throw StagedFailure(stage: secondStage, cause: error, argumentDiagnostic: .init(
                     validation: secondClaimed ? secondDiagnostic : firstDiagnostic,
                     gate: terminal == .budgetExhausted ? .budgetExhausted : .correctionRejected, attempt: secondClaimed ? 2 : 1),
-                    responseDiagnostic: secondResponseDiagnostic.map { .init(validation: $0, attempt: 2) })
+                    responseDiagnostic: secondResponseDiagnostic.map { .init(validation: $0, attempt: 2) },
+                    toolDiagnostic: secondToolDiagnostic.map { .init(validation: $0, attempt: 2) })
             }
         }
     }
@@ -920,12 +932,15 @@ actor APIModelServer {
             scopedMessage = "The retained tool history in this API request contains invalid arguments. This inference sent no provider request and executed no new tool."
         } else if error as? APIModelResponseCodec.Failure == .invalidArguments, stage == .decode {
             scopedMessage = "The provider response contained invalid tool arguments. No tool from this response was executed."
+        } else if error as? APIModelResponseCodec.Failure == .invalidTool, stage == .decode {
+            scopedMessage = "The provider response contained a malformed or unavailable tool call. No tool from this response was executed."
         } else { scopedMessage = message }
         return try JSONSerialization.data(withJSONObject: ["error": ["type": "api_model_error", "code": code, "message": scopedMessage, "x-computa-retryable": false]])
     }
     static func failureDiagnostic(_ error: any Error, stage: FailureStage,
                                   argumentDiagnostic: ArgumentFailureDiagnostic? = nil,
                                   responseDiagnostic: ResponseFailureDiagnostic? = nil,
+                                  toolDiagnostic: ToolFailureDiagnostic? = nil,
                                   context: FailureDiagnosticContext? = nil) -> String? {
         guard let body = try? errorBody(error, stage: stage),
               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -953,8 +968,19 @@ actor APIModelServer {
             if let context, let bytes = try? JSONEncoder().encode(context),
                let ids = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { record["native_context"] = ids }
         }
+        // Tool shape and identity failures are observational only. Their exact
+        // guard is finite; no provider tool name, ID or argument is retained.
+        if stage == .decode, error as? APIModelResponseCodec.Failure == .invalidTool,
+           let toolDiagnostic, (1...2).contains(toolDiagnostic.attempt),
+           toolDiagnostic.validation.isConsistent,
+           let bytes = try? JSONEncoder().encode(toolDiagnostic),
+           let finite = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+            record["tool_validation"] = finite
+            if let context, let bytes = try? JSONEncoder().encode(context),
+               let ids = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { record["native_context"] = ids }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
-              data.count <= (record["argument_validation"] == nil && record["response_validation"] == nil ? 256 : 1_024) else { return nil }
+              data.count <= (record["argument_validation"] == nil && record["response_validation"] == nil && record["tool_validation"] == nil ? 256 : 1_024) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
     /// Shared by terminal failure logs and durable recovered-response metadata.

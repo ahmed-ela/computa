@@ -1868,3 +1868,68 @@ describe('Claude post-submit detached header settling', () => {
     expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0);
   });
 });
+
+
+describe('Claude early user-count failure diagnostics', () => {
+  const diagnostic = (result: any) => {
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('user_count');
+    expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
+    expect(result.modelEvidence).toBeUndefined();
+    const value = JSON.parse(result.debugStructure);
+    expect(Object.keys(value).sort()).toEqual(['expectedCounts', 'kind', 'provider', 'userCount', 'userCountSaturated']);
+    expect(result.debugStructure.length).toBeLessThan(256);
+    return value;
+  };
+  test('zero and duplicate counts are captured at the unchanged guard, including a hidden sibling', async () => {
+    for (const count of [0, 2]) {
+      const f = fixture('claude', { userPrompt: 'PRIVATE_USER_COUNT_BODY' });
+      expect((await f.run()).firstUserVerified).toBe(true);
+      if (count === 0) f.messages.children = f.messages.children.filter(node => !node.contains(f.userRoot!));
+      else f.messages.append(new Element('DIV', { 'data-testid': 'user-message', hidden: '' }, 'PRIVATE_DUPLICATE_BODY'));
+      const original = f.document.querySelectorAll; let userReads = 0;
+      f.document.querySelectorAll = (selector: string) => { if (selector === '[data-testid="user-message"]') userReads++; return original(selector); };
+      Object.defineProperty(f.userRoot!, 'innerText', { get: () => { throw new Error('No body read allowed on count failure'); } });
+      const result = await f.run('inspect');
+      expect(diagnostic(result)).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: count,
+        userCountSaturated: false, expectedCounts: [1] });
+      expect(userReads).toBe(1);
+      expect(result.debugStructure).not.toContain('PRIVATE_');
+      expect(f.send.clicks).toBe(0); expect(f.composer.events).toHaveLength(0); expect(f.toggle.clicks).toBe(0);
+    }
+  });
+  test('nested user markers retain deduplication and allowed pending counts produce no failure diagnostic', async () => {
+    const bound = fixture('claude', { userPrompt: 'Bounded synthetic count fixture' });
+    const before = await bound.run();
+    bound.userRoot!.append(new Element('DIV', { 'data-testid': 'user-message' }));
+    const nested = await bound.run();
+    expect(nested.firstUserFingerprint).toBe(before.firstUserFingerprint); expect(nested.userCount).toBe(1);
+    expect(nested.error).toBeUndefined(); expect(nested.debugStructure).toBe('');
+    const fresh = fixture('claude');
+    const pending = await fresh.run('inspect', { expectedUserCounts: [0, 1] });
+    expect(pending.error).toBeUndefined(); expect(pending.userCount).toBe(0); expect(pending.debugStructure).toBe('');
+    expect(bound.send.clicks).toBe(0); expect(fresh.send.clicks).toBe(0);
+  });
+  test('malformed or unbounded expected-count inputs are unknown without copying them', async () => {
+    for (const expectedUserCounts of [undefined, 'PRIVATE_EXPECTED', [true], ['PRIVATE_EXPECTED'], [1.5], [-1], [1001], [1, 2, 3, 4]]) {
+      const f = fixture('claude'); const result = await f.run('inspect', { expectedUserCounts });
+      expect(diagnostic(result)).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: 0,
+        userCountSaturated: false, expectedCounts: null });
+      expect(result.debugStructure).not.toContain('PRIVATE_'); expect(f.send.clicks).toBe(0);
+    }
+    const f = fixture('claude');
+    expect(diagnostic(await f.run('inspect', { expectedUserCounts: [] })).expectedCounts).toEqual([]);
+  });
+  test('large observed counts explicitly saturate instead of presenting the cap as exact', async () => {
+    const f = fixture('claude');
+    for (let i = 0; i < 1001; i++) f.messages.append(new Element('DIV', { 'data-testid': 'user-message' }));
+    expect(diagnostic(await f.run())).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: 1000,
+      userCountSaturated: true, expectedCounts: [0] });
+    expect(f.send.clicks).toBe(0);
+  });
+  test('a throwing diagnostic input preserves the same rejection without leaking the exception', async () => {
+    const f = fixture('claude'); const expectedUserCounts = [1];
+    expectedUserCounts.every = () => { throw new Error('PRIVATE_DIAGNOSTIC_EXCEPTION'); };
+    expect(await f.run('inspect', { expectedUserCounts })).toEqual({ error: 'conversation_changed', detail: 'user_count' });
+    expect(f.send.clicks).toBe(0);
+  });
+});

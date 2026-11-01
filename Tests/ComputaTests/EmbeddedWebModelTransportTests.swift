@@ -11158,6 +11158,67 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await finishTerminalFixture(fixture, token: token)
     }
 
+    func testClaudeEarlyUserCountFailureEmitsCapturedCountsWithoutReplayOrCleanupAuthority() async throws {
+        for count in [0, 2] {
+            let page = Self.providerPage(.claude).replacingOccurrences(
+                of: "answer.setAttribute('data-is-streaming', 'false');",
+                with: "answer.setAttribute('data-is-streaming', 'true');")
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_CLAUDE_COUNT_CANARY"])
+            let running = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(running["state"] as? String, "running")
+            XCTAssertNil(running["freshSessionSubmissionProof"])
+            let context = try XCTUnwrap(running["modelProofContext"] as? [String: Any])
+            let outboundValue = try await evaluate(view, "return window.fixturePrompts[0];")
+            let outbound = try XCTUnwrap(outboundValue as? String)
+            XCTAssertEqual(context["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound),
+                           "Establish native first-message binding before testing its loss")
+            var emissions: [(isFailure: Bool, record: String)] = []
+            fixture.transport.setFirstUserStructureEmissionObserverForTesting { emissions.append(($0, $1)) }
+            defer { fixture.transport.setFirstUserStructureEmissionObserverForTesting(nil) }
+            let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+            let mutatedCount = try await evaluate(view, """
+                const user = document.querySelector('[data-testid="user-message"]');
+                if (!user) throw new Error('Expected one bound user');
+                if (\(count) === 0) user.remove();
+                else { const duplicate = user.cloneNode(true); duplicate.id = 'foreign-user'; user.after(duplicate); }
+                return document.querySelectorAll('[data-testid="user-message"]').length;
+                """) as? Int
+            XCTAssertEqual(mutatedCount, count)
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("An early count mismatch must not publish any response")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
+            XCTAssertEqual(emissions.count, 1, "The actual adapter rejection emits one finite captured decision")
+            let emission = try XCTUnwrap(emissions.first)
+            XCTAssertTrue(emission.isFailure)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(emission.record.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(fields.keys), ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"])
+            XCTAssertEqual(fields["kind"] as? String, "claude_user_count_v1")
+            XCTAssertEqual(fields["provider"] as? String, "claude")
+            XCTAssertEqual(fields["userCount"] as? Int, count)
+            XCTAssertEqual(fields["userCountSaturated"] as? Bool, false)
+            XCTAssertEqual(fields["expectedCounts"] as? [Int], [1])
+            XCTAssertLessThanOrEqual(emission.record.utf8.count, 512)
+            XCTAssertFalse(emission.record.contains("PRIVATE_CLAUDE_COUNT_CANARY"))
+            XCTAssertFalse(emission.record.contains("Computa session marker:"))
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed", "Diagnostics cannot establish lost lineage for cleanup")
+            XCTAssertNotEqual(finished["state"] as? String, "complete")
+            XCTAssertNil(finished["freshSessionSubmissionProof"])
+            let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+            XCTAssertEqual(actionsAfter, actionsBefore)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
+    }
+
     func testClaudeFreshSessionProofBindsCanonicalRequestOnlyAfterVerifiedCompletion() async throws {
         let choice = Self.fixtureChoice(.claude)
         let fixture = try Fixture(page: Self.modelChoicePage(.claude))
@@ -13974,6 +14035,54 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         source["literalCodeValidJSON"] = NSNull()
         source["literalCodeKnownEnvelopeType"] = NSNull()
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+    }
+
+    func testClaudeEarlyUserCountDiagnosticRequiresExactFiniteSchemaAndPreservesLegacyStructure() throws {
+        func encoded(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value, options: .sortedKeys), as: UTF8.self)
+        }
+        let base: [String: Any] = ["kind": "claude_user_count_v1", "provider": "claude",
+            "userCount": 0, "userCountSaturated": false, "expectedCounts": [1]]
+        for (count, saturated) in [(0, false), (2, false), (1_000, false), (1_000, true)] {
+            for expected in [NSNull(), [Int](), [1], [0, 1], [1, 1, 1], [0, 1, 1_000]] as [Any] {
+                var source = base
+                source["userCount"] = count; source["userCountSaturated"] = saturated; source["expectedCounts"] = expected
+                let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(source), provider: .claude))
+                XCTAssertEqual(safe, try encoded(source), "Preserve bounded captured values without inferring a mismatch or ownership")
+                XCTAssertLessThanOrEqual(safe.utf8.count, 512)
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(safe, provider: .claude),
+                             "An early count observation must not impersonate the full first-message schema")
+            }
+        }
+        for key in base.keys {
+            var missing = base; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(missing), provider: .claude), key)
+        }
+        let mutations: [(String, Any)] = [
+            ("kind", "first_user_structure"), ("provider", "chatgpt"), ("text", "PRIVATE_COUNT_CANARY"),
+            ("userCount", true), ("userCount", false), ("userCount", -1), ("userCount", 1_001),
+            ("userCount", 0.5), ("userCount", "0"), ("userCount", NSNull()),
+            ("userCountSaturated", 0), ("userCountSaturated", 1), ("userCountSaturated", "false"),
+            ("userCountSaturated", NSNull()), ("userCountSaturated", true),
+            ("expectedCounts", [true]), ("expectedCounts", [false]), ("expectedCounts", [0.5]),
+            ("expectedCounts", [-1]), ("expectedCounts", [1_001]), ("expectedCounts", ["1"]),
+            ("expectedCounts", [NSNull()]), ("expectedCounts", [0, 1, 2, 3]), ("expectedCounts", "PRIVATE_COUNT_CANARY")
+        ]
+        for (key, value) in mutations {
+            var source = base; source[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(source), provider: .claude), key)
+        }
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .gemini, .groq] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(base), provider: provider))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic("{", provider: .claude))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(String(repeating: " ", count: 513) + (try encoded(base)), provider: .claude))
+        let legacy: [String: Any] = ["kind": "first_user_structure", "provider": "claude",
+            "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],
+            "userCount": 1, "textLength": 32, "lineCount": 2, "markerOccurrences": 1, "controlDescendants": 0,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true]
+        XCTAssertNotNil(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encoded(legacy), provider: .claude))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(legacy), provider: .claude))
     }
 
     func testChatGPTFirstUserDiagnosticContextIsFiniteStrictlyTypedAndLogBounded() throws {

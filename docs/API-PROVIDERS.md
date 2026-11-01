@@ -50,10 +50,37 @@ role contract are described in [Alibaba's Chat Completions reference](https://ww
 capacity is listed in the [Qwen3.7 Flash reference](https://www.alibabacloud.com/help/en/model-studio/qwen3-7-flash).
 
 The affected catalog, codec, HTTP, capture, settings, runtime-contract and server
-cohort passed 193 native tests. Installed build371 inference and browser,
-terminal and file-editing qualification remain pending. Credentials are stored
-only in the device-local Keychain; no account key or workspace endpoint is
-included in this repository.
+cohort passed 193 native tests. Installed build371 (`c7186ae`) returned an exact
+Qwen3.7 Flash marker in 3.707 seconds. Refreshing the catalog reused the saved
+Keychain credential and persisted the new metadata for both discovered IDs.
+
+The first combined workflow reached 13 native tool calls in 52.416 seconds.
+Independent audit verified the intended code edit, six passing tests, unchanged
+protected fixture files, the expected reference and one accepted browser form
+submission. The next API response failed `invalid_tool`; no model-issued tab
+close or final answer followed. This decoder error also covers malformed or
+duplicate call IDs and malformed tool fields, so its old wording does not prove
+an unknown name caused this case. The rejected guard was not retained. Computa
+reported automatic cleanup of the one task-created browser tab; the operator
+stopped the exact loopback fixture server and verified its listener was absent.
+That cleanup is separate from model completion. Full workflow qualification
+remains incomplete; no failed inference was replayed.
+
+Build372 adds finite diagnostics for each existing tool-identity and shape
+rejection. They identify the exact failed guard and wire format; a rejected
+Chat Completions name records only whether it exactly matches a declared wire,
+native or namespace-qualified name, or none. No provider name, call ID, argument
+or response text is logged. Error wording now covers malformed as well as
+unavailable calls. The same fatal rejection, atomic publication and correction
+eligibility remain in force. All 173 codec, server and correction tests passed,
+including rejected later calls in a batch and failures after the one permitted
+argument-correction request. This instrumentation does not establish the cause
+of the installed371 failure or qualify the combined workflow.
+
+Private evidence is retained in `work/alibaba-qwen37-20261101/` as
+`marker371-audit.json` and `workflow371b-audit.json`, and in the independent
+`qwen37-371-a` fixture audit. Credentials remain only in device-local Keychain;
+no account key or workspace endpoint is included in this repository.
 
 The API unit/contract suite covers both wire formats, actual pinned Open Responses schemas, SSE lifecycles, interleaved/custom/namespaced tools, schema references and unions, encrypted reasoning, stale native turns, cancellation, model discovery, redirects, credential admission races, unavailable selections, and secret-free metadata/error projections.
 

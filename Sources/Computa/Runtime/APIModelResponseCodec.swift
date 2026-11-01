@@ -18,7 +18,7 @@ enum APIModelResponseCodec {
             case .invalidRequest: "The API inference request is invalid."
             case .unsupportedParameter: "The API adapter does not support a requested parameter."
             case .unsupportedModality: "The selected API model does not support this input attachment."
-            case .invalidTool: "The API response used an unknown or unavailable tool."
+            case .invalidTool: "An API tool definition or call was malformed or unavailable."
             case .invalidArguments: "The API response contained invalid tool arguments. No tool from this response was executed."
             case .invalidHistory: "The API tool history is incomplete or inconsistent."
             case .invalidResponse: "The API provider returned an invalid response. No tool from this response was executed."
@@ -80,6 +80,59 @@ enum APIModelResponseCodec {
                                         _ observe: InvalidResponseObserver?) -> Failure {
         observe?(guardID)
         return .invalidResponse
+    }
+    /// Only the fatal tool-call guard is retained. Provider names, IDs, values,
+    /// call contents and catalog entries never enter this observation.
+    struct InvalidToolDiagnostic: Codable, Equatable, Sendable {
+        enum NameMatch: String, Codable, Sendable {
+            case wireName = "wire_name", nativeName = "native_name", qualifiedName = "qualified_name", none
+        }
+        enum Guard: String, Codable, Sendable, CaseIterable {
+            case chatCallType = "chat_call_type", chatCallIDType = "chat_call_id_type"
+            case chatCallIDSyntax = "chat_call_id_syntax", chatCallIDHistory = "chat_call_id_history"
+            case chatCallIDDuplicate = "chat_call_id_duplicate", chatFunctionType = "chat_function_type"
+            case chatNameType = "chat_name_type", chatNameNotAllowed = "chat_name_not_allowed"
+            case chatNameNotDeclared = "chat_name_not_declared", chatArgumentsType = "chat_arguments_type"
+            case sseToolType = "sse_tool_type"
+            case responsesNameType = "responses_name_type", responsesNameNotDeclared = "responses_name_not_declared"
+            case responsesToolType = "responses_tool_type", responsesNameNotAllowed = "responses_name_not_allowed"
+            case responsesCallIDType = "responses_call_id_type", responsesCallIDSyntax = "responses_call_id_syntax"
+            case responsesCallIDHistory = "responses_call_id_history", responsesCallIDDuplicate = "responses_call_id_duplicate"
+            case responsesCallCount = "responses_call_count", responsesRequiredCall = "responses_required_call"
+        }
+        let format: InvalidResponseDiagnostic.Format
+        let guardID: Guard
+        /// Exact relation to the current declared catalog, never authorization.
+        /// Absent for every guard that did not validate a disallowed chat name.
+        var nameMatch: NameMatch? = nil
+        var isConsistent: Bool {
+            guard nameMatch == nil || guardID == .chatNameNotAllowed else { return false }
+            switch guardID {
+            case .chatCallType, .chatCallIDType, .chatCallIDSyntax, .chatCallIDHistory, .chatCallIDDuplicate,
+                 .chatFunctionType, .chatNameType, .chatNameNotAllowed, .chatNameNotDeclared, .chatArgumentsType:
+                return format == .chatJSON || format == .chatSSE
+            case .sseToolType: return format == .chatSSE
+            case .responsesNameType, .responsesNameNotDeclared, .responsesToolType, .responsesNameNotAllowed,
+                 .responsesCallIDType, .responsesCallIDSyntax, .responsesCallIDHistory, .responsesCallIDDuplicate,
+                 .responsesCallCount, .responsesRequiredCall:
+                return format == .responsesJSON
+            }
+        }
+    }
+    private typealias InvalidToolObserver = (InvalidToolDiagnostic.Guard, InvalidToolDiagnostic.NameMatch?) -> Void
+    private static func invalidTool(_ guardID: InvalidToolDiagnostic.Guard, _ observe: InvalidToolObserver?,
+                                    nameMatch: InvalidToolDiagnostic.NameMatch? = nil) -> Failure {
+        observe?(guardID, nameMatch)
+        return .invalidTool
+    }
+    private static func diagnosticNameMatch(_ name: String, tools: [Tool]) -> InvalidToolDiagnostic.NameMatch {
+        if tools.contains(where: { $0.wireName == name }) { return .wireName }
+        if tools.contains(where: { $0.name == name }) { return .nativeName }
+        if tools.contains(where: { tool in
+            guard let namespace = tool.namespace else { return false }
+            return namespace + "." + tool.name == name
+        }) { return .qualifiedName }
+        return .none
     }
     /// Preserve the exact Foundation parser/options. Only parser failure is
     /// reclassified; parsed nonobject/root-shape guards remain at their callers.
@@ -879,19 +932,23 @@ enum APIModelResponseCodec {
 
     static func decodeForCorrection(_ result: APIProviderHTTPClient.Result, request: Request,
                                     onArgumentRejection: ((ArgumentValidationDiagnostic) -> Void)? = nil,
-                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
+                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil,
+                                    onInvalidTool: ((InvalidToolDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
         let format: InvalidResponseDiagnostic.Format = request.provider.wireAPI == .responses ? .responsesJSON
             : (result.contentType.contains("text/event-stream") ? .chatSSE : .chatJSON)
         let observeResponseGuard: InvalidResponseObserver? = onInvalidResponse.map { callback in
             { guardID in callback(.init(format: format, guardID: guardID)) }
         }
-        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard)) }
+        let observeToolGuard: InvalidToolObserver? = onInvalidTool.map { callback in
+            { guardID, nameMatch in callback(.init(format: format, guardID: guardID, nameMatch: nameMatch)) }
+        }
+        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard, observeTool: observeToolGuard)) }
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
         let rawCorrectionEligible: Bool, envelopeShapeValid: Bool, unambiguousJSON: Bool, streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
         let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
+            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard, observeTool: observeToolGuard)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
@@ -932,10 +989,22 @@ enum APIModelResponseCodec {
         var callIDs = request.historyCallIDs
         var validatedCalls: [(id: String, tool: Tool, arguments: String)] = []
         for call in calls {
-            guard call["type"] as? String == "function", let id = call["id"] as? String, validCallID(id), callIDs.insert(id).inserted,
-                  let function = call["function"] as? [String: Any], let wireName = function["name"] as? String,
-                  request.allowedTools.contains(wireName), let tool = request.tools.first(where: { $0.wireName == wireName }),
-                  let arguments = function["arguments"] as? String else { throw Failure.invalidTool }
+            // Keep the original short-circuit order and insertion point. Each
+            // failed guard emits one finite label, then the same fatal error.
+            guard call["type"] as? String == "function" else { throw invalidTool(.chatCallType, observeToolGuard) }
+            guard let id = call["id"] as? String else { throw invalidTool(.chatCallIDType, observeToolGuard) }
+            guard validCallID(id) else { throw invalidTool(.chatCallIDSyntax, observeToolGuard) }
+            guard callIDs.insert(id).inserted else {
+                throw invalidTool(request.historyCallIDs.contains(id) ? .chatCallIDHistory : .chatCallIDDuplicate, observeToolGuard)
+            }
+            guard let function = call["function"] as? [String: Any] else { throw invalidTool(.chatFunctionType, observeToolGuard) }
+            guard let wireName = function["name"] as? String else { throw invalidTool(.chatNameType, observeToolGuard) }
+            guard request.allowedTools.contains(wireName) else {
+                throw invalidTool(.chatNameNotAllowed, observeToolGuard,
+                    nameMatch: onInvalidTool == nil ? nil : diagnosticNameMatch(wireName, tools: request.tools))
+            }
+            guard let tool = request.tools.first(where: { $0.wireName == wireName }) else { throw invalidTool(.chatNameNotDeclared, observeToolGuard) }
+            guard let arguments = function["arguments"] as? String else { throw invalidTool(.chatArgumentsType, observeToolGuard) }
             validatedCalls.append((id, tool, arguments))
         }
         var parsedArguments: [[String: Any]] = [], argumentsRejected = false
@@ -1005,7 +1074,7 @@ enum APIModelResponseCodec {
                            finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil))
     }
 
-    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?) throws -> Reply {
+    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> Reply {
         guard let raw = try responseJSONValue(data, observe: observe) as? [String: Any], raw["object"] as? String == "response",
               raw["status"] as? String == "completed", absent(raw["error"]), absent(raw["incomplete_details"]),
               let original = raw["output"] as? [[String: Any]], !original.isEmpty else { throw Failure.incompleteResponse }
@@ -1017,10 +1086,15 @@ enum APIModelResponseCodec {
             switch type {
             case "function_call", "custom_tool_call":
                 guard absent(value["status"]) || value["status"] as? String == "completed" else { throw Failure.incompleteResponse }
-                guard let name = value["name"] as? String,
-                      let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }),
-                      tool.custom == (type == "custom_tool_call"), request.allowedTools.contains(tool.wireName),
-                      let callID = value["call_id"] as? String, validCallID(callID), ids.insert(callID).inserted else { throw Failure.invalidTool }
+                guard let name = value["name"] as? String else { throw invalidTool(.responsesNameType, observeTool) }
+                guard let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }) else { throw invalidTool(.responsesNameNotDeclared, observeTool) }
+                guard tool.custom == (type == "custom_tool_call") else { throw invalidTool(.responsesToolType, observeTool) }
+                guard request.allowedTools.contains(tool.wireName) else { throw invalidTool(.responsesNameNotAllowed, observeTool) }
+                guard let callID = value["call_id"] as? String else { throw invalidTool(.responsesCallIDType, observeTool) }
+                guard validCallID(callID) else { throw invalidTool(.responsesCallIDSyntax, observeTool) }
+                guard ids.insert(callID).inserted else {
+                    throw invalidTool(request.historyCallIDs.contains(callID) ? .responsesCallIDHistory : .responsesCallIDDuplicate, observeTool)
+                }
                 if tool.custom {
                     guard let input = value["input"] as? String else { throw Failure.invalidArguments }
                     _ = try validatedArguments(String(decoding: try json(["input": input]), as: UTF8.self), tool: tool)
@@ -1048,7 +1122,8 @@ enum APIModelResponseCodec {
             default: throw invalidResponse(.responsesItemType, observe)
             }
         }
-        guard count <= request.maximumCalls, !request.requiredTool || count > 0 else { throw Failure.invalidTool }
+        guard count <= request.maximumCalls else { throw invalidTool(.responsesCallCount, observeTool) }
+        guard !request.requiredTool || count > 0 else { throw invalidTool(.responsesRequiredCall, observeTool) }
         let resource = response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
                                 usage: try usage(raw["usage"], responses: true, observe: observe))
         return Reply(response: resource, textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [],
@@ -1124,7 +1199,7 @@ enum APIModelResponseCodec {
         }
     }
 
-    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
+    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw invalidResponse(.sseUTF8, observe) }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
@@ -1183,7 +1258,7 @@ enum APIModelResponseCodec {
                     let index = try responseInteger(row["index"], default: -1, range: 0...127, guardID: .sseToolIndex, observe: observe)
                     var call = calls[index] ?? (id: "", name: "", arguments: [])
                     if let value = row["id"] as? String { guard call.id.isEmpty else { throw invalidResponse(.sseRepeatedCallID, observe) }; call.id = value }
-                    if let type = row["type"] as? String { guard type == "function" else { throw Failure.invalidTool } }
+                    if let type = row["type"] as? String { guard type == "function" else { throw invalidTool(.sseToolType, observeTool) } }
                     if let function = row["function"] as? [String: Any] {
                         if let value = function["name"] as? String { call.name += value }
                         if let value = function["arguments"] as? String { call.arguments.append(value) }

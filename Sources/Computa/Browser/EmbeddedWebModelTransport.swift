@@ -3648,6 +3648,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return safe
     }
 
+    /// Claude's early count guard precedes body/proof initialization for this
+    /// read. Preserve only its captured count decision, never authority.
+    static func sanitizedClaudeUserCountDiagnostic(_ raw: String, provider: Provider) -> String? {
+        guard provider == .claude, raw.utf8.count <= 512,
+              let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              Set(value.keys) == ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"],
+              value["kind"] as? String == "claude_user_count_v1", value["provider"] as? String == "claude",
+              let count = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...1_000).contains(count),
+              let saturated = firstUserDiagnosticBool(value["userCountSaturated"]), !saturated || count == 1_000 else { return nil }
+        var safe: [String: Any] = ["kind": "claude_user_count_v1", "provider": "claude",
+            "userCount": count, "userCountSaturated": saturated]
+        if value["expectedCounts"] is NSNull { safe["expectedCounts"] = NSNull() }
+        else {
+            guard let rawCounts = value["expectedCounts"] as? [Any], rawCounts.count <= 3 else { return nil }
+            let counts = rawCounts.compactMap { ComputerToolArgumentContract.exactInt64($0) }
+            guard counts.count == rawCounts.count, counts.allSatisfy({ (0...1_000).contains($0) }) else { return nil }
+            safe["expectedCounts"] = counts
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     static func sanitizedFirstUserStructure(_ raw: String, provider: Provider) -> String? {
         guard raw.utf8.count <= 8_192,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
@@ -4092,7 +4114,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return records
     }
 
-    private func logFirstUserStructure(_ records: [String], sequence: Int, isFailure: Bool = false) {
+    private func logFirstUserStructure(_ records: [String], sequence: Int, isFailure: Bool = false,
+                                       action: String? = nil, allowsBlockedProvider: Bool = false) {
+        // Optional native call context distinguishes the initial early-count
+        // failure from cleanup's later inspect without trusting page metadata.
+        let context = action.flatMap { Self.firstUserDiagnosticActions.contains($0)
+            ? "action=\($0) allowBlockedProvider=\(allowsBlockedProvider) " : nil } ?? ""
         var childIndex = 0
         for (index, safe) in records.enumerated() {
             let event: String
@@ -4131,9 +4158,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Both paths receive only the existing validated finite projection.
             // Retain rejection causes without persisting healthy-read noise.
             if isFailure {
-                Self.inspectionLog.error("\(event, privacy: .public) sequence=\(sequence) \(child, privacy: .public)\(safe, privacy: .public)")
+                Self.inspectionLog.error("\(event, privacy: .public) sequence=\(sequence) \(context, privacy: .public)\(child, privacy: .public)\(safe, privacy: .public)")
             } else {
-                Self.inspectionLog.info("\(event, privacy: .public) sequence=\(sequence) \(child, privacy: .public)\(safe, privacy: .public)")
+                Self.inspectionLog.info("\(event, privacy: .public) sequence=\(sequence) \(context, privacy: .public)\(child, privacy: .public)\(safe, privacy: .public)")
             }
             if event == "firstUserChild" { childIndex += 1 }
             #if DEBUG
@@ -5312,6 +5339,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       firstUserExpansionRouteContinuation: routeContinuation,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
+                if provider == .claude, error == "conversation_changed", observed["detail"] as? String == "user_count",
+                   let raw = observed["debugStructure"] as? String,
+                   let safe = Self.sanitizedClaudeUserCountDiagnostic(raw, provider: provider) {
+                    logFirstUserStructure([safe], sequence: session.sequence, isFailure: true,
+                                          action: action, allowsBlockedProvider: allowBlockedProvider)
+                }
                 if provider == .groq, error == "conversation_changed", observed["detail"] as? String == "user_count",
                    !session.loggedGroqUserCountDiagnostic, let groqUserCountDiagnostic {
                     session.loggedGroqUserCountDiagnostic = true

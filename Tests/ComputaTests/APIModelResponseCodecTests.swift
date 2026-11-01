@@ -1404,6 +1404,193 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    private func toolDiagnosticRequest(_ base: APIModelResponseCodec.Request, allowed: Set<String>? = nil,
+                                       history: Set<String>? = nil, maximumCalls: Int? = nil,
+                                       required: Bool? = nil) -> APIModelResponseCodec.Request {
+        .init(localModelID: base.localModelID, provider: base.provider, model: base.model, threadID: base.threadID,
+              stream: base.stream, body: base.body, tools: base.tools, toolNaming: base.toolNaming,
+              allowedTools: allowed ?? base.allowedTools, requiredTool: required ?? base.requiredTool,
+              maximumCalls: maximumCalls ?? base.maximumCalls, historyCallIDs: history ?? base.historyCallIDs,
+              capsules: base.capsules, responseConfiguration: base.responseConfiguration)
+    }
+
+    func testFatalChatToolGuardsAreFiniteOrderedAndExcludeArgumentCorrection() throws {
+        let prepared = try request(toolNaming: .semantic), name = prepared.tools[0].wireName
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        let valid: [String: Any] = ["id": "PRIVATE_CALL_ID", "type": "function",
+            "function": ["name": name, "arguments": "{\"path\":\"PRIVATE_ARGUMENT\"}"]]
+        func call(_ field: String, _ value: Any) -> [String: Any] { valid.merging([field: value]) { _, v in v } }
+        func function(_ field: String, _ value: Any) -> [String: Any] {
+            call("function", (valid["function"] as! [String: Any]).merging([field: value]) { _, v in v })
+        }
+        let cases: [(APIModelResponseCodec.Request, [[String: Any]], Guard)] = [
+            (prepared, [call("type", "PRIVATE_WRONG_TYPE")], .chatCallType),
+            (prepared, [call("id", [])], .chatCallIDType), (prepared, [call("id", "")], .chatCallIDSyntax),
+            (prepared, [call("id", "PRIVATE\nID")], .chatCallIDSyntax),
+            (toolDiagnosticRequest(prepared, history: ["PRIVATE_CALL_ID"]), [valid], .chatCallIDHistory),
+            (prepared, [valid, valid], .chatCallIDDuplicate),
+            (prepared, [call("function", NSNull())], .chatFunctionType),
+            (prepared, [function("name", [])], .chatNameType),
+            (prepared, [function("name", "PRIVATE_UNDECLARED_NAME")], .chatNameNotAllowed),
+            (toolDiagnosticRequest(prepared, allowed: ["PRIVATE_UNDECLARED_NAME"]),
+             [function("name", "PRIVATE_UNDECLARED_NAME")], .chatNameNotDeclared),
+            (prepared, [function("arguments", ["PRIVATE": true])], .chatArgumentsType),
+            // Earlier rejected arguments must not hide a later invalid identity.
+            (prepared, [function("arguments", "{\"path\":false}"),
+                        call("id", "PRIVATE_SECOND_ID").merging(["function": ["name": "PRIVATE_UNKNOWN", "arguments": "{}"]]) { _, v in v }], .chatNameNotAllowed),
+            // Preserve the original short-circuit order when several fields fail.
+            (prepared, [["type": false, "id": [], "function": false]], .chatCallType)]
+        for (req, calls, expected) in cases {
+            let object: [String: Any] = ["model": req.model.id, "choices": [["index": 0, "finish_reason": "tool_calls",
+                "message": ["role": "assistant", "content": "PRIVATE_RESPONSE", "tool_calls": calls]]],
+                "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+            let result = APIProviderHTTPClient.Result(body: try JSONSerialization.data(withJSONObject: object), contentType: "application/json")
+            for observe in [false, true] {
+                var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = [], argumentObserved = false, responseObserved = false
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: req,
+                    onArgumentRejection: { _ in argumentObserved = true }, onInvalidResponse: { _ in responseObserved = true },
+                    onInvalidTool: observe ? { diagnostics.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool, "\(expected)")
+                }
+                XCTAssertEqual(diagnostics, observe ? [.init(format: .chatJSON, guardID: expected,
+                    nameMatch: expected == .chatNameNotAllowed ? .some(.none) : nil)] : [])
+                XCTAssertFalse(argumentObserved); XCTAssertFalse(responseObserved)
+                for diagnostic in diagnostics {
+                    XCTAssertTrue(diagnostic.isConsistent)
+                    let bytes = try JSONEncoder().encode(diagnostic)
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                    XCTAssertEqual(Set(fields.keys), expected == .chatNameNotAllowed ? ["format", "guardID", "nameMatch"] : ["format", "guardID"])
+                    XCTAssertLessThan(bytes.count, 128)
+                    for privateValue in ["PRIVATE", name, "path", "http"] {
+                        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(privateValue))
+                    }
+                }
+            }
+        }
+    }
+
+    func testFatalResponsesToolGuardsPreserveFailureOrderAndArgumentClassification() throws {
+        let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let prepared = try request(provider: p)
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        let valid: [String: Any] = ["id": "PRIVATE_ITEM_ID", "type": "function_call", "name": "read", "namespace": "files",
+            "call_id": "PRIVATE_CALL_ID", "arguments": "{\"path\":\"PRIVATE_ARGUMENT\"}"]
+        func call(_ field: String, _ value: Any) -> [String: Any] { valid.merging([field: value]) { _, v in v } }
+        let message: [String: Any] = ["id": "PRIVATE_MESSAGE_ID", "type": "message", "role": "assistant", "status": "completed",
+            "content": [["type": "output_text", "text": "PRIVATE_TEXT"]]]
+        let cases: [(APIModelResponseCodec.Request, [[String: Any]], Guard)] = [
+            (prepared, [call("name", [])], .responsesNameType),
+            (prepared, [call("name", "PRIVATE_UNKNOWN")], .responsesNameNotDeclared),
+            (prepared, [call("type", "custom_tool_call")], .responsesToolType),
+            (toolDiagnosticRequest(prepared, allowed: []), [valid], .responsesNameNotAllowed),
+            (prepared, [call("call_id", [])], .responsesCallIDType),
+            (prepared, [call("call_id", "")], .responsesCallIDSyntax),
+            (toolDiagnosticRequest(prepared, history: ["PRIVATE_CALL_ID"]), [valid], .responsesCallIDHistory),
+            (prepared, [valid, call("id", "PRIVATE_SECOND_ITEM")], .responsesCallIDDuplicate),
+            (toolDiagnosticRequest(prepared, maximumCalls: 0), [valid], .responsesCallCount),
+            (toolDiagnosticRequest(prepared, required: true), [message], .responsesRequiredCall),
+            (prepared, [call("name", []).merging(["call_id": []]) { _, v in v }], .responsesNameType)]
+        func result(_ output: [[String: Any]]) throws -> APIProviderHTTPClient.Result {
+            .init(body: try JSONSerialization.data(withJSONObject: ["id": "PRIVATE_RESPONSE_ID", "object": "response",
+                "status": "completed", "model": prepared.model.id, "output": output]), contentType: "application/json")
+        }
+        for (req, output, expected) in cases {
+            for observe in [false, true] {
+                var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = [], responseObserved = false
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result(output), request: req,
+                    onInvalidResponse: { _ in responseObserved = true }, onInvalidTool: observe ? { diagnostics.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool, "\(expected)")
+                }
+                XCTAssertEqual(diagnostics, observe ? [.init(format: .responsesJSON, guardID: expected)] : [])
+                XCTAssertFalse(responseObserved)
+                for diagnostic in diagnostics {
+                    XCTAssertTrue(diagnostic.isConsistent)
+                    let bytes = try JSONEncoder().encode(diagnostic)
+                    XCTAssertLessThan(bytes.count, 128); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE"))
+                }
+            }
+        }
+        var observed = false
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result([call("arguments", [])]), request: prepared,
+            onInvalidTool: { _ in observed = true })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments) }
+        XCTAssertFalse(observed, "Responses argument-shape failures keep their existing error classification")
+    }
+
+    func testSSEToolGuardAndAssembledChatGuardRetainTheirFormats() throws {
+        let prepared = try request()
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        for (call, expected) in [
+            (["index": 0, "id": "PRIVATE_CALL", "type": "PRIVATE_BAD_TYPE", "function": ["name": prepared.tools[0].wireName, "arguments": "{}"]] as [String: Any], Guard.sseToolType),
+            (["index": 0, "id": "PRIVATE_CALL", "type": "function", "function": ["name": "PRIVATE_UNKNOWN", "arguments": "{}"]], Guard.chatNameNotAllowed)] {
+            let chunk: [String: Any] = ["id": "PRIVATE_RESPONSE", "model": prepared.model.id,
+                "choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [call]], "finish_reason": "tool_calls"]],
+                "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+            let body = Data("data: ".utf8) + (try JSONSerialization.data(withJSONObject: chunk)) + Data("\n\ndata: [DONE]\n\n".utf8)
+            var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: "text/event-stream"), request: prepared,
+                onInvalidTool: { diagnostics.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+            XCTAssertEqual(diagnostics, [.init(format: .chatSSE, guardID: expected,
+                nameMatch: expected == .chatNameNotAllowed ? .some(.none) : nil)])
+            XCTAssertTrue(try XCTUnwrap(diagnostics.first).isConsistent)
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(diagnostics), as: UTF8.self).contains("PRIVATE"))
+        }
+    }
+
+    func testRejectedChatNamesOnlyRecordExactCurrentCatalogRelationWithoutRemapping() throws {
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+            let prepared = try request(toolNaming: naming)
+            let wire = prepared.tools[0].wireName
+            let cases: [(String, APIModelResponseCodec.InvalidToolDiagnostic.NameMatch)] = [
+                (wire, .wireName), ("read", .nativeName), ("files.read", .qualifiedName),
+                ("PRIVATE_UNOFFERED", .none), ("READ", .none), ("files.READ", .none)]
+            // Even a declared alias is unavailable when tool_choice excludes it.
+            let req = toolDiagnosticRequest(prepared, allowed: [])
+            for (name, match) in cases {
+                var object = try JSONSerialization.jsonObject(with: correctionResult(req).body) as! [String: Any]
+                object["choices"] = [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant",
+                    "tool_calls": [["id": "PRIVATE_CALL", "type": "function", "function": ["name": name, "arguments": "{}"]]]]]]
+                var observed: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(
+                    .init(body: try JSONSerialization.data(withJSONObject: object), contentType: "application/json"), request: req,
+                    onInvalidTool: { observed.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+                XCTAssertEqual(observed, [.init(format: .chatJSON, guardID: .chatNameNotAllowed, nameMatch: match)])
+                XCTAssertTrue(try XCTUnwrap(observed.first).isConsistent)
+                let text = String(decoding: try JSONEncoder().encode(observed), as: UTF8.self)
+                for privateValue in ["PRIVATE", wire, "read", "files"] { XCTAssertFalse(text.contains(privateValue)) }
+            }
+        }
+        for guardID in APIModelResponseCodec.InvalidToolDiagnostic.Guard.allCases where guardID != .chatNameNotAllowed {
+            XCTAssertFalse(APIModelResponseCodec.InvalidToolDiagnostic(format: .chatJSON, guardID: guardID, nameMatch: .nativeName).isConsistent)
+        }
+    }
+
+    func testToolGuardObservationDoesNotChangeSuccessCorrectionOrOtherFailures() throws {
+        let prepared = try request()
+        var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+        guard case .reply = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: "{\"path\":\"safe\"}"),
+            request: prepared, onInvalidTool: { diagnostics.append($0) }) else { return XCTFail("Expected clean reply") }
+        guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared), request: prepared,
+            onInvalidTool: { diagnostics.append($0) }) else { return XCTFail("Expected unchanged argument correction") }
+        let cases: [(APIProviderHTTPClient.Result, APIModelResponseCodec.Failure)] = [
+            (try correctionResult(prepared, changes: ["model": "PRIVATE_OTHER_MODEL"]), .modelMismatch),
+            (try correctionResult(prepared, changes: ["usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 3]]), .invalidResponse),
+            (.init(body: Data("data: [DONE]\n\n".utf8), contentType: "text/event-stream"), .incompleteResponse)]
+        for (result, expected) in cases {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+                onInvalidTool: { diagnostics.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, expected) }
+        }
+        XCTAssertTrue(diagnostics.isEmpty)
+        for format in APIModelResponseCodec.InvalidResponseDiagnostic.Format.allCases {
+            for guardID in APIModelResponseCodec.InvalidToolDiagnostic.Guard.allCases {
+                let diagnostic = APIModelResponseCodec.InvalidToolDiagnostic(format: format, guardID: guardID)
+                let expected = guardID.rawValue.hasPrefix("responses_") ? format == .responsesJSON
+                    : guardID == .sseToolType ? format == .chatSSE : format != .responsesJSON
+                XCTAssertEqual(diagnostic.isConsistent, expected)
+            }
+        }
+    }
+
     func testFatalJSONResponseGuardsRetainExactFailuresAndEmitOnlyOneFiniteLabel() throws {
         let prepared = try request()
         typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard

@@ -2587,8 +2587,19 @@ if (input.expectedConversation && cleanURL !== input.expectedConversation)
   return { error: 'conversation_changed', detail: 'conversation_route' };
 const ownedMessages = modelUserRoots();
 const ownedUserCount = ownedMessages.length;
-if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
-  return { error: 'conversation_changed', detail: 'user_count' };
+if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount)) {
+  const failure = { error: 'conversation_changed', detail: 'user_count' };
+  try {
+    // Record the count used by this exact guard, without rereading the DOM or
+    // accessing first-message bindings that have not been initialized yet.
+    const expected = input.expectedUserCounts;
+    failure.debugStructure = JSON.stringify({ kind: 'claude_user_count_v1', provider: 'claude',
+      userCount: Math.min(ownedUserCount, 1_000), userCountSaturated: ownedUserCount > 1_000,
+      expectedCounts: Array.isArray(expected) && expected.length <= 3
+        && expected.every(count => Number.isInteger(count) && count >= 0 && count <= 1_000) ? [...expected] : null });
+  } catch { /* Diagnostics cannot change the original ownership rejection. */ }
+  return failure;
+}
 let usageLimited = modelUsageLimited();
 function modelUsageLimitFailure() {
   // This is only an empty initial-page abort receipt, never readiness or Send
