@@ -7,6 +7,153 @@ import XCTest
 /// with an inert browser backend. No provider, Chrome, UI or network is used.
 @MainActor
 final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
+    /// The browser lease and tool results come from the production runtime's
+    /// JSON-RPC boundary. Only the website replies/submission proofs are synthetic;
+    /// this checks the bytes handed to that transport, not Claude or WebKit behavior.
+    func testHaikuFreshSessionsPreserveHistoryAndBoundCatalogAfterOpenThenTabs() async throws {
+        try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
+            let url = "https://example.invalid/flight"
+            let calls: [[String: Any]] = [
+                ["tool": "browser_open", "arguments": ["url": url]],
+                ["tool": "browser_tabs", "arguments": [:]],
+            ]
+            try await harness.submit(calls, hold: true, pauseForNativeBinding: true, pauseAfterEachCall: true)
+            try await self.waitFor { harness.audit.status == .running }
+            let native = try await harness.runtime.prepareBrowserAvailabilityForFixture(taskID: Harness.taskID)
+            let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+            let provider = HaikuBrowserProjectionTransport(choice: choice, replies: [
+                #"{"type":"tool_calls","calls":[{"name":"browser_open","arguments":{"url":"https://example.invalid/flight"}}]}"#,
+                #"{"type":"tool_calls","calls":[{"name":"browser_tabs","arguments":{}}]}"#,
+                #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}"#,
+            ])
+            let evidenceRoot = harness.root.appendingPathComponent("haiku-projection")
+            try FileManager.default.createDirectory(at: evidenceRoot, withIntermediateDirectories: true)
+            let server = WebModelServer()
+            await server.configureEvidenceDirectory(evidenceRoot.appendingPathComponent("evidence"))
+            await server.configureCleanupReceipts(directory: evidenceRoot.appendingPathComponent("cleanup"),
+                runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+            self.addTeardownBlock { _ = await server.shutdown() }
+            let runtime = harness.runtime
+            await server.setBrowserToolAvailabilityProvider { request in
+                // Do not substitute .bound here: this callback validates the actual
+                // native task/thread/turn/preparation and reads its current lease.
+                try await runtime.browserToolAvailabilityForFixture(request)
+            }
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(provider, defaultClaudeChoice: choice))
+            let browserSchemas = EmbeddedBrowserTools.definitions().map { definition in
+                var value = definition
+                value["parameters"] = value.removeValue(forKey: "inputSchema")
+                return value
+            }
+            let execSchema: [String: Any] = ["type": "function", "name": "exec_command", "description": "Synthetic command schema",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],
+                               "required": ["cmd"], "additionalProperties": false]]
+            let tools = browserSchemas + [execSchema]
+            var history: [[String: Any]] = [
+                ["role": "developer", "content": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)],
+                ["role": "user", "content": "Inspect the fixture only; do not fill or submit. Keep exact e\u{0301}, 🧭, {quoted} and \\n text."],
+            ]
+            var expectedHistories: [NSArray] = []
+            var actualOutputs: [[[String: String]]] = []
+            for index in 0..<3 {
+                expectedHistories.append(history as NSArray)
+                let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": history,
+                    "tools": tools, "stream": false, "tool_choice": "auto", "parallel_tool_calls": false])
+                let bytes = try await server.fixtureInfer(request, taskID: native.taskID, threadID: native.threadID,
+                    turnID: native.turnID, preparationID: native.preparationID)
+                let response = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+                let call = try XCTUnwrap(output.first)
+                XCTAssertEqual(output.count, 1)
+                XCTAssertEqual(call["name"] as? String, ["browser_open", "browser_tabs", "browser_read"][index])
+                let arguments = try XCTUnwrap(call["arguments"] as? String)
+                let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? NSDictionary)
+                XCTAssertEqual(parsed, index == 0 ? ["url": url] as NSDictionary : [:] as NSDictionary)
+                if index < 2 {
+                    // Dispatch exactly the checked proposal through the existing
+                    // paused JSON-RPC fixture, then retain every output text part.
+                    let release = index == 0 ? "native-binding-continue" : "continue-1"
+                    try Data().write(to: harness.root.appendingPathComponent(release))
+                    try await self.waitFor { harness.rowCount == index + 1 }
+                    let row = try XCTUnwrap(harness.rows().last)
+                    XCTAssertEqual(row["tool"] as? String, calls[index]["tool"] as? String)
+                    XCTAssertEqual(row["success"] as? Bool, true)
+                    let items = try XCTUnwrap(row["contentItems"] as? [[String: Any]])
+                    XCTAssertFalse(items.isEmpty)
+                    let result: [[String: String]] = try items.map {
+                        ["type": "input_text", "text": try XCTUnwrap($0["text"] as? String)]
+                    }
+                    actualOutputs.append(result)
+                    history += output + [["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"]),
+                                          "output": result]]
+                    let state = try await runtime.browserAPIToolStateForFixture(native)
+                    XCTAssertEqual(state.availability, .bound)
+                    XCTAssertTrue(state.isValid)
+                }
+            }
+            let prompts = await provider.sentPrompts()
+            XCTAssertEqual(prompts.count, 3)
+            for (index, prompt) in prompts.enumerated() {
+                let range = try WebsiteRequestFixture.range(in: prompt, expectedModel: choice.modelID)
+                let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[range].utf8)) as? [String: Any])
+                XCTAssertEqual(displayed["input"] as? NSArray, expectedHistories[index])
+                XCTAssertEqual(try JSONSerialization.data(withJSONObject: XCTUnwrap(displayed["input"]), options: [.sortedKeys, .withoutEscapingSlashes]),
+                               try JSONSerialization.data(withJSONObject: expectedHistories[index], options: [.sortedKeys, .withoutEscapingSlashes]),
+                               "Every input item, result part and literal string value survives presentation")
+                XCTAssertEqual(displayed["tool_choice"] as? String, "auto")
+                XCTAssertEqual(displayed["parallel_tool_calls"] as? Bool, false)
+                let offered = try XCTUnwrap(displayed["tools"] as? [[String: Any]])
+                let expected = index == 0
+                    ? tools.filter { ["browser_open", "browser_bind", "browser_tabs", "exec_command"].contains($0["name"] as? String ?? "") }
+                    : tools
+                XCTAssertEqual(Set(offered.compactMap { $0["name"] as? String }), Set(expected.compactMap { $0["name"] as? String }))
+                for schema in expected {
+                    let name = try XCTUnwrap(schema["name"] as? String)
+                    let actual = try XCTUnwrap(offered.first { $0["name"] as? String == name })
+                    XCTAssertEqual(actual["type"] as? String, "function")
+                    XCTAssertEqual(actual["parameters"] as? NSDictionary, schema["parameters"] as? NSDictionary, name)
+                }
+                let suffix = String(prompt[range.upperBound...])
+                XCTAssertTrue(suffix.contains("COMPUTA_LOCAL_RESPONSE_HANDOFF:"))
+                XCTAssertTrue(suffix.contains("A tool_calls request claims no execution or direct access."))
+                XCTAssertEqual(prompt.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"), index == 0)
+                XCTAssertEqual(suffix.contains("COMPUTA_CURRENT_BROWSER_ENTRY:"), index == 0)
+                XCTAssertEqual(suffix.contains("COMPUTA_CURRENT_BROWSER_CAPABILITIES:"), index > 0)
+                if index > 0 {
+                    XCTAssertTrue(suffix.contains("call browser_read with {}. No continuation cursor is required."))
+                    XCTAssertTrue(suffix.contains("absent website-native integrations do not make them unavailable"))
+                }
+            }
+            XCTAssertEqual(actualOutputs.count, 2)
+            XCTAssertTrue(actualOutputs[0].contains { $0["text"] == BrowserCompleteObservation.marker })
+            XCTAssertTrue(actualOutputs[0].contains { $0["text"]?.contains("fill_ref=") == true })
+            XCTAssertTrue(actualOutputs[1].contains { $0["text"]?.contains("bound_current_turn") == true })
+            let journalURL = evidenceRoot.appendingPathComponent("evidence/transactions/\(native.taskID.lowercased())/\(native.turnID.lowercased()).jsonl")
+            let journal = try Data(contentsOf: journalURL).split(separator: 0x0A).map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+            }
+            let completed = journal.filter { $0["phase"] as? String == "complete" }
+            XCTAssertEqual(completed.count, 3)
+            XCTAssertEqual(completed.compactMap { $0["submittedPromptFingerprint"] as? String },
+                           prompts.map(EmbeddedWebModelTransport.promptFingerprint))
+            XCTAssertTrue(completed.allSatisfy { $0["submissionProofPolicy"] as? String == "fresh_session_submission_v1" })
+            XCTAssertEqual(Set(completed.compactMap { $0["sessionToken"] as? String }).count, 3)
+            XCTAssertTrue(completed.allSatisfy { $0["sequence"] as? Int == 1 && $0["baselineResponseCount"] as? Int == 0 })
+            XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 3)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 1); XCTAssertEqual(counts.mutations, 0)
+            XCTAssertTrue(counts.humanIntact)
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open"])
+            XCTAssertEqual(harness.rowCount, 2, "The last synthetic proposal is inspected, never dispatched")
+            let operations = await provider.recordedOperations()
+            for operation in ["webProviderStart", "webProviderSend", "webProviderFinish"] {
+                XCTAssertEqual(operations.filter { $0 == operation }.count, 3)
+            }
+            let issues = await server.fixtureFinish(taskID: native.taskID)
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
     func testAvailabilityUsesCurrentNativeLeaseAcrossTabsBindingCloseAndNewTurn() async throws {
         try await withHarness(approval: true, capabilities: [.browserLifecycleObservationsV1]) { harness in
             try await harness.submit([
@@ -1912,6 +2059,59 @@ enum CanonicalDynamicToolTestContract {
 }
 
 /// Shared only with native-engine contract tests; never a production backend.
+/// A scripted website peer, never a model runner. The shared fixture wrapper
+/// attests these serialized Send bytes only; browser availability is supplied
+/// separately by the actual native runtime lease in the test above.
+private actor HaikuBrowserProjectionTransport: WebModelTransport {
+    private let choice: WebsiteModelChoice
+    private var replies: [String]
+    private var token: String?
+    private var reply: String?
+    private var prompts: [String] = []
+    private var operations: [String] = []
+
+    init(choice: WebsiteModelChoice, replies: [String]) {
+        self.choice = choice
+        self.replies = replies
+    }
+
+    func sentPrompts() -> [String] { prompts }
+    func recordedOperations() -> [String] { operations }
+
+    func request(operation: String, params: Data) throws -> Data {
+        let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        operations.append(operation)
+        let response: [String: Any]
+        if operation == "webProviderStart" {
+            guard token == nil, input["provider"] == "claude",
+                  let selected = input["modelChoice"], WebsiteModelChoice.parse(selected) == choice else {
+                throw WebModelServer.Failure.invalidRequest
+            }
+            let freshToken = UUID().uuidString
+            token = freshToken
+            response = ["sessionToken": freshToken, "state": "ready"]
+        } else {
+            guard let token, input["sessionToken"] == token else { throw WebModelServer.Failure.invalidRequest }
+            switch operation {
+            case "webProviderSend":
+                guard reply == nil, !replies.isEmpty else { throw WebModelServer.Failure.invalidRequest }
+                prompts.append(try XCTUnwrap(input["prompt"]))
+                reply = replies.removeFirst()
+                response = ["state": "running"]
+            case "webProviderPoll":
+                response = ["state": "complete", "text": try XCTUnwrap(reply)]
+            case "webProviderFinish", "webProviderCancel":
+                self.token = nil
+                reply = nil
+                response = ["cleanup": "not_created"]
+            default:
+                throw WebModelServer.Failure.invalidRequest
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: response)
+    }
+}
+
 actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     static let humanID = "11111111-1111-4111-8111-111111111111"
     struct Counts: Equatable, Sendable {

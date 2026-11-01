@@ -36,6 +36,22 @@ Source-bound offline and installed website-model results are recorded in the
 individual live provider/model checks and Qwen qualification remain separate.
 Existing Chrome and native desktop tooling retain their separate behavior.
 
+## Claude website-model qualification
+
+- [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
+  Full Claude qualification remains incomplete; [PR #14](https://github.com/ahmed-ela/computa/pull/14)
+  stays draft. Sonnet 5.5 has bounded full-workflow passes, while the latest
+  Haiku 5.5, Sonnet 5 and Sonnet 4.6 workflows remain unqualified. Diagnose the
+  capability refusals and capture the earlier Haiku call-shape defect if it
+  recurs; verify the outstanding quota-cleanup case separately. Complete and
+  repeat fresh browser, terminal and file-editing fixtures for each available
+  model on the intended build, with exact selection/ownership, protected tests,
+  independently observed submission receipts, task-tab closure and durable
+  website cleanup. Preserve strict parsing and do not replay uncertain actions.
+  See the [qualification evidence](docs/CLAUDE-HARNESS-QUALIFICATION.md).
+  This is a future-work entry, not a qualification pass or an instruction to
+  restart Claude testing now.
+
 ## Preserved runtime fixes — 29 September 2026
 
 This update also publishes previously local MLX stream-boundary and Chrome

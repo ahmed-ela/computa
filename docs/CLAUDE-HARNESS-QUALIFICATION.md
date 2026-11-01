@@ -623,6 +623,29 @@ second fresh fixture was prepared but remains unsubmitted; the partial task
 was not replayed. Current evidence supports a bounded Sonnet 5.5 workflow pass,
 not reliable tool support for every Claude model.
 
+An offline follow-up on 2026-11-01 at 03:32 UTC passed
+`RuntimeEmbeddedBrowserToolsTests.testHaikuFreshSessionsPreserveHistoryAndBoundCatalogAfterOpenThenTabs`
+(one test, zero failures, 1.254 seconds). It used the production native runtime's
+JSON-RPC browser operations and actual task/thread/turn/preparation-bound browser
+availability, with an inert browser backend. Three fresh, concrete-Haiku server
+inferences used explicitly synthetic website replies and submission proofs.
+After `browser_open` and `browser_tabs`, the captured transport prompts retained
+all canonical history and tool-output text parts, the current browser schemas,
+and the bound-browser execution handoff. The test also checked distinct website
+sessions, sequence-one submission hashes and verified release records. It
+performed no real website request, fill or submission.
+
+The retained evidence is
+`work/groq-qualification-20261031/native-claude-projection-g-receipt.json` and
+`native-claude-projection-g.log`. The receipt records exit zero, unchanged source
+during the run, and log SHA-256
+`0e294f2050ed92a390ed22fde19a061f0a66721d07cb138a83cd37d9f5df8f3b`.
+This checks the local projection/history boundary in a controlled case; it does
+not reproduce the live refusal, verify WebKit rendering, or qualify Haiku tool
+behavior. The build354 failure retained submission fingerprints but not the
+final assembled request and projected catalog, so this test cannot retrospectively
+establish their exact contents or the refusal's root cause.
+
 ## Qualification contract
 
 Each available family will receive an independent controlled response check and
