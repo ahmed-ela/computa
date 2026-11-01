@@ -13,6 +13,7 @@ enum LocalModelCatalog {
     static let chatGPTBrowserModelID = "browser/chatgpt"
     static let geminiBrowserModelID = "browser/gemini"
     static let claudeBrowserModelID = "browser/claude"
+    static let groqBrowserModelID = "browser/groq"
     private static let visualGroundingModelIDs: Set<String> = [
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -35,6 +36,12 @@ enum LocalModelCatalog {
             id: claudeBrowserModelID,
             label: "Claude / Website default · Built-in browser",
             detail: "Uses signed-in Claude's website default in Incognito in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
+            highMemory: false
+        ),
+        LocalModelOption(
+            id: groqBrowserModelID,
+            label: "Groq / Website default · Built-in browser",
+            detail: "Uses Groq in Computa's built-in browser. Sign in to discover available models. Website limits still apply.",
             highMemory: false
         ),
         LocalModelOption(

@@ -110,7 +110,7 @@ enum WebsiteModelCatalog {
         label: WebsiteModelChoice.ChatGPTPower.instant.label
     ).modelID
 
-    static let providers = ["chatgpt", "gemini", "claude"]
+    static let providers = ["chatgpt", "gemini", "claude", "groq"]
     static let maximumChoicesPerProvider = 32
     static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
     static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
@@ -136,6 +136,7 @@ enum WebsiteModelCatalog {
         case "chatgpt": "ChatGPT"
         case "gemini": "Gemini"
         case "claude": "Claude"
+        case "groq": "Groq"
         default: provider
         }
     }

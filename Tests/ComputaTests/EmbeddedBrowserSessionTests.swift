@@ -1609,8 +1609,8 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertGreaterThan(after, before)
     }
 
-    func testModelNotificationsPinClaudeAndGeminiOriginsRatherThanTrustingAnotherProvider() async throws {
-        for host in ["claude.ai", "gemini.google.com"] {
+    func testModelNotificationsPinEachProviderOriginRatherThanTrustingAnotherProvider() async throws {
+        for host in ["claude.ai", "gemini.google.com", "chat.groq.com"] {
             let session = EmbeddedBrowserSession(persistent: false)
             defer { session.shutdown() }
             let id = try session.createTab(select: false)
@@ -1643,8 +1643,10 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
         let id = try session.createTab(select: false)
-        XCTAssertThrowsError(try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
-                                                                 world: .world(name: "invalid-origin"), originHost: "example.com"))
+        for host in ["example.com", "groq.com", "api.groq.com", "chat.groq.com.example.test"] {
+            XCTAssertThrowsError(try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
+                                                                     world: .world(name: "invalid-origin"), originHost: host))
+        }
         XCTAssertThrowsError(try session.modelChangeRevision(for: id), "An unsupported origin must not install a channel")
     }
 
@@ -1723,7 +1725,7 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
     }
 
     func testModelDiagnosticsPinOriginsAndBoundPhaseHistoryAndNativeGeometry() async throws {
-        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com"] {
             let session = EmbeddedBrowserSession(persistent: false)
             defer { session.shutdown() }
             let id = try session.createTab(select: false)
@@ -1741,10 +1743,10 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
                 if origin == host {
                     XCTAssertTrue(snapshot.contains("phases=" + phases.suffix(8).joined(separator: ",")))
                     XCTAssertFalse(snapshot.contains("adapter_entry"))
-                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=9 diagnosticRejected=none"))
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=\(phases.count) diagnosticsAccepted=\(phases.count) diagnosticRejected=none"))
                 } else {
                     XCTAssertTrue(snapshot.contains("phases=not_started"))
-                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=0 diagnosticRejected=origin"))
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=\(phases.count) diagnosticsAccepted=0 diagnosticRejected=origin"))
                     XCTAssertTrue(snapshot.contains("originCurrent=false"))
                 }
                 XCTAssertLessThan(snapshot.utf8.count, 1_024)
@@ -1824,7 +1826,7 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
     }
 
     func testModelClockPinsProviderMainFrameAndDocumentGeneration() async throws {
-        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com"] {
             let session = EmbeddedBrowserSession(persistent: false)
             defer { session.shutdown() }
             let id = try session.createTab(select: false), owner = UUID().uuidString

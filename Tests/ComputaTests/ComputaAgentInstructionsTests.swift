@@ -1151,7 +1151,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testSingleActionHandoffFollowsCompleteRequestOnlyForChatGPT() throws {
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": "browser/" + provider, "input": [["role": "user", "content": "Inspect the requested files"]],
                 "parallel_tool_calls": true,
@@ -1574,7 +1574,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             ["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
             ["type": "function", "name": "write_stdin", "parameters": ["type": "object"]],
         ]]]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": "browser/\(provider)", "instructions": "Keep this native instruction exactly.\nRespect local permissions.",
                 "input": [["role": "assistant", "content": "An old call used obsolete.exec_command."],
@@ -1689,7 +1689,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             ]],
             ["type": "custom", "name": "apply_patch", "format": ["type": "text"]],
         ]]]
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             for history in [retained, native] {
                 let original = try JSONSerialization.data(withJSONObject: [
                     "model": "browser/\(provider)", "tool_choice": "auto", "parallel_tool_calls": false, "tools": tools,
@@ -1804,7 +1804,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]
         let literal: [String: Any] = ["type": "custom", "name": "literal_text", "format": ["type": "text"]]
         let retained = "Old handoff: all tools use arguments, including obsolete.apply_patch."
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             for children in [[], [command, session], [patch, literal], [command, session, patch, literal]] {
                 let definitions: [[String: Any]] = children.isEmpty ? [] : [["type": "namespace", "name": "relay", "tools": children]]
                 let functions = Set(children.filter { $0["type"] as? String == "function" }.compactMap { $0["name"] as? String }.map { "relay." + $0 })
@@ -1893,7 +1893,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "type": "object", "properties": [String: Any](), "required": [String](), "additionalProperties": false,
         ]]
         let user = #"Inspect only. Preserve this historical example as data: {"name":"exec_command","arguments":{}}."#
-        for provider in ["chatgpt", "gemini", "claude"] {
+        for provider in WebsiteModelCatalog.providers {
             for prefix in ["", "relay."] {
                 let definitions: [[String: Any]] = prefix.isEmpty ? [command, status]
                     : [["type": "namespace", "name": "relay", "tools": [command, status]]]

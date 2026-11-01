@@ -735,11 +735,17 @@ actor WebModelServer {
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
                 params: params)
-            guard ["deleted", "not_created"].contains(reply["cleanup"] as? String ?? "") else {
-                throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
+            let reason: WebsiteSessionCleanupReceipt.Reason
+            switch reply["cleanup"] as? String {
+            case "deleted": reason = .deleted
+            case "not_created": reason = .notCreated
+            // Groq confirms removal of its owned visible transcript. This is
+            // neither temporary-chat proof nor a provider retention guarantee.
+            case "transcript_cleared" where session.provider == "groq": reason = .transcriptCleared
+            default: throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
             }
             let receipt = makeCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
-                outcome: .closed, reason: reply["cleanup"] as? String == "deleted" ? .deleted : .notCreated, trigger: trigger)
+                outcome: .closed, reason: reason, trigger: trigger)
             if sessions[taskID]?.token == session.token { sessions.removeValue(forKey: taskID) }
             let pending = PendingClosedTransaction(session: session, receipt: receipt)
             pendingClosedTransactions[taskID] = pending
@@ -1543,7 +1549,7 @@ actor WebModelServer {
               let token = UUID(uuidString: session.token),
               text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
               session.modelID.utf8.count <= 2_048,
-              ["chatgpt", "claude", "gemini"].contains(session.provider) else { return }
+              WebsiteModelCatalog.providers.contains(session.provider) else { return }
         let diagnosticFields: [String: Any]
         switch diagnostic {
         case let .malformed(value):
@@ -1718,8 +1724,10 @@ actor WebModelServer {
         if let turnScoped { policy = turnScoped }
         else if provider == "chatgpt" { policy = nil }
         else { policy = Self.requiresNativeContinuationProof(provider: provider) }
+        let transactionMode = provider == "groq" ? "explicit_clear_per_inference"
+            : policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending"
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
-            "transactionMode": policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending",
+            "transactionMode": transactionMode,
             "transactionVersion": policy.map { $0 ? 2 : 1 } ?? 0,
             "transactionPolicyEstablished": policy != nil,
             "taskID": taskID, "threadID": context.threadID, "turnID": context.turnID,

@@ -1,5 +1,5 @@
 export type Tone = 'neutral' | 'blue' | 'green' | 'orange' | 'red' | 'purple';
-export type WebsiteModelProvider = 'chatgpt' | 'gemini' | 'claude';
+export type WebsiteModelProvider = 'chatgpt' | 'gemini' | 'claude' | 'groq';
 
 export interface ConnectionSnapshot {
   state: 'disconnected' | 'connecting' | 'connected' | 'failed';

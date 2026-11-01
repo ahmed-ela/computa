@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "computa-contracts"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "computa-desktop"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "computa-harness"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "computa-inference"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "computa-macos"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "computa-runtime"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "computa-state"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "computa-contracts",
  "hex",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "computa-ui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "computa-contracts",
  "js-sys",
@@ -5379,7 +5379,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
