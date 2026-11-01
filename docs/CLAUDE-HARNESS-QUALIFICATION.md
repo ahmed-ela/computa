@@ -9,10 +9,10 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build371 (`c7186ae`) is installed and its launch is recorded.
+As of November 1, build373 (`0b46593`) is installed and its launch is recorded.
 The latest full Claude workflow cases below ran on build368 (`2dea3d2`). A later
 Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
-on build371 is claimed. The
+on build371 is claimed. The separate build373 reproduction below failed. The
 `v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
@@ -33,7 +33,7 @@ are still required.
 These results are independent cases, not an all-model pass or a measured
 reliability rate.
 
-## Subsequent ownership failure and diagnostic candidate
+## Subsequent ownership failure and installed diagnostics
 
 The fresh `fable51-marker370` task verified the selected model and first-user
 submission, then failed `website_ownership_unverified` with
@@ -44,16 +44,53 @@ replayed. The failed read did not retain its actual user-message count.
 This case also does not establish current Fable entitlement: the earlier
 ordinary picker marked Fable choices `Buy credits`.
 
-Build373's candidate includes finite count and remount-completion diagnostics
+Installed build373 includes finite count and remount-completion diagnostics
 first prepared in build372, plus the later Alibaba selector change. The count
 projection preserves the exact count used by the existing failed guard. Remount
 observations capture completion structure at entry and failed exit of the
 existing wait. Neither projection changes verification, deadlines, parsing,
 cleanup or action dispatch. Source checks and evidence limits are recorded in
-`HARNESS-VALIDATION-NOTES.md`; installed371 lacks these diagnostics. A fresh
-Opus 5 marker is the next controlled reproduction, after current picker
-eligibility is confirmed. Fable testing requires its own current eligibility
-proof. These candidates do not establish a root cause or repair.
+`HARNESS-VALIDATION-NOTES.md`. These diagnostics do not establish a root cause
+or repair. Fable testing requires its own current eligibility proof.
+
+## Installed build373 reproduction, November 1
+
+The approved restart installed source `0b465935ad69eab75be368ee13eebaf1b74088e8`,
+process 39393. Its signed package, installed executable and resource inventory
+were matched to the retained receipts. The installed model menu separately
+confirmed that Alibaba exposes only the undated Qwen3.7 Flash choice.
+
+Before the fresh `opus5-marker373-a` task, an ordinary Claude picker showed
+Opus 5 enabled. Fable 5.1 instead had `Requires usage credits`, and the page
+reported that usage credits were off. That current observation does not explain
+the historical Fable ownership failure. The ordinary inspection tab was closed
+before the harness task.
+
+The fresh Opus 5 marker failed after 4.959 seconds, with one inference, zero
+native tools and no accepted final answer. Its submission journal records exact
+Opus 5 selection and a nonempty native first-user fingerprint before the
+failure. The new diagnostic again reports `trigger_remount_timeout`: the
+previously recognized same-context model button was disconnected and no current
+model trigger was recognized. At both entry and exit of the 1,849 ms wait,
+the completion projection had zero logical answers, `no_message`, no scoped
+copies, and false busy/interrupted/complete flags. An outer assistant landmark
+was nevertheless present. These samples do not establish absent provider
+output, a rendering cause, entitlement failure or that extending the wait fixes
+the problem.
+
+The exact session has a saved `closed / not_created` cleanup receipt. As in the
+earlier case, `not_created` does not mean that no prompt was sent. Eight finite
+events were captured without omissions; no early count diagnostic was emitted.
+The independent audit is retained under `evidence/opus5-marker373-a/`, with
+SHA-256 `cfe820ec5e8837f42f06ef60ab39c02c72bbd13b268616eb00d56577d754aec2`.
+
+A distinct direct message in a visible ordinary Incognito tab returned its
+exact marker. The first sampled completed response was at 2.291 seconds, and
+all seven samples from 0.664 through 12.282 seconds exposed `Model: Opus 5 High`.
+Only this test-created tab was closed afterward. This is a direct-response
+control, not a harness pass or a matched latency benchmark: payload, viewport
+and foreground presentation differed. It does not isolate the cause of the
+harness failure. Verification and timeout behavior remain unchanged.
 
 ## Installed build368 results, November 1
 
