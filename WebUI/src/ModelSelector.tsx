@@ -25,10 +25,15 @@ export function ModelLabel({ model, option }: { model: string; option?: ModelOpt
 }
 
 const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude', 'browser/groq']);
+// Temporarily hide the other Alibaba catalog models, including dated duplicates.
+// Keep their saved configuration and runtime support; only expose Qwen3.7 Flash.
+const showAdditionalAlibabaModels = false;
+const alibabaQwen37Flash = 'api/alibaba/model/cXdlbjMuNy1mbGFzaA'; // qwen3.7-flash
 
 // Offer specific website/API models only. Keep hidden local/default selections
 // and runtime support intact without silently substituting a different model.
 function isVisibleModel(model: string): boolean {
+  if (model.startsWith('api/alibaba/')) return showAdditionalAlibabaModels || model === alibabaQwen37Flash;
   return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
 }
 
