@@ -1318,6 +1318,92 @@ function websiteClaudeModelTriggerDiagnostic(state) {
       inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
   } catch { return empty('unavailable'); }
 }
+// Failure-only structural inventory. These sampled DOM facts are not ownership,
+// model, completion or cleanup evidence. Never read text, arbitrary classes or
+// attribute values into the result; a failed read preserves the original error.
+function websiteClaudeRemountSurfaceDiagnostic(guard) {
+  try {
+    if (typeof guard !== 'function' || guard() !== true) return null;
+    const limit = 64;
+    const physical = node => !!node && node.isConnected === true && node.getClientRects().length > 0
+      && !['hidden', 'collapse'].includes(getComputedStyle(node).visibility);
+    const visible = node => physical(node) && !node.closest('[hidden], [inert], [aria-hidden="true"]');
+    const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+    // Only fixed selector queries; do not enumerate the whole document or its text.
+    const scan = (selector, scope = document) => {
+      const matches = scope.querySelectorAll(selector), nodes = [];
+      for (let index = 0; index < Math.min(matches.length, limit); index++) nodes.push(matches[index]);
+      return { nodes, truncated: matches.length > limit };
+    };
+    const counts = sample => ({ sampled: sample.nodes.length, truncated: sample.truncated,
+      physical: sample.nodes.filter(physical).length, visible: sample.nodes.filter(visible).length,
+      enabled: sample.nodes.filter(enabled).length });
+    const number = (value, min = 0) => typeof value === 'number' && Number.isFinite(value)
+      ? { value: Math.max(min, Math.min(100_000, Math.trunc(value))), saturated: value < min || value > 100_000 }
+      : { value: null, saturated: false };
+    const enumValue = (value, allowed) => value == null ? 'unavailable' : allowed.includes(value) ? value : 'other';
+    // CharacterData.length supplies UTF-16 occupancy without concatenating or
+    // reading page text. Both traversal and sum are capped, including deep trees.
+    const textNodes = root => {
+      const stack = [{ node: root, index: 0 }];
+      let utf16Units = 0, saturated = false, nodesVisited = 0, truncated = false;
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (nodesVisited === limit) { truncated = true; break; }
+        const child = children[frame.index++]; nodesVisited++;
+        if (child.nodeType === 3) {
+          const length = child.length;
+          if (!Number.isSafeInteger(length) || length < 0) throw new Error('text_length_unavailable');
+          saturated = saturated || utf16Units + length > 180_201;
+          utf16Units = Math.min(180_201, utf16Units + length);
+        } else if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+      return { utf16Units, saturated, nodesVisited, truncated };
+    };
+    const shape = node => {
+      const tag = node.tagName?.toLowerCase(), role = node.getAttribute('role'), testID = node.getAttribute('data-testid');
+      return { tag: ['div', 'span', 'p', 'section', 'article', 'main', 'form', 'button', 'pre', 'code', 'h2', 'svg'].includes(tag) ? tag : 'other',
+        role: role === null ? 'absent' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation', 'status', 'button', 'textbox'].includes(role) ? role : 'other',
+        testID: testID === null ? 'absent' : ['assistant-message', 'user-message', 'message-actions', 'action-bar-copy',
+          'response-status-announcer', 'chat-input', 'chat-input-send'].includes(testID) ? testID : 'other',
+        replyText: node.getAttribute('data-perf-reply-text') !== null,
+        physical: physical(node), visible: visible(node), textNodes: textNodes(node) };
+    };
+    const labeled = scan('button[aria-label], [role="button"][aria-label]');
+    const prefix = [], kinds = { recognized: 0, known_prefix_unrecognized: 0, other: 0 };
+    for (const node of labeled.nodes) {
+      const raw = node.getAttribute('aria-label');
+      // Limit normalization work; oversized labels can establish only a literal
+      // known prefix, never a recognized model. No label bytes leave this scope.
+      const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+      const knownPrefix = label?.startsWith('Model: ') || typeof raw === 'string' && raw.startsWith('Model: ');
+      const kind = knownPrefix ? label && websiteModelSafeTriggerLabel(label) ? 'recognized' : 'known_prefix_unrecognized' : 'other';
+      kinds[kind]++;
+      if (knownPrefix) prefix.push(node);
+    }
+    const roots = scan('[data-testid="assistant-message"]');
+    const rootSamples = roots.nodes.slice(0, 2).map(node => {
+      const children = node.children, samples = [];
+      for (let index = 0; index < Math.min(children.length, 6); index++) samples.push(shape(children[index]));
+      return { ...shape(node), childrenSampled: samples.length, childrenTruncated: children.length > 6, children: samples };
+    });
+    const result = { kind: 'claude_remount_surface_v1', scanLimit: limit,
+      document: { hidden: typeof document.hidden === 'boolean' ? document.hidden : null,
+        visibility: enumValue(document.visibilityState, ['visible', 'hidden', 'prerender']),
+        ready: enumValue(document.readyState, ['loading', 'interactive', 'complete']),
+        width: number(window.innerWidth), height: number(window.innerHeight),
+        scrollX: number(window.scrollX, -100_000), scrollY: number(window.scrollY, -100_000) },
+      composers: counts(scan('[data-testid="chat-input"][contenteditable="true"][role="textbox"]')),
+      stopButtons: counts(scan('button[aria-label="Stop response"]')),
+      sendButtons: counts(scan('button[aria-label="Send message"]')),
+      modelControls: { labeledScan: counts(labeled), labelKinds: kinds, prefix: counts({ nodes: prefix, truncated: labeled.truncated }) },
+      responseRoots: { ...counts(roots), shapesTruncated: roots.truncated || roots.nodes.length > 2, shapes: rootSamples },
+      renderedReplies: counts(scan('[data-testid="assistant-message"] [data-perf-reply-text]')),
+      replyTextNodes: counts(scan('[data-perf-reply-text]')) };
+    return guard() === true ? result : null;
+  } catch { return null; }
+}
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
   const allowedRoles = ['button', 'menu', 'menuitem', 'menuitemradio', 'radio', 'listbox', 'option', 'dialog'];
@@ -1807,7 +1893,8 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
           const elapsed = Date.now() - diagnosticStarted;
           remountObservation = { kind: 'claude_remount_observation_v1',
             elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.min(10_000, Math.floor(elapsed))) : null,
-            observations, entry, terminal: completionDiagnostic() };
+            observations, entry, terminal: completionDiagnostic(),
+            surface: websiteClaudeRemountSurfaceDiagnostic(context.claudeSubmittedReadGuard) };
         } catch { /* Unavailable diagnostics cannot replace the original failure. */ }
         return failure(rejection || 'model_unverified');
       }

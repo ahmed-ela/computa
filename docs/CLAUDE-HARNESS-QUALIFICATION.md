@@ -92,6 +92,25 @@ control, not a harness pass or a matched latency benchmark: payload, viewport
 and foreground presentation differed. It does not isolate the cause of the
 harness failure. Verification and timeout behavior remain unchanged.
 
+Build374 adds a diagnostic capture at this existing failure boundary. Its
+content-free DOM inventory distinguishes missing reply elements from hidden
+ones and records bounded control counts and response subtree shapes. A
+separate native record joins the exact session, tab and document generation to
+view/host dimensions, clipping and window visibility before cleanup. Neither
+record supplies model or response authority, extends a deadline, retains the
+page or replays a prompt. The installed app is still build373; this candidate
+has not yet produced a live failure capture or established a repair.
+
+The candidate passed 969 cross-provider adapter tests (41,752 assertions),
+11 focused native tests and nine versioning tests. The native cases verify
+capture before cleanup, no duplicate emission, suppression for stale views and
+successful remounts, and unchanged error/deadline behavior. The DOM cases cover
+missing, hidden, inert and alternate reply structures, bounded text occupancy,
+exceptions, changed ownership and output-size limits. Source hashes were
+unchanged during both adapter and native runs. Their retained log SHA-256 values
+are `ee08a87d9bc6c862db5ae8547e6c3aea029026b4a1ac49c9d8e838fa5f3de4df`
+and `f299f34d047d4ce53d7a4b63abc4757da061e281ff3f00aed4200ed397eb6933`.
+
 ## Installed build368 results, November 1
 
 These fresh cases ran on source `2dea3d291cc414f76c1f0687b2e141cdafa5b4f1`,

@@ -465,6 +465,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedPendingModelVerification = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
+        var loggedClaudeRemountHostFailure = false
         var loggedModelMismatch = false
         var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
@@ -643,6 +644,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
+    private var claudeRemountHostObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var groqSendRevealObserverForTesting: (@MainActor (String) -> Void)?
@@ -785,6 +787,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         modelDiagnosticsObserverForTesting = observer
+    }
+
+    func setClaudeRemountHostObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        claudeRemountHostObserverForTesting = observer
     }
 
     func setAdapterTimeoutObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -5260,6 +5266,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            logClaudeRemountHostFailure(observed, session: session, action: action,
+                                       generation: generation, allowsBlockedProvider: allowBlockedProvider)
             if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
                let raw = observed["quotaDiagnostic"] as? String {
                 logQuotaDiagnostic(raw, session: session, action: action, force: true)
@@ -5985,6 +5993,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]), data.count <= 2_048 else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private func logClaudeRemountHostFailure(_ observation: [String: Any], session: Session,
+                                            action: String, generation: UUID, allowsBlockedProvider: Bool) {
+        // The callback's view, generation and route guards have already passed.
+        // This synchronous native-only snapshot neither rereads nor retains the
+        // failing page. Cleanup and repeated failure reads cannot emit again.
+        guard session.provider == .claude, !session.isDiscovery, !session.isRecoveryProbe,
+              !allowsBlockedProvider, !Task.isCancelled, !session.loggedClaudeRemountHostFailure,
+              session.state == "running", session.submitted,
+              (1...Self.maximumTurnSubmissions).contains(session.sequence),
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              session.documentGeneration == generation,
+              let record = ClaudeRemountHostDiagnostic.record(observation: observation,
+                  action: action, sequence: session.sequence, sessionID: session.token,
+                  tabID: session.tabID, generation: generation,
+                  snapshot: { browser.modelDiagnosticSnapshot(tabID: session.tabID) }) else { return }
+        session.loggedClaudeRemountHostFailure = true
+        #if DEBUG
+        claudeRemountHostObserverForTesting?(record)
+        #endif
+        Self.inspectionLog.error("claudeRemountHost structure=\(record, privacy: .public)")
     }
 
     private func logModelDiagnostic(_ observation: [String: Any], session: Session) {

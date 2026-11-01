@@ -11058,6 +11058,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let choice = Self.fixtureChoice(.claude)
         let fixture = try Fixture(page: Self.modelChoicePage(.claude))
         defer { fixture.shutdown() }
+        var hostFailures: [String] = []
+        fixture.transport.setClaudeRemountHostObserverForTesting { hostFailures.append($0) }
         let started = try await startChoice(choice, in: fixture)
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let tabID = try XCTUnwrap(fixture.createdTabs.last)
@@ -11091,6 +11093,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(actionsAfter, actionsBefore, "Remount observation must not open or dismiss a picker")
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         try await finishTerminalFixture(fixture, token: token)
+        XCTAssertTrue(hostFailures.isEmpty, "A successful remount cannot emit a failure host snapshot")
     }
 
     func testClaudeSubmittedHeaderRemountRejectsChangedModelBodyAndOwnerWithoutReplay() async throws {
@@ -11135,8 +11138,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         defer { fixture.shutdown() }
         let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
         let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
         _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tabID))
+        var hostFailures: [String] = []
+        fixture.transport.setClaudeRemountHostObserverForTesting {
+            XCTAssertTrue(fixture.browser.webView(for: tabID) === view, "Capture must precede cleanup")
+            XCTAssertEqual(fixture.browser.documentGeneration(for: tabID), generation)
+            hostFailures.append($0)
+        }
+        defer { fixture.transport.setClaudeRemountHostObserverForTesting(nil) }
         let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
         _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Missing header remains unverified"])
         try await installClaudeHeaderRemountFixture(view, variant: "missing")
@@ -11148,14 +11160,63 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let elapsed = began.duration(to: .now)
         XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(1_500), "The real existing native clock must expire the 1.8s wait")
         XCTAssertLessThan(elapsed, .seconds(5), "No retry budget or indefinite wait may be introduced")
+        XCTAssertEqual(hostFailures.count, 1)
+        let hostRecord = try XCTUnwrap(hostFailures.first)
+        let hostFailure = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(hostRecord.utf8)) as? [String: Any])
+        XCTAssertEqual(hostFailure["sessionID"] as? String, token.lowercased())
+        XCTAssertEqual(hostFailure["tabID"] as? String, tabID.uuidString.lowercased())
+        XCTAssertEqual(hostFailure["generation"] as? String, generation.uuidString.lowercased())
+        XCTAssertEqual(hostFailure["action"] as? String, "inspect")
+        XCTAssertEqual(hostFailure["sequence"] as? Int, 1)
+        XCTAssertEqual(hostFailure["stage"] as? String, "trigger_remount_timeout")
+        let host = try XCTUnwrap(hostFailure["host"] as? [String: Any])
+        XCTAssertEqual(host["width"] as? Int, 1_024)
+        XCTAssertEqual(host["height"] as? Int, 768)
+        XCTAssertEqual(host["attached"] as? Bool, true)
+        XCTAssertEqual(host["hidden"] as? Bool, false)
+        XCTAssertEqual(host["window"] as? Bool, true)
+        XCTAssertFalse(hostRecord.contains("Missing header remains unverified"))
         let ledger = try await claudeHeaderRemountLedger(view)
         XCTAssertEqual(ledger["observerArms"] as? Int, 1)
         XCTAssertEqual(ledger["mounts"] as? Int, 0)
         XCTAssertEqual(ledger["replacementCurrent"] as? Bool, false)
         let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
         XCTAssertEqual(actionsAfter, actionsBefore)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("The terminal failure remains terminal; no diagnostic may trigger another inference")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        XCTAssertEqual(hostFailures.count, 1)
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         try await finishTerminalFixture(fixture, token: token)
+        XCTAssertEqual(hostFailures.count, 1, "Cleanup cannot replace or duplicate the original failure snapshot")
+    }
+
+    func testClaudeRemountHostDiagnosticRejectsClosedViewBeforeCallbackValidation() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Native callback teardown fixture"])
+        try await installClaudeHeaderRemountFixture(view, variant: "missing")
+        var hostFailures: [String] = [], closed = false
+        fixture.transport.setClaudeRemountHostObserverForTesting { hostFailures.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !closed else { return }
+            closed = true
+            fixture.browser.closeTab(tabID)
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A callback for a closed view cannot publish geometry or a model response")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertTrue(closed)
+        XCTAssertTrue(hostFailures.isEmpty)
+        try await assertHumanTabIntact(fixture)
     }
 
     func testClaudeEarlyUserCountFailureEmitsCapturedCountsWithoutReplayOrCleanupAuthority() async throws {

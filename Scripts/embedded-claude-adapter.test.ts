@@ -1599,7 +1599,7 @@ describe('Claude post-submit detached header settling', () => {
       x.expire(); const result = await x.pending;
       expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
       const d = result.modelDiagnostic.remountObservation;
-      expect(Object.keys(d).sort()).toEqual(['elapsedMs', 'entry', 'kind', 'observations', 'terminal']);
+      expect(Object.keys(d).sort()).toEqual(['elapsedMs', 'entry', 'kind', 'observations', 'surface', 'terminal']);
       expect(d.kind).toBe('claude_remount_observation_v1');
       expect(d.elapsedMs).toBeGreaterThanOrEqual(0); expect(d.elapsedMs).toBeLessThanOrEqual(10000);
       expect(d.observations).toBeGreaterThanOrEqual(2); expect(d.observations).toBeLessThanOrEqual(1000);
@@ -1610,8 +1610,152 @@ describe('Claude post-submit detached header settling', () => {
         scopedCopies: shape === 'absent' ? 0 : 1, enabledCopies: shape === 'absent' ? 0 : 1,
         answerComplete: shape === 'complete' });
       expect(JSON.stringify(d)).not.toContain('PRIVATE_REPLY_CANARY');
-      expect(JSON.stringify(d).length).toBeLessThan(1000); x.noActions();
+      expect(JSON.stringify(d).length).toBeLessThan(6000); x.noActions();
     }
+  });
+
+  test('remount surface distinguishes missing, hidden and inert rendered reply subtrees', async () => {
+    for (const mode of ['missing', 'hidden_body', 'hidden_root', 'inert_root']) {
+      const x = await detached('inspect', f => {
+        if (mode === 'missing') f.response.replaceChildren(new Element('H2', {}, 'PRIVATE_HEADER'));
+        if (mode === 'hidden_body') f.answer.values.hidden = '';
+        if (mode === 'hidden_root') f.response.values.hidden = '';
+        if (mode === 'inert_root') f.response.values.inert = '';
+      });
+      x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      expect(d.kind).toBe('claude_remount_surface_v1');
+      expect(d.responseRoots).toMatchObject({ sampled: 1, truncated: false, shapesTruncated: false,
+        physical: mode === 'hidden_root' ? 0 : 1, visible: ['hidden_root', 'inert_root'].includes(mode) ? 0 : 1 });
+      expect(d.renderedReplies).toEqual({ sampled: mode === 'missing' ? 0 : 1, truncated: false,
+        physical: mode === 'inert_root' ? 1 : 0, visible: 0, enabled: 0 });
+      expect(d.replyTextNodes).toEqual(d.renderedReplies);
+      expect(d.responseRoots.shapes[0].children.some((child: any) => child.replyText)).toBe(mode !== 'missing');
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_HEADER'); x.noActions();
+    }
+  });
+
+  test('remount surface records alternate direct children and only finite control categories', async () => {
+    const x = await detached('verifyModel', f => {
+      f.response.replaceChildren(new Element('SECTION', { role: 'region', class: 'PRIVATE_CLASS' }, 'PRIVATE_REPLY'),
+        new Element('PRIVATE-TAG', { role: 'PRIVATE_ROLE', 'data-testid': 'PRIVATE_TESTID', 'data-perf-reply-text': 'PRIVATE_ATTRIBUTE' }));
+      f.body.append(new Element('BUTTON', { 'aria-label': 'Model: PRIVATE_MODEL', hidden: '' }),
+        new Element('BUTTON', { 'aria-label': 'PRIVATE_CONTROL' }),
+        new Element('BUTTON', { 'aria-label': 'Model: Opus 5 High', hidden: '' }));
+      f.composer.disabled = true;
+      f.send.values['aria-disabled'] = 'true'; delete f.send.values['data-testid']; f.stop.connected = true;
+      Object.assign(f.document, { hidden: true, visibilityState: 'hidden', readyState: 'complete' });
+      Object.assign(f.window, { innerWidth: 1024, innerHeight: 768, scrollX: -4.5, scrollY: 12.9 });
+    });
+    x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    expect(d.responseRoots.shapes[0].children).toEqual([
+      { tag: 'section', role: 'region', testID: 'absent', replyText: false, physical: true, visible: true,
+        textNodes: { utf16Units: 13, saturated: false, nodesVisited: 1, truncated: false } },
+      { tag: 'other', role: 'other', testID: 'other', replyText: true, physical: true, visible: true,
+        textNodes: { utf16Units: 0, saturated: false, nodesVisited: 0, truncated: false } }]);
+    expect(d.modelControls.prefix).toMatchObject({ sampled: 3, truncated: false, physical: 0, visible: 0, enabled: 0 });
+    expect(d.modelControls.labelKinds).toMatchObject({ recognized: 2, known_prefix_unrecognized: 1 });
+    expect(d.composers).toEqual({ sampled: 1, truncated: false, physical: 1, visible: 1, enabled: 0 });
+    expect(d.sendButtons.enabled).toBe(0); expect(d.stopButtons.enabled).toBe(1);
+    expect(d.document).toEqual({ hidden: true, visibility: 'hidden', ready: 'complete',
+      width: { value: 1024, saturated: false }, height: { value: 768, saturated: false },
+      scrollX: { value: -4, saturated: false }, scrollY: { value: 12, saturated: false } });
+    expect(JSON.stringify(d)).not.toContain('PRIVATE_'); x.noActions();
+  });
+
+  test('remount surface distinguishes empty placeholders from alternate text without reading text content', async () => {
+    for (const mode of ['empty', 'nonempty', 'long', 'deep']) {
+      const x = await detached('inspect', f => {
+        f.response.replaceChildren();
+        const child = new Element('SECTION'); f.response.append(child);
+        let leaf = child;
+        if (mode === 'deep') for (let index = 0; index < 80; index++) {
+          const next = new Element('DIV'); leaf.append(next); leaf = next;
+        }
+        if (mode !== 'empty') {
+          const text = new Element('#text', {}, mode === 'long' ? 'PRIVATE_TEXT_'.repeat(20000) : 'PRIVATE_TEXT_😀');
+          // Diagnostic must use CharacterData.length, never textContent/innerText.
+          Object.defineProperty(text, 'textContent', { get: () => { throw new Error('RAW_TEXT_READ'); } });
+          leaf.append(text);
+        }
+      });
+      x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+      expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+      const root = d.responseRoots.shapes[0], child = root.children[0];
+      for (const shape of [root, child]) {
+        expect(shape.textNodes).toMatchObject({ utf16Units: mode === 'long' ? 180201 : mode === 'nonempty' ? 15 : 0,
+          saturated: mode === 'long', truncated: mode === 'deep' });
+        expect(shape.textNodes.nodesVisited).toBeLessThanOrEqual(64);
+      }
+      expect(d.renderedReplies.sampled).toBe(0);
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_TEXT'); expect(JSON.stringify(d)).not.toContain('RAW_TEXT_READ'); x.noActions();
+    }
+  });
+
+  test('remount surface is a failure-time reread and can describe a rejected replacement', async () => {
+    const x = await detached();
+    x.f.response.replaceChildren(new Element('DIV', { 'data-testid': 'message-actions' }));
+    x.f.body.append(currentHeader('Sonnet 5')); x.wake();
+    const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_mismatch'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_rejected');
+    expect(result.modelDiagnostic.remountObservation.entry.logicalAnswerCount).toBe(1);
+    expect(d.renderedReplies.sampled).toBe(0); expect(d.modelControls.prefix.visible).toBe(1);
+    expect(d.responseRoots.shapes[0].children[0].testID).toBe('message-actions');
+    expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+  });
+
+  test('remount surface exceptions preserve the original error, clock and no actions', async () => {
+    const x = await detached();
+    Object.defineProperty(x.f.document, 'hidden', { get: () => { throw new Error('PRIVATE_DIAGNOSTIC_FAILURE'); } });
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+    expect(result.modelDiagnostic.remountObservation.surface).toBeNull();
+    expect(result.modelDiagnostic.remountObservation.terminal.answerComplete).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_DIAGNOSTIC_FAILURE'); x.noActions();
+  });
+
+  test('remount surface discards the inventory if ownership changes during the projection', async () => {
+    const x = await detached();
+    Object.defineProperty(x.f.document, 'hidden', { get: () => {
+      x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER'; return false;
+    } });
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('first_user_message');
+    expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+  });
+
+  test('remount surface caps every inventory and shape and fits the existing native diagnostic budget', async () => {
+    const x = await detached('inspect', f => {
+      f.response.replaceChildren();
+      for (let root = 0; root < 70; root++) {
+        const node = root === 0 ? f.response : new Element('DIV', { 'data-testid': 'assistant-message' });
+        for (let child = 0; child < 10; child++) node.append(new Element('SECTION', {
+          role: 'presentation', 'data-testid': 'response-status-announcer', 'data-perf-reply-text': 'PRIVATE_VALUE', class: 'PRIVATE_CLASS' }));
+        if (root !== 0) f.messages.append(node);
+        f.body.append(new Element('BUTTON', { 'aria-label': 'Model: PRIVATE_' + root, hidden: '' }),
+          new Element('DIV', { 'data-testid': 'chat-input', contenteditable: 'true', role: 'textbox', hidden: '' }),
+          new Element('BUTTON', { 'aria-label': 'Send message', 'data-testid': 'chat-input-send', hidden: '' }),
+          new Element('BUTTON', { 'aria-label': 'Stop response', hidden: '' }));
+      }
+      Object.assign(f.document, { hidden: false, visibilityState: 'PRIVATE_VISIBILITY', readyState: 'PRIVATE_READY' });
+      Object.assign(f.window, { innerWidth: Infinity, innerHeight: 900000, scrollX: -900000, scrollY: NaN });
+    });
+    x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    for (const sample of [d.composers, d.stopButtons, d.sendButtons, d.responseRoots, d.renderedReplies, d.replyTextNodes, d.modelControls.labeledScan])
+      expect(sample).toMatchObject({ sampled: 64, truncated: true });
+    expect(d.modelControls.prefix.truncated).toBe(true);
+    expect(d.responseRoots.shapesTruncated).toBe(true); expect(d.responseRoots.shapes).toHaveLength(2);
+    for (const root of d.responseRoots.shapes) { expect(root.childrenTruncated).toBe(true); expect(root.children).toHaveLength(6); }
+    expect(d.document).toMatchObject({ visibility: 'other', ready: 'other',
+      width: { value: null, saturated: false }, height: { value: 100000, saturated: true },
+      scrollX: { value: -100000, saturated: true }, scrollY: { value: null, saturated: false } });
+    expect(JSON.stringify(d)).not.toContain('PRIVATE_');
+    expect(new TextEncoder().encode(JSON.stringify(d)).length).toBeLessThan(6000);
+    expect(new TextEncoder().encode(JSON.stringify(result.modelDiagnostic)).length).toBeLessThan(16384);
+    x.noActions();
   });
 
   test('remount diagnostics preserve entry separately from the later completion reread', async () => {

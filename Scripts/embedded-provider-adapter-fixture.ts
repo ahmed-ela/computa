@@ -18,9 +18,10 @@ export class Element {
   events: unknown[] = [];
   constructor(public tagName: string, public values: Record<string, string> = {}, public text = "") {}
   get nodeType() { return this.tagName === "#text" ? 3 : 1; }
+  get length() { return this.tagName === "#text" ? this.text.length : undefined; }
   get childElementCount() { return this.children.filter(child => child.nodeType === 1).length; }
   get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
-  get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
+  get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, length: this.text.length, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get isConnected(): boolean { return this.connected && (!this.parentElement || this.parentElement.isConnected); }
   set isConnected(value: boolean) { this.connected = value; }
   get textContent(): string { return this.text + this.children.map(child => child.tagName === "BR" ? "\n" : child.textContent).join(""); }
