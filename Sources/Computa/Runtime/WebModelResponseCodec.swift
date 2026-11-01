@@ -267,9 +267,10 @@ enum WebModelResponseCodec {
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt"
         let isClaude = provider == "claude"
+        let isGroq = provider == "groq"
         let runtimeInstructions = [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
-            deduplicateNativeContext: isClaude),
+            deduplicateNativeContext: isClaude || isGroq),
             deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
@@ -281,11 +282,16 @@ enum WebModelResponseCodec {
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
-        let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
-        // Keep ChatGPT and Claude's complete request in one literal, unlabelled
-        // code block. This changes no JSON values or tool/dispatch policy; the
-        // eight fence bytes count toward admission and ownership fingerprints.
-        let framedRequestJSON = (isChatGPT || isClaude) ? "```\n" + displayJSON + "\n```" : displayJSON
+        // Groq receives one compact JSON line inside a literal code block.
+        // Valid JSON strings cannot contain raw CR/LF, so quoted backticks cannot
+        // become a closing-fence line. Preserve JSON lexemes rather than expand
+        // punctuation into Unicode escapes; the other providers keep their
+        // existing rendering policy. This grants no relay/dispatch privileges.
+        let displayJSON = isGroq ? projection.json
+            : displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
+        // The eight fence bytes count toward admission and ownership fingerprints.
+        let framedRequestJSON = (isChatGPT || isClaude || isGroq) ? "```\n" + displayJSON + "\n```" : displayJSON
+        let requestContext = ComputaAgentInstructions.requestContext(compactLiteralJSON: isGroq)
         let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
             currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability),
@@ -293,7 +299,7 @@ enum WebModelResponseCodec {
         let prompt = """
         \(runtimeInstructions)
 
-        \(ComputaAgentInstructions.webRequestContext)
+        \(requestContext)
         COMPLETE_RESPONSES_REQUEST_JSON:
         \(framedRequestJSON)
         END_COMPLETE_RESPONSES_REQUEST_JSON.
@@ -307,7 +313,7 @@ enum WebModelResponseCodec {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
         let statistics = projection.statistics(originalRequestBytes: data.count, presentedRequestBytes: displayJSON.utf8.count,
-            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
+            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: requestContext.utf8.count,
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
         return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,

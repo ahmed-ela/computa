@@ -9,9 +9,11 @@ passed submission and an initial first-user binding observation, then failed a
 later `user_count` ownership check: the rejected read matched zero user and
 answer rows where one user was required. No completed answer was accepted;
 cleanup is unconfirmed and live support remains unqualified. A separate normal
-website test also returned an error for a longer synthetic prompt. Its request
-error remains unknown; a size limit is not established. Direct website probes
-below are not harness qualification.
+website test returned an error for a longer synthetic prompt. One approved
+resend captured HTTP 413: the provider reported a tokens-per-minute limit of
+8,000 and a request of 9,085 tokens. This confirms that direct request's budget
+failure, not the original harness request's status or token count. Direct
+website probes below are not harness qualification.
 
 The observed menu contains these general chat choices:
 
@@ -440,8 +442,40 @@ A separate ordinary Groq tab on the same build submitted one harmless
 30,729-byte synthetic prompt to GPT OSS 120B. The website displayed
 “Something went wrong. Please, try again.” and restored the full draft. The
 earlier 5,313-byte probe succeeded, but this is not a simultaneous size control
-and no HTTP status or response error was captured. The exact request-failure
-cause must be inspected before changing submission or recovery behavior.
+and no HTTP status or response error was captured for that first trial. Its
+cause was initially unknown. The separately approved capture below records
+that resend's concrete request error; it does not retroactively establish the
+first experiment's or the harness request's HTTP result.
+
+## Approved direct-request diagnosis — build367
+
+One explicitly approved resend of the same harmless 30,729-byte synthetic
+prompt captured a POST to `api.groq.com/openai/v1/chat/completions` returning
+HTTP 413. The response identified `openai/gpt-oss-120b`, error type `tokens`,
+code `rate_limit_exceeded`, a tokens-per-minute limit of **8,000** and
+**9,085 requested tokens**. The inspected request's Content-Length was
+**31,524 bytes**; the prompt and complete request body are different byte
+measurements. The saved Preview text verifies the status and token figures;
+the method, endpoint and byte counts are operator-recorded request metadata.
+
+The website restored the draft. No further Send was performed. The synthetic
+draft was cleared, the ordinary tab was left open and empty, its Web Inspector
+setting was turned off, and Safari's developer setting was restored to off.
+The original failed harness task and its unconfirmed cleanup remain separate.
+
+This establishes a request-budget rejection for the controlled direct resend.
+It does not prove that `groq-gptoss120b-marker367-b` received HTTP 413 or used
+9,085 tokens; its complete outgoing payload and provider request were not
+captured in this probe. No byte-to-token ratio, output-token contribution,
+quota reset time, automatic replay or weaker verification is inferred. The
+next change should measure the actual harness request before choosing a
+lossless size reduction or reporting the provider limit.
+
+The private final receipt is
+`ordinary367-request-budget-probe/receipt.json`, SHA-256
+`1bf533aab2f0a315c44d39b855f64cc08d2eb00a856ad1c4a28c9fcd24582f2f`.
+It indexes the redacted response preview and cleanup evidence by hash without
+copying credentials, organization identifiers or raw request content.
 
 The captured native input-message text totals 19,379 bytes; it is not the full
 outgoing prompt, which also contains schemas and framing. The next source
@@ -458,3 +492,55 @@ proof. This diagnostic has not yet been installed or exercised against Groq.
 The native build and 110 prompt-projection/response-codec tests passed with zero
 failures. Log SHA-256:
 `92d49db8f95502bced7a52d86c4fcdd228c23d81fbbae682843e76b179d8d9d6`.
+
+## Compact presentation and remaining request budget — candidate368
+
+Groq alone now presents the complete projected request as compact JSON inside
+one unlabelled code block. This removes JSON-structural whitespace and avoids
+expanding string punctuation into Unicode escapes. The JSON remains one line,
+so backticks in a valid JSON string cannot introduce a closing-fence line.
+Every decoded value, schema and policy remains unchanged; original continuation
+bytes remain retained. The existing exact-current-native-contract check also
+omits duplicated outer guidance when the complete trusted developer contract
+is already present. User/tool text, partial contracts and obsolete contracts
+cannot activate that path. Other providers retain their previous prompt bytes.
+
+The final native prompt/codec/instruction/fixture suites passed **177 tests**;
+the version suite passed **9 tests**. An earlier combined run had one stale
+test assertion expecting Groq's old presentation explanation; that assertion
+was updated to require the complete provider-specific context. Its targeted
+rerun and the final full focused suites passed. A separate private offline
+comparison verified complete projected JSON equality, unchanged continuation
+bytes and byte-identical other-provider controls against the prior codec.
+
+The comparison uses a previously captured synthetic Claude task, changes only
+its provider for measurement, and explicitly derives initial history prefixes.
+It is not a replay or reconstruction of the failed Groq367 request. An isolated
+`tiktoken` 0.12.0 counter with official `o200k_harmony` vocabulary counted the
+exported prompts offline, verifying all twelve source hashes and UTF-8
+roundtrips with zero network attempts during counting:
+
+| Synthetic control | Browser unbound, before → after | Browser bound, before → after |
+| --- | ---: | ---: |
+| Complete initial prefix | 15,025 → 11,892 tokens | 17,194 → 13,640 tokens |
+| Complete retained post-tabs request | 17,452 → 13,114 tokens | 19,621 → 14,862 tokens |
+
+The incomplete first-user-only controls also remained above 8,000 tokens and
+are not presented as complete initial tasks. These counts exclude provider
+framing, the transport marker and any output reservation. The controlled
+30,729-byte direct prompt alone counted 8,669 tokens, compared with the
+provider-reported 9,085; the 416-token difference has no established component
+attribution. Byte counts are not used as token estimates.
+
+The full harness therefore remains unqualified: even the compact synthetic
+request bodies exceed the observed allowance. Do not submit these same controls
+again merely to reproduce the known budget failure. Supporting that website
+budget requires a separate design for tools loaded on demand and history
+budgeting, with full native execution/permission checks retained. A different
+API route would require separate account configuration and limit verification;
+this change does not switch providers or extract website credentials.
+
+Candidate368 has not been packaged, installed or exercised live. Installed367
+and the published alpha.363 release remain unchanged. The private finite count
+receipt is `tokenizer368/offline-prompt368-counts.json`, SHA-256
+`245a186ad02eb2801d12decefaadbdcf7266f11a0d3657553a70f5333a20c56d`.

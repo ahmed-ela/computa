@@ -1982,7 +1982,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             includedInstructionText: includedInstructionText,
             responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
             allowedToolNames: expectedAllowedToolNames)
-        let closingFence = ["chatgpt", "claude"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
+        let closingFence = ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
         return handoff
