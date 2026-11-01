@@ -211,7 +211,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
                 "responseCount": count, "firstUserFingerprint": fingerprint, "submittedPromptFingerprint": submitted]
         }
         if ["webProviderFinish", "webProviderCancel"].contains(operation),
-           ["deleted", "not_created"].contains(snapshot["cleanup"] as? String ?? ""), let token {
+           ["deleted", "not_created", "transcript_cleared"].contains(snapshot["cleanup"] as? String ?? ""), let token {
             generations.removeValue(forKey: token)
             providers.removeValue(forKey: token)
             hasExplicitChoice.removeValue(forKey: token)

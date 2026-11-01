@@ -488,14 +488,20 @@ Qwen tasks and sustained concurrent human use still require separate qualificati
 
 ### Website models
 
-In the Swift app, choose **ChatGPT**, **Gemini**, or **Claude** after signing into that provider in the Browser
-pane. All three use Computa's WebKit profile for inference. Ordinary browser
+In the Swift app, choose a model from **ChatGPT**, **Gemini**, **Claude**, or
+**Groq** after signing into that provider in the Browser pane. Each uses
+Computa's WebKit profile for inference. Ordinary browser
 tools also use the app's built-in browser.
 These website routes do not require provider API keys.
 
 Each inference creates a new owned, inactive website chat. ChatGPT and Gemini
 must confirm Temporary Chat mode, and Claude must confirm Incognito mode before
-sending; the app preserves the human sign-in tab.
+sending; the app preserves the human sign-in tab. Groq uses a separate
+explicit-clear lifecycle: one fresh inference, verified Clear chat, then closure.
+Groq does not claim Temporary Chat, Incognito mode, or server-side deletion;
+its cleanup receipt proves the observed transcript was cleared. Model choices
+come from the current website picker; safety/classifier models are excluded.
+See [Groq qualification and limits](docs/GROQ-HARNESS-QUALIFICATION.md).
 The app closes that exact chat and durably verifies cleanup before releasing
 the response or tool calls. Tool-result iterations use fresh website chats while
 retaining the native thread, turn, terminal sessions and browser-tool tabs.

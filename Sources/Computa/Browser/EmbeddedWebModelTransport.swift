@@ -46,13 +46,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Every session pins one provider. A valid route on another provider can
     /// never satisfy its ownership checks, including before its first submit.
     enum Provider: String, CaseIterable {
-        case chatgpt, claude, gemini
+        case chatgpt, claude, gemini, groq
 
         var host: String {
             switch self {
             case .chatgpt: "chatgpt.com"
             case .claude: "claude.ai"
             case .gemini: "gemini.google.com"
+            case .groq: "chat.groq.com"
             }
         }
 
@@ -61,6 +62,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: "ChatGPT"
             case .claude: "Claude"
             case .gemini: "Gemini"
+            case .groq: "Groq"
             }
         }
 
@@ -69,7 +71,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: URL(string: "https://chatgpt.com/")!
             case .claude: URL(string: "https://claude.ai/new?incognito")!
             case .gemini: URL(string: "https://gemini.google.com/app")!
+            case .groq: URL(string: "https://chat.groq.com/")!
             }
+        }
+
+        func startURL(choice: WebsiteModelChoice?) -> URL {
+            guard self == .groq, let choice, choice.provider == rawValue else { return startURL }
+            var components = URLComponents(url: startURL, resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(name: "model", value: choice.key)]
+            return components.url!
+        }
+
+        func acceptsGroqModelQuery(_ url: URL, expectedKey: String? = nil) -> Bool {
+            guard self == .groq, originURL(url.absoluteString) != nil, url.path == "/",
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false), components.fragment == nil else { return false }
+            let items = components.queryItems ?? []
+            if items.isEmpty { return expectedKey == nil }
+            guard items.count == 1, items[0].name == "model", let key = items[0].value,
+                  !key.isEmpty, key.utf8.count <= 128,
+                  key.range(of: #"^[A-Za-z0-9][A-Za-z0-9._/-]*$"#, options: .regularExpression) != nil,
+                  !key.contains(".."), !key.contains("//") else { return false }
+            return expectedKey == nil || key == expectedKey
         }
 
         func accepts(_ raw: String) -> Bool {
@@ -84,6 +106,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: pattern = #"^/c/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)/?$"#
             case .claude: pattern = #"^/chat/[A-Za-z0-9-]+/?$"#
             case .gemini: pattern = #"^/(?:u/[0-9]{1,3}/)?app/[A-Za-z0-9_-]+/?$"#
+            // Only the root and its model query have been observed. Neither
+            // a saved-conversation route nor temporary mode is established.
+            case .groq: return nil
             }
             guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
             return "https://\(host)" + (url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path)
@@ -100,6 +125,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt: return "https://\(host)/"
             case .claude: return "https://\(host)/new"
+            case .groq: return "https://\(host)/"
             case .gemini:
                 guard let range = url.path.range(of: #"^/(?:u/[0-9]{1,3}/)?app(?=/|$)"#, options: .regularExpression) else { return nil }
                 return "https://\(host)" + String(url.path[range])
@@ -113,6 +139,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: return query.contains(URLQueryItem(name: "temporary-chat", value: "true"))
             case .claude: return query.contains { $0.name == "incognito" }
             case .gemini: return false // Gemini changes its mode without changing the route.
+            case .groq: return false // A model query is not temporary-session proof.
             }
         }
 
@@ -131,11 +158,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                url.path == "/sorry" || url.path.hasPrefix("/sorry/") {
                 return .humanVerificationRequired(self)
             }
-            if [.gemini, .chatgpt].contains(self), url.host == "accounts.google.com" {
+            if [.gemini, .chatgpt, .groq].contains(self), url.host == "accounts.google.com" {
                 return .signInRequired
             }
             guard url.host == host else { return nil }
-            let authRoots = self == .chatgpt ? ["/auth", "/login"] : self == .claude ? ["/login", "/signup"] : ["/signin"]
+            let authRoots = self == .chatgpt ? ["/auth", "/login"] : self == .claude ? ["/login", "/signup"]
+                : self == .groq ? ["/authenticate"] : ["/signin"]
             if authRoots.contains(where: { url.path == $0 || url.path.hasPrefix($0 + "/") }) {
                 return .signInRequired
             }
@@ -159,6 +187,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: path == "/"
             case .claude: path == "/new" || path == "/new/"
             case .gemini: path.range(of: #"^/(?:u/[0-9]{1,3}/)?app/?$"#, options: .regularExpression) != nil
+            case .groq: path == "/"
             }
         }
     }
@@ -194,7 +223,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     enum Failure: Error, LocalizedError, Equatable {
         case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged, turnLimit, cookieMaintenancePending
-        case signInRequired, temporaryUnverified, notFresh, composerUnavailable
+        case signInRequired, temporaryUnverified, explicitClearUnverified, notFresh, composerUnavailable
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
@@ -214,6 +243,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseStreamFailed: "website_response_stream_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
+            case .explicitClearUnverified: "website_lifecycle_unverified"
             case .ownershipFailure: "website_ownership_unverified"
             case .turnLimit: "website_turn_limit"
             default: nil
@@ -230,6 +260,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
+            case .explicitClearUnverified: "inspect_website"
             case .ownershipFailure: "inspect_website"
             default: nil
             }
@@ -257,6 +288,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .ownershipFailure(let reason): "The owned model page or conversation changed (\(reason.rawValue)). No prompt was replayed."
             case .signInRequired: "Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying."
             case .temporaryUnverified: "The AI website did not confirm temporary or incognito chat mode. No further prompt was sent."
+            case .explicitClearUnverified: "The website did not confirm the owned chat's explicit-clear lifecycle. No further prompt was sent."
             case .notFresh: "The new model page was not empty. It was not modified."
             case .composerUnavailable: "The website's message editor could not accept the exact prompt. No send was retried."
             case .editorFailure(let reason): "The website's message editor could not accept the exact prompt (\(reason)). No send was retried."
@@ -325,6 +357,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var acknowledgedSendSequence = 0
         var temporary = false
         var temporaryRequested = false
+        // Explicit clearing is a separate lifecycle, never temporary mode or
+        // a promise about the provider's server-side retention.
+        var requiresExplicitClear: Bool { provider == .groq && !isDiscovery }
+        var explicitClearReady = false
+        var lifecycleVerified: Bool { provider == .groq ? explicitClearReady : temporary }
+        struct ExplicitClearSubmission {
+            let generation: UUID
+            let url: URL
+            let outboundFingerprint: String
+        }
+        struct ExplicitClearOperation {
+            let id: UUID
+            let generation: UUID
+            let url: URL
+            let sequence: Int
+            let firstUserFingerprint: String
+            let model: WebsiteModelChoice
+            var dictionary: [String: Any] {
+                ["id": id.uuidString, "documentGeneration": generation.uuidString,
+                 "sequence": sequence, "firstUserFingerprint": firstUserFingerprint]
+            }
+        }
+        var explicitClearSubmission: ExplicitClearSubmission?
+        var explicitClearOperation: ExplicitClearOperation?
         var chatModeRequested = false
         var productModeEvidence: WebsiteProductModeEvidence?
         var sequence = 0
@@ -899,6 +955,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             choice = parsed
         } else { choice = nil }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
+        guard provider != .groq || choice != nil else { throw Failure.invalidRequest }
         if provider == .chatgpt {
             guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
             try Task.checkCancellation()
@@ -978,6 +1035,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
+                guard !session.requiresExplicitClear || !session.submitted && session.sequence == 0
+                    && session.explicitClearOperation == nil else { throw Failure.invalidRequest }
                 browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                 // Count the full outbound bytes, including the ownership marker.
                 // These are finite engineering bounds, not provider context sizes.
@@ -1019,7 +1078,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if !prepareFirstInstantInInsert {
                     let before = try await page(session, action: "prepare",
                         recheckModelAfterAwait: session.provider != .chatgpt)
-                    guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
+                    try requireLifecycle(before, session: session)
                     guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
                     if !session.submitted {
                         guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
@@ -1068,6 +1127,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             promptFingerprint: Self.promptFingerprint(prompt),
                             outboundFingerprint: Self.outboundFingerprint(outbound))
                     } else { session.freshSubmissionBinding = nil }
+                }
+                if session.requiresExplicitClear {
+                    guard session.explicitClearSubmission == nil, let generation = session.documentGeneration,
+                          let url = session.view.url, session.sequence == 0, !session.submitted,
+                          session.baseline == 0, session.confirmedUsers == 0 else { throw Failure.notFresh }
+                    session.explicitClearSubmission = .init(generation: generation, url: url,
+                        outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
                 let readinessRequest = firstInstantReadinessRequest(session)
                 var readinessReceipt: PreparedEditorReadinessReceipt?
@@ -1241,8 +1307,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let id: UUID
         if let preparedTab { id = preparedTab }
         else if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
-            id = try browser.createModelTab(url: provider.startURL, requestMetadata: requestMetadata)
-        } else { id = try createTab(provider.startURL) }
+            id = try browser.createModelTab(url: provider.startURL(choice: choice), requestMetadata: requestMetadata)
+        } else { id = try createTab(provider.startURL(choice: choice)) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
                               modelChoice: choice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
@@ -1357,6 +1423,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return changed
     }
 
+    private static func isGroqHydrationObservation(_ observed: [String: Any]) -> Bool {
+        guard Set(observed.keys) == ["pending", "sessionLifecycle", "temporary", "composer"],
+              observed["sessionLifecycle"] as? String == "explicit_clear" else { return false }
+        return [("pending", true), ("temporary", false), ("composer", false)].allSatisfy { key, expected in
+            guard let value = observed[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return value.boolValue == expected
+        }
+    }
+
+    private func observesLifecycle(_ observed: [String: Any], session: Session) -> Bool {
+        if session.provider == .groq {
+            guard observed["sessionLifecycle"] as? String == "explicit_clear",
+                  let temporary = observed["temporary"] as? NSNumber,
+                  CFGetTypeID(temporary) == CFBooleanGetTypeID() else { return false }
+            return !temporary.boolValue
+        }
+        return observed["temporary"] as? Bool == true
+    }
+
+    private func requireLifecycle(_ observed: [String: Any], session: Session) throws {
+        guard session.lifecycleVerified, observesLifecycle(observed, session: session) else {
+            throw session.provider == .groq ? Failure.explicitClearUnverified : Failure.temporaryUnverified
+        }
+    }
+
     private func waitForSendReady(_ session: Session, prompt: String) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         while ContinuousClock.now < deadline {
@@ -1374,7 +1465,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 throw error
             }
             guard ContinuousClock.now < deadline else { break }
-            guard session.temporary, observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
+            try requireLifecycle(observed, session: session)
             if observed["sendReady"] as? Bool == true { return }
             _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
         }
@@ -2042,6 +2133,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
+            if session.provider == .groq, observed["pending"] as? Bool == true,
+               observed["composer"] as? Bool == false, observed["url"] == nil {
+                // No URL, count or model evidence is admitted while the fresh
+                // page hydrates. Existing DOM/navigation wakeups and the fixed
+                // preparation deadline bound this read-only phase.
+                guard Self.isGroqHydrationObservation(observed), session.documentGeneration == nil,
+                      !session.modelSelectionRequested, !session.explicitClearReady,
+                      !session.submitted, !session.pendingSubmission, session.sequence == 0 else { throw Failure.notFresh }
+                return try snapshot(session)
+            }
             guard count(observed, "responseCount") == 0, count(observed, "userCount") == 0,
                   session.provider.conversationURL(observed["url"] as? String) == nil else { throw Failure.notFresh }
             if observed["signIn"] as? Bool == true { throw Failure.signInRequired }
@@ -2070,7 +2171,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // controls or composer aria-hidden. Advance this claimed phase
                 // so its adapter can close the popup. Only fresh checked model
                 // proof and restored temporary mode can finish preparation.
-                guard session.temporary, session.modelChoice != nil else { throw Failure.modelUnverified }
+                guard session.lifecycleVerified, session.modelChoice != nil else { throw Failure.modelUnverified }
                 let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                 if selected["pending"] as? Bool != true {
                     session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
@@ -2079,8 +2180,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.state = "ready"
                 }
             } else if observed["composer"] as? Bool == true {
-                if observed["temporary"] as? Bool == true {
-                    session.temporary = true
+                if observesLifecycle(observed, session: session) {
+                    if session.provider == .groq { session.explicitClearReady = true }
+                    else { session.temporary = true }
                     if let choice = session.modelChoice {
                         if let evidence = try? WebsiteModelEvidence.parse(observed["modelEvidence"], provider: session.provider.rawValue, expected: choice) {
                             session.modelEvidence = evidence
@@ -2118,7 +2220,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                         session.state = "ready"
                     } else { session.state = "ready" }
-                } else if !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
+                } else if session.provider != .groq, !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
                     session.temporaryRequested = true
                     _ = try await page(session, action: "enableTemporary")
                 }
@@ -2129,7 +2231,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else {
             let previouslyCandidate = session.completionCandidate
             session.completionCandidate = false
-            guard observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
+            try requireLifecycle(observed, session: session)
             guard observed["interrupted"] as? Bool != true else { throw Failure.responseInterrupted }
             if let failureCandidate, failureCandidate == terminalFailureReceipt(session),
                session.currentSubmissionVerified, !session.pendingSubmission,
@@ -2303,6 +2405,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 && count(final, "responseCount") == count(observed, "responseCount")
                                 && count(final, "userCount") == session.sequence
                                 && !session.pendingSubmission
+                            completionObservation = final
+                            if !currentAnswerVerified {
+                                session.completionCandidate = false
+                                session.candidateSince = nil
+                            }
+                        }
+                        if currentAnswerVerified, session.requiresExplicitClear {
+                            // Groq's native model recheck also yields. Its model
+                            // identity alone cannot preserve an older completed
+                            // answer across changed text or resumed streaming.
+                            let final = try await page(session, action: "inspect",
+                                recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                            currentAnswerVerified = session.lifecycleVerified && observesLifecycle(final, session: session)
+                                && final["interrupted"] as? Bool == false
+                                && final["busy"] as? Bool == false && final["answerComplete"] as? Bool == true
+                                && (final["text"] as? String).map { $0.utf8.elementsEqual(response.utf8) } == true
+                                && count(final, "responseCount") == 1
+                                && count(final, "responseCount") == count(observed, "responseCount")
+                                && count(final, "userCount") == 1 && session.sequence == 1
+                                && session.submitted && session.acknowledgedSendSequence == 1 && !session.pendingSubmission
+                                && final["firstUserVerified"] as? Bool == true
+                                && final["firstUserMarkerVerified"] as? Bool == true
+                                && session.firstUserFingerprint != nil
+                                && final["firstUserFingerprint"] as? String == session.firstUserFingerprint
+                                && session.explicitClearSubmission?.outboundFingerprint == session.firstUserFingerprint
                             completionObservation = final
                             if !currentAnswerVerified {
                                 session.completionCandidate = false
@@ -4466,7 +4594,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       prepareFirstInstantInInsert: Bool = false,
                       preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
                       preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
+                      explicitClearOperation: Session.ExplicitClearOperation? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        let explicitClearAction = ["clearTranscript", "observeClearTranscript"].contains(action)
+        guard explicitClearAction == (explicitClearOperation != nil) else { throw Failure.invalidRequest }
+        if let explicitClearOperation {
+            guard isCurrent(explicitClearOperation, session: session), enforceModel,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait else { throw Failure.staleSession }
+        }
         let preparationActionStarted = ContinuousClock.now
         let logPreparationAction = session.provider == .chatgpt
             && (session.state == "loading" || !session.submitted || action == "submit")
@@ -4517,6 +4652,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("adapterContextUnavailable provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) urlPresent=\(candidate != nil) https=\(candidate?.scheme == "https") hostMatches=\(candidate?.host == provider.host) loading=\(session.view.isLoading)")
             if candidate != nil, candidate?.absoluteString != "about:blank" { throw Failure.unexpectedPage(provider) }
             throw Failure.pageUnavailable
+        }
+        if provider == .groq {
+            guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
         let context = provider.routeContext(url.absoluteString)
         if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
@@ -4583,6 +4721,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if provider == .groq { input["documentGeneration"] = generation.uuidString }
+        if let explicitClearOperation { input["clearOperation"] = explicitClearOperation.dictionary }
         if pendingSubmissionProductRecheck {
             guard action == "verifyProductMode", !enforceModel, !recheckModelAfterAwait, !recheckProductAfterAwait,
                   !allowBlockedProvider, canRecheckUnacknowledgedChatGPTProduct(session),
@@ -4833,6 +4973,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.ownershipFailure(.routeAfter)
         }
         if currentURL != url {
+            if provider == .groq, session.isDiscovery, action == "inspect", session.state == "loading",
+               session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
+               !session.submitted, !session.pendingSubmission, session.sequence == 0,
+               URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.isEmpty != false,
+               provider.acceptsGroqModelQuery(url), provider.acceptsGroqModelQuery(currentURL),
+               URLComponents(url: currentURL, resolvingAgainstBaseURL: false)?.queryItems?.count == 1 {
+                // Discard the obsolete initial read. Only a new read of the
+                // website's canonical model query may bind discovery context.
+                throw Failure.pageUnavailable
+            }
             let nextConversation = provider.conversationURL(currentURL.absoluteString)
             let firstConversation = session.submitted && session.sequence == 1 && session.conversation == nil
                 && nextConversation != nil && (current == nil || provider.isLocalConversation(current)
@@ -5121,6 +5271,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             default: throw Failure.composerUnavailable
             }
         }
+        if session.provider == .groq, !observesLifecycle(observed, session: session) {
+            throw Failure.explicitClearUnverified
+        }
+        if provider == .groq, observed["pending"] as? Bool == true, observed["url"] == nil {
+            guard Self.isGroqHydrationObservation(observed), action == "inspect", session.state == "loading",
+                  session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
+                  !session.submitted, !session.pendingSubmission, session.sequence == 0 else { throw Failure.notFresh }
+            return observed
+        }
+        if let operation = explicitClearOperation {
+            // Only this exact native-owned cleanup operation may consume its
+            // previously proven first body. Ordinary reads still require it.
+            guard isCurrent(operation, session: session), generation == operation.generation,
+                  currentURL == operation.url, observed["url"] as? String == operation.url.absoluteString,
+                  observesLifecycle(observed, session: session),
+                  Self.validExplicitClearProof(observed["clearProof"], operation: operation),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.unboundCleanup) }
+            _ = try validatedModelEvidence(observed, session: session, action: action)
+            return observed
+        }
         if pendingSubmissionProductRecheck {
             guard canRecheckUnacknowledgedChatGPTProduct(session),
                   Self.isChatGPTPendingProductReceipt(observed) else { throw Failure.ownershipFailure(.javaScriptSubmission) }
@@ -5218,7 +5388,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 } else {
                     guard action == "inspect", session.sequence == 1, session.pendingSubmission,
                           count(observed, "userCount") == 1,
-                          session.temporary, observed["temporary"] as? Bool == true else {
+                          session.lifecycleVerified, observesLifecycle(observed, session: session) else {
                         recordFirstUserFailure(.bindingNotAuthorized, observed: observed)
                         throw Failure.ownershipFailure(.javaScriptFirstUser)
                     }
@@ -5228,6 +5398,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider, expectedReason: "first_bound") {
                         session.loggedFirstUserStructure = true
                         logFirstUserStructure(records, sequence: session.sequence)
+                    }
+                }
+                if session.requiresExplicitClear {
+                    guard let submitted = session.explicitClearSubmission,
+                          submitted.generation == generation, submitted.url == currentURL,
+                          submitted.outboundFingerprint == fingerprint,
+                          session.sequence == 1, count(observed, "userCount") == 1 else {
+                        throw Failure.ownershipFailure(.javaScriptFirstUser)
                     }
                 }
             }
@@ -5284,6 +5462,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         "userCount": 0, "responseCount": session.baseline, "text": "", "busy": true,
                         "answerComplete": false, "ownershipPending": true,
                         "debugStructure": observed["debugStructure"] as? String ?? ""]
+                if session.requiresExplicitClear { pending["sessionLifecycle"] = "explicit_clear" }
                 if observed["modelVerificationPending"] as? Bool == true { pending["modelVerificationPending"] = true }
                 else if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
                 if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
@@ -5648,6 +5827,97 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         sessions[sessionToken]?.postBlockDiagnostic?.task?.cancel()
     }
 
+    private func isCurrent(_ operation: Session.ExplicitClearOperation, session: Session) -> Bool {
+        session.requiresExplicitClear && session.explicitClearReady && !session.temporary
+            && sessions[session.token] === session && browser.webView(for: session.tabID) === session.view
+            && session.documentGeneration == operation.generation
+            && browser.documentGeneration(for: session.tabID) == operation.generation
+            && session.view.url == operation.url && session.modelChoice == operation.model
+            && session.modelSelectionVerified && session.modelEvidence != nil
+            && session.submitted && !session.pendingSubmission && session.sequence == 1
+            && session.acknowledgedSendSequence == 1 && session.confirmedUsers == 1
+            && operation.sequence == 1 && session.firstUserFingerprint == operation.firstUserFingerprint
+            && session.explicitClearSubmission.map {
+                $0.generation == operation.generation && $0.url == operation.url
+                    && $0.outboundFingerprint == operation.firstUserFingerprint
+            } == true
+            && session.explicitClearOperation?.id == operation.id
+    }
+
+    private static func validExplicitClearProof(_ raw: Any?, operation: Session.ExplicitClearOperation) -> Bool {
+        guard let proof = raw as? [String: Any],
+              Set(proof.keys) == ["id", "documentGeneration", "sequence", "firstUserFingerprint", "clickAcknowledged", "transcriptEmpty"],
+              proof["id"] as? String == operation.id.uuidString,
+              proof["documentGeneration"] as? String == operation.generation.uuidString,
+              ComputerToolArgumentContract.exactInt64(proof["sequence"]) == 1,
+              proof["firstUserFingerprint"] as? String == operation.firstUserFingerprint,
+              let acknowledged = proof["clickAcknowledged"] as? NSNumber,
+              CFGetTypeID(acknowledged) == CFBooleanGetTypeID(), acknowledged.boolValue,
+              let empty = proof["transcriptEmpty"] as? NSNumber,
+              CFGetTypeID(empty) == CFBooleanGetTypeID() else { return false }
+        return true
+    }
+
+    /// Clear the visible owned transcript, not provider-side retention. The
+    /// operation is claimed before dispatch; every later attempt only observes
+    /// that same private adapter record and can never repeat Clear.
+    private func clearOwnedTranscript(_ session: Session) async throws -> String {
+        guard session.requiresExplicitClear, session.explicitClearReady, !session.temporary else {
+            throw Failure.ownershipFailure(.unboundCleanup)
+        }
+        if !session.submitted {
+            guard session.sequence == 0, !session.pendingSubmission,
+                  session.acknowledgedSendSequence == 0, session.firstUserFingerprint == nil,
+                  session.explicitClearOperation == nil else { throw Failure.ownershipFailure(.unboundCleanup) }
+            let observed = try await page(session, action: "inspect", allowBlockedProvider: true)
+            try requireLifecycle(observed, session: session)
+            guard count(observed, "userCount") == 0, count(observed, "responseCount") == 0,
+                  observed["busy"] as? Bool == false, observed["composer"] as? Bool == true else { throw Failure.notFresh }
+            return "not_created"
+        }
+        let action: String
+        let operation: Session.ExplicitClearOperation
+        if let existing = session.explicitClearOperation {
+            operation = existing
+            action = "observeClearTranscript"
+        } else {
+            let observed = try await page(session, action: "inspect", allowBlockedProvider: true)
+            try requireLifecycle(observed, session: session)
+            guard observed["ownershipPending"] as? Bool != true, observed["busy"] as? Bool == false,
+                  session.sequence == 1, session.confirmedUsers == 1, !session.pendingSubmission,
+                  session.acknowledgedSendSequence == 1, count(observed, "userCount") == 1,
+                  let fingerprint = session.firstUserFingerprint, let generation = session.documentGeneration,
+                  let url = session.view.url, let model = session.modelChoice else {
+                throw Failure.ownershipFailure(.unboundCleanup)
+            }
+            operation = .init(id: UUID(), generation: generation, url: url, sequence: 1,
+                firstUserFingerprint: fingerprint, model: model)
+            session.explicitClearOperation = operation
+            action = "clearTranscript"
+        }
+        guard isCurrent(operation, session: session) else { throw Failure.ownershipFailure(.unboundCleanup) }
+        let deadline = ContinuousClock.now + .seconds(10)
+        var nextAction = action
+        while ContinuousClock.now < deadline {
+            let revision = try browser.modelChangeRevision(for: session.tabID)
+            let observed = try await page(session, action: nextAction, recheckModelAfterAwait: false,
+                recheckProductAfterAwait: false, allowBlockedProvider: true,
+                explicitClearOperation: operation, maximumWait: deadline - .now)
+            let proof = observed["clearProof"] as? [String: Any]
+            if proof?["transcriptEmpty"] as? Bool == true {
+                guard ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+                      ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+                      let busy = observed["busy"] as? NSNumber, CFGetTypeID(busy) == CFBooleanGetTypeID(), !busy.boolValue,
+                      let composer = observed["composer"] as? NSNumber, CFGetTypeID(composer) == CFBooleanGetTypeID(), composer.boolValue,
+                      isCurrent(operation, session: session) else { throw Failure.ownershipFailure(.unboundCleanup) }
+                return "transcript_cleared"
+            }
+            nextAction = "observeClearTranscript"
+            _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
+        }
+        throw Failure.ownershipFailure(.unboundCleanup)
+    }
+
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
         // Cleanup must finish its own fresh ownership proof even when its
@@ -5727,6 +5997,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // by a human tab. Close exactly this read-only view even after
                 // a sign-in redirect; inference cleanup authority is unchanged.
                 guard !session.submitted, browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+            } else if session.requiresExplicitClear {
+                let cleanup = try await clearOwnedTranscript(session)
+                browser.closeTab(session.tabID)
+                session.responseProfile?.mark(.physicalClose)
+                guard browser.webView(for: session.tabID) == nil,
+                      !browser.tabs.contains(where: { $0.id == session.tabID }), session.view.superview == nil else {
+                    throw Failure.staleSession
+                }
+                sessions.removeValue(forKey: session.token)
+                session.state = "finished"
+                return try snapshot(session, cleanup: cleanup)
             } else if session.submitted || session.temporaryRequested || session.temporary {
                 let observed: [String: Any]
                 session.responseProfile?.mark(.cleanupOwnershipInspectStart)
@@ -5789,6 +6070,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let pendingModel = session.provider == .chatgpt && session.state == "running" && session.modelVerificationPending
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": pendingModel ? "" : session.response, "sequence": session.sequence]
+        if session.provider == .groq { value["sessionLifecycle"] = "explicit_clear"; value["temporary"] = false }
         if pendingModel { value["modelVerificationPending"] = true }
         if !pendingModel, let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }

@@ -136,6 +136,57 @@ final class WebsiteSessionCleanupTests: XCTestCase {
             XCTAssertFalse(forged.isValid)
         }
     }
+
+    func testGroqUnconfirmedReceiptRetainsExactProviderModelAndAttemptBinding() throws {
+        let choice = WebsiteModelChoice(provider: "groq", key: "synthetic-model", label: "Synthetic model")
+        let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,
+            turnID: UUID().uuidString, runtimeGeneration: UUID(), outcome: .unconfirmed, provider: .groq,
+            route: .embedded, modelID: choice.modelID, reason: .cleanupUnverified, trigger: .inference,
+            receiptSaved: true, inferenceID: UUID().uuidString, sessionToken: UUID().uuidString)
+        XCTAssertTrue(receipt.isValid)
+        XCTAssertEqual(receipt.schemaVersion, 2)
+        XCTAssertTrue(receipt.isTransactionLinked)
+        let encoded = try JSONEncoder().encode(receipt)
+        XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: encoded), receipt)
+        let store = WebsiteSessionCleanupStore(directory: try directory())
+        XCTAssertTrue(store.save(receipt))
+        XCTAssertEqual(store.latest(), [receipt], "Registration preserves an unresolved attempt, never invents successful cleanup")
+        for mutation in [["provider": "claude"], ["modelID": "browser/claude"], ["outcome": "closed"]] {
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            mutation.forEach { raw[$0.key] = $0.value }
+            let forged = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
+            XCTAssertFalse(forged.isValid)
+        }
+    }
+
+    func testTranscriptClearedReceiptRequiresAnExactEmbeddedGroqLease() throws {
+        let choice = WebsiteModelChoice(provider: "groq", key: "synthetic-model", label: "Synthetic model")
+        let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,
+            turnID: UUID().uuidString, runtimeGeneration: UUID(), outcome: .closed, provider: .groq,
+            route: .embedded, modelID: choice.modelID, reason: .transcriptCleared, trigger: .inference,
+            receiptSaved: true, inferenceID: UUID().uuidString, sessionToken: UUID().uuidString)
+        XCTAssertTrue(receipt.isValid)
+        XCTAssertEqual(receipt.schemaVersion, 2)
+        XCTAssertTrue(receipt.isTransactionLinked)
+        let encoded = try JSONEncoder().encode(receipt)
+        XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: encoded), receipt)
+        let store = WebsiteSessionCleanupStore(directory: try directory())
+        XCTAssertTrue(store.save(receipt))
+        XCTAssertEqual(store.latest(), [receipt])
+        let mutations: [[String: Any]] = [
+            ["provider": "claude", "modelID": "browser/claude"],
+            ["provider": "chatgpt", "modelID": "browser/chatgpt"],
+            ["route": "chrome"], ["outcome": "unconfirmed"], ["sessionToken": NSNull()],
+            ["inferenceID": NSNull()], ["schemaVersion": 3], ["schemaVersion": 4],
+            ["schemaVersion": 1, "inferenceID": NSNull(), "sessionToken": NSNull(), "trigger": "manual"],
+        ]
+        for mutation in mutations {
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            mutation.forEach { raw[$0.key] = $0.value }
+            let forged = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
+            XCTAssertFalse(forged.isValid, "Transcript clearing cannot become generic deletion or unbound disposal authority")
+        }
+    }
 }
 
 @MainActor

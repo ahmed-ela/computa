@@ -33,8 +33,10 @@ const options: ModelOption[] = [
   { id: 'browser/claude/choice/old', label: 'Claude / Fixture Old · Built-in browser', detail: 'Refresh after sign-in; never substitute', highMemory: false, available: false },
   { id: 'browser/gemini', label: 'Gemini / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
   { id: 'browser/claude', label: 'Claude / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
+  { id: 'browser/groq', label: 'Groq / Website default · Built-in browser', detail: 'Default website routing', highMemory: false },
+  { id: 'browser/groq/choice/observed', label: 'Groq / Fixture Groq · Built-in browser', detail: 'Observed choice', highMemory: false, available: true },
 ];
-const selectableOptions = [options[1], options[2], options[3], options[4]];
+const selectableOptions = [options[1], options[2], options[3], options[4], options[8]];
 const selector = (model = options[1].id, label = 'Task model', disabled = false) => renderToStaticMarkup(h(ModelSelector, {
   options, model, label, disabled, onSelect: () => {},
 })).html;
@@ -49,7 +51,7 @@ describe('website model selectors', () => {
       const names = await textBySelector(html, '.model-option-name');
       expect(names).toEqual([modelOptionLabel(options[1]), ...selectableOptions.map(modelOptionLabel)]);
       const providerText = (await textBySelector(html, '.sr-only')).join(' ');
-      for (const provider of ['ChatGPT', 'Gemini', 'Claude']) expect(providerText).toContain(provider);
+      for (const provider of ['ChatGPT', 'Gemini', 'Claude', 'Groq']) expect(providerText).toContain(provider);
       expect(names.join(' ')).not.toContain('Built-in browser');
       expect(names.join(' ')).not.toContain('ChatGPT /');
     }
@@ -92,10 +94,26 @@ describe('website model selectors', () => {
       .toBe('true');
   });
 
+  test('Groq selection keeps the exact observed name and a missing saved choice stays unavailable', async () => {
+    const observed = selector(options[8].id);
+    const elements = await parsedElements(observed);
+    expect(elements.find((element) => element.attributes.role === 'combobox')?.attributes['aria-label'])
+      .toBe('Task model: Groq / Fixture Groq');
+    expect((await textBySelector(observed, '.model-option-name'))[0]).toBe('Fixture Groq');
+    expect(elements.find((element) => element.attributes['data-value'] === options[8].id)?.attributes['aria-disabled'])
+      .toBeUndefined();
+    const missing = 'browser/groq/choice/missing';
+    const staleElements = await parsedElements(selector(missing));
+    expect(staleElements.find((element) => element.attributes['data-select-value'])?.attributes['data-select-value']).toBe(missing);
+    expect(staleElements.find((element) => element.attributes['data-value'] === missing)?.attributes['aria-disabled']).toBe('true');
+    expect(staleElements.some((element) => element.attributes['data-value'] === 'browser/groq')).toBe(false);
+  });
+
   test('saved local and website-default models stay readable but remain absent from the choices', async () => {
     const local = { id: 'local/saved-model', label: 'Local / Saved model · MLX', detail: 'Saved local selection', highMemory: false };
     for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model'],
-      ['browser/chatgpt', 'Website default'], ['browser/gemini', 'Website default'], ['browser/claude', 'Website default']]) {
+      ['browser/chatgpt', 'Website default'], ['browser/gemini', 'Website default'], ['browser/claude', 'Website default'],
+      ['browser/groq', 'Website default']]) {
       const html = renderToStaticMarkup(h(ModelSelector, { options: [...options, local], model, label: 'Task model', onSelect: () => {} })).html;
       expect((await textBySelector(html, '.model-option-name'))[0]).toBe(name);
       const elements = await parsedElements(html);
@@ -111,6 +129,7 @@ describe('website model selectors', () => {
       ['api/openai/model/fixture', 'openai', 'openai'],
       ['browser/gemini/choice/fast', 'gemini', 'gemini'],
       ['browser/claude/choice/fast', 'claude', 'claude'],
+      ['browser/groq/choice/observed', 'groq', 'groq'],
       ['api/cerebras/model/fixture', 'cerebras', 'cerebras'],
     ]) {
       const elements = await parsedElements(renderToStaticMarkup(h(ModelProviderIcon, { model })).html);
@@ -157,7 +176,7 @@ describe('website model selectors', () => {
   });
 
   test('task refresh addresses only its selected website provider for default and concrete choices', () => {
-    for (const [provider, label] of [['gemini', 'Gemini'], ['chatgpt', 'ChatGPT'], ['claude', 'Claude']]) {
+    for (const [provider, label] of [['gemini', 'Gemini'], ['chatgpt', 'ChatGPT'], ['claude', 'Claude'], ['groq', 'Groq']]) {
       for (const model of [`browser/${provider}`, `browser/${provider}/choice/eyJrZXkiOiJmaXh0dXJlIn0`]) {
         expect(websiteModelsRefreshAction(model)).toEqual({ action: 'refreshWebsiteModels', provider });
         const html = renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html;
@@ -173,7 +192,9 @@ describe('website model selectors', () => {
   test('nonwebsite and malformed model scopes cannot request a global refresh', () => {
     for (const model of ['', 'local/model', 'api/cerebras/gpt-oss-120b', 'browser/unknown', 'browser/Gemini',
       'browser/gemini ', 'browser/gemini\n', 'browser/gemini/choice/value\n',
-      'browser/gemini/choice/', 'browser/gemini/choice/value/extra', 'browser/gemini/not-choice/value']) {
+      'browser/gemini/choice/', 'browser/gemini/choice/value/extra', 'browser/gemini/not-choice/value',
+      'browser/Groq', 'browser/groq-like', 'browser/groq/choice/', 'browser/groq/choice/value\n',
+      'browser/groq/choice/value/extra', 'browser/groq/not-choice/value']) {
       expect(websiteModelsRefreshAction(model)).toBeUndefined();
       expect(renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html).toBe('');
     }

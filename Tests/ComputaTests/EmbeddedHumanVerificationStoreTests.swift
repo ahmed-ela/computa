@@ -9,7 +9,7 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let profile = UUID()
         let store = EmbeddedHumanVerificationStore(defaults: defaults, profileID: profile)
-        let expected = Dictionary(uniqueKeysWithValues: ["chatgpt", "claude", "gemini"].map { ($0, UUID()) })
+        let expected = Dictionary(uniqueKeysWithValues: ["chatgpt", "claude", "gemini", "groq"].map { ($0, UUID()) })
         var supplied = expected
         supplied["https://www.google.com/sorry/?private=query"] = UUID()
         store.save(supplied)
@@ -18,7 +18,7 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(Set(object.keys), ["version", "checkpoints"])
         let checkpoints = try XCTUnwrap(object["checkpoints"] as? [String: String])
-        XCTAssertEqual(Set(checkpoints.keys), ["chatgpt", "claude", "gemini"])
+        XCTAssertEqual(Set(checkpoints.keys), ["chatgpt", "claude", "gemini", "groq"])
         XCTAssertTrue(checkpoints.values.allSatisfy { UUID(uuidString: $0) != nil })
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("private"))
         XCTAssertTrue(EmbeddedHumanVerificationStore(defaults: defaults, profileID: UUID()).load().isEmpty)
@@ -121,6 +121,17 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         XCTAssertTrue(restored.load().isEmpty)
         XCTAssertEqual(restored.loadRecoveryReports()["gemini"], report)
         XCTAssertTrue(EmbeddedHumanVerificationStore(defaults: defaults, profileID: UUID()).loadRecoveryReports().isEmpty)
+    }
+
+    func testGroqRegistrationDoesNotBorrowGoogleCheckpointOrRecoveryAuthority() {
+        for raw in ["https://chat.groq.com/", "https://chat.groq.com/?model=openai/gpt-oss-120b",
+                    "https://chat.groq.com/authenticate", "https://accounts.google.com/",
+                    "https://chat.groq.com/sorry", "https://chat.groq.com/app"] {
+            XCTAssertNil(EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: URL(string: raw)), raw)
+            XCTAssertNil(EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: URL(string: raw)), raw)
+        }
+        XCTAssertEqual(EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: URL(string: "https://google.com/sorry")), "gemini")
+        XCTAssertNil(EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: URL(string: "https://google.com/sorry")))
     }
 
 }

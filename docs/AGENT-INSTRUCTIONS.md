@@ -95,7 +95,7 @@ because the model returned a patch. See [code editing](CODE-EDITING.md).
 Current website models receive text observations. The `browser_*` tools control
 Computa's normal built-in WebKit tabs through a separate owned controller;
 the `computer_v2_*` tools operate native applications.
-Embedded ChatGPT, Gemini and Claude model pages remain private inference surfaces
+Embedded provider model pages remain private inference surfaces
 and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).
 Image/audio input remains unavailable. Full Access uses the engine's
 `danger-full-access` terminal/file mode and automatically resolves permitted

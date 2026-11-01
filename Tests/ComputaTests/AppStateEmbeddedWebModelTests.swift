@@ -200,8 +200,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         try await waitUntil { state.websiteModelRefreshIntentsForTesting.contains { $0.provider == "gemini" && $0.retryBlocked } }
         held?.resume(returning: Self.choices("chatgpt")); held = nil
         try await waitUntil { !state.websiteModelsRefreshing }
-        XCTAssertEqual(observed.map { $0.0 }, ["chatgpt", "gemini", "claude"])
-        XCTAssertEqual(observed.map { $0.1 }, [false, true, false], "A Gemini intent cannot widen ChatGPT or Claude's startup gate")
+        XCTAssertEqual(observed.map { $0.0 }, WebsiteModelCatalog.providers)
+        XCTAssertEqual(observed.map { $0.1 }, WebsiteModelCatalog.providers.map { $0 == "gemini" },
+                       "A Gemini intent cannot widen another provider's startup gate")
         XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint, "Injected catalog results cannot clear a checkpoint")
         XCTAssertEqual(runtime.submissions, 0)
         XCTAssertEqual(browser.tabs.count, 1)
@@ -337,13 +338,13 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             if allProviders { await state.refreshWebsiteModels() }
             else { await state.refreshWebsiteModels(provider: "gemini") }
         }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == (allProviders ? 3 : 1) }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == (allProviders ? WebsiteModelCatalog.providers.count : 1) }
         // Model production discovery's successful cleanup/checkpoint clearance.
         // This fixture does not grant that authority to injected catalog data.
         browser.clearHumanVerificationRequired(provider: "gemini")
         held?.resume(returning: [automaticChoice]); held = nil
         await manual.value
-        XCTAssertEqual(reads, allProviders ? ["gemini", "chatgpt", "claude"] : ["gemini"],
+        XCTAssertEqual(reads, allProviders ? ["gemini"] + WebsiteModelCatalog.providers.filter { $0 != "gemini" } : ["gemini"],
                        "An equivalent completed recovery must satisfy the pending same-provider refresh")
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [automaticChoice])
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
@@ -435,11 +436,11 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let (id, _) = try await healthyHumanPage(browser)
         try await waitUntil { held != nil }
         let manual = Task { await state.refreshWebsiteModels() }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == 3 }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == WebsiteModelCatalog.providers.count }
         _ = try browser.prepareToolMutation(tabID: id, generation: XCTUnwrap(browser.documentGeneration(for: id)))
         held?.resume(returning: Self.choices("gemini")); held = nil
         await manual.value
-        XCTAssertEqual(observed.map { $0.0 }, ["gemini", "chatgpt", "gemini", "claude"])
+        XCTAssertEqual(observed.map { $0.0 }, ["gemini"] + WebsiteModelCatalog.providers)
         XCTAssertTrue(observed.allSatisfy { $0.1 }, "The explicit all-provider refresh retains its own per-provider recovery flags")
         XCTAssertEqual(geminiReads, 2, "Revoking automatic recovery cannot drop the queued manual Gemini request")
         XCTAssertTrue(state.websiteModelChoices.contains(manualChoice))

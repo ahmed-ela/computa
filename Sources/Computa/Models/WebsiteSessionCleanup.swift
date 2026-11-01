@@ -5,11 +5,11 @@ import Foundation
 struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     enum Outcome: String, Codable, Sendable { case closed, noOwnedSession = "no_owned_session", unconfirmed }
     enum Reason: String, Codable, Sendable {
-        case deleted, notCreated = "not_created", noOwnedSession = "no_owned_session", busy
+        case deleted, transcriptCleared = "transcript_cleared", notCreated = "not_created", noOwnedSession = "no_owned_session", busy
         case shuttingDown = "shutting_down", runtimeChanged = "runtime_changed"
         case cleanupUnverified = "cleanup_unverified", unsupportedRuntime = "unsupported_runtime"
     }
-    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude }
+    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude, groq }
     enum Route: String, Codable, Sendable {
         case embedded
         // Decode existing saved receipts without retaining a Chrome execution route.
@@ -81,11 +81,15 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         if let modelID {
             guard let provider, validation.validModel(modelID, provider: provider) else { return false }
         }
+        if reason == .transcriptCleared {
+            // UI transcript removal is not a claim of provider-side deletion.
+            guard schemaVersion == 2, provider == .groq, route == .embedded, outcome == .closed else { return false }
+        }
         switch outcome {
-        case .closed: return provider != nil && route != nil && modelID != nil && [.deleted, .notCreated].contains(reason)
+        case .closed: return provider != nil && route != nil && modelID != nil && [.deleted, .notCreated, .transcriptCleared].contains(reason)
         case .noOwnedSession:
             return schemaVersion == 4 || provider == nil && route == nil && modelID == nil && reason == .noOwnedSession
-        case .unconfirmed: return ![.deleted, .notCreated, .noOwnedSession].contains(reason)
+        case .unconfirmed: return ![.deleted, .notCreated, .transcriptCleared, .noOwnedSession].contains(reason)
         }
     }
 
