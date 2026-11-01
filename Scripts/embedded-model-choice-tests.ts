@@ -412,9 +412,19 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         return { f, picker, before, triggerClicks: picker.trigger.clicks, waits: f.delays.length };
       }
 
+      // Expire only the new detached-header wait. The native clock is a negative
+      // deadline, never restored model evidence or permission to retry Send.
+      async function expiredDetachedRead(x: any) {
+        const clocks: any[] = [];
+        x.f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => { clocks.push(request); return Promise.resolve(true); } };
+        const result = await x.f.run('inspect', { expectedModelChoice, operationID: 'b90afc30-7aee-411e-b8b4-4efeafceddb1' });
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
+        return result;
+      }
+
       describe('Claude post-submission header diagnostics', () => {
         for (const variant of ['detached', 'display_none', 'visibility_hidden', 'aria_label_removed', 'new_label_prefix', 'nonbutton_layout', 'scan_cap']) {
-          test(`${variant} yields the same zero-trigger diagnostic without waiting or replay`, async () => {
+          test(`${variant} retains zero-trigger rejection with only detached-header bounded settling`, async () => {
             const x = await submitted();
             if (variant === 'detached') x.picker.trigger.connected = false;
             if (variant === 'display_none') x.picker.trigger.values.hidden = '';
@@ -427,10 +437,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
               for (let i = 0; i < 256; i++) noise.append(new Node('BUTTON', { 'aria-label': 'Synthetic unrelated control' }));
               noise.parentElement = x.f.body; x.f.body.children.unshift(noise);
             }
-            const result = await x.f.run('inspect', { expectedModelChoice });
+            const result = variant === 'detached' ? await expiredDetachedRead(x) : await x.f.run('inspect', { expectedModelChoice });
             expect(result.error).toBe('model_unverified');
             expect(result.modelDiagnostic).toMatchObject({ trigger: null, triggerCount: 0, triggerCandidates: [],
-              readStage: 'initial_observation', readContext: { scope: 'action_precheck', action: 'inspect' },
+              readStage: variant === 'detached' ? 'trigger_remount_timeout' : 'initial_observation', readContext: { scope: 'action_precheck', action: 'inspect' },
               readAttempt: { observedProof: false, primaryOpened: false, secondaryOpened: false, closeAttempted: false } });
             expect(result.modelEvidence).toBeUndefined();
             const facts = result.modelDiagnostic.lastModelTrigger;
@@ -460,10 +470,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
           });
         }
-        test('a synthetic transient is terminal on that read; later exact proof is independently recomputed', async () => {
+        test('an expired detached read is terminal; later exact proof is independently recomputed', async () => {
           const x = await submitted();
           x.picker.trigger.connected = false;
-          const missing = await x.f.run('inspect', { expectedModelChoice });
+          const missing = await expiredDetachedRead(x);
           expect(missing.error).toBe('model_unverified');
           expect(missing.modelEvidence).toBeUndefined();
           expect(x.f.delays.length).toBe(x.waits);
@@ -478,7 +488,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         test('restoration with a different model cannot use the cached selection', async () => {
           const x = await submitted();
           x.picker.trigger.connected = false;
-          expect((await x.f.run('inspect', { expectedModelChoice })).error).toBe('model_unverified');
+          expect((await expiredDetachedRead(x)).error).toBe('model_unverified');
           x.picker.trigger.connected = true; x.picker.selected('Sonnet 5');
           const mismatch = await x.f.run('inspect', { expectedModelChoice });
           expect(mismatch.error).toBe('model_mismatch'); expect(mismatch.text).toBeUndefined();
@@ -539,7 +549,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           const x=await submitted();
           x.f.world.__computaClaudeLastModelTrigger={owner:privateOwner,document:x.f.document,url:x.f.document.URL,node:x.picker.trigger};
           x.picker.trigger.connected=false;
-          const result=await x.f.run('inspect',{expectedModelChoice});
+          const result=await expiredDetachedRead(x);
           expect(result.error).toBe('model_unverified');expect(result.modelEvidence).toBeUndefined();expect(result.text).toBeUndefined();
           expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
         });

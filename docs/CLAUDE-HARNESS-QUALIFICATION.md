@@ -6,23 +6,29 @@ Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6 and Opus 3 as enabled controls.
 Fable 5.1 and Fable 5 require usage credits. Haiku 4.5 remains absent. This
 read-only inspection sent no prompt and changed no model; enabled picker controls
 are availability observations, not successful inference or workflow evidence.
-The newly visible Opus choices still require independent qualification.
+Each newly visible Opus choice requires independent qualification; the
+individual results below do not qualify the others.
 
-As of November 1, build363 is installed and published as `v0.8.0-alpha.363`.
-PR #19 was squash-merged at `0c182d7`; its tree exactly matches the actual build
-source `e2a0fe4`. The signed bundle and frozen build inputs were revalidated
+As of November 1, build364 (`06b9463`) is installed for qualification. The
+published release remains `v0.8.0-alpha.363`. PR #19 was squash-merged at
+`0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
+The signed bundle and frozen build inputs were revalidated
 before publication. The package is not notarized. Full Claude qualification
 remains open in issue #15; release publication does not establish model reliability.
 
-Current bounded evidence includes a successful Sonnet 5.5 workflow on build353
-and a successful Haiku 5.5 workflow on build361. Opus 5.5 completed one full
+Current bounded evidence includes a successful Sonnet 5.5 marker and full
+workflow on installed build364 and a successful Haiku 5.5 workflow on build361.
+Opus 5.5 completed one full
 workflow on build363. Build362's Sonnet 5 marker received a valid refusal.
-Sonnet 4.6 has passed markers but continues to fail full workflows on response
-formatting. Opus 5 lost verified model-header visibility after submission in
-its owned session; the remaining Opus choices still need workflows. These results
-are independent cases, not an all-model pass or a measured reliability rate.
+Sonnet 4.6 has passed markers but still fails full workflows: build364
+corrected its malformed first reply, then received a valid refusal. Opus 5
+lost its verified model header after submission; finite build364 diagnostics
+show the old control was detached. Opus 4.8 returned a verified response but
+failed its exact-marker task. Remaining model workflows are still required.
+These results are independent cases, not an all-model pass or a measured
+reliability rate.
 
-## Build363: live failures and candidate364
+## Build363 failures and build364 changes
 
 Opus 5.5's marker passed in 6.048 seconds and its safe full workflow passed in
 73.365 seconds. Independent checks joined nine verified, closed website
@@ -83,11 +89,101 @@ empty extra controls have dedicated regressions. Log hashes are
 `46f14212003a3cde482bff6a477a65beeb46a6e4cf43eec710b706220b9f3730`
 for adapter/version tests and
 `3eeeaf79338474d9e012f99a2b8fad932a01f91f9d294b1ca692fb16fe720616`
-for native tests. Installation and live qualification remain pending.
+for native tests. Build364 was subsequently installed from `06b9463`; its
+separate live results follow.
 
 The published build363 package does not contain these candidate changes. Private evidence is
 retained under `work/claude-qualification-20261031/evidence/` in the named cases
 and `opus5-layout363-a/`; raw provider text is not included in this repository.
+
+## Installed build364 results, November 1
+
+These are separate, fresh tasks on installed source `06b9463`. Durations are
+native task durations. A successful transport or cleanup record does not make
+a failed marker or workflow pass.
+
+| Case | Duration | Inferences / tool calls | Result |
+| --- | ---: | ---: | --- |
+| `sonnet55-marker364-b` | 4.538 s | 1 / 0 | Exact marker passed; selection, submission, response and saved closed cleanup verified. |
+| `sonnet55-workflow364-b` | 52.510 s | 9 / 8 | Full local fixture passed: permitted function edit, six protected tests, exact reference, one accepted POST, receipt observed and reported, and model-issued tab close. |
+| `sonnet46-workflow364-a` | 18.225 s | 2 / 0 | One isolated malformed JSON response used the single correction allowance. The fresh response was a valid refusal; no proposed call executed and the workflow failed. Both sessions have saved closed cleanup. |
+| `opus5-marker364-a` | 3.822 s | 1 / 0 | After verified submission, current model proof failed because the previously verified header was detached. No answer was released; owned-session cleanup was verified closed. |
+| `opus48-marker364-b` | 11.232 s | 1 / 0 | Selection, submission, response and cleanup verified, but the answer added prose to the requested marker. Exact-marker qualification failed. |
+
+Sonnet 5.5's independent workflow audit joined all nine distinct website
+inferences and their saved cleanup receipts to the eight native calls. It
+verified that only the permitted function changed, all six protected tests
+passed, the loopback ledger contained exactly one accepted submission, the
+unpredictable receipt appeared in browser output and the final answer, and only
+the task's browser tab was closed. No correction or native tool error occurred.
+The fixture server was stopped before its independent audit. This is one bounded
+workflow pass, not an all-model or arbitrary-website reliability claim.
+
+Sonnet 4.6's captured first reply proposed two read-only `exec_command` calls
+but contained an extra brace. The original whole reply stayed rejected. Its
+fresh same-model correction returned a valid message refusing the external-tool
+handoff; neither original call was dispatched. Retained correction records join
+the rejected first inference, its saved closure and the distinct second
+inference. They do not independently establish exact paired canonical-request
+bytes or cumulative budget usage. The refusal's cause remains unproved; current
+source explicitly distinguishes Claude's JSON proposals from host execution.
+
+Opus 5's finite diagnostic reports zero current trigger candidates and a
+same-context previous button with `connected=false`, `physical=false`,
+`visible=false`, a still-recognized label category and an unsaturated scan.
+This identifies detachment rather than a label change. It does not establish
+why the site detached the header or whether it would have returned. Opus 4.8's
+normal response shows the loss is not universal; its additional prose remains
+a separate model-behavior failure.
+
+Startup catalog discovery also remains unverified. Settings reported that
+Claude's selected model could not be verified, and the existing cached choices,
+including Fable 5.1 and Fable 5, remained visible. Keeping that cache is failure
+behavior, not successful catalog refresh or evidence that purchase-gated choices
+are currently usable. No manual refresh was used to relabel this result.
+
+Evidence is retained privately under `work/claude-qualification-20261031/`:
+the named `evidence/` cases contain summaries, native/website/cleanup journals
+and independent v5 audits; the workflow oracle is
+`fixtures/cases/sonnet55-364-b/audit/result.json` (SHA-256
+`34befb0469027dade5fb2105903c3f5e5136d0410659bed5c5301528590a33c3`).
+The detached-header facts are in
+`evidence/opus5-marker364-a/finite-native-diagnosis/decoded-diagnostics.json`,
+and startup failure is recorded in `catalog364-initial-settings.txt`.
+Used and unused diagnostic arms were retained and retired without replay.
+
+## Candidate365: bounded read-only header-remount observation
+
+Candidate365 proposes bounded observation of the detached-header state. Only a
+post-submission `inspect` or `verifyModel` read with verified first-user state
+and a disconnected, previously verified node in the same owner/document/URL
+may wait for DOM changes, within the existing 1.8-second read deadline. The
+remembered node permits this bounded observation only; it supplies no model,
+response, action or cleanup proof.
+
+A newly observed header must independently prove the exact requested selection:
+one enabled, closed control, an unsaturated candidate scan, and no foreign or
+open popup. The ordinary fresh verification path checks it again, including
+after its asynchronous close check and before returning. Observed owner,
+route, first-user, mode, ambiguous-control or model changes remain terminal,
+even if restored before the wait resumes. Missing headers and expired deadlines
+still fail. This path opens no picker, dismisses no popup, selects no model,
+replays no Send and adds no correction allowance.
+
+Build365 passed all 960 combined adapter/version tests (41,163 assertions) and
+27 focused native Claude transport tests with unchanged source. The native
+cases use real WebKit observers and the existing native deadline, verifying
+fresh completion proof, model/body/owner rejection, timeout, one Send and no
+picker actions. The first native run exposed two incorrect test expectations:
+the existing post-action first-user guard takes precedence over the model error
+for body/owner changes. The final tests require that exact ownership rejection;
+no production guard was changed to satisfy them. Passing log hashes are
+`2fb6034cf4d67e027d450f12bd79edc0d9922b02d27c16df5addd467472daa9c`
+and `bc586ca832e06d49e0c23a0429d12a4eac8c71b665efe762eb76c5da30d54221`.
+Build, installation and fresh live remount qualification remain pending.
+Catalog startup failure,
+refusal behavior and the historical unconfirmed quota-cleanup record remain
+separate open issues; this candidate does not establish their resolution.
 
 ## Build362: duplicate code blocks stop the Sonnet 4.6 workflow
 

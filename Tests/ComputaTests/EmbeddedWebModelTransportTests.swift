@@ -10925,6 +10925,168 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+
+    // The test instrumentation delegates to real WebKit observers. It only schedules
+    // fixture DOM mutations after the production read-only wait starts; it never
+    // supplies a model proof, native-clock result, or adapter observation.
+    private func installClaudeHeaderRemountFixture(_ view: WKWebView, variant: String) async throws {
+        precondition(["exact", "model", "body", "owner", "missing"].contains(variant))
+        let installed = try await evaluate(view, """
+            const original = document.getElementById('fixture-model-trigger');
+            if (!original || !original.isConnected || document.querySelectorAll('[data-testid="user-message"]').length !== 1)
+              throw new Error('fixture requires actual acknowledged first Send');
+            const parent = original.parentNode, next = original.nextSibling;
+            const replacement = original.cloneNode(true);
+            globalThis.fixtureRemount = {original, replacement, observerArms:0, callbacks:0, mounts:0,
+              started:0, mounted:0, originalObserver:globalThis.MutationObserver};
+            const ledger = globalThis.fixtureRemount;
+            const NativeObserver = ledger.originalObserver;
+            globalThis.MutationObserver = class extends NativeObserver {
+              constructor(callback) {
+                super((records, observer) => { ledger.callbacks++; callback(records, observer); });
+              }
+              observe(target, options) {
+                super.observe(target, options);
+                if (ledger.observerArms || document.getElementById('fixture-model-trigger')
+                  || original.isConnected || target !== document.documentElement || options?.subtree !== true
+                  || options?.childList !== true || options?.attributes !== true) return;
+                ledger.observerArms++; ledger.started = performance.now();
+                if ('\(variant)' === 'missing') return;
+                setTimeout(() => {
+                  if ('\(variant)' === 'model') {
+                    replacement.setAttribute('aria-label', 'Model: Sonnet 5.5 Medium');
+                    replacement.querySelector('#fixture-model-header').textContent = 'Sonnet 5.5';
+                  }
+                  if ('\(variant)' === 'body')
+                    document.querySelector('[data-testid="user-message"]').textContent += ' changed while waiting';
+                  if ('\(variant)' === 'owner') globalThis.__computaModelOwner = 'foreign-fixture-owner';
+                  parent.insertBefore(replacement, next);
+                  ledger.mounts++; ledger.mounted = performance.now();
+                }, 150);
+              }
+            };
+            original.remove();
+            return !original.isConnected && !document.getElementById('fixture-model-trigger');
+            """, world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(installed as? Bool, true)
+    }
+
+    private func claudeHeaderRemountLedger(_ view: WKWebView) async throws -> [String: Any] {
+        let result = try await evaluate(view, """
+            const ledger=globalThis.fixtureRemount;
+            globalThis.MutationObserver=ledger.originalObserver;
+            return {observerArms:ledger.observerArms, callbacks:ledger.callbacks, mounts:ledger.mounts,
+              elapsedUntilMount:ledger.mounted ? ledger.mounted-ledger.started : null,
+              oldDisconnected:!ledger.original.isConnected,
+              replacementCurrent:document.getElementById('fixture-model-trigger')===ledger.replacement};
+            """, world: .world(name: "computa-chatgpt-model-v1"))
+        return try XCTUnwrap(result as? [String: Any])
+    }
+
+    func testClaudeSubmittedHeaderRemountUsesRealObserverBeforeStrictCompletion() async throws {
+        let choice = Self.fixtureChoice(.claude)
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        let prompt = "Read-only native Claude header remount fixture"
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        XCTAssertEqual(sent["sequence"] as? Int, 1)
+        XCTAssertNil(sent["freshSessionSubmissionProof"])
+        try await installClaudeHeaderRemountFixture(view, variant: "exact")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        let proof = try XCTUnwrap(complete["freshSessionSubmissionProof"] as? [String: Any])
+        let rawOutbound = try await evaluate(view, "return window.fixturePrompts[0];")
+        let outbound = try XCTUnwrap(rawOutbound as? String)
+        XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        XCTAssertEqual(proof["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+        XCTAssertEqual(proof["sequence"] as? Int, 1)
+        XCTAssertEqual(proof["responseCount"] as? Int, 1)
+        let ledger = try await claudeHeaderRemountLedger(view)
+        XCTAssertEqual(ledger["observerArms"] as? Int, 1)
+        XCTAssertGreaterThanOrEqual(ledger["callbacks"] as? Int ?? 0, 1)
+        XCTAssertEqual(ledger["mounts"] as? Int, 1)
+        XCTAssertGreaterThanOrEqual(ledger["elapsedUntilMount"] as? Double ?? 0, 100)
+        XCTAssertEqual(ledger["oldDisconnected"] as? Bool, true)
+        XCTAssertEqual(ledger["replacementCurrent"] as? Bool, true)
+        let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        XCTAssertEqual(actionsAfter, actionsBefore, "Remount observation must not open or dismiss a picker")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testClaudeSubmittedHeaderRemountRejectsChangedModelBodyAndOwnerWithoutReplay() async throws {
+        for variant in ["model", "body", "owner"] {
+            let choice = Self.fixtureChoice(.claude)
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Reject remounted header drift"])
+            try await installClaudeHeaderRemountFixture(view, variant: variant)
+            do {
+                let result = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A remounted \(variant) drift must reject before any response publication: \(result)")
+            } catch {
+                let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                if variant == "model" { XCTAssertEqual(failure, .modelMismatch) }
+                else {
+                    // The existing post-action snapshot recheck includes both
+                    // body and owner, and takes precedence over model failure.
+                    XCTAssertEqual(failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+            }
+            let ledger = try await claudeHeaderRemountLedger(view)
+            XCTAssertEqual(ledger["observerArms"] as? Int, 1, variant)
+            XCTAssertGreaterThanOrEqual(ledger["callbacks"] as? Int ?? 0, 1, variant)
+            XCTAssertEqual(ledger["mounts"] as? Int, 1, variant)
+            let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+            XCTAssertEqual(actionsAfter, actionsBefore, variant)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+            // Teardown only: do not restore owner/body or retry a failed inference.
+        }
+    }
+
+    func testClaudeSubmittedHeaderRemountMissingReplacementExpiresNativeDeadlineWithoutReplay() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let actionsBefore = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Missing header remains unverified"])
+        try await installClaudeHeaderRemountFixture(view, variant: "missing")
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Remembered header proof must never substitute for the absent current node")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        let elapsed = began.duration(to: .now)
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(1_500), "The real existing native clock must expire the 1.8s wait")
+        XCTAssertLessThan(elapsed, .seconds(5), "No retry budget or indefinite wait may be introduced")
+        let ledger = try await claudeHeaderRemountLedger(view)
+        XCTAssertEqual(ledger["observerArms"] as? Int, 1)
+        XCTAssertEqual(ledger["mounts"] as? Int, 0)
+        XCTAssertEqual(ledger["replacementCurrent"] as? Bool, false)
+        let actionsAfter = try await evaluate(view, "return [window.fixtureModelTriggerClicks,window.fixtureModelEscapeEvents];") as? [Int]
+        XCTAssertEqual(actionsAfter, actionsBefore)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
     func testClaudeFreshSessionProofBindsCanonicalRequestOnlyAfterVerifiedCompletion() async throws {
         let choice = Self.fixtureChoice(.claude)
         let fixture = try Fixture(page: Self.modelChoicePage(.claude))

@@ -1288,8 +1288,9 @@ function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
   try {
     if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
       || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
-    // Diagnostic reference only, written after an existing positive proof.
-    // It must never supply selection, response, action, or cleanup authority.
+    // Reference written only after an existing positive proof, for diagnostics
+    // and detached-node wait eligibility. Never selection, response, action,
+    // or cleanup authority: a replacement still requires fresh current proof.
     globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
   } catch { /* Diagnostics cannot change the already evaluated proof. */ }
 }
@@ -1628,8 +1629,33 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
     && openingRecovery.attempt.settled === true && openingRecovery.attempt.completed !== true
     && typeof openingRecovery.guard === 'function' ? openingRecovery : null;
-  const unchanged = () => window === window.top && document.URL === url && globalThis.__computaModelOwner === owner
-    && (!recovery || recovery.guard(false) === true);
+  const readDocument = document;
+  let claudeRemountStarted = false, claudeRemountTrigger = null;
+  const submittedReadIntact = () => {
+    try { return context.claudeSubmittedReadGuard() === true; } catch { return false; }
+  };
+  const unchanged = () => window === window.top && document === readDocument && document.URL === url && globalThis.__computaModelOwner === owner
+    && (!recovery || recovery.guard(false) === true) && (!claudeRemountStarted || submittedReadIntact());
+  const detachedClaudeTrigger = () => {
+    try {
+      const record = globalThis.__computaClaudeLastModelTrigger;
+      if (!record || typeof record !== 'object' || Object.keys(record).length !== 4
+        || !['node', 'owner', 'document', 'url'].every(key => Object.getOwnPropertyDescriptor(record, key)?.value !== undefined)
+        || record.owner !== owner || record.document !== readDocument || record.url !== url) return false;
+      const node = record.node;
+      return !!node && node.nodeType === 1 && typeof node.getAttribute === 'function'
+        && typeof node.closest === 'function' && node.isConnected === false;
+    } catch { return false; }
+  };
+  const remountProofError = current => {
+    if (Date.now() >= until || !unchanged() || current.trigger !== claudeRemountTrigger
+      || current.triggerScan.length >= 256 || current.triggerCount !== 1 || current.triggerCandidates.length !== 1 || current.triggerCandidates[0] !== current.trigger
+      || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
+      || current.physicalMenus.length || current.allMenus.length || !current.enabled(current.trigger)
+      || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+      || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) return 'model_unverified';
+    return websiteModelChoiceEqual(current.evidence.selected, expected) ? null : 'model_mismatch';
+  };
   const until = recovery ? recovery.until : Date.now() + 1_800;
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, trigger = null, captured = null;
   const ownedMenus = new Set(), popupOwners = new Set(), ownedMenuIDs = new Set(), popupOwnerIDs = new Set();
@@ -1704,6 +1730,9 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const closeOwned = async () => {
     const current = websiteModelPickerState(provider);
     if (!unchanged()) return false;
+    // This new read-only branch must never dismiss or open a popup, even if
+    // one appears after the replacement header was observed.
+    if (claudeRemountStarted) return remountProofError(current) === null;
     if (!trigger || current.trigger !== trigger || !current.physical(trigger) || trigger.disabled
       || trigger.getAttribute('aria-disabled') === 'true') return false;
     if (!current.topMenu) {
@@ -1722,9 +1751,57 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     return waitForClosedPicker();
   };
   try {
+    // Claude can detach its model header after the acknowledged first Send.
+    // A bounded, action-free DOM wait may observe its replacement, but never
+    // promotes the remembered diagnostic node or a timer into model evidence.
+    if (provider === 'claude' && context?.scope === 'action_precheck'
+      && ['inspect', 'verifyModel'].includes(context.action) && typeof context.claudeSubmittedReadGuard === 'function'
+      && !state.trigger && state.triggerCount === 0 && state.triggerCandidates.length === 0
+      && state.triggerScan.length < 256 && detachedClaudeTrigger()) {
+      claudeRemountStarted = true;
+      readStage = 'trigger_remount_waiting';
+      let rejection = null;
+      const observeRemount = () => {
+        if (rejection) return true;
+        if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        const current = websiteModelPickerState(provider);
+        if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
+          || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0) return false;
+        if (current.triggerCount !== 1 || current.triggerCandidates.length !== 1
+          || current.triggerCandidates[0] !== current.trigger || !current.enabled(current.trigger)
+          || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!websiteModelChoiceEqual(current.evidence.selected, expected)) {
+          rejection = 'model_mismatch'; return true;
+        }
+        // Identity is pinned only after this current node provides exact proof;
+        // the ordinary read below must independently observe it again.
+        if (claudeRemountTrigger && claudeRemountTrigger !== current.trigger) {
+          rejection = 'model_unverified'; return true;
+        }
+        claudeRemountTrigger = current.trigger;
+        return true;
+      };
+      const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
+        () => { rejection = 'model_unverified'; });
+      if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
+        return failure(rejection || 'model_unverified');
+      }
+      readStage = 'trigger_remount_observed';
+    }
     while (Date.now() < until) {
       if (!unchanged()) return recovery ? failure('model_unverified') : { error: 'document_changed', detail: 'owner_token' };
       state = websiteModelPickerState(provider);
+      if (claudeRemountStarted) {
+        const invalid = remountProofError(state);
+        if (invalid) return failure(invalid);
+      }
       trackOwnedMenus(state);
       websiteModelTrackReadUI(state);
       if (state.duplicate || state.conflicting || state.indicatorInvalid || state.selectionAmbiguous || state.navigationAmbiguous)
@@ -1735,6 +1812,10 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         trigger = trigger || state.trigger;
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
+        if (claudeRemountStarted) {
+          const invalid = remountProofError(after);
+          if (invalid) return failure(invalid);
+        }
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
         if (websiteModelChoiceEqual(captured.selected, expected)) {
           websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
@@ -1795,7 +1876,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   } finally {
     // Close only a popup associated with this observation's exact controlled
     // trigger. This never selects a family or replays a failed editor operation.
-    if (unchanged() && trigger && !closeAttempted) {
+    if (!claudeRemountStarted && unchanged() && trigger && !closeAttempted) {
       const current = websiteModelPickerState(provider);
       if (current.topMenu && current.trigger === trigger && current.physical(trigger)
         && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true') {

@@ -39,16 +39,22 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 ## Claude website-model qualification
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
-  Full Claude qualification remains incomplete. Sonnet 5.5 on build353 and
-  Haiku 5.5 on build361 have bounded full-workflow passes, as does Opus 5.5 on
-  build363. Sonnet 5's marker returned a refusal; Sonnet 4.6 still fails on
-  malformed JSON, with the first-response brace defect captured on build363.
-  Opus 5 lost its verified model-header observation after submission; a direct
-  website marker passed separately. Other Opus choices remain unqualified.
-  Verify candidate364's isolated-block correction, catalog eligibility fix and
-  header diagnostics in the installed app. Diagnose the
-  capability refusals and capture the earlier Haiku call-shape defect if it
-  recurs; verify the outstanding quota-cleanup case separately. Complete and
+  Full Claude qualification remains incomplete. Installed build364 passed
+  Sonnet 5.5's exact marker and one full local workflow (52.510 seconds, nine
+  verified inferences, eight tools, six protected tests and one accepted POST).
+  Earlier bounded workflow passes include Haiku 5.5 on build361 and Opus 5.5
+  on build363. Build364 corrected Sonnet 4.6's isolated malformed first reply,
+  then received a valid refusal with zero tools executed. Opus 5 failed after
+  its verified header detached; Opus 4.8 returned extra prose and failed its
+  exact marker. Startup Claude discovery failed verification and retained its
+  cache; visible Fable rows do not establish current availability.
+  Candidate365 adds a bounded read-only remount wait with fresh model and
+  first-user proof, no picker/Send replay and the existing 1.8-second deadline.
+  Its 960 adapter/version tests and 27 native Claude tests passed; build,
+  installation and live qualification are pending.
+  Diagnose capability refusals and capture the earlier Haiku call-shape defect
+  if it recurs; preserve the historical unconfirmed quota-cleanup record and
+  verify any new quota event separately. Complete and
   repeat fresh browser, terminal and file-editing fixtures for each available
   model on the intended build, with exact selection/ownership, protected tests,
   independently observed submission receipts, task-tab closure and durable

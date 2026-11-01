@@ -1545,3 +1545,235 @@ describe("Claude isolated malformed JSON correction evidence", () => {
     }
   });
 });
+
+describe('Claude post-submit detached header settling', () => {
+  const expectedModelChoice = { key: 'Opus 5', label: 'Opus 5' };
+  const operationID = 'a909845c-2857-4b22-a66b-261b22281513';
+  const tickUntil = async (condition: () => boolean) => {
+    for (let count = 0; count < 100 && !condition(); count++) await Bun.sleep(1);
+    expect(condition()).toBe(true);
+  };
+  const currentHeader = (label = 'Opus 5') => {
+    const node = new Element('BUTTON', { 'aria-label': `Model: ${label} High`, 'aria-expanded': 'false', 'data-state': 'closed' });
+    node.append(new Element('SPAN', {}, label), new Element('SPAN', {}, 'High'));
+    return node;
+  };
+  const detached = async (action = 'inspect') => {
+    const f = fixture('claude', { userPrompt: 'Bounded detached-header control' });
+    const picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5');
+    const before = await f.run('inspect', { expectedModelChoice });
+    expect(before).toMatchObject({ firstUserVerified: true, modelEvidence: { selected: expectedModelChoice } });
+    expect(f.world.__computaClaudeLastModelTrigger.node).toBe(picker.trigger);
+    picker.trigger.connected = false;
+    const clocks: any[] = []; let expire: () => void = () => {}, rejectClock: () => void = () => {};
+    f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => {
+      clocks.push(request); return new Promise((resolve, reject) => {
+        expire = () => resolve(true); rejectClock = () => reject(new Error('synthetic clock failure'));
+      });
+    } };
+    let settled = false;
+    const pending = f.run(action, { expectedModelChoice, operationID }).then(result => { settled = true; return result; });
+    await tickUntil(() => clocks.length > 0 || settled);
+    expect(settled).toBe(false); expect(clocks).toHaveLength(1);
+    expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
+    expect(f.delays).toHaveLength(0);
+    const wake = () => { for (const observer of [...f.observers]) observer.callback([{ type: 'childList', target: f.body }]); };
+    const noActions = () => {
+      expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+      expect(picker.options.every((node: Element) => node.clicks === 0)).toBe(true);
+      expect(picker.menu.events).toHaveLength(0); expect(picker.nested!.events).toHaveLength(0);
+      expect(clocks).toHaveLength(1);
+    };
+    return { f, picker, before, pending, wake, noActions, clocks, expire: () => expire(), rejectClock: () => rejectClock() };
+  };
+
+  test('a new exact current header after Send supplies fresh proof without any picker or editor action', async () => {
+    for (const action of ['inspect', 'verifyModel']) {
+      const x = await detached(action), replacement = currentHeader(); x.f.body.append(replacement); x.wake();
+      const result = await x.pending;
+      expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: x.before.firstUserFingerprint,
+        modelEvidence: { selected: expectedModelChoice, verification: 'website_selection', source: 'model_picker_label' } });
+      if (action === 'inspect') expect(result).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}' });
+      expect(x.f.world.__computaClaudeLastModelTrigger.node).toBe(replacement);
+      expect(replacement.clicks).toBe(0); x.noActions();
+      x.expire(); await Bun.sleep(0); x.noActions();
+    }
+  });
+
+  test('the old diagnostic node is never promoted and a missing replacement or rejected clock fails closed', async () => {
+    for (const kind of ['deadline', 'clock_rejected', 'header_after_deadline']) {
+      const x = await detached();
+      // Even a still-recognized old label cannot qualify a detached node.
+      expect(x.f.world.__computaClaudeLastModelTrigger.node.getAttribute('aria-label')).toContain('Opus 5');
+      if (kind === 'clock_rejected') x.rejectClock(); else x.expire();
+      if (kind === 'header_after_deadline') { await Promise.resolve(); await Promise.resolve(); x.f.body.append(currentHeader()); x.wake(); }
+      const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(result.modelDiagnostic.lastModelTrigger).toMatchObject({ connected: false, physical: false, visible: false });
+      x.noActions();
+    }
+  });
+
+  test('mismatch, unknown, disabled, ambiguous or open replacement controls never become model proof', async () => {
+    for (const kind of ['mismatch', 'unknown', 'disabled', 'duplicate', 'expanded']) {
+      const x = await detached(), replacement = currentHeader(kind === 'mismatch' ? 'Haiku 5.5' : 'Opus 5');
+      if (kind === 'unknown') replacement.values['aria-label'] = 'Model: unrecognized model';
+      if (kind === 'disabled') replacement.disabled = true;
+      if (kind === 'expanded') replacement.values['aria-expanded'] = 'true';
+      x.f.body.append(replacement); if (kind === 'duplicate') x.f.body.append(currentHeader()); x.wake();
+      const result = await x.pending;
+      expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+      expect(result.modelEvidence).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('owner, route, first-user and foreign-popup negatives stay latched even if restored before the await resumes', async () => {
+    for (const kind of ['owner', 'route', 'frame', 'first_text', 'first_identity', 'first_count', 'submitted', 'first_marker', 'first_proof', 'temporary', 'foreign_menu', 'foreign_dialog', 'mismatch']) {
+      const x = await detached(), originalOwner = x.f.world.__computaModelOwner, originalURL = x.f.document.URL;
+      const originalText = x.f.userBody!.text, wrapper = x.f.userRoot!.parentElement!, originalID = wrapper.values.id;
+      const originalMessages = [...x.f.messages.children], originalTop = x.f.window.top;
+      const originalProof = x.f.world.__computaModelFirstProof, originalMarker = x.f.world.__computaModelFirstMarker;
+      const foreign = new Element('DIV', { role: kind === 'foreign_dialog' ? 'dialog' : 'menu' });
+      const wrong = currentHeader('Haiku 5.5');
+      if (kind === 'owner') x.f.world.__computaModelOwner = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'route') x.f.document.URL = x.f.origin + '/chat/foreign?incognito';
+      if (kind === 'frame') x.f.window.top = {};
+      if (kind === 'submitted') x.f.world.__computaModelFirstSubmitted = false;
+      if (kind === 'first_marker') x.f.world.__computaModelFirstMarker = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'first_proof') x.f.world.__computaModelFirstProof = { ...originalProof };
+      if (kind === 'first_text') x.f.userBody!.text += ' changed';
+      if (kind === 'first_identity') wrapper.values.id = 'foreign-first-message';
+      if (kind === 'first_count') x.f.messages.append(new Element('DIV', { 'data-testid': 'user-message' }, 'foreign'));
+      if (kind === 'temporary') x.f.badge.connected = false;
+      if (kind.startsWith('foreign_')) x.f.body.append(foreign);
+      if (kind === 'mismatch') x.f.body.append(wrong);
+      x.wake();
+      x.f.world.__computaModelOwner = originalOwner; x.f.document.URL = originalURL; x.f.window.top = originalTop;
+      x.f.world.__computaModelFirstSubmitted = true; x.f.world.__computaModelFirstMarker = originalMarker;
+      x.f.world.__computaModelFirstProof = originalProof;
+      x.f.userBody!.text = originalText; wrapper.values.id = originalID; x.f.badge.connected = true;
+      if (kind === 'first_count') x.f.messages.children = originalMessages;
+      foreign.connected = false; wrong.connected = false;
+      x.f.body.append(currentHeader()); x.wake();
+      const result = await x.pending;
+      expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+      expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('a replacement losing proof before the ordinary loop cannot open a picker', async () => {
+    const x = await detached(), replacement = currentHeader();
+    let reads = 0;
+    const get = replacement.getAttribute.bind(replacement);
+    // The observer sees exact evidence; its last closed-state read invalidates
+    // the label before the independent ordinary read, without a DOM action.
+    replacement.getAttribute = (name: string) => {
+      const result = get(name);
+      if (name === 'data-state' && ++reads === 1) replacement.values['aria-label'] = 'Model: unknown';
+      return result;
+    };
+    x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(replacement.clicks).toBe(0); x.noActions();
+  });
+
+  test('final close await rechecks exact replacement, current proof and the original deadline', async () => {
+    for (const kind of ['detached', 'replaced', 'unknown', 'mismatch', 'disabled', 'menu', 'scan_limit', 'deadline']) {
+      const x = await detached(), replacement = currentHeader();
+      let tracked = false, mutated = false, trackedValue: any;
+      const realNow = Date.now;
+      Object.defineProperty(x.f.world, '__computaModelReadUI', { configurable: true,
+        get: () => trackedValue, set: value => {
+          trackedValue = value;
+          if (tracked) return;
+          tracked = true;
+          // Tracking happens in the ordinary fresh loop, immediately before
+          // closeOwned. A microtask runs only when its await actually yields.
+          queueMicrotask(() => {
+            mutated = true;
+            if (kind === 'detached') replacement.connected = false;
+            if (kind === 'replaced') { replacement.connected = false; x.f.body.append(currentHeader()); }
+            if (kind === 'unknown') replacement.values['aria-label'] = 'Model: unknown';
+            if (kind === 'mismatch') { replacement.values['aria-label'] = 'Model: Haiku 5.5 High'; replacement.children[0].text = 'Haiku 5.5'; }
+            if (kind === 'disabled') replacement.disabled = true;
+            if (kind === 'menu') {
+              replacement.values['aria-controls'] = 'late-owned-popup'; replacement.values['aria-expanded'] = 'true';
+              x.f.body.append(new Element('DIV', { role: 'menu', id: 'late-owned-popup' }));
+            }
+            if (kind === 'scan_limit') for (let i=0;i<256;i++) x.f.body.append(new Element('BUTTON', {'aria-label':'Unrelated control'}));
+            if (kind === 'deadline') Date.now = () => realNow() + 10_000;
+          });
+        } });
+      try {
+        x.f.body.append(replacement); x.wake();
+        const result = await x.pending;
+        expect(tracked).toBe(true); expect(mutated).toBe(true);
+        expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+        expect(result.text).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+        expect(x.f.body.querySelector('[id="late-owned-popup"]')?.events ?? []).toHaveLength(0);
+      } finally { Date.now = realNow; }
+    }
+  });
+
+  test('a saturated trigger scan cannot start or continue the detached-header wait', async () => {
+    const fillScan = (f: any) => {
+      const noise = new Element('DIV');
+      for (let i=0;i<256;i++) noise.append(new Element('BUTTON', {'aria-label':'Unrelated control'}));
+      noise.parentElement = f.body; f.body.children.unshift(noise);
+    };
+    const f = fixture('claude', {userPrompt:'Saturated scan control'}), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5'); expect((await f.run('inspect', {expectedModelChoice})).error).toBeUndefined();
+    picker.trigger.connected = false; fillScan(f);
+    const before = await f.run('inspect', {expectedModelChoice});
+    expect(before.error).toBe('model_unverified'); expect(before.modelEvidence).toBeUndefined();
+    expect(before.modelDiagnostic.readStage).toBe('initial_observation');
+    expect(before.modelDiagnostic.lastModelTrigger.triggerScanAtLimit).toBe(true);
+    expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+    const x = await detached(); fillScan(x.f); x.wake();
+    const during = await x.pending;
+    expect(during.error).toBe('model_unverified'); expect(during.modelEvidence).toBeUndefined();
+    expect(during.modelDiagnostic.readStage).toBe('trigger_remount_rejected');
+    expect(during.modelDiagnostic.lastModelTrigger.triggerScanAtLimit).toBe(true); x.noActions();
+  });
+
+  test('missing, malformed, foreign or unreadable remembered records cannot acquire waiting privilege', async () => {
+    for (const kind of ['missing', 'primitive', 'extra_key', 'node_missing', 'node_forged', 'owner', 'document', 'url', 'node_getter', 'record_getter']) {
+      const f = fixture('claude', { userPrompt: 'Record scope control' }), picker = installObservedModelPicker(f, 'claude', Element);
+      picker.selected('Opus 5'); expect((await f.run('inspect', { expectedModelChoice })).error).toBeUndefined();
+      picker.trigger.connected = false;
+      const record = f.world.__computaClaudeLastModelTrigger;
+      if (kind === 'missing') delete f.world.__computaClaudeLastModelTrigger;
+      if (kind === 'primitive') f.world.__computaClaudeLastModelTrigger = 'private poison';
+      if (kind === 'extra_key') record.unrecognized = true;
+      if (kind === 'node_missing') delete record.node;
+      if (kind === 'node_forged') record.node = { isConnected: false };
+      if (kind === 'owner') record.owner = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'document') record.document = { URL: f.document.URL };
+      if (kind === 'url') record.url += '&foreign';
+      if (kind === 'node_getter') Object.defineProperty(record, 'node', { get: () => { throw new Error('private getter'); } });
+      if (kind === 'record_getter') Object.defineProperty(f.world, '__computaClaudeLastModelTrigger', { get: () => { throw new Error('private getter'); } });
+      const result = await f.run('inspect', { expectedModelChoice });
+      expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('absence before Send or during selection and final verification does not acquire a new waiting privilege', async () => {
+    for (const action of ['inspect', 'verifyModel', 'prepare', 'selectModel']) {
+      const f = fixture('claude'), picker = installObservedModelPicker(f, 'claude', Element);
+      picker.selected('Opus 5'); picker.trigger.connected = false;
+      const result = await f.run(action, { expectedModelChoice, modelChoice: expectedModelChoice });
+      expect(result.error === 'model_unverified' || result.pending === true).toBe(true);
+      expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0);
+    }
+    const f = fixture('claude', { userPrompt: 'Final guard control' }), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5'); let removed = false;
+    f.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: ({ phase }: any) => {
+      if (phase === 'final_model_guard') { picker.trigger.connected = false; removed = true; }
+    } };
+    const result = await f.run('inspect', { expectedModelChoice, operationID });
+    expect(removed).toBe(true); expect(result.error).toBe('model_unverified');
+    expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0);
+  });
+});
