@@ -1,7 +1,7 @@
 # Claude harness qualification
 
-Claude qualification resumed on October 31, 2026. The November 1 picker in the
-installed build359 presents Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6, plus
+Claude qualification resumed on October 31, 2026. A November 1 picker inspection
+on installed build359 observed Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6, plus
 Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6 and Opus 3 as enabled controls.
 Fable 5.1 and Fable 5 require usage credits. Haiku 4.5 remains absent. This
 read-only inspection sent no prompt and changed no model; enabled picker controls
@@ -9,24 +9,97 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build365 (`ed8e86e`) is installed for qualification. The
-published release remains `v0.8.0-alpha.363`. PR #19 was squash-merged at
+As of November 1, build370 (`d87792b`) is installed and its launch is recorded.
+The latest Claude qualification cases below ran on build368 (`2dea3d2`), before
+that installation; no Claude qualification on build370 is claimed. The
+`v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
 before publication. The package is not notarized. Full Claude qualification
 remains open in issue #15; release publication does not establish model reliability.
 
-Current bounded evidence includes a successful Sonnet 5.5 marker and full
-workflow on installed build364 and a successful Haiku 5.5 workflow on build361.
-Opus 5.5 completed one full
-workflow on build363. Build362's Sonnet 5 marker received a valid refusal.
-Sonnet 4.6 has passed markers but still fails full workflows: build364
-corrected its malformed first reply, then received a valid refusal. Opus 5
-lost its verified model header after submission; finite build364 diagnostics
-show the old control was detached. Opus 4.8 returned a verified response but
-failed its exact-marker task. Remaining model workflows are still required.
+Current bounded evidence includes a new Sonnet 5.5 full-workflow pass on
+installed build368, earlier Sonnet markers, and a Haiku 5.5 workflow pass on
+build361. Opus 5.5 completed one full workflow on build363. Build368's Opus 4.6
+marker passed, but its full workflow failed after a successful file edit.
+Opus 4.7 added prose to its marker; Opus 3's malformed reply was rejected.
+Build362's Sonnet 5 marker received a valid refusal. Sonnet 4.6 has passed
+markers but still fails full workflows: build364 corrected its malformed first
+reply, then received a valid refusal. Opus 5 still loses current model proof
+after submission, including a bounded remount timeout on build368. Opus 4.8's
+earlier verified response failed its exact-marker task. Remaining workflows
+are still required.
 These results are independent cases, not an all-model pass or a measured
 reliability rate.
+
+## Installed build368 results, November 1
+
+These fresh cases ran on source `2dea3d291cc414f76c1f0687b2e141cdafa5b4f1`,
+process 27615. Each result retains its own model, submission and cleanup records.
+The later installation and launch of build370, source `d87792b`, do not change
+these results or resolve historical failures.
+
+| Case | Duration | Inferences / tool calls | Result |
+| --- | ---: | ---: | --- |
+| `sonnet55-workflow368-c` | 53.033 s | 9 / 8 | Full local fixture passed: permitted function edit, six protected tests, reference, exactly one accepted browser POST, fresh receipt observed/reported, and exact task-created tab closure. |
+| `opus5-marker368-c` | 4.934 s | 1 / 0 | Exact model and first-user submission verified, then `trigger_remount_timeout`. No accepted answer; saved session cleanup closed. |
+| `opus46-marker368-c` | 8.767 s | 1 / 0 | Exact marker passed with selection, first-user/document, completed response and saved closure/release evidence. |
+| `opus46-workflow368-c` | 56.185 s | 4 / 3 | Two reads and a function-only patch succeeded. The fourth inference failed with `invalid_model_output`; no model-dispatched tests/reference, browser action, POST, receipt or final answer. All four sessions have saved closed cleanup. |
+| `opus47-marker368-c` | 25.702 s | 1 / 0 | Verified response contained the nonce plus prose rejecting relay framing. Exact-marker check failed; session cleanup closed. |
+| `opus3-marker368-c` | 9.626 s | 1 / 0 | `malformed_website_reply`, `invalid_json`, `json_fenced=false`, 75 reply bytes. No accepted answer or correction; saved session cleanup closed. |
+
+Sonnet 5.5's independent audit joined all nine distinct website inferences to
+the eight native calls and their outputs. All 27 scenario checks and 19 fixture
+checks passed, without a tool error or correction. Protected files were unchanged;
+the loopback ledger contains exactly one accepted submission and a fresh receipt
+matching browser output and the final answer. A separate native browser-cleanup
+receipt identifies the exact task-created tab as closed. The fixture server was
+stopped. This is one bounded local workflow pass.
+
+Opus 4.6's independent auditor subsequently ran six passing tests and the correct
+reference on its patched function. These verify the edit, but are not
+model-dispatched tests or workflow completion. Protected files were unchanged.
+No task browser tab was opened or form submitted. The saved failure code does not
+establish the rejected reply's exact shape or cause. The marker pass remains
+separate from the failed workflow.
+
+Opus 5's finite log reports a disconnected, previously recognized model button
+and zero current recognized trigger candidates at `trigger_remount_timeout`.
+The submission record already contains exact Opus 5 selection and the bound
+first-user fingerprint. Its failed inference joins its own saved closure 95 ms
+later; `not_created` is the temporary-conversation cleanup reason, not evidence
+that no prompt was sent. The finite log has no task/session IDs, so its exact
+process/time correlation is not exclusive session identity. It does not prove
+continuous header absence, why the site detached the control, or a quota,
+background-rendering or caller-ordering cause. No repair is established by this
+case and no uncertain prompt was replayed.
+
+Opus 4.7's only failed scenario check is `markerExact`. The installed instructions
+explicitly preserve the website model's identity and governing rules, distinguish
+host proposals from execution, and apply user exact-output requirements to
+decoded `message.text`. No contradictory identity-reassignment instruction was
+found. The precise whole outgoing request was not retained; the response does
+not establish unavailable host tools. It must not be trimmed into a marker pass.
+Opus 3's exact case retains the finite malformed-response diagnostic but no raw
+75-byte reply or correction record. Its exact syntax error and the reason no
+correction was admitted remain unproved. Generic native high-demand text is not
+evidence of the provider-side cause.
+
+Catalog freshness is not established for this batch. The operator observed 12
+cached app choices while a separate ordinary Claude picker showed ten eligible
+choices and both Fable rows marked `Buy credits`. This does not negate build365's
+recorded successful refresh, but it prevents claiming a persistent catalog fix.
+Current picker eligibility does not qualify inference or tools. Earlier model
+failures and the historical unconfirmed quota-cleanup case remain open.
+
+Private records are retained under the named cases in
+`work/claude-qualification-20261031/evidence/`. The Sonnet workflow review has
+SHA-256 `eb95eb74d78423867fc02473a1036ff353e99cbe630fe6dad02495febaf7d1eb`;
+Opus 4.6's `partial-negative-audit.json` has
+`bfb231e7a95f6e4d578f4ad6782d916d1e25facb64e8924e0c29162ec06d893f`.
+Original failed verdicts and raw private evidence remain separate from this
+summary. Build370's install and launch receipts are retained under
+`work/sidebar-activity-20261101/`; they are artifact/process evidence only.
 
 ## Build363 failures and build364 changes
 
