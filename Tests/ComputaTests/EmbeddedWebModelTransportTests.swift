@@ -11401,7 +11401,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         for action in ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel", "prepare",
                        "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"] {
-            for reason in ["send_missing", "send_ambiguous"] {
+            for reason in ["send_missing", "send_ambiguous", "reveal_unconfirmed"] {
                 XCTAssertEqual(EmbeddedWebModelTransport.groqSendFailureDiagnostic(action: action, stage: "current", detail: reason),
                                "send_unavailable; action=\(action); stage=current; detail=\(reason)")
                 if action == "sendReady" {
@@ -11515,6 +11515,167 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
             XCTAssertEqual(counts, drifts ? [0, 0] : [1, 1])
             if drifts { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+            else { try await assertHumanTabIntact(fixture) }
+        }
+    }
+
+    func testGroqSendRevealDiagnosticIsFiniteOptionalAndNeverAuthority() throws {
+        let afterValues: [Any] = [NSNull(), "disabled", "invalid_geometry", "outside_viewport", "occluded"]
+        for after in afterValues {
+            let value: [String: Any] = ["before": "outside_viewport", "after": after, "attempted": true]
+            let safe = try XCTUnwrap(EmbeddedWebModelTransport.groqSendRevealDiagnostic(value, provider: .groq, action: "sendReady"))
+            XCTAssertLessThanOrEqual(safe.utf8.count, 160)
+            let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? NSDictionary)
+            XCTAssertEqual(parsed, value as NSDictionary)
+            for other in [EmbeddedWebModelTransport.Provider.chatgpt, .claude, .gemini] {
+                XCTAssertNil(EmbeddedWebModelTransport.groqSendRevealDiagnostic(value, provider: other, action: "sendReady"))
+            }
+            for action in ["inspect", "submit", "clearTranscript", "sendReady\nPRIVATE"] {
+                XCTAssertNil(EmbeddedWebModelTransport.groqSendRevealDiagnostic(value, provider: .groq, action: action))
+            }
+        }
+        let valid: [String: Any] = ["before": "outside_viewport", "after": NSNull(), "attempted": true]
+        for (key, value): (String, Any) in [("before", "occluded"), ("after", "PRIVATE_URL"), ("after", true),
+            ("after", 1), ("after", ["text": "PRIVATE"]), ("attempted", 1), ("attempted", false),
+            ("attempted", "true"), ("url", "https://PRIVATE.invalid/")] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.groqSendRevealDiagnostic(bad, provider: .groq, action: "sendReady"))
+        }
+        for key in valid.keys {
+            var bad = valid; bad.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.groqSendRevealDiagnostic(bad, provider: .groq, action: "sendReady"))
+        }
+        let invalidRaw: [Any?] = [nil, NSNull(), [], String(repeating: "PRIVATE", count: 1_000)]
+        for bad in invalidRaw {
+            XCTAssertNil(EmbeddedWebModelTransport.groqSendRevealDiagnostic(bad, provider: .groq, action: "sendReady"))
+        }
+    }
+
+    private func installGroqFlowRevealFixture(_ view: WKWebView, behavior: String) async throws {
+        XCTAssertTrue(["normal", "ignored", "lost_ack", "owner", "model", "prompt", "replacement", "occluded"].contains(behavior))
+        _ = try await evaluate(view, """
+            const f = groqFixture;
+            f.revealInputs = 0;
+            f.editor.addEventListener('input', () => {
+                f.revealInputs++; f.editor.style.height = 'auto'; f.editor.style.height = f.editor.scrollHeight + 'px';
+            });
+            f.send.addEventListener('click', () => { f.sentOutbound = f.editor.value; }, true);
+            f.send.addEventListener('click', () => {
+                f.editor.style.height = '120px';
+                // Model the observed visual clamp without truncating the body.
+                if (f.userBody) f.userBody.style.cssText = 'display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden';
+            });
+            return true;
+            """)
+        // The adapter lives in this isolated world; a page-world method
+        // override would not exercise its actual scroll acknowledgment.
+        _ = try await evaluate(view, """
+            const send = document.querySelector('form:not([hidden]) button[type="submit"]');
+            const editor = document.querySelector('form:not([hidden]) textarea#chat');
+            const original = send.scrollIntoView.bind(send);
+            const record = globalThis.fixtureGroqReveal = {attempts:0, beforeOutside:false, afterHit:false};
+            send.scrollIntoView = options => {
+                record.attempts++;
+                const r = send.getBoundingClientRect(); record.beforeOutside = r.top >= innerHeight;
+                if ('\(behavior)' === 'ignored') return;
+                original(options);
+                if ('\(behavior)' === 'lost_ack') throw new Error('Synthetic lost scroll acknowledgment');
+                if ('\(behavior)' === 'owner') globalThis.__computaModelOwner = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+                if ('\(behavior)' === 'model') history.replaceState(null, '', '/?model=openai%2Fgpt-oss-20b');
+                if ('\(behavior)' === 'prompt') editor.value += ' changed';
+                if ('\(behavior)' === 'replacement') send.replaceWith(send.cloneNode(true));
+                if ('\(behavior)' === 'occluded') {
+                    const rect = send.getBoundingClientRect(), cover = document.createElement('div');
+                    cover.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:1000`;
+                    document.body.append(cover);
+                }
+                const after = send.getBoundingClientRect();
+                record.afterHit = send.contains(document.elementFromPoint(after.left + after.width / 2, after.top + after.height / 2));
+            };
+            return true;
+            """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+    }
+
+    func testGroqFlowEditorRevealsExactSendOnceThenVerifiesResponseAndClear() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        try await installGroqFlowRevealFixture(view, behavior: "normal")
+        var diagnostics: [String] = []
+        fixture.transport.setGroqSendRevealObserverForTesting { diagnostics.append($0) }
+        let prompt = Array(repeating: "SAFE normal-flow long composer reveal fixture", count: 280).joined(separator: "\n")
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"OK"}"#)
+        let rawOutbound = try await evaluate(view, "return groqFixture.sentOutbound;")
+        let outbound = try XCTUnwrap(rawOutbound as? String)
+        XCTAssertTrue(outbound.hasPrefix(prompt + "\n\nComputa session marker: "))
+        let actualBody = try await evaluate(view, "return groqFixture.userBody.textContent;") as? String
+        XCTAssertEqual(actualBody.map { Data($0.utf8) }, Data(outbound.utf8))
+        let context = try XCTUnwrap(completed["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+        XCTAssertEqual(context["sequence"] as? Int, 1); XCTAssertEqual(context["responseCount"] as? Int, 1)
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        XCTAssertEqual(try WebsiteModelEvidence.parse(completed["modelEvidence"], provider: "groq", expected: choice).selected.key, choice.key)
+        let reveal = try await evaluate(view, "return fixtureGroqReveal;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        XCTAssertEqual(reveal?["attempts"] as? Int, 1); XCTAssertEqual(reveal?["beforeOutside"] as? Bool, true)
+        XCTAssertEqual(reveal?["afterHit"] as? Bool, true)
+        XCTAssertEqual(diagnostics, [#"{"after":null,"attempted":true,"before":"outside_viewport"}"#])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "transcript_cleared")
+        let counts = try await evaluate(view, "return [groqFixture.revealInputs, groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1, 1])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqSendRevealNeverRepeatsIgnoredOrAmbiguousScrollAndRejectsChangedTargets() async throws {
+        for behavior in ["ignored", "occluded", "lost_ack", "owner", "model", "prompt", "replacement"] {
+            let fixture = try Fixture(page: Self.groqFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGroqFixture(fixture, send: false)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            try await installGroqFlowRevealFixture(view, behavior: behavior)
+            var diagnostics: [String] = [], actions: [String] = [], woke = false
+            fixture.transport.setGroqSendRevealObserverForTesting { diagnostics.append($0) }
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard action == "sendReady", !woke, ["ignored", "occluded"].contains(behavior) else { return }
+                woke = true
+                _ = try? await self.evaluate(view, "document.body.classList.add('fixture-reveal-wake'); return true;")
+            }
+            let expected: EmbeddedWebModelTransport.Failure
+            switch behavior {
+            case "ignored": expected = .editorFailure("send_unavailable; action=sendReady; stage=last_observation; detail=outside_viewport")
+            case "occluded": expected = .editorFailure("send_unavailable; action=sendReady; stage=last_observation; detail=occluded")
+            case "lost_ack": expected = .editorFailure("send_unavailable; action=sendReady; stage=current; detail=reveal_unconfirmed")
+            case "owner": expected = .ownershipFailure(.javaScriptOwner)
+            case "model": expected = .ownershipFailure(.routeAfter)
+            case "prompt": expected = .editorFailure("prompt_not_inserted")
+            default: expected = .ownershipFailure(.javaScriptConversation)
+            }
+            do {
+                let prompt = Array(repeating: "SAFE normal-flow reveal must preserve every binding", count: 280).joined(separator: "\n")
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTFail("A changed or unready target cannot dispatch Send")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected, behavior) }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertFalse(actions.contains("submit"))
+            let attempts = try await evaluate(view, "return fixtureGroqReveal.attempts;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1")) as? Int
+            XCTAssertEqual(attempts, 1, behavior)
+            if ["ignored", "occluded"].contains(behavior) {
+                XCTAssertGreaterThanOrEqual(actions.filter { $0 == "sendReady" }.count, 2)
+                XCTAssertEqual(diagnostics.count, 1, "Repeated reads retain the original diagnostic without logging again")
+            } else { XCTAssertTrue(diagnostics.isEmpty, "A failed reveal cannot claim evaluated post-scroll readiness") }
+            let counts = try await evaluate(view, "return [groqFixture.revealInputs, groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+            XCTAssertEqual(counts, [1, 0, 0])
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            // Replacement raises a terminal ownership failure too. The
+            // cleanup path's fresh model verification cannot dismiss that
+            // latched failure merely because no Send was dispatched.
+            let retained = ["owner", "model", "replacement"].contains(behavior)
+            XCTAssertEqual(finished["cleanup"] as? String, retained ? "failed" : "not_created", behavior)
+            if retained { try await assertHumanTabIntact(fixture, retaining: ownedID) }
             else { try await assertHumanTabIntact(fixture) }
         }
     }

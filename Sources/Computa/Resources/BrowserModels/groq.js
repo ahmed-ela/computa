@@ -93,7 +93,7 @@ try {
   const stateKey = '__computaGroqFreshSessionV1';
   if (globalThis[stateKey] === undefined) globalThis[stateKey] = { owner: input.ownerToken,
     document, generation: input.documentGeneration, url: null, mapping: null, picker: null,
-    prepared: null, inserted: null, submitted: false, first: null, clear: null };
+    prepared: null, inserted: null, submitted: false, first: null, clear: null, sendReveal: null };
   const state = globalThis[stateKey];
   const owned = () => c.context() && globalThis[stateKey] === state && state.owner === input.ownerToken
     && state.document === document && state.generation === input.documentGeneration
@@ -397,11 +397,45 @@ try {
     return { ...initial.output, inserted: true };
   }
   if (state.submitted || state.inserted !== prompt || form.editor.value !== prompt || transcript().users.length !== 0) c.fail('prompt_not_inserted');
+  const validateReveal = record => {
+    guard();
+    const current = composer();
+    if (state.sendReveal !== record || state.prepared !== record.editor || state.submitted || state.first || state.clear
+      || current.editor !== record.editor || current.form !== record.form || current.send !== record.send)
+      c.fail('conversation_changed', 'send_reveal_target');
+    if (state.inserted !== record.prompt || prompt !== record.prompt || current.editor.value !== record.prompt
+      || state.marker !== marker || transcript().users.length !== 0) c.fail('prompt_not_inserted');
+    if (!c.equalChoice(evidence().selected, record.model)) c.fail('model_mismatch');
+  };
+  if (state.sendReveal) {
+    if (state.sendReveal.status !== 'verified') c.fail('send_unavailable', 'reveal_unconfirmed');
+    validateReveal(state.sendReveal);
+  }
   // Retain only the fixed reason from this actual decision. A later geometry
   // probe could disagree with the check that prevented this Send.
-  const sendReadinessFailure = c.hitFailure(form.send) ?? (c.enabled(form.editor) ? null : 'disabled');
+  let sendReadinessFailure = c.hitFailure(form.send) ?? (c.enabled(form.editor) ? null : 'disabled');
+  if (input.action === 'sendReady' && sendReadinessFailure === 'outside_viewport' && !state.sendReveal
+    && typeof form.send.scrollIntoView === 'function') {
+    if (state.prepared !== form.editor) c.fail('conversation_changed', 'send_reveal_target');
+    // Claim before scrolling: lost acknowledgments and failed rechecks never
+    // permit another reveal. This neither reinserts text nor dispatches Send.
+    const record = { editor: form.editor, form: form.form, send: form.send, prompt,
+      model: model.selected, status: 'attempting', diagnostic: null };
+    state.sendReveal = record;
+    try { form.send.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+    catch { record.status = 'failed'; c.fail('send_unavailable', 'reveal_unconfirmed'); }
+    try {
+      validateReveal(record);
+      if (!c.enabled(form.editor)) c.fail('composer_unavailable', 'editor_disabled');
+      if (!c.hit(form.editor)) c.fail('composer_unavailable', 'editor_hit_test');
+      sendReadinessFailure = c.hitFailure(form.send) ?? (c.enabled(form.editor) ? null : 'disabled');
+      record.diagnostic = { before: 'outside_viewport', after: sendReadinessFailure, attempted: true };
+      record.status = 'verified';
+    } catch (error) { record.status = 'failed'; throw error; }
+  }
   const ready = sendReadinessFailure === null;
-  if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure };
+  if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure,
+    ...(state.sendReveal?.diagnostic ? { sendRevealDiagnostic: state.sendReveal.diagnostic } : {}) };
   if (!ready) c.fail('send_unavailable', sendReadinessFailure);
   state.submitted = true;
   form.send.click();

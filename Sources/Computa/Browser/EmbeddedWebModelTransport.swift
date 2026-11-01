@@ -455,6 +455,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedFirstUserStructure = false
         var loggedGroqComposerFailure = false
         var loggedGroqSendFailure = false
+        var loggedGroqSendReveal = false
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
@@ -643,6 +644,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var groqSendRevealObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var completionObserverDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
@@ -724,6 +726,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setBeforePageResultValidationForTesting(_ hook: (@MainActor (String) async -> Void)?) {
         beforePageResultValidationForTesting = hook
+    }
+
+    func setGroqSendRevealObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        groqSendRevealObserverForTesting = observer
     }
 
     func setPreparedEditorReadinessTransformForTesting(_ transform: (@MainActor (Any?) -> Any?)?) {
@@ -4162,9 +4168,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
         let readinessReasons: Set<String> = ["disabled", "invalid_geometry", "outside_viewport", "occluded"]
         guard actions.contains(action), stage == "current" || stage == "last_observation" && action == "sendReady" else { return nil }
-        let reasons = stage == "current" ? readinessReasons.union(["send_missing", "send_ambiguous"]) : readinessReasons
+        let reasons = stage == "current" ? readinessReasons.union(["send_missing", "send_ambiguous", "reveal_unconfirmed"]) : readinessReasons
         let reason = (detail as? String).flatMap { reasons.contains($0) ? $0 : nil } ?? "unknown"
         return "send_unavailable; action=\(action); stage=\(stage); detail=\(reason)"
+    }
+
+    static func groqSendRevealDiagnostic(_ raw: Any?, provider: Provider, action: String) -> String? {
+        guard provider == .groq, action == "sendReady", let raw = raw as? [String: Any],
+              Set(raw.keys) == ["before", "after", "attempted"], raw["before"] as? String == "outside_viewport",
+              let attempted = raw["attempted"] as? NSNumber,
+              CFGetTypeID(attempted) == CFBooleanGetTypeID(), attempted.boolValue else { return nil }
+        let after: Any
+        if raw["after"] is NSNull { after = NSNull() }
+        else if let reason = raw["after"] as? String,
+                ["disabled", "invalid_geometry", "outside_viewport", "occluded"].contains(reason) { after = reason }
+        else { return nil }
+        let value: [String: Any] = ["before": "outside_viewport", "after": after, "attempted": true]
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), data.count <= 160 else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     static func insertionDifferenceDiagnostic(_ observed: [String: Any]) -> String? {
@@ -5089,6 +5110,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        // This immutable attempt diagnostic is stripped before response or
+        // readiness validation; logging cannot grant scroll/Send authority.
+        let sendReveal = Self.groqSendRevealDiagnostic(observed.removeValue(forKey: "sendRevealDiagnostic"),
+            provider: provider, action: action)
+        if let sendReveal, !session.loggedGroqSendReveal {
+            session.loggedGroqSendReveal = true
+            Self.inspectionLog.notice("sendReveal provider=groq \(sendReveal, privacy: .public)")
+            #if DEBUG
+            groqSendRevealObserverForTesting?(sendReveal)
+            #endif
+        }
         for (index, certificate) in Self.removeBoundCertificateDiagnosticRecords(from: &observed, provider: provider).enumerated() {
             // This existing finite diagnostic channel also covers later spent
             // reads and cleanup. The record cannot enter response validation.

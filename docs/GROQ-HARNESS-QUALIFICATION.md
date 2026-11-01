@@ -1,12 +1,12 @@
 # Groq website adapter qualification
 
-## Scope and status — 2026-10-31
+## Scope and status — 2026-11-01
 
 This work adds the signed-in `https://chat.groq.com/` website as an embedded
 provider. It does not configure Groq API access or substitute another provider.
-Build 357 (0.8.0) is installed from `64febc1`. After the editor hit-test repair,
-a fresh GPT-OSS 120B marker failed before Send with
-`send_unavailable`; live support remains unqualified. Direct website probes
+Build 358 (0.8.0) is installed from `b83693d`. Its fresh GPT-OSS 120B marker
+identified an offscreen Send button after prompt insertion. A one-shot reveal
+repair is under test; live support remains unqualified. Direct website probes
 below are not harness qualification.
 
 The observed menu contains these general chat choices:
@@ -14,7 +14,7 @@ The observed menu contains these general chat choices:
 | Website key | Website label | Direct website evidence | Harness evidence |
 | --- | --- | --- | --- |
 | `qwen/qwen3.8-27b` | Qwen/Qwen3.8-27B | Exact marker returned | Pending |
-| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build357: pre-Send readiness failure |
+| `openai/gpt-oss-120b` | GPT OSS 120B | Requested structured response returned | Build358: Send outside viewport |
 | `openai/gpt-oss-20b` | GPT OSS 20B | Completed; malformed JSON rejected | Pending |
 
 The same menu also exposes `meta-llama/llama-prompt-guard-2-22m`,
@@ -252,6 +252,47 @@ were corrected. Native run N then passed all 26 tests in 49.584 seconds with
 unchanged source hashes, including the existing ChatGPT readiness deadline
 case. N log SHA-256:
 `9cab63a14d5beadf40a2b1275a0e0610e884b5a757323911a1b0640c1799ca2e`.
-The installed check of this diagnostic remains pending.
+## Owned-session Send diagnosis — build 358
+
+Fresh case `groq-gptoss120b-marker358-e`, installed from `b83693d`, failed after
+5,372 ms with `send_unavailable; action=sendReady; stage=last_observation;
+detail=outside_viewport`. The bounded native log records that exact finite
+reason at 04:30:05.901070Z. This establishes that the last completed readiness
+read found Send outside the viewport after inserting the verified prompt; it
+does not claim a new geometry measurement at timeout. No website Send or tool
+call occurred, and the owned view closed with a durable `not_created` receipt.
+The exact failure capture and unused-arm archive are retained. Native log
+SHA-256: `3dadb0a556ac3c47e2fd6fb72d4da12c99f7590413bb72f068a2bc3a76953347`.
+
+The resulting repair is being qualified: reveal only that exact verified Send
+control once when its actual hit-test reason is `outside_viewport`, then repeat
+the ownership/model/prompt/control and hit checks before allowing Send. Other
+failure categories do not grant a scroll, and the original deadline remains.
 
 No live harness pass or release is claimed yet.
+
+## One-shot Send reveal — candidate build 359
+
+Only a `sendReady` result of `outside_viewport` permits one reveal of the exact
+same-form Send button. The attempt is claimed before scrolling. The adapter
+then rechecks document, owner, URL, model, exact prompt, editor/form/button
+identities, zero submitted messages, enabled editor and actual hit tests.
+Lost acknowledgment or changed ownership/targets cannot repeat the scroll.
+Submit remains a separate, fully checked one-shot action. No timeout is extended.
+A finite before/after diagnostic records the actual attempt and grants no
+action authority.
+
+JavaScript validation passed 54 tests and 680 assertions. Native run O passed
+28 of 29 tests, including the real-WebKit normal-flow long-editor test with
+one insertion, one reveal, one Send, verified response and one Clear. Two
+assertions in the negative replacement case expected the never-submitted page
+to close. The production ownership error correctly remains terminal through
+cleanup and retains the page. Only that test expectation was corrected; the
+production cleanup contract was unchanged. O retained unchanged source hashes;
+log SHA-256 `eff82f8e0f93e6e7b166ba069fd7551bb0ad4eeace6d78dbc97c1f13518587e8`.
+Version checks passed nine tests.
+
+The corrected seven-scenario negative test passed in native run P (8.618 seconds,
+unchanged source hashes). The other 28 cases and all production sources remained
+unchanged from O. P log SHA-256:
+`acc62ee1df2c7982fbaea798bca29c4837b30b7cc56c6940f40a1b575d019d9f`.

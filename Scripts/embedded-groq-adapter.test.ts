@@ -322,6 +322,133 @@ describe('Groq fixed fresh-session adapter', () => {
     }
   });
 
+  test('only readiness reveals the exact offscreen Send once before a verified single submission', async () => {
+    const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+    f.f.send.rect.top = 900; let scrolls = 0;
+    f.f.send.scrollIntoView = function (options: any) {
+      expect(this).toBe(f.f.send); expect(options).toEqual({ block: 'center', inline: 'nearest' });
+      scrolls++; this.rect.top = 600;
+    };
+    f.hitQueries.length = 0;
+    const ready = await f.run('sendReady', { prompt: groqPrompt });
+    expect(ready.sendReady).toBe(true); expect(ready.sendReadinessFailure).toBeNull();
+    expect(ready.sendRevealDiagnostic).toEqual({ before: 'outside_viewport', after: null, attempted: true });
+    expect(f.hitQueries.filter(({ node }) => node === f.f.send).length).toBe(1);
+    expect(f.f.editor.value).toBe(groqPrompt); expect(f.f.sendCount).toBe(0); expect(scrolls).toBe(1);
+    expect((await f.run('sendReady', { prompt: groqPrompt })).sendRevealDiagnostic).toEqual(ready.sendRevealDiagnostic);
+    expect((await f.run('submit', { prompt: groqPrompt })).submitted).toBe(true);
+    expect((await f.run()).firstUserVerified).toBe(true);
+    expect(f.f.sendCount).toBe(1); expect(scrolls).toBe(1);
+    expect((await f.run('submit', { prompt: groqPrompt })).error).toBeDefined(); expect(f.f.sendCount).toBe(1);
+  });
+
+  test('disabled, invalid, occluded, missing and ambiguous Send controls never trigger reveal', async () => {
+    const changes = [
+      (f: any) => { f.f.send.rect.top = 900; f.f.send.disabled = true; },
+      (f: any) => { f.f.send.rect.width = NaN; },
+      (f: any) => { const original = f.document.elementFromPoint;
+        f.document.elementFromPoint = (x: number, y: number) => { const hit = original(x, y); return hit === f.f.send ? f.body : hit; }; },
+      (f: any) => { f.f.send.remove(); },
+      (f: any) => { const duplicate = new f.Node('BUTTON', { type: 'submit' });
+        duplicate.append(new f.Node('SVG', { 'aria-label': 'send' })); f.f.form.append(duplicate); },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      let scrolls = 0; f.f.send.scrollIntoView = () => { scrolls++; };
+      change(f); const observed = await f.run('sendReady', { prompt: groqPrompt });
+      expect(observed.sendReady === true).toBe(false); expect(observed.sendRevealDiagnostic).toBeUndefined();
+      expect(scrolls).toBe(0); expect(f.f.sendCount).toBe(0);
+    }
+    const submit = groqFixture(); await submit.select(); await submit.run('prepare'); await submit.run('insert', { prompt: groqPrompt });
+    submit.f.send.rect.top = 900; let scrolls = 0;
+    submit.f.send.scrollIntoView = () => { scrolls++; submit.f.send.rect.top = 600; };
+    expect(await submit.run('submit', { prompt: groqPrompt })).toEqual({ error: 'send_unavailable', detail: 'outside_viewport' });
+    expect(scrolls).toBe(0); expect(submit.f.sendCount).toBe(0);
+  });
+
+  test('ignored or delayed reveal is observation-only and keeps the original finite decision', async () => {
+    const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+    f.f.send.rect.top = 900; let scrolls = 0; f.f.send.scrollIntoView = () => { scrolls++; };
+    for (let i = 0; i < 4; i++) {
+      const pending = await f.run('sendReady', { prompt: groqPrompt });
+      expect(pending.sendReady).toBe(false); expect(pending.sendReadinessFailure).toBe('outside_viewport');
+      expect(pending.sendRevealDiagnostic).toEqual({ before: 'outside_viewport', after: 'outside_viewport', attempted: true });
+    }
+    expect(scrolls).toBe(1); expect(f.f.sendCount).toBe(0);
+    f.f.send.rect.top = 600;
+    const ready = await f.run('sendReady', { prompt: groqPrompt });
+    expect(ready.sendReady).toBe(true); expect(ready.sendReadinessFailure).toBeNull();
+    expect(ready.sendRevealDiagnostic.after).toBe('outside_viewport');
+    expect((await f.run('submit', { prompt: groqPrompt })).submitted).toBe(true);
+    expect(scrolls).toBe(1); expect(f.f.sendCount).toBe(1);
+  });
+
+  test('a lost reveal acknowledgment cannot repeat scrolling or grant Send even if the button moved', async () => {
+    for (const moved of [false, true]) {
+      const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      f.f.send.rect.top = 900; let scrolls = 0;
+      f.f.send.scrollIntoView = () => { scrolls++; if (moved) f.f.send.rect.top = 600; throw new Error('PRIVATE_SCROLL_EXCEPTION'); };
+      for (const action of ['sendReady', 'sendReady', 'submit']) {
+        const failure = await f.run(action, { prompt: groqPrompt });
+        expect(failure).toEqual({ error: 'send_unavailable', detail: 'reveal_unconfirmed' });
+        expect(JSON.stringify(failure)).not.toContain('PRIVATE_SCROLL');
+      }
+      expect(scrolls).toBe(1); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('scroll-induced identity, ownership, prompt, model and editor drift stops without Send', async () => {
+    const changes = [
+      (f: any) => { f.world.__computaModelOwner = 'foreign'; },
+      (f: any) => { f.document.URL += '&foreign=1'; },
+      (f: any) => { f.world.__computaGroqFreshSessionV1.generation = 'foreign'; },
+      (f: any) => { f.world.__computaGroqFreshSessionV1 = { ...f.world.__computaGroqFreshSessionV1 }; },
+      (f: any) => { f.f.trigger.text = 'Other model'; },
+      (f: any) => { f.f.editor.value += 'PRIVATE_CHANGED_PROMPT'; },
+      (f: any) => { f.f.appendUser(groqPrompt); },
+      (f: any) => { const replacement = new f.Textarea('TEXTAREA', { id: 'chat' });
+        replacement.value = groqPrompt; f.f.editor.remove(); f.f.form.append(replacement); },
+      (f: any) => { const replacement = new f.Node('FORM');
+        replacement.append(f.f.editor, f.f.send); f.f.form.remove(); f.body.append(replacement); },
+      (f: any) => { const replacement = new f.Node('BUTTON', { type: 'submit' });
+        replacement.append(new f.Node('SVG', { 'aria-label': 'send' })); f.f.send.remove(); f.f.form.append(replacement); },
+      (f: any) => { f.f.editor.disabled = true; },
+      (f: any) => { f.f.editor.rect.top = 900; },
+      (f: any) => { f.f.form.setAttribute('inert', ''); },
+    ];
+    for (const change of changes) {
+      const f = groqFixture(); await f.select(); await f.run('prepare'); await f.run('insert', { prompt: groqPrompt });
+      f.f.send.rect.top = 900; let scrolls = 0;
+      f.f.send.scrollIntoView = () => { scrolls++; f.f.send.rect.top = 600; change(f); };
+      expect((await f.run('sendReady', { prompt: groqPrompt })).error).toBeDefined();
+      expect((await f.run('submit', { prompt: groqPrompt })).error).toBeDefined();
+      expect(scrolls).toBe(1); expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('post-reveal obstruction remains blocked and target substitution between readiness and submit cannot borrow proof', async () => {
+    const blocked = groqFixture(); await blocked.select(); await blocked.run('prepare'); await blocked.run('insert', { prompt: groqPrompt });
+    blocked.f.send.rect.top = 900; let scrolls = 0;
+    blocked.f.send.scrollIntoView = () => {
+      scrolls++; blocked.f.send.rect.top = 600;
+      const original = blocked.document.elementFromPoint;
+      blocked.document.elementFromPoint = (x: number, y: number) => { const hit = original(x, y); return hit === blocked.f.send ? blocked.body : hit; };
+    };
+    const pending = await blocked.run('sendReady', { prompt: groqPrompt });
+    expect(pending.sendReady).toBe(false); expect(pending.sendReadinessFailure).toBe('occluded');
+    expect(pending.sendRevealDiagnostic).toEqual({ before: 'outside_viewport', after: 'occluded', attempted: true });
+    expect((await blocked.run('sendReady', { prompt: groqPrompt })).sendReady).toBe(false);
+    expect(scrolls).toBe(1); expect(blocked.f.sendCount).toBe(0);
+    const replaced = groqFixture(); await replaced.select(); await replaced.run('prepare'); await replaced.run('insert', { prompt: groqPrompt });
+    replaced.f.send.rect.top = 900; let reveals = 0;
+    replaced.f.send.scrollIntoView = () => { reveals++; replaced.f.send.rect.top = 600; };
+    expect((await replaced.run('sendReady', { prompt: groqPrompt })).sendReady).toBe(true);
+    const duplicate = new replaced.Node('BUTTON', { type: 'submit' });
+    duplicate.append(new replaced.Node('SVG', { 'aria-label': 'send' })); replaced.f.send.remove(); replaced.f.form.append(duplicate);
+    expect((await replaced.run('submit', { prompt: groqPrompt })).error).toBe('conversation_changed');
+    expect(reveals).toBe(1); expect(replaced.f.sendCount).toBe(0); expect(duplicate.clicks).toBe(0);
+  });
+
   test('editor substitution and missing exact final marker stop before Send', async () => {
     const f = groqFixture(); await f.select(); await f.run('prepare');
     f.f.editor.oninput = () => { f.f.editor.value += 'changed'; };
