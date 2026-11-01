@@ -14084,13 +14084,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
             _ = try await evaluate(view, """
                 document.querySelector('[data-perf-reply-text]').textContent = '{"type":"message","text":"Must not be accepted"}';
-                const paused = document.createElement('aside'); paused.id = 'fixture-safeguards-pause';
-                for (const text of ['Paused', "Opus 5's safeguards flagged this message. This sometimes happens with safe, normal conversations.", '[reasoning_extraction]']) {
-                    const label = document.createElement('p'); label.textContent = text; paused.appendChild(label);
-                }
+                // Match the observed provider UI: warning prose and a CODE
+                // reason live outside authored messages and editor content.
+                const paused = document.createElement('div'); paused.id = 'fixture-safeguards-pause';
+                paused.setAttribute('data-testid', 'asl3-stop-warning');
+                const title = document.createElement('h4'); title.textContent = 'Paused';
+                const warning = document.createElement('p'), warningText = document.createElement('span');
+                warningText.textContent = "Opus 5's safeguards flagged this message. This sometimes happens with safe, normal conversations.";
+                warning.appendChild(warningText);
+                const details = document.createElement('div'), detailsLabel = document.createElement('span');
+                detailsLabel.textContent = 'Details';
+                const reason = document.createElement('code'); reason.textContent = '[reasoning_extraction]';
+                details.append(detailsLabel, reason); paused.append(title, warning, details);
                 window.fixtureSafeguardClicks = 0;
                 window.fixtureSafeguardStopClicks = 0;
-                for (const text of ['Retry with Opus 5', 'Continue with Sonnet 4.6']) {
+                for (const text of ['Edit and retry with Opus 5', 'Continue with Sonnet 4.6']) {
                     const button = document.createElement('button'); button.textContent = text;
                     button.addEventListener('click', () => window.fixtureSafeguardClicks++); paused.appendChild(button);
                 }

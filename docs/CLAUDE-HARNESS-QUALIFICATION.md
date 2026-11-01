@@ -9,13 +9,15 @@ are availability observations, not successful inference or workflow evidence.
 Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
-As of November 1, build378 (`68ce26b`) is installed and its launch is recorded.
-Its captured Opus 5 request reached the five-minute deadline after a verified
-submission, with no answer. A separate foreground Incognito comparison using
-the captured prompt exposed Claude's safeguards pause, tagged
-`reasoning_extraction`. That notice was missed by the adapter; it does not
-identify which input field caused the provider decision, or prove the exact
-state of the already-closed native page. See the build378 comparison below.
+As of November 1, build379 (`0633fc3`) is installed. Its captured Opus 5 request
+still reached the five-minute deadline after verified submission, with no
+answer. The same corrected prompt in an ordinary foreground Incognito tab
+showed Claude's `reasoning_extraction` safeguards pause. Removing API-only
+controls did not resolve that provider block. DOM inspection found two concrete
+classifier mismatches: the reason is inside `CODE`, and the button says
+`Edit and retry with Opus 5`. These explain the missed foreground warning;
+the native page was already closed, so its exact state remains unproved.
+Build380 addresses those detection mismatches; its live qualification is pending.
 A separate short direct Opus 5 prompt on build377 had passed;
 that different payload and presentation did not establish the timeout's cause.
 A fresh Opus 4.8 workflow returned a valid refusal without tool use. The latest
@@ -1782,4 +1784,43 @@ The initial native run's failures were corrected fixture assumptions: metadata
 canaries now live under retained data without relaxing exact comparisons; route
 drift uses an already-bound supported conversation; Send's existing first-body
 proof is asserted rather than incorrectly treated as absent. Production did not
-change during those fixture corrections. Live build379 qualification is pending.
+change during those fixture corrections.
+
+## Installed build379 comparison and build380 detection fix, November 1
+
+The `opus5-payload379-a` marker failed after 301.253 seconds with one verified
+inference, no tools and no final answer. Its saved cleanup receipt is
+`closed / not_created`; that reason does not mean the prompt was unsent. The
+captured website prompt was 60,359 bytes. All eleven API-only keys were absent
+from the display request while canonical input and response configuration were
+preserved. The unchanged independent audit retained the failed result.
+
+The separate `opus5-direct379-c` comparison submitted those exact bytes once
+in ordinary foreground Incognito mode with Opus 5 High selected. It again
+showed the explicit safeguards pause. No Retry or fallback control was used.
+Read-only Inspector queries established `H4` / `Paused`, an exact warning Text
+node inside `P > SPAN`, and `[reasoning_extraction]` as one Text child of `CODE`
+inside `[data-testid="asl3-stop-warning"]`. The only retry button's DOM text
+was `Edit and retry with Opus 5`, with no aria-label. Safari's developer setting
+was restored to disabled; the test tab's Inspector setting was disabled and
+only that synthetic tab and the unmodified payload document were closed.
+
+Build380 preserves ordinary code, authored content, editor, hidden and tooltip
+exclusions. Only the isolated exact reason token inside the observed warning
+wrapper can satisfy the reason check. Retry recognition accepts either exact
+observed label while requiring uniqueness across both variants. The complete
+warning/control conjunction, ownership priority, no-click behavior and strict
+cleanup checks remain required. This is an error-detection fix, not evidence
+that Opus 5 accepts the harness prompt.
+
+Private evidence remains under the two named cases in
+`work/claude-qualification-20261031/evidence/`. The exact consumed request was
+archived before further source changes; no failed request was replayed through
+the harness.
+
+Build380 validation passed 236 Claude adapter tests (6,544 assertions), including
+the actual warning structure and negative cases for altered, duplicated, quoted
+or hidden controls. Two native test methods passed all nine real-WebKit pause,
+completion-race and ownership scenarios. The nine versioning tests also passed.
+Product and test inputs stayed unchanged during the adapter/native runs. Live
+build380 qualification remains pending.

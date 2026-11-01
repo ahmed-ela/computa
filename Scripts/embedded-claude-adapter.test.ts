@@ -47,14 +47,19 @@ function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM",
   container.append(warning, upgrade); f.body.append(container);
   return { container, warning, support, upgrade };
 }
-function observedClaudePause(f: ReturnType<typeof fixture>, family = "Opus 5", continuation = "Sonnet 4.6") {
-  // Observed AX semantics; deliberately no invented provider wrapper/testid.
-  const surface = new Element("SECTION"), paused = new Element("SPAN", {}, "Paused");
-  const warning = new Element("P", {}, `${family}'s safeguards flagged this message. This sometimes happens with safe, normal conversations.`);
-  const details = new Element("SPAN", {}, "[reasoning_extraction]");
-  const retry = new Element("BUTTON", {}, `Retry with ${family}`);
-  const fallback = new Element("DIV", { role: "button", "aria-label": `Continue with ${continuation}` });
-  surface.append(paused, retry, warning, fallback, new Element("SPAN", {}, "Details:"), details);
+function observedClaudePause(f: ReturnType<typeof fixture>, family = "Opus 5", continuation = "Sonnet 4.6", observedDOM = true) {
+  // Saved direct379 DOM: warning SPAN, isolated CODE reason, and edit/retry text.
+  // The older AX-only shape remains an explicit compatibility fixture.
+  const surface = new Element("DIV", observedDOM ? { "data-testid": "asl3-stop-warning" } : {});
+  const paused = new Element(observedDOM ? "H4" : "SPAN", {}, "Paused");
+  const warning = new Element("SPAN", {}, `${family}'s safeguards flagged this message. This sometimes happens with safe, normal conversations.`);
+  const details = new Element(observedDOM ? "CODE" : "SPAN", {}, "[reasoning_extraction]");
+  const retry = new Element("BUTTON", {}, `${observedDOM ? "Edit and retry" : "Retry"} with ${family}`);
+  const fallback = new Element("BUTTON", {}, `Continue with ${continuation}`);
+  const paragraph = new Element("P"), reason = new Element("SPAN", {}, "Details: ");
+  paragraph.append(warning, new Element("#text", {}, " "), fallback, new Element("#text", {}, ", "),
+    new Element("BUTTON", {}, "send feedback"), new Element("#text", {}, ", or "), new Element("A", {}, "learn more"), new Element("#text", {}, "."));
+  reason.append(details); surface.append(paused, retry, paragraph, reason);
   f.body.append(surface);
   const finished = new Element("DIV", { "data-testid": "response-status-announcer", role: "status" }, "Claude finished the response");
   f.body.append(finished);
@@ -633,6 +638,58 @@ describe("embedded Claude fixed adapter", () => {
       if (mutation === "disabled_retry") p.retry.disabled = true;
       expect((await f.run()).error, mutation).toBeUndefined();
       expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard observed CODE reason and both exact retry variants preserve the complete conjunction", async () => {
+    for (const observedDOM of [true, false]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const p = observedClaudePause(f, "Opus 5", "Sonnet 4.6", observedDOM);
+      expect(p.retry.getAttribute("aria-label")).toBeNull();
+      expect(await f.run()).toEqual(safeguardFailure);
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
+    }
+    for (const variant of ["legacy", "both", "duplicate_edit", "wrong_family", "suffix", "prefix", "wrong_case"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (variant === "legacy") p.retry.text = "Retry with Opus 5";
+      if (variant === "both") p.surface.append(new Element("BUTTON", {}, "Retry with Opus 5"));
+      if (variant === "duplicate_edit") p.surface.append(p.retry.cloneNode(true));
+      if (variant === "wrong_family") p.retry.text = "Edit and retry with Opus 5.5";
+      if (variant === "suffix") p.retry.text += " now";
+      if (variant === "prefix") p.retry.text = "Please " + p.retry.text;
+      if (variant === "wrong_case") p.retry.text = "Edit And Retry with Opus 5";
+      const result = await f.run();
+      if (variant === "legacy") expect(result).toEqual(safeguardFailure);
+      else expect(result.error, variant).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard CODE exception requires one exact visible token in the provider wrapper", async () => {
+    for (const mutation of ["missing_wrapper", "wrong_wrapper", "pre", "outer_code", "tooltip", "own_authored", "hidden", "aria_hidden", "inert", "display", "visibility", "split", "nested", "extra", "long", "empty", "duplicate"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (mutation === "missing_wrapper") delete p.surface.values["data-testid"];
+      if (mutation === "wrong_wrapper") p.surface.values["data-testid"] = "foreign-stop-warning";
+      if (["pre", "outer_code", "tooltip"].includes(mutation)) {
+        const parent = p.details.parentElement!; parent.children = parent.children.filter(node => node !== p.details);
+        const wrapper = new Element(mutation === "pre" ? "PRE" : mutation === "outer_code" ? "CODE" : "SPAN", mutation === "tooltip" ? { role: "tooltip" } : {});
+        wrapper.append(p.details); parent.append(wrapper);
+      }
+      if (mutation === "own_authored") p.details.values["data-message-author-role"] = "assistant";
+      if (mutation === "hidden") p.details.values.hidden = "";
+      if (mutation === "aria_hidden") p.details.values["aria-hidden"] = "true";
+      if (mutation === "inert") p.details.values.inert = "";
+      if (mutation === "display") p.details.values.display = "none";
+      if (mutation === "visibility") p.details.values.visibility = "hidden";
+      if (mutation === "split") { p.details.text = "[reasoning_"; p.details.append(new Element("#text", {}, "extraction]")); }
+      if (mutation === "nested") { p.details.text = ""; p.details.append(new Element("SPAN", {}, "[reasoning_extraction]")); }
+      if (mutation === "extra") p.details.text += " private-canary";
+      if (mutation === "long") p.details.text = "private-canary".repeat(1000);
+      if (mutation === "empty") p.details.text = "";
+      if (mutation === "duplicate") p.surface.append(p.details.cloneNode(true));
+      const result = await f.run(); expect(result.error, mutation).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain("private-canary");
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
     }
   });
 

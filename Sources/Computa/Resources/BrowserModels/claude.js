@@ -2369,13 +2369,15 @@ function modelEnabled(node) { return modelVisible(node) && !node.disabled && nod
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
 // Abort-only recognition of the observed provider safeguard pause. No authored
 // message, editor, quoted code, or arbitrary surrounding text supplies authority.
-// AX supplied exact text/control semantics, not a stable DOM wrapper/testid.
+// The observed warning wrapper admits only its isolated fixed reason CODE;
+// all ordinary code and authored content remain excluded.
 let modelObservedSafeguardPause = false;
 function modelSafeguardsPaused() {
   if (modelObservedSafeguardPause) return true;
   try {
-    const boundary = '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"]';
-    const excluded = node => !!node.closest(boundary + ', [hidden], [inert], [aria-hidden="true"]')
+    const authoredBoundary = '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, [role="tooltip"]';
+    const boundary = authoredBoundary + ', code';
+    const excluded = (node, scope = boundary) => !!node.closest(scope + ', [hidden], [inert], [aria-hidden="true"]')
       || ['hidden', 'collapse'].includes(getComputedStyle(node).visibility) || getComputedStyle(node).display === 'none';
     const normalized = value => value.replace(/\s+/g, ' ').trim().replace(/’/g, "'");
     const labels = [], controls = [];
@@ -2411,7 +2413,19 @@ function modelSafeguardsPaused() {
         if (child.length > 256 || !modelVisible(child.parentElement)) continue;
         const label = normalized(child.textContent || '');
         if (label) labels.push(label);
-      } else if (child.nodeType === 1 && !excluded(child)) {
+      } else if (child.nodeType === 1) {
+        // Observed provider chrome uses CODE for this fixed reason. Do not
+        // traverse code or admit quoted reasons outside the warning wrapper.
+        if (child.tagName === 'CODE') {
+          if (!excluded(child, authoredBoundary) && !child.parentElement?.closest('code')
+            && modelVisible(child) && modelVisible(child.closest('[data-testid="asl3-stop-warning"]'))) {
+            const nodes = child.childNodes, reason = '[reasoning_extraction]';
+            if (nodes.length === 1 && nodes[0].nodeType === 3 && nodes[0].length === reason.length
+              && nodes[0].textContent === reason) labels.push(reason);
+          }
+          continue;
+        }
+        if (excluded(child)) continue;
         if ((child.tagName === 'BUTTON' || child.getAttribute('role') === 'button') && modelEnabled(child)) {
           const label = controlLabel(child);
           if (label !== null) controls.push(label);
@@ -2423,9 +2437,9 @@ function modelSafeguardsPaused() {
       .filter(match => match && websiteModelFamilyLabel('claude', match[1]) === match[1]);
     if (warnings.length !== 1 || labels.filter(label => label === 'Paused').length !== 1
       || labels.filter(label => label === '[reasoning_extraction]').length !== 1) return false;
-    const family = warnings[0][1], retry = controls.filter(label => label.startsWith('Retry with '));
+    const family = warnings[0][1], retry = controls.filter(label => label.startsWith('Retry with ') || label.startsWith('Edit and retry with '));
     const continuation = controls.filter(label => label.startsWith('Continue with '));
-    if (retry.length !== 1 || retry[0] !== 'Retry with ' + family || continuation.length !== 1) return false;
+    if (retry.length !== 1 || !['Retry with ' + family, 'Edit and retry with ' + family].includes(retry[0]) || continuation.length !== 1) return false;
     const other = continuation[0].slice('Continue with '.length);
     if (other === family || websiteModelFamilyLabel('claude', other) !== other) return false;
     modelObservedSafeguardPause = true;
