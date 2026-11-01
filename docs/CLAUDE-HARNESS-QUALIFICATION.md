@@ -434,7 +434,34 @@ retry, server continuation/cleanup checks and six bundled-runtime restart cases.
 The source and tests remained unchanged during the passing run. Earlier runs
 exposed a test-helper actor-isolation error and an outdated handoff suffix
 assertion; both were corrected without changing production prompt instructions
-or dropping assertions. Live build351 qualification remains pending.
+or dropping assertions.
+
+Build351 was Developer ID signed and installed from `9fef5a2`; all 11 source
+checks, 10 signing checks and installed-artifact comparisons passed. The
+historical failed cleanup remains unconfirmed after restart. A fresh Sonnet 5
+marker failed in 3.569 seconds before prompt submission. Its own exact session
+closed successfully with `not_created`; it was not replayed. No quota surface
+was observed during this attempt.
+
+The bounded selector diagnostic recorded a clicked selection, observed checked
+proof and the header `Model: Sonnet 5 Medium`, followed by `close_unconfirmed`:
+the same associated menu remained physically visible. A manual check in an
+ordinary Claude tab confirmed Sonnet 5 remains offered and selecting its row
+closes the picker. That inspection sent no prompt and its tab was closed.
+The log proves failed closure acknowledgement; it cannot alone distinguish an
+ignored dismissal from a menu reopened by the trigger toggle. The native
+transcript's generic high-demand wording is not evidence of a provider outage.
+
+Candidate build352 replaces Claude's toggle-based dismissal with one Escape on
+the exact associated popup. Escape itself supplies no model or closure proof:
+the existing popup, trigger, document and ownership checks must still pass.
+This addresses a normal selection auto-close racing with the subsequent toggle.
+All 878 provider-adapter tests passed (39,576 assertions). Eleven focused native
+WebKit tests passed, including the retained-portal race, ignored Escape,
+discovery, model drift, and quota cleanup. The two new native cases passed again
+after making the fixture's closing commit deterministic. They require real
+popup removal before readiness and withhold all prompt insertion when Escape
+is ignored. Fresh live build352 qualification remains pending.
 
 ## Qualification contract
 

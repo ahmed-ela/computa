@@ -526,7 +526,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         if (opening) { opens++; background.values['aria-hidden'] = 'true'; }
         else delete background.values['aria-hidden'];
       };
-      if (provider === 'chatgpt') {
+      if (provider === 'chatgpt' || provider === 'claude') {
         for (const menu of [picker.menu, picker.nested].filter(Boolean)) {
           const escape = menu.onDispatch;
           menu.onDispatch = (event: any) => { escape(event); delete background.values['aria-hidden']; };
@@ -4405,7 +4405,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (current.values.hidden === undefined) { current.values.hidden = ''; current.connected = false; }
           else { delete current.values.hidden; current.connected = true; }
         };
-        if (provider === 'chatgpt') current.onDispatch = (event: any) => {
+        if (provider === 'chatgpt' || provider === 'claude') current.onDispatch = (event: any) => {
           if (event.key === 'Escape') { current.values.hidden = ''; current.connected = false; }
         };
         }

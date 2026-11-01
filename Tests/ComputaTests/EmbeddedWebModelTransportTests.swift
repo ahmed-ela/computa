@@ -10829,6 +10829,74 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testClaudeDelayedPickerPortalClosesWithoutToggleReopenBeforeVerifiedSend() async throws {
+        let choice = Self.fixtureChoice(.claude)
+        let fixture = try Fixture(page: Self.claudeDeferredPickerClosurePage())
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+        let closed = try await evaluate(view, """
+            return {escapes: window.fixtureClaudeSelectionEscapes, delayedClosures: window.fixtureClaudeDelayedClosures,
+              reopenToggles: window.fixtureClaudeReopenToggles, pending: window.fixtureClaudeClosing,
+              samePopupTarget: window.fixtureClaudeExactEscapeTarget, visiblePortal: !!document.getElementById('fixture-model-menu'),
+              expanded: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded')};
+            """) as? [String: Any]
+        XCTAssertEqual(closed?["escapes"] as? Int, 1)
+        XCTAssertEqual(closed?["delayedClosures"] as? Int, 1, "The actual delayed DOM removal must precede readiness")
+        XCTAssertEqual(closed?["reopenToggles"] as? Int, 0, "Closing must not toggle a logically closed picker open")
+        XCTAssertEqual(closed?["pending"] as? Bool, false)
+        XCTAssertEqual(closed?["samePopupTarget"] as? Bool, true)
+        XCTAssertEqual(closed?["visiblePortal"] as? Bool, false)
+        XCTAssertEqual(closed?["expanded"] as? String, "false")
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Verified Claude picker close fixture"])
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(completed, choice: choice)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
+    func testClaudeRetainedPickerIgnoringEscapeCannotAdmitOrReplayPrompt() async throws {
+        let choice = Self.fixtureChoice(.claude)
+        let fixture = try Fixture(page: Self.claudeDeferredPickerClosurePage(ignoreSelectionEscape: true))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        do {
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            XCTFail("Checked family and closed ARIA are insufficient while the exact popup remains physically rendered")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        let retained = try await evaluate(view, """
+            const menu = document.getElementById('fixture-model-menu');
+            return {escapes: window.fixtureClaudeSelectionEscapes, delayedClosures: window.fixtureClaudeDelayedClosures,
+              reopenToggles: window.fixtureClaudeReopenToggles, pending: window.fixtureClaudeClosing,
+              samePopupTarget: window.fixtureClaudeExactEscapeTarget,
+              visiblePortal: !!menu && menu.getClientRects().length > 0,
+              expanded: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded')};
+            """) as? [String: Any]
+        XCTAssertEqual(retained?["escapes"] as? Int, 1, "Missing closure must not replay Escape")
+        XCTAssertEqual(retained?["delayedClosures"] as? Int, 0)
+        XCTAssertEqual(retained?["reopenToggles"] as? Int, 0)
+        XCTAssertEqual(retained?["pending"] as? Bool, true)
+        XCTAssertEqual(retained?["samePopupTarget"] as? Bool, true)
+        XCTAssertEqual(retained?["visiblePortal"] as? Bool, true)
+        XCTAssertEqual(retained?["expanded"] as? String, "false")
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not send through retained Claude popup"])
+            XCTFail("An unverified close must not admit prompt insertion")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testConcreteSelectionAcknowledgmentRejectsModelDriftAcrossNativeAwait() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.claude, deferSelectionCommit: true))
         defer { fixture.shutdown() }
@@ -10927,6 +10995,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if provider == .chatgpt {
                 XCTAssertEqual(clicks, 2, "Discovery selects the latest family once, then verifies active Family bracketed by the closed power header")
                 XCTAssertEqual(escapes, ["attempts": 1, "closed": 1], "The family click closes once; the one fresh joint proof read dispatches one acknowledged Escape")
+            } else if provider == .claude {
+                XCTAssertEqual(clicks, 1, "Claude opens once, then dismisses the exact associated popup without toggling it")
+                XCTAssertEqual(escapes, ["attempts": 1, "closed": 1])
             } else {
                 XCTAssertEqual(clicks, 2, "The associated model menu is opened and closed once")
                 XCTAssertEqual(escapes, ["attempts": 0, "closed": 0])
@@ -16602,6 +16673,57 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 """)
     }
 
+    /// A site state transition can commit closed while its exiting portal is
+    /// still physically rendered. A trigger toggle reopens that component;
+    /// Escape only dismisses it. No adapter state or model evidence is mocked.
+    private static func claudeDeferredPickerClosurePage(ignoreSelectionEscape: Bool = false) -> String {
+        let script = """
+        <script>
+        (() => {
+          const trigger = document.getElementById('fixture-model-trigger');
+          const menu = document.getElementById('fixture-model-menu');
+          window.fixtureClaudeClosing = false;
+          window.fixtureClaudeSelectionEscapes = 0; window.fixtureClaudeDelayedClosures = 0;
+          window.fixtureClaudeReopenToggles = 0; window.fixtureClaudeExactEscapeTarget = false;
+          let timer = null;
+          trigger.addEventListener('click', event => {
+            if (!window.fixtureClaudeClosing) return;
+            event.stopImmediatePropagation(); clearTimeout(timer);
+            window.fixtureModelTriggerClicks++; window.fixtureClaudeReopenToggles++;
+            window.fixtureClaudeClosing = false;
+            menu.style.display = 'block'; trigger.setAttribute('aria-expanded', 'true');
+          }, true);
+          document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || !window.fixtureClaudeClosing || event.target !== menu) return;
+            event.stopImmediatePropagation(); event.preventDefault();
+            window.fixtureModelEscapeEvents++; window.fixtureClaudeSelectionEscapes++;
+            window.fixtureClaudeExactEscapeTarget = event.target === menu && menu.isConnected
+              && menu.getClientRects().length > 0 && trigger.getAttribute('aria-expanded') === 'false';
+            // Hold the stale portal until the actual dismiss event so native
+            // scheduling cannot skip the regression. Escape still is not a
+            // closure receipt: physical removal is a later real DOM mutation.
+            \(ignoreSelectionEscape ? "return; // No physical closure acknowledgment." : "")
+            if (window.fixtureClaudeSelectionEscapes !== 1) return;
+            timer = setTimeout(() => {
+              if (!window.fixtureClaudeClosing) return;
+              menu.style.display = 'none'; menu.remove(); trigger.setAttribute('aria-expanded', 'false');
+              window.fixtureClaudeClosing = false; window.fixtureClaudeDelayedClosures++;
+              window.fixtureModelEscapeClosures++;
+            }, 150);
+          }, true);
+          menu.querySelectorAll('[data-fixture-model]').forEach(row => row.addEventListener('click', () => {
+            // The ordinary fixture has committed the new checked family and
+            // closing ARIA by now. Keep only its exiting portal rendered.
+            window.fixtureClaudeClosing = true;
+            if (!menu.isConnected) document.body.appendChild(menu);
+            menu.style.display = 'block'; trigger.setAttribute('aria-expanded', 'false');
+          }));
+        })();
+        </script>
+        """
+        return modelChoicePage(.claude).replacingOccurrences(of: "</body>", with: script + "</body>")
+    }
+
     /// Actual WebKit DOM/layout, associated picker/menu roles and primary family
     /// leaves exercise the shipped scripts. Labels are synthetic menu fixtures,
     /// not an application availability catalog or model self-report.
@@ -16626,7 +16748,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             ? "Open mode picker, currently Gemini Pro" : "Model: \(initial) Medium"
         let disabled = provider == .chatgpt ? "GPT-4.9" : provider == .gemini ? "3.7 Flash" : "Opus 4.5"
         let upgrade = provider == .chatgpt ? "GPT-5.9" : provider == .gemini ? "4.0 Pro" : "Fable 5.5"
-        let escapeClosesPopup = provider == .chatgpt
+        let escapeClosesPopup = provider == .chatgpt || provider == .claude
         let rows = labels.map { label in
             if provider == .chatgpt {
                 return "<div role=\"menuitemradio\" tabindex=\"-1\" aria-checked=\"false\" data-fixture-model=\"\(label)\"><span>\(label)</span></div>"
@@ -16726,7 +16848,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         modelTrigger.addEventListener('click', () => {
           window.fixtureModelTriggerClicks++;
           const open = !modelMenu.isConnected || modelMenu.style.display === 'none';
-          \(escapeClosesPopup ? "if (!open) return; // Observed ChatGPT clicks do not close an already-open portal." : "")
+          \(provider == .chatgpt ? "if (!open) return; // Observed ChatGPT clicks do not close an already-open portal." : "")
           if (open && !modelMenu.isConnected) document.body.appendChild(modelMenu);
           \(provider == .chatgpt ? """
           if (open) {
@@ -16764,8 +16886,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
           \(ignoreModelEscape ? "return; // The owned popup intentionally ignores this one close request." : "")
           event.preventDefault();
           modelMenu.style.display = 'none'; modelTrigger.setAttribute('aria-expanded', 'false');
+          \(provider == .chatgpt ? """
           window.fixtureModelUpdateHeader();
           window.fixtureModelClosedHeaders.push(document.getElementById('fixture-model-header').textContent);
+          """ : "")
           \(returnToParentAfterSelection ? """
           modelMenu.setAttribute('data-state', 'closed'); modelTrigger.setAttribute('data-state', 'closed');
           window.fixtureModelSetModalHidden(false);

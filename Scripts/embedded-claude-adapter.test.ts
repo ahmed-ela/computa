@@ -53,13 +53,14 @@ const freshQuotaReceipt = (f: ReturnType<typeof fixture>) => ({ error: "website_
 function claudeCloseFixture(onClosed: (f: ReturnType<typeof fixture>, picker: ReturnType<typeof installObservedModelPicker>, count: number) => void) {
   const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
   picker.selected("Sonnet 5");
-  const click = picker.trigger.onClick!;
   let closes = 0;
-  picker.trigger.onClick = () => {
-    const wasOpen = picker.menu.values.hidden === undefined || picker.nested?.values.hidden === undefined;
-    click();
-    if (wasOpen) onClosed(f, picker, ++closes);
-  };
+  for (const menu of [picker.menu, picker.nested].filter(Boolean)) {
+    const dismiss = menu!.onDispatch!;
+    menu!.onDispatch = (event: any) => {
+      dismiss(event);
+      if (event.type === "keydown" && event.key === "Escape") onClosed(f, picker, ++closes);
+    };
+  }
   return { f, picker };
 }
 
@@ -84,6 +85,81 @@ async function completeClaudeRead(f: ReturnType<typeof fixture>, action: string,
 }
 
 describe("embedded Claude fixed adapter", () => {
+  test("selection-driven asynchronous Claude closure cannot be toggled open by dismissal", async () => {
+    for (const label of ["Haiku 4.5", "Sonnet 5"]) {
+      const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
+      const modelChoice = { key: label, label };
+      if (label === "Haiku 4.5") picker.secondary!.connected = false;
+      const closingMenu = label === "Haiku 4.5" ? picker.menu : picker.nested!;
+      const option = picker.options.find(node => node.children[0].text === label)!;
+      const triggerClick = picker.trigger.onClick!;
+      let selectionClosing = false, componentOpen = true, reopens = 0;
+      option.onClick = () => {
+        picker.selected(label);
+        // React has committed the selected family/closed state, but its portal
+        // remains in the physical DOM through the asynchronous closing phase.
+        selectionClosing = true; componentOpen = false;
+      };
+      picker.trigger.onClick = () => {
+        if (selectionClosing) {
+          componentOpen = !componentOpen;
+          if (componentOpen) reopens++;
+          return;
+        }
+        triggerClick();
+      };
+      const escapes: Element[] = [];
+      for (const menu of [picker.menu, picker.nested].filter(Boolean)) menu!.onDispatch = (event: any) => {
+        if (event.type === "keydown" && event.key === "Escape") { escapes.push(menu!); componentOpen = false; }
+      };
+      for (let step = 0; step < 4 && !selectionClosing; step++)
+        expect((await f.run("selectModel", { modelChoice })).pending).toBe(true);
+      expect(option.clicks).toBe(1); expect(selectionClosing).toBe(true);
+      let finished = false;
+      const pending = f.run("selectModel", { modelChoice }).then(result => { finished = true; return result; });
+      for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+      expect(finished).toBe(false); expect(escapes).toEqual([closingMenu]);
+      expect(picker.trigger.clicks).toBe(1); expect(reopens).toBe(0);
+      // Only the actual closing commit, not the Escape event, supplies proof.
+      if (!componentOpen) {
+        for (const menu of [picker.menu, picker.nested].filter(Boolean)) { menu!.values.hidden = ""; menu!.connected = false; }
+        picker.trigger.values["aria-expanded"] = "false";
+      }
+      f.observers.forEach(observer => observer.callback([]));
+      const result = await pending;
+      expect(result).toMatchObject({ selected: true, modelEvidence: { selected: modelChoice, source: "checked_model_option" } });
+      expect(escapes).toHaveLength(1); expect(option.clicks).toBe(1); expect(reopens).toBe(0);
+      expect(f.composer.textContent).toBe(""); expect(f.composer.events).toHaveLength(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("ignored Claude Escape cannot qualify a still-visible popup or mutate the composer", async () => {
+    const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
+    picker.selected("Sonnet 5");
+    const foreign = new Element("DIV", { role: "menu", hidden: "" }); f.body.append(foreign);
+    for (const menu of [picker.menu, picker.nested].filter(Boolean)) menu!.onDispatch = () => {};
+    const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
+    expect(result).toMatchObject({ error: "model_unverified", modelDiagnostic: { readStage: "close_unconfirmed",
+      readAttempt: { closeAttempted: true, observedProof: true, popupStillAssociated: true } } });
+    expect(picker.trigger.clicks).toBe(1); expect(picker.nested!.events).toHaveLength(1); expect(picker.menu.events).toHaveLength(0);
+    expect(foreign.events).toHaveLength(0); expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    expect(f.composer.textContent).toBe(""); expect(f.composer.events).toHaveLength(0); expect(f.send.clicks).toBe(0);
+  });
+
+  test("Claude Escape does not permit owner or document drift during its closure acknowledgment", async () => {
+    for (const drift of ["owner", "url", "top-frame"]) {
+      const { f, picker } = claudeCloseFixture(f => {
+        if (drift === "owner") f.world.__computaModelOwner = "foreign-owner";
+        else if (drift === "url") f.document.URL += "&foreign-route=1";
+        else f.window.top = {};
+      });
+      const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
+      expect(result.error).toBe("model_unverified"); expect(picker.trigger.clicks).toBe(1);
+      expect(picker.nested!.events).toHaveLength(1); expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+      expect(f.composer.textContent).toBe(""); expect(f.composer.events).toHaveLength(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
   test("a final model guard confirms its exact closed popups without dismissing an unrelated nonmodal dialog", async () => {
     let popup: ReturnType<typeof unrelatedClaudeDialog> | undefined;
     const { f, picker } = claudeCloseFixture((f, picker, count) => {
@@ -93,7 +169,7 @@ describe("embedded Claude fixed adapter", () => {
     const result = await completeClaudeRead(f, "insert", { expectedModelChoice, prompt: outbound });
     expect(result).toMatchObject({ inserted: true, modelEvidence: { selected: expectedModelChoice, source: "checked_model_option" } });
     expect(picker.trigger.values["aria-label"]).toBe("Model: Sonnet 5 Medium");
-    expect(picker.trigger.clicks).toBe(4); expect(picker.menu.isConnected).toBe(false); expect(picker.nested!.isConnected).toBe(false);
+    expect(picker.trigger.clicks).toBe(2); expect(picker.menu.isConnected).toBe(false); expect(picker.nested!.isConnected).toBe(false);
     expect(popup!.dialog.isConnected).toBe(true); expect(popup!.dismiss.clicks).toBe(0);
     expect(f.composer.textContent).toBe(outbound); expect(f.send.clicks).toBe(0);
     expect(picker.options.every(option => option.clicks === 0)).toBe(true);
@@ -131,7 +207,7 @@ describe("embedded Claude fixed adapter", () => {
       const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
       expect(result).toMatchObject({ error: "model_unverified", modelDiagnostic: { readStage: "close_unconfirmed",
         readAttempt: { closeAttempted: true, observedProof: true, sameTrigger: true, popupStillAssociated: false } } });
-      expect(picker.trigger.clicks).toBe(2); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
+      expect(picker.trigger.clicks).toBe(1); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
       expect(picker.options.every(option => option.clicks === 0)).toBe(true);
     }
   });
@@ -153,7 +229,7 @@ describe("embedded Claude fixed adapter", () => {
       });
       const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
       expect(result.error).toBe("model_unverified");
-      expect(picker.trigger.clicks).toBe(2); expect(dismiss!.clicks).toBe(0);
+      expect(picker.trigger.clicks).toBe(1); expect(dismiss!.clicks).toBe(0);
       expect(f.composer.textContent).toBe(""); expect(f.composer.events.length).toBe(0); expect(f.send.clicks).toBe(0);
     }
   });
@@ -171,7 +247,7 @@ describe("embedded Claude fixed adapter", () => {
         else picker.trigger.values["data-state"] = "open";
       });
       expect((await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound })).error).toBe("model_unverified");
-      expect(picker.trigger.clicks).toBe(2); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
+      expect(picker.trigger.clicks).toBe(1); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
     }
   });
 
@@ -183,7 +259,7 @@ describe("embedded Claude fixed adapter", () => {
       const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
       expect(result.error).toBe("model_unverified");
       expect(result.modelDiagnostic.readAttempt.observedProof).toBe(false);
-      expect(picker.trigger.clicks).toBe(initialDialog ? 0 : 2);
+      expect(picker.trigger.clicks).toBe(initialDialog ? 0 : 1);
       expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
       expect(picker.options.every(option => option.clicks === 0)).toBe(true);
     }
@@ -1047,11 +1123,9 @@ describe("embedded Claude fixed adapter", () => {
       "streaming", "stop", "interrupted", "replace-answer", "changed-text", "append-response"] as const) {
       const f = fixture(provider, { userPrompt: prompt }); delete f.copy.values["data-testid"];
       const picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
-      picker.selected("Sonnet 5"); const click = picker.trigger.onClick!; let closes = 0;
-      picker.trigger.onClick = () => {
-        const wasOpen = picker.menu.values.hidden === undefined || picker.nested?.values.hidden === undefined;
-        click();
-        if (!wasOpen || ++closes !== 2) return;
+      picker.selected("Sonnet 5"); let closes = 0;
+      const onClosed = () => {
+        if (++closes !== 2) return;
         if (variant === "remove-copy") f.copy.connected = false;
         if (variant === "replace-copy") f.controls.replaceChildren(new Element("BUTTON", { "aria-label": "Copy" }));
         if (variant === "duplicate-copy") f.controls.append(new Element("BUTTON", { "aria-label": "Copy" }));
@@ -1072,6 +1146,10 @@ describe("embedded Claude fixed adapter", () => {
           message.append(new Element("DIV", { "data-perf-reply-text": "" }, f.answer.text)); article.append(message, bar); f.messages.append(article);
         }
       };
+      for (const menu of [picker.menu, picker.nested].filter(Boolean)) {
+        const dismiss = menu!.onDispatch!;
+        menu!.onDispatch = (event: any) => { dismiss(event); if (event.type === "keydown" && event.key === "Escape") onClosed(); };
+      }
       const observed = await completeClaudeRead(f, "inspect", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" } });
       expect(closes).toBe(2);
       expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(false);
