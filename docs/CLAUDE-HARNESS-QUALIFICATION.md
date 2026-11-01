@@ -10,10 +10,11 @@ Each newly visible Opus choice requires independent qualification; the
 individual results below do not qualify the others.
 
 As of November 1, build374 (`c58d43d`) is installed and its launch is recorded.
-The latest full Claude workflow cases below ran on build368 (`2dea3d2`). A later
+The latest Opus 4.6 full workflow passed on build374; the earlier Sonnet 5.5
+full workflow ran on build368 (`2dea3d2`). A later
 Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
-on build371 is claimed. The separate build373 and build374 reproductions below
-failed. The
+on build371 is claimed. The separate Opus 5 reproductions on builds 373 and 374
+failed as recorded below. The
 `v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
 `0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
 The signed bundle and frozen build inputs were revalidated
@@ -23,14 +24,17 @@ remains open in issue #15; release publication does not establish model reliabil
 Current bounded evidence includes a new Sonnet 5.5 full-workflow pass on
 installed build368, earlier Sonnet markers, and a Haiku 5.5 workflow pass on
 build361. Opus 5.5 completed one full workflow on build363. Build368's Opus 4.6
-marker passed, but its full workflow failed after a successful file edit.
+marker passed, but its full workflow failed after a successful file edit. A
+fresh build374 Opus 4.6 workflow subsequently passed as recorded below; that
+result does not explain or erase the earlier failure.
 Opus 4.7 added prose to its marker; Opus 3's malformed reply was rejected.
 Build362's Sonnet 5 marker received a valid refusal. Sonnet 4.6 has passed
 markers but still fails full workflows: build364 corrected its malformed first
 reply, then received a valid refusal. Opus 5 still loses current model proof
 after submission, including a bounded remount timeout on build368. Opus 4.8's
-earlier verified response failed its exact-marker task. Remaining workflows
-are still required.
+earlier verified response failed its exact-marker task, and its fresh build374
+workflow returned a refusal without tool use. Remaining workflows are still
+required.
 These results are independent cases, not an all-model pass or a measured
 reliability rate.
 
@@ -199,6 +203,72 @@ The initial cross-provider run exposed a throwing-getter regression; its failed
 receipt is retained, and the final suite includes that corrected guard plus
 transient-blocker tests. These are synthetic/native validation results, not a
 live Opus 5 pass.
+
+## Installed build374 Opus 4.6 workflow, November 1
+
+The fresh `opus46-workflow374-b` task ran on source `c58d43d`, process 19847,
+without a restart. The ordinary website picker showed Opus 4.6 available and
+then selected as `Opus 4.6 Medium`; its empty inspection tab was closed before
+the harness task. The harness independently verified the requested Opus 4.6
+selection, document and first-user fingerprint for every accepted response.
+
+The task completed in 124.798 seconds with nine website inferences and eleven
+native tool calls. It changed only the permitted aggregation function, ran the
+six protected tests successfully, printed the correct reference, and used
+`browser_open`, `browser_fill`, `browser_click` and `browser_close` to complete
+one loopback form submission. Its final answer reported the unpredictable
+receipt observed in the browser. The model explicitly closed its exact test
+tab; this was not a cleanup-only closure. All nine website sessions have saved
+closed cleanup receipts and verified release records.
+
+After the exact fixture server stopped, the independent audit reran the six
+tests, checked protected files and the allowed diff, and verified exactly one
+accepted POST and matching browser receipt. All 19 fixture checks, 27 transport
+checks and seven checks for each of the nine inference chains passed. A second
+read-only review independently joined the tool calls, outputs and command
+scope. The model requested the test and reference commands in the same response:
+both completed before browser submission, but waiting for the test result
+before starting the reference command is not established.
+
+No correction, malformed reply or tool error was recorded in this run. The
+task-scoped rejection capture remained unused and was explicitly disarmed,
+with its original arm retained in the case evidence. The independent transport
+audit is `evidence/opus46-workflow374-b/capture/independent-audit-v6.json`, SHA-256
+`53e54fd97d1d49ec5d7c61fc6a38c7325c9b81c376fb56cecb19cfbd01ffd2d5`.
+The fixture audit SHA-256 is
+`9e6a3c765229f37980bcb4f79fd5d6d44822a87cbf38c767934ee832d1b577bc`.
+
+This is one bounded local workflow pass, not a measured reliability rate,
+backend model attestation, a diagnosis of the build368 failure or a live test
+of the Opus 5 remount change. Candidate build376 includes that still-unqualified
+change plus the provider-first model submenu; build374 remains installed.
+
+## Installed build374 Opus 4.8 workflow refusal, November 1
+
+The distinct `opus48-workflow374-c` task used a fresh fixture and loopback port
+on the same installed build374. Opus 4.8 was present in the ordinary picker.
+The owned session verified its selection, first-user submission and completed
+response, then saved a closed cleanup receipt and release record.
+
+After 16.890 seconds, the model returned a prose refusal and made zero tool
+calls. It described the long runtime-contract instructions as claiming tools
+were attached to Claude's website and declined to emit action JSON for the
+external runner. This is the model's stated interpretation, not proof that
+Computa lacks those tools or that one particular instruction caused the refusal.
+The parser preserved this response as ordinary final text; there was no parse,
+ownership, cleanup or correction error.
+
+The fixture remained unchanged, no browser submission or receipt occurred,
+and the workflow failed qualification. The exact fixture server was stopped;
+the unused task-scoped rejection arm was archived and disarmed. The retained
+audit is `evidence/opus48-workflow374-c/capture/independent-audit-v6.json`,
+SHA-256 `e40eb72c8d667f994e88dc53171a817a4307362cdad58201bbf688ed445eb60d`.
+Its seven per-inference identity/cleanup checks passed, while
+`workflowActuallyDispatchedTools` failed. The separate fixture audit SHA-256 is
+`7755ee2f5c023e2b3809f154d5ce1b7cbf18d087519ee51e20d285321faed8f8`.
+This gives a concrete instruction-design hypothesis for a later controlled
+comparison, not a successful workflow or permission to reinterpret the refusal
+as an executable tool call.
 
 ## Installed build368 results, November 1
 
