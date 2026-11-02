@@ -28,9 +28,12 @@ regression results, not qualification of a new adapter.
 ## Live observations
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
-K3.1 Pro, K2.8 Preview and Instant, plus a More models submenu. The Instant
-row was checked before a single harmless JSON marker request; its returned
-code block matched the expected object exactly. No local tools were requested.
+K3.1 Pro, K2.8 Preview and Instant, plus K3 in the More models submenu. Two
+harmless Instant JSON marker requests returned the exact expected objects.
+No local tools were requested. The second approved Inspector check captured
+the Lexical composer, enabled Send, exact user/assistant containers, literal
+JSON code and assistant action rail. Thinking/tool-flow nodes are separate
+from the final answer; an adapter must not treat their text as response text.
 
 Submission first changed to a provisional `/chat/p…` route, then a final
 `/chat/…` identifier. The adapter must bind any transition to the exact first
@@ -40,10 +43,18 @@ For the synthetic conversation, the current-chat menu's Delete action opened
 a confirmation; confirming once returned to the home page, cleared the
 composer and removed that test row from rendered history. No deletion toast or
 remote-erasure guarantee was established. This manual UI observation does not
-yet establish an automated deletion-completion contract.
+yet establish an automated deletion-completion contract. The second test
+confirmed the current header's ARIA-linked menu, a `confirm-dialog` with a
+dedicated confirmation button, and the subsequent empty home page with no
+test entry. Both test conversations are deleted. The original K3/High
+selection, split position and developer settings were restored. No more
+than the two approved messages were sent to the inspected Kimi tab.
 
 The user reported Qwen and DeepSeek signed in and authorized bounded Inspector
-checks of all three existing test tabs. Their live response/deletion contracts
+checks of all three existing test tabs. Subsequent normal reloads in Computa
+still showed Qwen's Log in/Sign up controls and DeepSeek's `/sign_in` form.
+Which app received the sign-ins is being clarified. Neither tab was exposed
+to Inspector or sent a test message. Their live response/deletion contracts
 remain to be captured. Existing human conversations must remain untouched.
 
 ## Remaining gates

@@ -2121,3 +2121,48 @@ The directory's `382` label identifies an experiment, not an installed build.
 The next investigation is a bounded passive observation of one owned synthetic
 response, retaining event shapes rather than credentials or reasoning text.
 Its actual provider protocol and response-authority checks remain unverified.
+
+## Opt-in passive response diagnostic, November 2 UTC
+
+The native integration now supports an explicitly armed first synthetic Claude
+request. It installs a dormant document-start observer only in that newly owned
+view. Native Start binds task, thread, turn, runtime, preparation, inference and
+model identities; ordinary fresh-page preparation must pass before the observer
+is armed with the exact outbound prompt and existing ownership marker. No wire
+operation or user-visible model capability is added.
+
+The private `ClaudeResponseStreamDiagnostics-v1/arm.json` specifies version 1,
+provider `claude`, purpose `claude_synthetic_response_metadata_v1`, a lowercase
+UUID nonce, concrete model ID, an expiry within ten minutes and the SHA-256 of
+the fixed synthetic user prompt. The native helper generates that prompt as
+`Computa response diagnostic. Reply with exactly CLAUDESTREAM<nonce without hyphens>. Do not use tools.`
+Only the ordinary new-thread first request with the exact canonical input may
+consume the arm. History, maintenance, corrections, different prompts and other
+providers leave it unused. Directory/file permissions remain 0700/0600 and the
+existing same-UID, no-symlink, single-link and exclusive-publication rules apply.
+
+The observer clones at most one matching fetch response and retains finite
+status/MIME classes, event/key shapes, byte counts and synthetic marker-presence
+booleans. It retains no response text, reasoning, credentials, cookies or headers.
+Its 60-second, 64-KiB and 128-event limits are independent of inference completion.
+Unmatched fetches, cached fetch references, XHR and worker traffic can remain
+unobserved; absence of metadata is not proof that no request occurred.
+
+Transport stops and saves the one metadata snapshot before ordinary cleanup on
+success, failure or cancellation. File preparation runs off the main actor,
+publication has a one-second deadline, and revocation prevents late writes.
+`response-metadata.json` is explicitly marked as untrusted page-world diagnostic
+evidence. EOF, a marker match or a saved file grants no response, completion or
+tool authority. Selection, ownership, fenced response parsing and cleanup
+verification remain unchanged. This integration is not live provider protocol
+qualification and does not resolve the remaining Claude refusals or formats.
+
+Validation for build 382: 81 focused native tests passed, covering the observer,
+strict metadata schema, native Start admission, ownership/expiry/revocation,
+transport cleanup and existing diagnostic captures. The shared file-helper
+regression found during integration was corrected: legacy validators establish
+their deadline during record validation, before the first eligibility check.
+The server fixture now resolves the existing temporary directory with `realpath`
+so its synthetic arm meets the unchanged no-symlink requirement. Model-picker
+checks passed 21 tests/404 assertions, frontend type checking passed, and version
+checks passed 9 tests/56 assertions. Live build-382 qualification remains pending.

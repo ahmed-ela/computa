@@ -943,6 +943,11 @@ actor WebModelServer {
         var lease = sessions[taskID]
         var closedHandoff = closedTurns[taskID]
         var requestMetadata = lease?.requestMetadata
+        // Native Start owns an untransferred diagnostic grant. After it returns
+        // a session, transport retains the grant through its ordinary cleanup,
+        // including failures whose cleanup happens after this method throws.
+        var claudeResponseStream: ClaudeResponseStreamLease?
+        defer { claudeResponseStream?.revoke() }
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
         var yielded = yieldedTurns.removeValue(forKey: taskID)
@@ -1132,9 +1137,24 @@ actor WebModelServer {
                         threadID: context.threadID, turnID: context.turnID, runtimeGeneration: context.runtimeGeneration,
                         preparationID: context.preparationID, transportGeneration: transportGeneration,
                         provider: provider, modelID: request.model, parameters: startParameters)
+                    claudeResponseStream?.revoke()
+                    claudeResponseStream = nil
+                    if provider == "claude", let task = UUID(uuidString: taskID),
+                       let thread = UUID(uuidString: context.threadID), let turn = UUID(uuidString: context.turnID) {
+                        claudeResponseStream = ClaudeResponseStreamLease.consume(
+                            directory: rejectedReplyDirectory?.deletingLastPathComponent()
+                                .appendingPathComponent(ClaudeResponseStreamDiagnostic.directoryName),
+                            context: .init(taskID: task, threadID: thread, turnID: turn,
+                                runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                                inferenceID: inferenceID, modelID: request.model),
+                            request: request, isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
+                            isFirstInference: firstNativeInference, hasCorrectionTicket: correctionTicket != nil)
+                    }
                     let reply: [String: Any]
                     do {
-                        let data = try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                        let data = try await ClaudeResponseStreamLease.$current.withValue(claudeResponseStream) {
+                            try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                        }
                         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
                         reply = object
                     } catch let rejected as EmbeddedWebModelTransport.PrecreationRejection {
@@ -1159,6 +1179,7 @@ actor WebModelServer {
                     guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
                         throw Self.snapshotFailure(reply)
                     }
+                    claudeResponseStream = nil
                     let advertised = reply["turnContinuationCapability"]
                     session = Session(token: rawToken, provider: provider, modelID: request.model,
                         modelChoice: choice, transport: transport, inferenceID: inferenceID,

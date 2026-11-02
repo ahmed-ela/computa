@@ -5,39 +5,87 @@ import Foundation
 /// explicit arm and creates its record; this helper grants no inference authority.
 /// It never creates directories or replaces an existing output.
 enum WebsitePrivateDiagnosticCapture {
+    enum Record: String, Sendable {
+        case request = "request.json"
+        case rejectedReply = "rejected-reply.json"
+        case claudeResponseMetadata = "response-metadata.json"
+
+        var maximumBytes: Int { self == .claudeResponseMetadata ? 96 * 1_024 : 2_000_000 }
+    }
+
+    /// Holds the exact private directory opened during the single arm claim.
+    /// The descriptor/lock live through publication; no replacement directory
+    /// can inherit a claim. The caller must still enforce its native lease.
+    final class Claim: @unchecked Sendable {
+        fileprivate let directory: URL
+        fileprivate let directoryFD: Int32
+        fileprivate let directoryInfo: stat
+        fileprivate let record: Record
+        private let lock = NSLock()
+        private var attempted = false
+
+        fileprivate init(directory: URL, directoryFD: Int32, directoryInfo: stat, record: Record) {
+            self.directory = directory; self.directoryFD = directoryFD
+            self.directoryInfo = directoryInfo; self.record = record
+        }
+        deinit { close(directoryFD) }
+        fileprivate func beginPublication() -> Bool {
+            lock.withLock { guard !attempted else { return false }; attempted = true; return true }
+        }
+    }
+
+    // Compatibility wrapper: record construction still precedes the arm claim,
+    // and a raced replacement is restored rather than granting old authority.
     static func publish(directory: URL, outputName: String, maximumArmBytes: Int,
                         maximumRecordBytes: Int, makeRecord: (Data) -> Data?,
                         isCurrent: () -> Bool = { true },
                         beforeArmClaim: (@Sendable () -> Void)? = nil) -> Bool {
-        guard ["rejected-reply.json", "request.json"].contains(outputName),
-              (1...4096).contains(maximumArmBytes), maximumRecordBytes > 0,
-              maximumRecordBytes <= 2_000_000 else { return false }
+        guard let kind = Record(rawValue: outputName), kind != .claudeResponseMetadata,
+              maximumRecordBytes > 0, maximumRecordBytes <= kind.maximumBytes else { return false }
+        var record: Data?
+        guard let claimed = claim(directory: directory, record: kind, maximumArmBytes: maximumArmBytes,
+            validate: { arm in
+                guard let value = makeRecord(arm), !value.isEmpty, value.count <= maximumRecordBytes else { return false }
+                record = value; return true
+            }, isCurrent: isCurrent, beforeArmClaim: beforeArmClaim), let record else { return false }
+        return publish(record, using: claimed, isCurrent: isCurrent, commit: { rename in
+            guard isCurrent() else { return false }; return rename()
+        })
+    }
+
+    /// Validate and consume once. No output is written and no directories are
+    /// created. Filesystem/expiry checks are deliberately separate from a lease.
+    static func claim(directory: URL, record: Record, maximumArmBytes: Int,
+                      validate: (Data) -> Bool, isCurrent: () -> Bool,
+                      beforeArmClaim: (@Sendable () -> Void)? = nil) -> Claim? {
+        // Legacy validators establish their monotonic deadline while creating
+        // the record. Their first eligibility check must remain after validate.
+        guard (1...4096).contains(maximumArmBytes) else { return nil }
         let directoryFD = openDirectoryWithoutSymlinks(directory)
-        guard directoryFD >= 0 else { return false }
-        defer { close(directoryFD) }
+        guard directoryFD >= 0 else { return nil }
+        var retained = false
+        defer { if !retained { close(directoryFD) } }
         var directoryInfo = stat()
         guard fstat(directoryFD, &directoryInfo) == 0, privateDirectory(directoryInfo),
-              flock(directoryFD, LOCK_EX | LOCK_NB) == 0 else { return false }
+              flock(directoryFD, LOCK_EX | LOCK_NB) == 0 else { return nil }
         let armFD = openat(directoryFD, "arm.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard armFD >= 0 else { return false }
+        guard armFD >= 0 else { return nil }
         defer { close(armFD) }
         var before = stat()
         guard fstat(armFD, &before) == 0, privateFile(before), before.st_size > 0,
               before.st_size <= maximumArmBytes, let arm = readArm(armFD, maximum: maximumArmBytes),
-              arm.count == before.st_size, let record = makeRecord(arm),
-              !record.isEmpty, record.count <= maximumRecordBytes, isCurrent() else { return false }
+              arm.count == before.st_size, validate(arm), isCurrent() else { return nil }
         var after = stat(), named = stat(), output = stat()
         guard fstat(armFD, &after) == 0, sameUnchangedFile(before, after),
               fstatat(directoryFD, "arm.json", &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(before, named),
-              fstatat(directoryFD, outputName, &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT,
-              directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return false }
+              fstatat(directoryFD, record.rawValue, &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT,
+              directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return nil }
         let claimed = ".claimed-arm-" + UUID().uuidString.lowercased()
         beforeArmClaim?()
-        guard renameatx_np(directoryFD, "arm.json", directoryFD, claimed, UInt32(RENAME_EXCL)) == 0 else { return false }
+        guard renameatx_np(directoryFD, "arm.json", directoryFD, claimed, UInt32(RENAME_EXCL)) == 0 else { return nil }
         var claimedInfo = stat()
-        // A replaced arm must never grant capture authority to its old reader.
-        // Preserve a raced replacement: restore it exclusively, or leave its
-        // private claimed file recoverable if another new arm already exists.
+        // Preserve a raced replacement exclusively, or leave its private claimed
+        // file recoverable if another new arm already occupies the original name.
         guard fstatat(directoryFD, claimed, &claimedInfo, AT_SYMLINK_NOFOLLOW) == 0,
               privateFile(claimedInfo), before.st_dev == claimedInfo.st_dev, before.st_ino == claimedInfo.st_ino,
               before.st_size == claimedInfo.st_size,
@@ -47,7 +95,7 @@ enum WebsitePrivateDiagnosticCapture {
               fstat(armFD, &after) == 0, sameUnchangedFile(claimedInfo, after),
               fstatat(directoryFD, claimed, &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(after, named) else {
             _ = renameatx_np(directoryFD, claimed, directoryFD, "arm.json", UInt32(RENAME_EXCL))
-            return false
+            return nil
         }
         let authorizedClaim = after
         defer {
@@ -55,7 +103,26 @@ enum WebsitePrivateDiagnosticCapture {
             if fstatat(directoryFD, claimed, &remaining, AT_SYMLINK_NOFOLLOW) == 0,
                sameUnchangedFile(authorizedClaim, remaining) { _ = unlinkat(directoryFD, claimed, 0) }
         }
-        guard isCurrent() else { return false }
+        guard isCurrent(), directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return nil }
+        // Consumption is irreversible even if a later snapshot is unavailable.
+        guard unlinkat(directoryFD, claimed, 0) == 0 else { return nil }
+        guard fsync(directoryFD) == 0 else { return nil }
+        guard isCurrent() else { return nil }
+        retained = true
+        return Claim(directory: directory, directoryFD: directoryFD, directoryInfo: directoryInfo, record: record)
+    }
+
+    /// All preparation and fsync happen before/after commit. The caller uses
+    /// commit to serialize only the final eligibility check and exclusive rename
+    /// with lease revocation; slow writes cannot hold the caller's lease lock.
+    static func publish(_ record: Data, using claim: Claim, isCurrent: () -> Bool,
+                        beforeRecordWrite: (() -> Void)? = nil,
+                        beforeCommit: (() -> Void)? = nil,
+                        commit: (_ rename: () -> Bool) -> Bool) -> Bool {
+        guard !record.isEmpty, record.count <= claim.record.maximumBytes,
+              claim.beginPublication(), isCurrent() else { return false }
+        let directoryFD = claim.directoryFD, directory = claim.directory, directoryInfo = claim.directoryInfo
+        guard directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return false }
         let temporary = ".diagnostic-record-" + UUID().uuidString.lowercased() + ".tmp"
         let outputFD = openat(directoryFD, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard outputFD >= 0 else { return false }
@@ -66,13 +133,17 @@ enum WebsitePrivateDiagnosticCapture {
                sameUnchangedFile(held, remaining) { _ = unlinkat(directoryFD, temporary, 0) }
             close(outputFD)
         }
+        beforeRecordWrite?()
         guard fchmod(outputFD, 0o600) == 0, writeAll(record, descriptor: outputFD), fsync(outputFD) == 0,
-              directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo), isCurrent() else { return false }
+              isCurrent() else { return false }
+        beforeCommit?()
+        guard directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo), isCurrent() else { return false }
         var written = stat(), temporaryInfo = stat()
         guard fstat(outputFD, &written) == 0, privateFile(written), written.st_size == record.count,
               fstatat(directoryFD, temporary, &temporaryInfo, AT_SYMLINK_NOFOLLOW) == 0,
               sameUnchangedFile(written, temporaryInfo),
-              renameatx_np(directoryFD, temporary, directoryFD, outputName, UInt32(RENAME_EXCL)) == 0 else { return false }
+              commit({ renameatx_np(directoryFD, temporary, directoryFD, claim.record.rawValue, UInt32(RENAME_EXCL)) == 0 })
+        else { return false }
         _ = fsync(directoryFD)
         return true
     }

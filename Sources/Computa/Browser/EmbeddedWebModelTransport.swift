@@ -338,6 +338,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let isDiscovery: Bool
         let isRecoveryProbe: Bool
         let view: WKWebView
+        // Passive synthetic metadata only. Neither this lease nor its snapshot
+        // can supply model, ownership, completion or response text evidence.
+        var claudeResponseStream: ClaudeResponseStreamLease?
+        var claudeResponseStreamGeneration: UUID?
+        var claudeResponseStreamArmAttempted = false
+        var claudeResponseStreamCaptureAttempted = false
         let initialDocumentGeneration: UUID
         let created = ContinuousClock.now
         var state = "loading"
@@ -921,6 +927,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func start(params: Data, admission: WebModelStartAdmission,
                authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        var admitted = false
+        defer { if !admitted { ClaudeResponseStreamLease.current?.revoke() } }
         guard admission.parameters == params,
               let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               let selection = WebsiteModelCatalog.inferenceSelection(for: admission.modelID),
@@ -928,12 +936,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               selection.choice?.canonicalJSONString == values["modelChoice"],
               authorization == nil || admission.provider == "chatgpt" else {
             authorization?.revoke()
+            ClaudeResponseStreamLease.current?.revoke()
             throw Failure.invalidRequest
         }
+        admitted = true
         return try await start(values, requestMetadata: authorization, admission: admission)
     }
 
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
+        ClaudeResponseStreamLease.current?.revoke()
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               values["provider"] == "chatgpt" else { authorization.revoke(); throw Failure.invalidRequest }
         return try await start(values, requestMetadata: authorization)
@@ -980,8 +991,88 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private func revokeClaudeResponseStream(_ session: Session) {
+        session.claudeResponseStream?.revoke()
+        session.claudeResponseStream = nil
+        browser.revokeClaudeResponseStream(tabID: session.tabID, ownerToken: session.token)
+    }
+
+    private func armClaudeResponseStream(_ session: Session, prompt: String, outbound: String) async {
+        guard let lease = session.claudeResponseStream else { return }
+        guard !session.claudeResponseStreamArmAttempted else {
+            revokeClaudeResponseStream(session)
+            return
+        }
+        session.claudeResponseStreamArmAttempted = true
+        guard lease.isCurrent, lease.matchesPrompt(prompt), session.provider == .claude,
+              !session.isDiscovery, !session.isRecoveryProbe, !session.submitted,
+              session.state == "ready", session.sequence == 0, session.baseline == 0,
+              session.confirmedUsers == 0, session.firstUserFingerprint == nil,
+              session.temporary, session.modelSelectionVerified, session.modelChoice != nil,
+              outbound.components(separatedBy: lease.expectedMarker).count == 2,
+              let generation = session.documentGeneration,
+              sessions[session.token] === session,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              let url = session.view.url, session.provider.accepts(url.absoluteString),
+              session.provider.conversationURL(url.absoluteString) == nil else {
+            revokeClaudeResponseStream(session)
+            return
+        }
+        let armed = await browser.armClaudeResponseStream(tabID: session.tabID, view: session.view,
+            ownerToken: session.token, expectedPrompt: outbound)
+        guard armed, lease.matches(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation),
+              sessions[session.token] === session,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation else {
+            revokeClaudeResponseStream(session)
+            return
+        }
+        session.claudeResponseStreamGeneration = generation
+    }
+
+    /// Capture is opt-in and one-shot. Stop is bounded by the browser wrapper;
+    /// persistence has its own one-second ceiling and never blocks MainActor on
+    /// file I/O. Expired/late work cannot publish after lease revocation.
+    private func captureClaudeResponseStream(_ session: Session) async {
+        guard let lease = session.claudeResponseStream, !session.claudeResponseStreamCaptureAttempted else { return }
+        session.claudeResponseStreamCaptureAttempted = true
+        defer { revokeClaudeResponseStream(session) }
+        guard let generation = session.claudeResponseStreamGeneration,
+              lease.matches(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation),
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              let snapshot = await browser.stopClaudeResponseStream(tabID: session.tabID, view: session.view,
+                  ownerToken: session.token),
+              lease.matches(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation),
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation else { return }
+        let view = ObjectIdentifier(session.view), owner = session.token
+        let deadline = ContinuousClock.now + .seconds(1)
+        let completion = EmbeddedScriptResult()
+        _ = try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            completion.install(continuation)
+            let timer = Task.detached {
+                do {
+                    try await Task.sleep(until: deadline)
+                    lease.revoke()
+                    completion.complete(.success(Data()))
+                } catch { }
+            }
+            completion.setTimeout(timer)
+            Task.detached {
+                _ = lease.persist(snapshot: snapshot, view: view, ownerToken: owner, generation: generation,
+                    commitDeadline: deadline)
+                completion.complete(.success(Data()))
+            }
+        }
+    }
+
     private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil,
                        admission: WebModelStartAdmission? = nil) async throws -> Data {
+        let streamCandidate = ClaudeResponseStreamLease.current
+        var streamRetained = false
+        defer { if !streamRetained { streamCandidate?.revoke() } }
         try Task.checkCancellation()
         guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
         guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
@@ -993,6 +1084,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else { choice = nil }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
         guard provider != .groq || choice != nil else { throw Failure.invalidRequest }
+        let claudeResponseStream: ClaudeResponseStreamLease?
+        if let candidate = streamCandidate, provider == .claude, choice != nil,
+           let admission, admission.provider == provider.rawValue, admission.modelID == choice?.modelID,
+           let taskID = UUID(uuidString: admission.taskID), let threadID = UUID(uuidString: admission.threadID),
+           let turnID = UUID(uuidString: admission.turnID),
+           candidate.matches(context: .init(taskID: taskID, threadID: threadID, turnID: turnID,
+               runtimeGeneration: admission.runtimeGeneration, preparationID: admission.preparationID,
+               inferenceID: admission.inferenceID, modelID: admission.modelID)) {
+            claudeResponseStream = candidate
+        } else {
+            // Plain wire Start, discovery, other models and unrelated native
+            // invocations never inherit an operator's one-shot diagnostic.
+            streamCandidate?.revoke()
+            claudeResponseStream = nil
+        }
         if provider == .chatgpt {
             guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
             try Task.checkCancellation()
@@ -1027,12 +1133,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do {
             try Task.checkCancellation()
             session = try createSession(provider: provider, choice: choice, isDiscovery: false,
-                requestMetadata: requestMetadata, preparedTab: preparedTab, reservedStart: true)
+                requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream,
+                preparedTab: preparedTab, reservedStart: true)
         } catch {
             if let preparedTab { browser.closeTab(preparedTab) }
             throw error
         }
-        return try snapshot(session)
+        let result = try snapshot(session)
+        streamRetained = session.claudeResponseStream != nil
+        return result
     }
 
     func request(operation: String, params: Data) async throws -> Data {
@@ -1041,6 +1150,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
+        // The wire protocol has no authority to acquire this native diagnostic,
+        // including malformed Start requests that fail before decoding.
+        if operation == "webProviderStart" { ClaudeResponseStreamLease.current?.revoke() }
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String] else {
             throw Failure.invalidRequest
         }
@@ -1138,6 +1250,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         sessionToken: session.token, documentGeneration: generation,
                         marker: submissionMarker, nativeFirstFresh: true)
                 }
+                // Ordinary prepare has already proved the empty owned page.
+                // Failed/expired instrumentation is discarded without changing
+                // insertion, Send, model verification or their error handling.
+                await armClaudeResponseStream(session, prompt: prompt, outbound: outbound)
                 if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,
                    canPrepareFirstInstantInInsert(session), session.provider == .chatgpt,
                    let choice = session.modelChoice, choice.key == "chat/latest/instant",
@@ -1351,6 +1467,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
+                               claudeResponseStream: ClaudeResponseStreamLease? = nil,
                                preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
@@ -1362,12 +1479,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
+        else if let claudeResponseStream, provider == .claude, !isDiscovery, !isRecoveryProbe {
+            id = try browser.createModelTab(url: provider.startURL(choice: choice), claudeResponseStream: claudeResponseStream)
+        }
         else if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
             id = try browser.createModelTab(url: provider.startURL(choice: choice), requestMetadata: requestMetadata)
         } else { id = try createTab(provider.startURL(choice: choice)) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
                               modelChoice: choice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
+        if provider == .claude, !isDiscovery, !isRecoveryProbe, preparedTab == nil,
+           claudeResponseStream?.isCurrent == true {
+            session.claudeResponseStream = claudeResponseStream
+        }
         do { try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world, originHost: provider.host) }
         catch { browser.closeTab(id); throw error }
         sessions[session.token] = session
@@ -6299,6 +6423,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         defer {
             if sessions[session.token] == nil { observationDiagnosticLogBudgets.removeValue(forKey: session.token) }
         }
+        // Save finite diagnostic evidence while the exact owned view still
+        // exists. This neither supplies nor bypasses any cleanup proof below.
+        await captureClaudeResponseStream(session)
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)

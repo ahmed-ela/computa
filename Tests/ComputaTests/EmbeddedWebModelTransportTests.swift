@@ -6,6 +6,213 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testClaudeResponseStreamSavesBeforeOwnedCleanupOnEveryTerminalPath() async throws {
+        for outcome in ["success", "malformed", "provider_pause", "cancelled_caller"] {
+            let choice = Self.fixtureChoice(.claude)
+            let diagnostic = try ClaudeResponseStreamLeaseFixture(modelID: choice.modelID)
+            defer { diagnostic.cleanup() }
+            let lease = try XCTUnwrap(diagnostic.lease())
+            let base = Self.providerPage(.claude)
+            let page = outcome == "provider_pause"
+                ? base.replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';", with: "body.textContent = '';")
+                : outcome == "malformed"
+                ? base.replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';", with: "body.textContent = '{\"type\":\"tool_calls\",';") : base
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page), isolatedInference: true)
+            defer { fixture.shutdown() }
+            let started = try await startClaudeResponseStream(diagnostic, lease: lease, fixture: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.browser.tabs.first(where: { $0.id != fixture.humanID })?.id)
+            let view = try XCTUnwrap(fixture.isolatedViews.first)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let installedControllers = try await claudeResponseStreamControllerCount(view)
+            XCTAssertEqual(installedControllers, 1, outcome)
+            XCTAssertTrue(lease.isCurrent, outcome)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": diagnostic.request.prompt])
+            XCTAssertTrue(lease.isCurrent, "Send must retain the optional diagnostic for later cleanup: \(outcome)")
+            XCTAssertFalse(diagnostic.exists(diagnostic.outputURL), outcome)
+            if outcome == "provider_pause" {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                _ = try await evaluate(view, """
+                    const paused = document.createElement('div'); paused.setAttribute('data-testid', 'asl3-stop-warning');
+                    paused.innerHTML = '<h4>Paused</h4><p><span>Opus 5&#39;s safeguards flagged this message. This sometimes happens with safe, normal conversations.</span></p><div><span>Details</span><code>[reasoning_extraction]</code></div>';
+                    window.fixtureSafeguardClicks = 0;
+                    for (const text of ['Edit and retry with Opus 5', 'Continue with Sonnet 4.6']) {
+                        const button = document.createElement('button'); button.textContent = text;
+                        button.addEventListener('click', () => window.fixtureSafeguardClicks++); paused.appendChild(button);
+                    }
+                    document.body.appendChild(paused); return true;
+                    """)
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("The passive stream must not turn a provider pause into an answer")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseBlocked(.claude)) }
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": diagnostic.request.prompt])
+                    XCTFail("A terminal provider failure must not replay Send")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseBlocked(.claude)) }
+                let retries = try await evaluate(view, "return window.fixtureSafeguardClicks;")
+                XCTAssertEqual(retries as? Int, 0)
+            } else {
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+                let text = try XCTUnwrap(complete["text"] as? String)
+                if outcome == "malformed" {
+                    XCTAssertEqual(text, "{\"type\":\"tool_calls\",")
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: diagnostic.request))
+                } else {
+                    XCTAssertEqual(text, #"{"type":"message","text":"Fixture reply"}"#)
+                    XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(text, request: diagnostic.request))
+                }
+            }
+            XCTAssertTrue(lease.isCurrent, "Provider/parser failures retain evidence until cleanup: \(outcome)")
+            let prompts = try await capturedUserPrompts(view)
+            // This real contenteditable fixture serializes its final block as
+            // one terminal LF. The native lease still matches the exact prompt
+            // before insertion; do not trim arbitrary differences here.
+            XCTAssertEqual(prompts, [diagnostic.request.prompt + "\n"], outcome)
+            XCTAssertEqual(view.requestLoadCount, 1, outcome)
+            var savedWhileViewOwned = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect" || action == "stop" else { return }
+                savedWhileViewOwned = diagnostic.exists(diagnostic.outputURL)
+                    && fixture.browser.webView(for: tabID) === view
+                XCTAssertTrue(savedWhileViewOwned, "Diagnostic must precede ordinary cleanup proof: \(outcome)")
+            }
+            let parameters = try JSONSerialization.data(withJSONObject: ["sessionToken": token])
+            let result: Data
+            if outcome == "cancelled_caller" {
+                let caller = Task { @MainActor in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return try await fixture.transport.request(operation: "webProviderCancel", params: parameters)
+                }
+                result = try await caller.value
+            } else {
+                result = try await fixture.transport.request(operation: "webProviderFinish", params: parameters)
+            }
+            let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
+            XCTAssertEqual(receipt["cleanup"] as? String, "not_created", outcome)
+            XCTAssertTrue(savedWhileViewOwned, outcome)
+            XCTAssertNil(fixture.browser.webView(for: tabID), outcome)
+            XCTAssertFalse(lease.isCurrent, outcome)
+            let bytes = try Data(contentsOf: diagnostic.outputURL)
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let metadata = try XCTUnwrap(record["diagnostic"] as? [String: Any])
+            XCTAssertEqual(metadata["armUsed"] as? Bool, true, outcome)
+            XCTAssertEqual(metadata["matchedCalls"] as? Int, 0, "This DOM-only fixture makes no provider requests")
+            XCTAssertEqual(metadata["terminalReason"] as? String, "stopped", outcome)
+            XCTAssertEqual(record["sessionToken"] as? String, token, outcome)
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(lease.expectedMarker), outcome)
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("Fixture reply"), outcome)
+            let repeated = try await fixture.transport.request(operation: "webProviderCancel", params: parameters)
+            XCTAssertEqual(repeated, result, "Cleanup remains idempotent: \(outcome)")
+            XCTAssertEqual(try Data(contentsOf: diagnostic.outputURL), bytes, "No second diagnostic publication")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testClaudeResponseStreamRequiresExactNativeAdmissionAndPreparedPrompt() async throws {
+        for admission in ["ordinary", "plain_wire", "other_context", "changed_prompt", "exact"] {
+            let choice = Self.fixtureChoice(.claude)
+            let diagnostic = try ClaudeResponseStreamLeaseFixture(modelID: choice.modelID)
+            defer { diagnostic.cleanup() }
+            let lease = try XCTUnwrap(diagnostic.lease())
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude), isolatedInference: true)
+            defer { fixture.shutdown() }
+            let started: [String: Any]
+            switch admission {
+            case "ordinary": started = try await startChoice(choice, in: fixture)
+            case "plain_wire":
+                started = try await ClaudeResponseStreamLease.$current.withValue(lease) {
+                    try await startChoice(choice, in: fixture)
+                }
+            default:
+                let c = diagnostic.context
+                let context = admission == "other_context" ? ClaudeResponseStreamDiagnostic.Context(taskID: UUID(),
+                    threadID: c.threadID, turnID: c.turnID, runtimeGeneration: c.runtimeGeneration,
+                    preparationID: c.preparationID, inferenceID: c.inferenceID, modelID: c.modelID) : c
+                started = try await startClaudeResponseStream(diagnostic, lease: lease, fixture: fixture, context: context)
+            }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.isolatedViews.first)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let expectedInstallation = ["changed_prompt", "exact"].contains(admission)
+            let installedControllers = try await claudeResponseStreamControllerCount(view)
+            XCTAssertEqual(installedControllers, expectedInstallation ? 1 : 0, admission)
+            let prompt = diagnostic.request.prompt + (admission == "changed_prompt" ? "\nChanged instruction" : "")
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#, admission)
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts, [prompt + "\n"], "Only the fixture's one terminal block LF may differ: \(admission)")
+            let result = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(result["cleanup"] as? String, "not_created", admission)
+            XCTAssertEqual(diagnostic.exists(diagnostic.outputURL), admission == "exact", admission)
+            if admission != "ordinary" { XCTAssertFalse(lease.isCurrent, admission) }
+            lease.revoke()
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testClaudeResponseStreamStartFailureAndRevocationCannotPublishLate() async throws {
+        let choice = Self.fixtureChoice(.claude)
+        for mode in ["invalid_start", "revoked_after_send"] {
+            let diagnostic = try ClaudeResponseStreamLeaseFixture(modelID: choice.modelID)
+            defer { diagnostic.cleanup() }
+            let lease = try XCTUnwrap(diagnostic.lease())
+            let fixture = try Fixture(page: Self.modelChoicePage(.claude), isolatedInference: true)
+            defer { fixture.shutdown() }
+            if mode == "invalid_start" {
+                do {
+                    _ = try await startClaudeResponseStream(diagnostic, lease: lease, fixture: fixture, invalidParameters: true)
+                    XCTFail("Mismatched native parameters must remain invalid")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+                XCTAssertTrue(fixture.isolatedViews.isEmpty)
+            } else {
+                let started = try await startClaudeResponseStream(diagnostic, lease: lease, fixture: fixture)
+                let token = try XCTUnwrap(started["sessionToken"] as? String)
+                let tabID = try XCTUnwrap(fixture.browser.tabs.first(where: { $0.id != fixture.humanID })?.id)
+                let view = try XCTUnwrap(fixture.isolatedViews.first)
+                _ = try await waitForState("ready", fixture.transport, token: token)
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": diagnostic.request.prompt])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tabID))
+                XCTAssertTrue(lease.matches(view: ObjectIdentifier(view), ownerToken: token, generation: generation))
+                lease.revoke()
+                let result = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(result["cleanup"] as? String, "not_created")
+                XCTAssertFalse(lease.persist(snapshot: try diagnostic.snapshot(), view: ObjectIdentifier(view), ownerToken: token, generation: generation))
+                XCTAssertNil(fixture.browser.webView(for: tabID))
+            }
+            XCTAssertFalse(lease.isCurrent, mode)
+            XCTAssertFalse(diagnostic.exists(diagnostic.outputURL), mode)
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    private func startClaudeResponseStream(_ diagnostic: ClaudeResponseStreamLeaseFixture,
+                                          lease: ClaudeResponseStreamLease, fixture: Fixture,
+                                          context: ClaudeResponseStreamDiagnostic.Context? = nil,
+                                          invalidParameters: Bool = false) async throws -> [String: Any] {
+        let c = context ?? diagnostic.context
+        let choice = try XCTUnwrap(WebsiteModelCatalog.inferenceSelection(for: c.modelID)?.choice)
+        let parameters = try JSONSerialization.data(withJSONObject: ["provider": "claude",
+            "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+        let admission = WebModelStartAdmission(id: UUID(), inferenceID: c.inferenceID,
+            taskID: c.taskID.uuidString, threadID: c.threadID.uuidString, turnID: c.turnID.uuidString,
+            runtimeGeneration: c.runtimeGeneration, preparationID: c.preparationID, transportGeneration: UUID(),
+            provider: "claude", modelID: c.modelID, parameters: invalidParameters ? Data("{}".utf8) : parameters)
+        let data = try await ClaudeResponseStreamLease.$current.withValue(lease) {
+            try await fixture.transport.start(params: parameters, admission: admission, authorization: nil)
+        }
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func claudeResponseStreamControllerCount(_ view: WKWebView) async throws -> Int {
+        let result = try await evaluate(view, "return Object.getOwnPropertyNames(window).filter(key => /^__computaClaudeResponseStream_[a-f0-9]{32}$/.test(key)).length;")
+        return try XCTUnwrap(result as? Int)
+    }
+
     // Insert into existing EmbeddedWebModelTransportTests. Uses the exact
     // bundled source and a real rendered WKWebView; no getter mocks/fake DOM.
     // Prepared only. Root applies/runs; this snippet has not been executed.

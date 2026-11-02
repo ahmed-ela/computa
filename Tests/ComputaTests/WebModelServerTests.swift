@@ -4,6 +4,87 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testClaudeStreamGrantOnlyEntersExactNativeStartAndSurvivesFailureUntilCleanup() async throws {
+        for mode in ["capture", "unarmed", "ordinary", "history", "old_thread", "maintenance", "gemini", "send_failure", "start_failure"] {
+            // Resolve the existing temporary ancestor with realpath before
+            // creating the fixture; no-follow arm admission rejects aliases.
+            let root = try websiteBenchmarkTemporaryDirectory()
+                .appendingPathComponent("claude-stream-server-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent(ClaudeResponseStreamDiagnostic.directoryName)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let nonce = UUID(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased()
+            let turn = UUID().uuidString.lowercased(), preparation = UUID()
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")
+            let userText = ClaudeResponseStreamDiagnostic.syntheticUserText(nonce: nonce)
+            let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let arm: [String: Any] = ["schemaVersion": 1, "provider": "claude", "purpose": ClaudeResponseStreamDiagnostic.purpose,
+                "nonce": nonce.uuidString.lowercased(), "modelID": choice.modelID,
+                "expiresAt": formatter.string(from: Date().addingTimeInterval(300)),
+                "userPromptSHA256": SHA256.hash(data: Data(userText.utf8)).map { String(format: "%02x", $0) }.joined()]
+            let armFile = directory.appendingPathComponent("arm.json")
+            if mode != "unarmed" {
+                try JSONSerialization.data(withJSONObject: arm).write(to: armFile)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: armFile.path)
+            }
+            func message(_ role: String, _ text: String) -> [String: Any] {
+                ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+            }
+            // Native engine requests have a developer prelude followed by the
+            // environment fragment and exact user/policy content. A bare wire
+            // user string intentionally cannot activate this diagnostic.
+            var input = [message("developer", "Synthetic native policy"),
+                message("user", "<environment_context><cwd>/tmp/computa-empty-fixture</cwd><shell>zsh</shell></environment_context>"),
+                message("user", (mode == "ordinary" ? "Hi" : userText) + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())]
+            if mode == "history" { input.insert(message("assistant", "Earlier response"), at: 2) }
+            let object: [String: Any] = ["model": mode == "gemini" ? "browser/gemini" : choice.modelID,
+                "input": input, "tools": [], "client_metadata": ["x-codex-turn-metadata":
+                    try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)]]
+            let bytes = try JSONSerialization.data(withJSONObject: object)
+            let preparedFixture = try WebModelResponseCodec.prepareRequest(bytes)
+            XCTAssertEqual(WebsiteSyntheticFirstRequest.matches(preparedFixture, expectedUserText: userText),
+                           !["ordinary", "history"].contains(mode), mode)
+            let base = FixtureWebModelTransport()
+            let observer = ClaudeStreamStartScopeTransport(base: WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice),
+                failStart: mode == "start_failure", failSend: mode == "send_failure")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: root.appendingPathComponent("rejected"), storageDirectory: root)
+            await server.configureEmbeddedTransport(observer)
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                isMaintenance: mode == "maintenance", isNewThread: mode != "old_thread")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+            do {
+                let response = try await server.infer(bytes, taskID: task)
+                XCTAssertFalse(["start_failure", "send_failure"].contains(mode))
+                XCTAssertEqual(try responseOutput(response).first?["type"] as? String, "message")
+            } catch {
+                XCTAssertTrue(["start_failure", "send_failure"].contains(mode), "\(mode): \(error)")
+                if case .providerFailed = error as? WebModelServer.Failure { }
+                else { XCTFail("The original provider error changed: \(error)") }
+            }
+            let expected = ["capture", "send_failure", "start_failure"].contains(mode)
+            var observation = await observer.observation()
+            XCTAssertEqual(observation.admitted, [expected], mode)
+            XCTAssertTrue(observation.contextsMatch, mode)
+            XCTAssertTrue(observation.startWireUnchanged, mode)
+            XCTAssertFalse(observation.leakedOutsideStart, mode)
+            XCTAssertEqual(observation.current, mode == "send_failure", mode)
+            if mode == "send_failure" { _ = await server.fixtureCancel(taskID: task) }
+            observation = await observer.observation()
+            XCTAssertFalse(observation.current, mode)
+            XCTAssertEqual(observation.currentAtFinish, ["capture", "send_failure"].contains(mode), mode)
+            XCTAssertEqual(FileManager.default.fileExists(atPath: armFile.path), mode != "unarmed" && !expected, mode)
+            let operations = await base.operations(), prompts = await base.sentPrompts()
+            XCTAssertEqual(prompts.count, mode == "start_failure" ? 0 : 1, mode)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, prompts.count, mode)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("response-metadata.json").path),
+                "A native grant alone never creates response evidence")
+        }
+    }
+
     func testClaudeFirstCaptureIsScopedToFreshSendAndRevokedBeforePollOrAfterSendFailure() async throws {
         for mode in ["capture", "unarmed", "deferred", "old_thread", "send_failure"] {
             let f = try ClaudeFirstRequestCaptureFixture(now: Date()); defer { f.remove() }
@@ -3729,6 +3810,46 @@ private actor SyntheticCaptureNoninterferenceTransport: WebModelTransport {
         if operation == "webProviderSend" { admitted.append(WebsiteBenchmarkCaptureLease.current != nil) }
         return try await base.request(operation: operation, params: params)
     }
+}
+
+private actor ClaudeStreamStartScopeTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private let failStart: Bool, failSend: Bool
+    private var grant: ClaudeResponseStreamLease?
+    private var admitted: [Bool] = []
+    private var contextsMatch = true, startWireUnchanged = true, leakedOutsideStart = false, currentAtFinish = false
+    init(base: any WebModelTransport, failStart: Bool, failSend: Bool) {
+        self.base = base; self.failStart = failStart; self.failSend = failSend
+    }
+    func observation() -> (admitted: [Bool], contextsMatch: Bool, startWireUnchanged: Bool,
+                            leakedOutsideStart: Bool, current: Bool, currentAtFinish: Bool) {
+        (admitted, contextsMatch, startWireUnchanged, leakedOutsideStart, grant?.isCurrent ?? false, currentAtFinish)
+    }
+    func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        grant = ClaudeResponseStreamLease.current; admitted.append(grant != nil)
+        if let grant {
+            contextsMatch = grant.matches(context: .init(taskID: try XCTUnwrap(UUID(uuidString: admission.taskID)),
+                threadID: try XCTUnwrap(UUID(uuidString: admission.threadID)), turnID: try XCTUnwrap(UUID(uuidString: admission.turnID)),
+                runtimeGeneration: admission.runtimeGeneration, preparationID: admission.preparationID,
+                inferenceID: admission.inferenceID, modelID: admission.modelID))
+        }
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        startWireUnchanged = Set(fields.keys).isSubset(of: ["provider", "modelChoice"]) && params == admission.parameters
+        if failStart { throw WebModelServer.Failure.providerFailed }
+        return try await base.start(params: params, admission: admission, authorization: authorization)
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if ClaudeResponseStreamLease.current != nil { leakedOutsideStart = true }
+        if operation == "webProviderFinish" || operation == "webProviderCancel" {
+            currentAtFinish = grant?.isCurrent ?? false
+            grant?.revoke()
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        if operation == "webProviderSend", failSend { throw WebModelServer.Failure.providerFailed }
+        return bytes
+    }
+
+
 }
 
 private actor ClaudeFirstCaptureScopeTransport: WebModelTransport {

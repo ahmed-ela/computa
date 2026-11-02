@@ -227,6 +227,10 @@ final class EmbeddedBrowserSession {
                                             expiry: Task<Void, Never>)?
         #endif
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
+        var claudeResponseStreamDiagnostic: ClaudeResponseStreamDiagnosticState?
+        // Stop removes the page observer, but close must still revoke this exact
+        // lease after transport's pre-cleanup persistence attempt.
+        var claudeResponseStreamLease: ClaudeResponseStreamLease?
         var responseCompletionObserver: ResponseCompletionObserver?
         var responseCompletion: ChatGPTResponseCompletion?
         var responseCompletionDiagnosticLogged = false
@@ -714,6 +718,7 @@ final class EmbeddedBrowserSession {
         entry.frameBeforeToolRendering = nil
         removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
+        revokeClaudeResponseStream(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
@@ -803,6 +808,7 @@ final class EmbeddedBrowserSession {
         entry.pendingCacheAdmission = nil
         entry.delegate.cancelCacheAdmission()
         revokeResponseCompletion(entry)
+        revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
@@ -834,6 +840,201 @@ final class EmbeddedBrowserSession {
         case navigation, origin, closed, shutdown, expired, nativeContext = "native_context", finished
     }
     private static let inspectorDiagnosticLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ModelInspectorDiagnostic")
+
+    /// This observes one explicitly armed synthetic inference. It never supplies
+    /// response text, ownership, provider completion or tool-dispatch authority.
+    private final class ClaudeResponseStreamDiagnosticState {
+        let authorization: ClaudeResponseStreamLease
+        let key: String
+        let script: WKUserScript
+        var initialNavigationPrepared = false
+        var initialNavigationStarted = false
+        var generation: UUID?
+        var conversationURL: String?
+        var expiry: Task<Void, Never>?
+        init(authorization: ClaudeResponseStreamLease, key: String, script: WKUserScript) {
+            self.authorization = authorization; self.key = key; self.script = script
+        }
+    }
+
+    func createModelTab(url: URL, claudeResponseStream authorization: ClaudeResponseStreamLease) throws -> UUID {
+        let id = try createModelTab(initialURL: nil)
+        do {
+            if Self.claudeResponseStreamFreshURL(url) { _ = installClaudeResponseStream(authorization, tabID: id) }
+            else { authorization.revoke() }
+            // A failed diagnostic cannot fail or replay the ordinary navigation.
+            try navigate(tabID: id, to: url)
+            return id
+        } catch { closeTab(id); authorization.revoke(); throw error }
+    }
+
+    @discardableResult
+    func installClaudeResponseStream(_ authorization: ClaudeResponseStreamLease, tabID: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.claudeResponseStreamDiagnostic == nil, entry.claudeResponseStreamLease == nil,
+              entry.view.url == nil, !entry.view.isLoading,
+              entry.modelChanges == nil, authorization.isCurrent,
+              authorization.claim(view: ObjectIdentifier(entry.view)) else { authorization.revoke(); return false }
+        let duration = min(60_000, authorization.remainingMilliseconds)
+        let key = "__computaClaudeResponseStream_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        guard duration > 0, let source = Self.claudeResponseStreamSource(),
+              let config = try? JSONSerialization.data(withJSONObject: ["key": key, "durationMs": duration]),
+              let text = String(data: config, encoding: .utf8) else { authorization.revoke(); return false }
+        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_CLAUDE_RESPONSE_STREAM_CONFIG__", with: text),
+                                  injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        let diagnostic = ClaudeResponseStreamDiagnosticState(authorization: authorization, key: key, script: script)
+        entry.claudeResponseStreamDiagnostic = diagnostic
+        entry.claudeResponseStreamLease = authorization
+        entry.view.configuration.userContentController.addUserScript(script)
+        diagnostic.expiry = Task { @MainActor [weak self, weak diagnostic] in
+            do { try await Task.sleep(for: .milliseconds(duration)) } catch { return }
+            guard let self, let diagnostic, let current = self.entries[tabID],
+                  current.claudeResponseStreamDiagnostic === diagnostic else { return }
+            self.revokeClaudeResponseStream(current)
+        }
+        return true
+    }
+
+    func armClaudeResponseStream(tabID: UUID, view: WKWebView, ownerToken: String, expectedPrompt: String) async -> Bool {
+        guard !Task.isCancelled, !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "claude.ai", Self.claudeResponseStreamFreshURL(view.url),
+              let diagnostic = entry.claudeResponseStreamDiagnostic, diagnostic.generation == nil,
+              diagnostic.initialNavigationStarted, diagnostic.authorization.isCurrent,
+              !expectedPrompt.isEmpty, expectedPrompt.utf16.count <= 131_072 else { return false }
+        let generation = entry.tab.documentGeneration
+        guard diagnostic.authorization.bind(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation) else { return false }
+        diagnostic.generation = generation
+        let bytes = await callClaudeResponseStream(command: "arm", entry: entry, diagnostic: diagnostic,
+                                                  arguments: ["expectedPrompt": expectedPrompt,
+                                                              "expectedMarker": diagnostic.authorization.expectedMarker])
+        guard claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation),
+              bytes == Data("true".utf8) else {
+            if entries[tabID] === entry, entry.claudeResponseStreamDiagnostic === diagnostic { revokeClaudeResponseStream(entry) }
+            return false
+        }
+        return true
+    }
+
+    func stopClaudeResponseStream(tabID: UUID, view: WKWebView, ownerToken: String) async -> ClaudeResponseStreamSnapshot? {
+        guard !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "claude.ai", let diagnostic = entry.claudeResponseStreamDiagnostic else { return nil }
+        // Removal is unconditional for this exact caller, even if no arm or
+        // snapshot succeeded. Persistence belongs to transport before revoke.
+        defer { removeClaudeResponseStream(entry, diagnostic: diagnostic) }
+        guard let generation = diagnostic.generation,
+              claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation) else { return nil }
+        let bytes = await callClaudeResponseStream(command: "stop", entry: entry, diagnostic: diagnostic)
+        guard claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation),
+              let bytes else { return nil }
+        return try? ClaudeResponseStreamSnapshot.parse(bytes)
+    }
+
+    func revokeClaudeResponseStream(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeClaudeResponseStream(entry)
+    }
+
+    private func claudeResponseStreamCurrent(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState,
+                                            view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        !Task.isCancelled && !isShutdown && entries[entry.tab.id] === entry && entry.view === view
+            && entry.claudeResponseStreamDiagnostic === diagnostic && diagnostic.generation == generation
+            && entry.tab.documentGeneration == generation && entry.modelChanges?.ownerToken == ownerToken
+            && entry.modelSignalOriginHost == "claude.ai"
+            && diagnostic.authorization.matches(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation)
+            && claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic)
+    }
+
+    private static func claudeResponseStreamFreshURL(_ url: URL?) -> Bool {
+        ["https://claude.ai/new", "https://claude.ai/new?incognito"].contains(url?.absoluteString ?? "")
+    }
+
+    private func claudeResponseStreamRouteCurrent(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState) -> Bool {
+        guard let url = entry.view.url, url.scheme == "https", url.host == "claude.ai",
+              url.port == nil, url.user == nil, url.password == nil, url.fragment == nil else { return false }
+        if let pinned = diagnostic.conversationURL { return url.absoluteString == pinned }
+        if Self.claudeResponseStreamFreshURL(url) { return true }
+        guard diagnostic.generation != nil, url.query == nil, url.path.hasPrefix("/chat/"),
+              let id = UUID(uuidString: String(url.path.dropFirst(6))),
+              url.absoluteString == "https://claude.ai/chat/" + id.uuidString.lowercased() else { return false }
+        diagnostic.conversationURL = url.absoluteString
+        return true
+    }
+
+    private func callClaudeResponseStream(command: String, entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState,
+                                          arguments: [String: Any] = [:]) async -> Data? {
+        guard let expectedURL = entry.view.url?.absoluteString, diagnostic.authorization.isCurrent else { return nil }
+        let deadline = ContinuousClock.now + .milliseconds(min(1_000, diagnostic.authorization.remainingMilliseconds))
+        let result = EmbeddedScriptResult()
+        let bytes: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                let timeout = Task {
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                }
+                result.setTimeout(timeout)
+                guard result.isPending, !Task.isCancelled, ContinuousClock.now < deadline else {
+                    result.complete(.failure(CancellationError())); return
+                }
+                var values = arguments
+                values["key"] = diagnostic.key; values["command"] = command; values["expectedURL"] = expectedURL
+                values["expectedPrompt"] = values["expectedPrompt"] ?? NSNull()
+                values["expectedMarker"] = values["expectedMarker"] ?? NSNull()
+                entry.view.callAsyncJavaScript("""
+                    if (document.URL !== expectedURL || typeof window[key] !== 'function') return null;
+                    try {
+                      const value = await window[key](command, expectedPrompt, expectedMarker);
+                      const text = JSON.stringify(value);
+                      return typeof text === 'string' && text.length <= 81920 ? text : null;
+                    } catch { return null; }
+                    """, arguments: values, in: nil, in: .page) { reply in
+                    switch reply {
+                    case .success(let value):
+                        if let text = value as? String, text.utf8.count <= ClaudeResponseStreamSnapshot.maximumEncodedBytes {
+                            result.complete(.success(Data(text.utf8)))
+                        } else { result.complete(.failure(Failure.tabClosed)) }
+                    case .failure: result.complete(.failure(Failure.tabClosed))
+                    }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        return ContinuousClock.now < deadline ? bytes : nil
+    }
+
+    private func removeClaudeResponseStream(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState) {
+        guard entry.claudeResponseStreamDiagnostic === diagnostic else { return }
+        entry.claudeResponseStreamDiagnostic = nil; diagnostic.expiry?.cancel()
+        let controller = entry.view.configuration.userContentController
+        let surviving = controller.userScripts.filter { $0 !== diagnostic.script }
+        controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+        // No snapshot or authority is retained by this best-effort disposal.
+        entry.view.callAsyncJavaScript("""
+            if (typeof window[key] === 'function') { try { window[key]('stop'); } catch {} }
+            try { delete window[key]; } catch {} return null;
+            """, arguments: ["key": diagnostic.key], in: nil, in: .page, completionHandler: nil)
+    }
+
+    private func revokeClaudeResponseStream(_ entry: Entry) {
+        if let diagnostic = entry.claudeResponseStreamDiagnostic { removeClaudeResponseStream(entry, diagnostic: diagnostic) }
+        entry.claudeResponseStreamLease?.revoke()
+        entry.claudeResponseStreamLease = nil
+    }
+
+    private static func claudeResponseStreamSource() -> String? {
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "claude-response-stream-diagnostic", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8),
+               source.components(separatedBy: "__COMPUTA_CLAUDE_RESPONSE_STREAM_CONFIG__").count == 2 { return source }
+        }
+        return nil
+    }
 
     private final class RequestMetadataDiagnostic {
         let authorization: ChatGPTRequestMetadataLease
@@ -2623,12 +2824,23 @@ final class EmbeddedBrowserSession {
         return entry
     }
 
-    private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+    private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false, claudeInitialStart: Bool = false) {
         entry.pendingCacheAdmission = nil
         entry.delegate.cancelCacheAdmission()
         entry.pendingConversationAdmission = nil
         revokeResponseCompletion(entry)
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
+        if let diagnostic = entry.claudeResponseStreamDiagnostic {
+            if claudeInitialStart, !diagnostic.initialNavigationStarted {
+                // The one initial owned navigation injects the dormant script.
+                diagnostic.initialNavigationStarted = true
+            } else if !diagnostic.initialNavigationPrepared, !diagnostic.initialNavigationStarted,
+                      entry.view.url == nil, entry.navigation == nil {
+                diagnostic.initialNavigationPrepared = true
+            } else { revokeClaudeResponseStream(entry) }
+        } else if entry.claudeResponseStreamLease != nil {
+            revokeClaudeResponseStream(entry)
+        }
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.recoverySettledGeneration = nil
@@ -2668,6 +2880,8 @@ final class EmbeddedBrowserSession {
 
     private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
+        if let diagnostic = entry.claudeResponseStreamDiagnostic, view.url != nil,
+           !claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic) { revokeClaudeResponseStream(entry) }
         if entry.responseCompletion != nil, !Self.responseCompletionURLAllowed(view.url) { revokeResponseCompletion(entry) }
         if entry.inspectorDiagnostic != nil, !Self.inspectorOriginAllowed(view.url) { revokeModelInspector(entry, reason: .origin) }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2940,7 +3154,7 @@ final class EmbeddedBrowserSession {
         // A native load/reload invalidates synchronously, before WebKit starts it.
         // Page-initiated full navigations advance here; pushState does not arrive here.
         let prepared = entry.preparedDocumentNavigation && entry.navigation === navigation
-        prepareNavigation(entry)
+        prepareNavigation(entry, claudeInitialStart: true)
         if !prepared { entry.tab.documentGeneration = UUID() }
         entry.navigation = navigation
         if entry.isModelOwned, navigation != nil {
@@ -3020,6 +3234,7 @@ final class EmbeddedBrowserSession {
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         revokeResponseCompletion(entry)
+        revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
