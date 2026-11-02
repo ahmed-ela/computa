@@ -21,13 +21,13 @@ correct reference, exactly one accepted loopback submission, browser-observed
 receipt, final answer, task-tab closure and saved website-session cleanup.
 These are separate bounded results, not an all-model pass or a reliability rate.
 
-Opus 5 remains unqualified. The captured build379 request timed out in the
-harness; a separate foreground copy of that exact prompt showed Claude's
-`reasoning_extraction` safeguards pause. Build380 recognizes the observed
-warning layout in tested fixtures, but that detection fix has not been exercised
-by a new live Opus 5 case and does not establish prompt acceptance. The failed
-native page's exact state was not retained. No Retry or alternate-model action
-is authorized by the warning.
+Opus 5 remains unqualified for responses and workflows. A fresh build380
+marker verified live block handling: it failed with `website_response_blocked`
+after 2.905 s, without an answer or tools. The rendered app showed Failed, the
+non-retryable reasoning-extraction warning and confirmed website-session closure.
+This verifies the detection/cleanup fix, not provider acceptance. The earlier
+build379 native page's exact state remains unproved; its matching foreground
+control showed the safeguard pause. No Retry or alternate model was selected.
 
 Fresh build380 fixtures also failed for Sonnet 5, Sonnet 4.6, Opus 4.7 and
 Opus 4.8: each ended in a valid refusal with no native tool calls. Opus 3
@@ -1966,3 +1966,52 @@ Independent review records remain under the private evidence cases:
 | `sonnet5-workflow380-i` | `45a158c4f7bcd6462d1ed07ba9f5990e8783a9db74bc73d397943bbe082f0f19` |
 | `opus47-workflow380-j` | `46e7ed84c91e1178f909760fc20311216a445adb5a9f44b095adbcf48081ea8b` |
 | `opus48-workflow380-k` | `589c2fc8f4810ba94bd1468eb9ceb09c0e983a0118698d6b41df61c4d01e1639` |
+
+
+## Build380 live Opus 5 block handling, November 1
+
+One fresh harmless marker case, opus5-marker380-l, exercised the installed
+build380 error path under the existing testing authorization. It was a new
+native task, not a replay of either earlier captured request. Source e62bbbaf,
+process35137, process start and installed executable hash remained unchanged.
+The native draft and selected Opus 5 choice were read back before one Send.
+
+The task ended after 2.905 seconds, with one inference, zero tool calls and no
+accepted answer. The website journal joins exact Opus 5 selection, document
+generation and the bound first-user submission to website_response_blocked.
+There was no response release, correction, retry, alternate-model action or
+additional inference. The marker and full workflow remain unqualified.
+
+The rendered app was separately inspected through the public desktop tools. It
+showed Failed rather than Waiting, with code website_response_blocked, type
+model_error, retryable false and required_action inspect_website. Its message
+identified Claude's reasoning-extraction warning and stated that no response
+was accepted or prompt replayed. The closure banner confirmed that the owned
+website session was closed and the local chat retained. The engine's separate
+native-error capture contains generic internal_server_error text; that layer
+must not be cited as the source of the typed UI fields or evidence of provider
+load. The rendered screenshot and server journal supply their own proof.
+
+The exact saved automatic closed/not_created receipt completed 97 ms after
+native terminal. That cleanup reason does not imply no prompt was sent: the
+first-user submission had already been verified. No fixture server or new
+diagnostic arm was created for this marker. Its negative V6 qualification
+verdict remains separate from the positive error-handling/cleanup review.
+
+Earlier Opus 5 attempts on builds378 and379 reached roughly 301-second
+deadlines. This case demonstrates prompt terminal reporting of the observed
+block on build380; different fresh marker payloads mean those durations are
+not a matched provider-latency benchmark. The fix does not make the provider
+accept the harness request or close the historical failure records.
+
+The independent block-handling review verifies 21 checks and 15 retained-file
+hashes under the private case evidence. Its SHA-256 is
+`ad687b4915bb0f03e57f33e9cb7bab298da2e8aeedb02ead019412cd95c66974`. The public-tool screenshot
+SHA-256 is
+`f8af75d35e689d13cd4d799e9208b223f48bafb6f45099bfb8478442efe9b387`.
+
+Full Claude qualification remains incomplete: Sonnet 5/Sonnet 4.6 and
+Opus 4.7/Opus 4.8 still refuse the tested workflows, Opus 3 still produces
+malformed responses, and Opus 5 blocks the request. No further demonstrated
+host defect from these captures would turn those cases into successful
+workflows while preserving the established boundaries.

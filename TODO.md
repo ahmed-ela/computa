@@ -45,8 +45,9 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   run completed after a malformed reply and correction, but missing raw reply
   evidence prevents its full transport audit. The fresh pass does not diagnose
   that earlier response.
-  Opus 5's safeguard block remains unresolved; build380's warning-layout fix is
-  synthetically validated but not live-qualified for that case. Preserve the
+  Opus 5's safeguard block remains unresolved. Build380 now has a live 2.905 s
+  typed-block/confirmed-cleanup check, but no accepted response or workflow.
+  Preserve the
   other models' refusals, format failures, eligibility limits and historical
   unconfirmed cleanup. Fresh build380 tasks confirmed Sonnet 5/Sonnet 4.6 and
   Opus 4.7/Opus 4.8 refusals with zero tool calls. Opus 3 again failed both
