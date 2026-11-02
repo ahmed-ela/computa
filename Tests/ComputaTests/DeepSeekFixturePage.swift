@@ -47,9 +47,9 @@ enum DeepSeekFixturePage {
     reply: '{"type":"message","text":"Synthetic DeepSeek native reply"}' };
   const counters = { inputs: 0, sends: 0, deepThinkClicks: 0, searchClicks: 0, historyOpens: 0,
     deleteSelections: 0, confirmations: 0, earlySends: 0 };
-  const editor = document.querySelector('textarea');
-  const [deepThink, search] = document.querySelectorAll('.ds-toggle-button');
-  const send = document.querySelector('.ds-button--circle');
+  let editor = document.querySelector('textarea');
+  let [deepThink, search] = document.querySelectorAll('.ds-toggle-button');
+  let send = document.querySelector('.ds-button--circle');
   const transcript = document.querySelector('#transcript'), historyList = document.querySelector('#history');
   const prompts = []; window.fixturePrompts = prompts;
   let submitted = false, sent = '', userTurn = null, answerTurn = null, answer = null;
@@ -187,8 +187,21 @@ enum DeepSeekFixturePage {
     editor.value = ''; send.classList.add('ds-button--disabled'); setArrow(false);
     delayed(options.canonicalDelayMs, canonicalize);
   });
+  function remountComposer() {
+    const old = editor.closest('._020ab5b'), replacement = old.cloneNode(true);
+    old.replaceWith(replacement);
+    editor = replacement.querySelector('textarea'); editor.value = '';
+    [deepThink, search] = replacement.querySelectorAll('.ds-toggle-button');
+    send = replacement.querySelector('.ds-button--circle');
+    // Any adapter mutation of this new composer is a test failure, even though
+    // the fixture deliberately supplies no handler that could repair its mode.
+    editor.addEventListener('input', () => counters.inputs++);
+    deepThink.addEventListener('click', () => counters.deepThinkClicks++);
+    search.addEventListener('click', () => counters.searchClicks++);
+    send.addEventListener('click', () => counters.earlySends++);
+  }
   window.deepseekFixture = { options, counters, canonical, conversationID, appendUser, completeResponse,
-    resumeStreaming, canonicalize, setMode,
+    resumeStreaming, canonicalize, setMode, remountComposer,
     snapshot() { return { counters: { ...counters }, submitted, promptCount: prompts.length,
       promptLength: sent.length, userPresent: !!userTurn?.isConnected, answerPresent: !!answerTurn?.isConnected,
       mode: selected(deepThink) ? 'deepthink' : 'chat', search: selected(search), canonical: location.href === canonical,

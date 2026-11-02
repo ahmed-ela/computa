@@ -23,6 +23,135 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testCompleteComposerRemountWithholdsAuthorityUntilExactFirstBodyInBothModes() async throws {
+        for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+            let fixture = try Fixture(setup: """
+                deepseekFixture.options.delayUser = true;
+                document.querySelector('.ds-button--circle').addEventListener('click', deepseekFixture.remountComposer);
+                """)
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, mode: mode)
+            let prompt = String(repeating: "Exact synthetic remount café 👋 <tag>\n", count: 1_600)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            for _ in 0..<2 {
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["state"] as? String, "running")
+                XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "deepseek_initial_composer_remount_v1")
+                XCTAssertEqual(pending["text"] as? String, "")
+                XCTAssertNil(pending["modeEvidence"]); XCTAssertNil(pending["modelEvidence"])
+                XCTAssertNil(pending["modelProofContext"]); XCTAssertNil(pending["completionEvidence"])
+                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                XCTAssertEqual(context["responseCount"] as? Int, 0)
+            }
+            let revision = try await fixture.transport.changeRevision(sessionToken: token)
+            _ = try await evaluate(fixture.view, "deepseekFixture.appendUser(); return true;")
+            let changed = try await fixture.transport.waitForChange(sessionToken: token,
+                after: try XCTUnwrap(revision), until: .now + .seconds(2))
+            XCTAssertNotNil(changed, "Existing DOM events must wake the held first-body observation")
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic DeepSeek native reply"}"#)
+            let choice = WebsiteModeChoice(deepSeekMode: mode)
+            XCTAssertEqual(try WebsiteModeEvidence.parse(complete["modeEvidence"], provider: "deepseek", expected: choice).selected, choice)
+            XCTAssertNil(complete["modelVerificationPending"])
+            let exact = try await evaluate(fixture.view,
+                "return fixturePrompts.length===1 && fixturePrompts[0]===document.querySelector('.ds-collapsible-text').textContent;") as? Bool
+            XCTAssertEqual(exact, true)
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            let actions = try await evaluate(fixture.view,
+                "return [deepseekFixture.counters.inputs,deepseekFixture.counters.searchClicks,deepseekFixture.counters.deepThinkClicks,deepseekFixture.counters.earlySends];") as? [Int]
+            XCTAssertEqual(actions, [1,1,mode == .chat ? 0 : 1,0])
+        }
+    }
+
+    func testExistingFirstCanonicalRouteRefreshRetainsOnlyInitialRemountObservationPermission() async throws {
+        let fixture = try Fixture(setup: "deepseekFixture.options.delayUser=true; deepseekFixture.options.canonicalDelayMs=60000")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic exact first canonical route transition")
+        var crossed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !crossed {
+                crossed = true
+                _ = try? await self.evaluate(fixture.view,
+                    "deepseekFixture.canonicalize(); deepseekFixture.remountComposer(); return true;")
+            }
+        }
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertTrue(crossed)
+        XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+        XCTAssertNil(pending["modeEvidence"]); XCTAssertEqual(pending["text"] as? String, "")
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        _ = try await evaluate(fixture.view, "deepseekFixture.appendUser(); return true;")
+        _ = try await wait(fixture, token, state: "complete")
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testServerAcceptsOnlyRestoredModeAfterHeldComposerRemountAndDurableDeletion() async throws {
+        for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+            let fixture = try Fixture(setup: """
+                deepseekFixture.options.delayUser = true;
+                document.querySelector('.ds-button--circle').addEventListener('click', deepseekFixture.remountComposer);
+                """)
+            defer { fixture.shutdown() }
+            var pendingReads = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect",
+                   (try? await self.evaluate(fixture.view,
+                       "return !!globalThis.__computaDeepSeekSavedSessionV1?.modeHandoff && !globalThis.__computaDeepSeekSavedSessionV1?.first;",
+                       world: self.world)) as? Bool == true {
+                    pendingReads += 1
+                    if pendingReads == 1 {
+                        _ = try? await self.evaluate(fixture.view, "setTimeout(()=>deepseekFixture.appendUser(),100); return true;")
+                    }
+                }
+            }
+            let choice = WebsiteModeChoice(deepSeekMode: mode)
+            try await assertSavedProviderServerStream(transport: fixture.transport, provider: .deepseek,
+                modelID: choice.requestID, selection: .mode(choice), expectedText: "Synthetic DeepSeek native reply")
+            XCTAssertGreaterThanOrEqual(pendingReads, 1)
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
+    func testPendingRemountCannotRenewDeadlineOrRepairChangedMode() async throws {
+        for failureKind in ["deadline", "search", "second-remount", "wrong-body"] {
+            let fixture = try Fixture(setup: """
+                deepseekFixture.options.delayUser = true;
+                document.querySelector('.ds-button--circle').addEventListener('click', deepseekFixture.remountComposer);
+                """)
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic bounded pending body")
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+            switch failureKind {
+            case "deadline": fixture.transport.setTimeoutsForTesting(preparation: .seconds(10), response: .milliseconds(1))
+            case "search": _ = try await evaluate(fixture.view, "deepseekFixture.setMode(false,true); return true;")
+            case "second-remount": _ = try await evaluate(fixture.view, "deepseekFixture.remountComposer(); return true;")
+            default: _ = try await evaluate(fixture.view,
+                "deepseekFixture.appendUser(); document.querySelector('.ds-collapsible-text span').textContent += ' altered'; return true;")
+            }
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("A pending remount must not survive \(failureKind)")
+            } catch let failure as EmbeddedWebModelTransport.Failure {
+                if failureKind == "deadline" { XCTAssertEqual(failure, .deadline) }
+                else if failureKind == "wrong-body" { XCTAssertEqual(failure, .ownershipFailure(.javaScriptFirstUser)) }
+                else { XCTAssertEqual(failure, .modelUnverified) }
+            }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            let actions = try await evaluate(fixture.view,
+                "return [deepseekFixture.counters.inputs,deepseekFixture.counters.searchClicks,deepseekFixture.counters.deepThinkClicks,deepseekFixture.counters.earlySends];") as? [Int]
+            XCTAssertEqual(actions, [1,1,0,0])
+        }
+    }
+
     func testReadOnlyModeDiscoveryDoesNotChangeSearchOrDeepThink() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let modes = try await fixture.transport.discoverModes(provider: "deepseek")

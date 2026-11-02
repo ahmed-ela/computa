@@ -40,23 +40,23 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
   existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
-  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed392
-  failed all three fresh native markers: Kimi Instant before Send (2,159 ms),
-  Qwen Plus on a non-UUID `/c/` route after submit (3,048 ms), and DeepSeek Chat
-  after verified mode/submission (1,343 ms). No answer or tool result was accepted;
-  Qwen and DeepSeek cleanup remains unconfirmed. DeepSeek's391 empty decoration
-  and392 replaced-toggle packets came from cleanup after the primary errors,
-  so neither establishes the primary cause. Qwen's exact terminal error is now
-  preserved instead of generic high demand. Candidate393 diagnostics target
-  the missing route/mode evidence without broadening acceptance; native replies,
-  durable cleanup and tool workflows remain unqualified.
-  Discover concrete models from each live picker, verify the exact submitted
-  message and final response, and delete only the owned test conversation.
-  Kimi Instant returned direct synthetic markers; build382 Qwen3.7-Plus and
-  Qwen3.8-Max each returned one exact direct marker and their test conversations
-  were deleted. DeepSeek returned its first direct Chat marker; scoped deletion
-  inspection remains pending. These direct website observations are not native
-  harness/tool-use passes.
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed393
+  failed all three fresh native markers: Kimi Instant after Send at first-user
+  ownership (2,361 ms), Qwen Plus at its post-submit route (3,228 ms), and
+  DeepSeek Chat at the initial complete composer/control replacement (1,255 ms).
+  No native answer/tool result was accepted; all three cleanups are unconfirmed.
+  Kimi's settled saved page later showed the exact marker and valid body/ID
+  structure, but its failed-time predicate and full outbound comparison remain
+  unknown. DeepSeek's first negative packet shows old controls disconnected,
+  current Chat and Search off. A separate one-Send Qwen direct probe identified
+  `/c/new-chat` at 57 ms, canonical at 784 ms; that direct conversation was deleted
+  and developer settings restored. It is not a native response/cleanup pass.
+  Candidate394 adds finite Kimi reasons and a narrowly bound DeepSeek handoff;
+  exact Qwen provisional-route support is integrated. Source gates passed 115
+  distinct native and 226 JavaScript/resource/version tests. Packaging and fresh
+  installed qualification remain pending; browser/terminal/file tasks are unstarted.
+  Earlier bounded direct Kimi, Qwen Plus/Max and DeepSeek Chat/DeepThink markers
+  and manual deletion observations remain separate from native qualification.
   See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
 
 - [ ] Audit the remaining terminal website HTTP403/409 mappings against the

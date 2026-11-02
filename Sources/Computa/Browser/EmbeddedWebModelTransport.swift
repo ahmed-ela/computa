@@ -548,6 +548,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Claude may temporarily detach its header before any reply exists.
         // This separate negative state never carries model or answer proof.
         var claudeModelObservationPending = false
+        var deepSeekComposerHandoffPending = false
+        var qwenProvisionalRoutePending = false
         var loggedPendingModelVerification = false
         var selectionEvidence: WebsiteSelectionEvidence?
         var lastModelDiagnostic: String?
@@ -1844,6 +1846,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && browser.webView(for: session.tabID) === session.view && session.view.url == session.provider.startURL
     }
 
+    private static let kimiFirstUserFailureDetails = [
+        "first_body_count", "first_root_hidden", "first_root_id_invalid", "first_turn_link_mismatch", "first_body_shape",
+        "first_submission_unclaimed", "first_insertion_missing", "first_full_echo_mismatch", "first_marker_invalid",
+        "first_marker_mismatch", "first_marker_suffix", "first_changed_during_hash", "first_pinned_identity_changed",
+        "first_pinned_fingerprint_mismatch", "first_expected_fingerprint_mismatch", "first_binding_not_authorized", "first_disappeared",
+    ]
+
+    /// Finite Kimi details preserve the original first-user ownership category.
+    /// The body-count check retains its original document_changed error.
+    static func isKimiFirstUserFailure(_ observed: [String: Any], provider: Provider) -> Bool {
+        guard provider == .kimi, let detail = observed["detail"] as? String,
+              kimiFirstUserFailureDetails.contains(detail) else { return false }
+        return observed["error"] as? String == (detail == "first_body_count" ? "document_changed" : "conversation_changed")
+    }
+
     private static let deepSeekFirstUserFailureDetails = [
         "first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children", "first_container_text", "first_root_text",
         "first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash",
@@ -1986,7 +2003,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "more_related_changed", "more_related_disconnected", "more_selection_state",
                 "more_submenu_changed", "more_submenu_count", "more_submenu_expansion",
                 "more_submenu_labelledby", "more_top_checked", "more_trigger_changed",
-                "more_trigger_count", "more_trigger_disabled", "more_trigger_links"]
+                "more_trigger_count", "more_trigger_disabled", "more_trigger_links"] + kimiFirstUserFailureDetails
                 + ["picker_open", "picker_close", "model_option", "more_open", "more_close"].flatMap { stage in
                     ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
                 }
@@ -2004,6 +2021,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .deepseek:
             providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
                 "mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed",
+                "composer_handoff_ineligible", "composer_handoff_binding", "composer_handoff_changed",
                 "delete_anchor", "delete_buttons"] + deepSeekFirstUserFailureDetails
         default: return nil
         }
@@ -2739,6 +2757,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     maximumWait: min(inspectionTimeout, deadline - .now))
             } else {
                 observed = try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
+                    allowPendingDeepSeekComposerHandoff: true,
+                    allowPendingQwenProvisionalRoute: true,
                     maximumWait: min(inspectionTimeout, deadline - .now))
             }
         }
@@ -2793,6 +2813,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         if observed["claudeModelObservationPending"] != nil {
             guard session.claudeModelObservationPending else { throw Failure.modelUnverified }
+            return try snapshot(session)
+        }
+        if observed["deepSeekComposerHandoffPending"] != nil {
+            guard session.deepSeekComposerHandoffPending else { throw Failure.modelUnverified }
+            return try snapshot(session)
+        }
+        if observed["qwenProvisionalRoutePending"] != nil {
+            guard session.qwenProvisionalRoutePending else { throw Failure.modelUnverified }
             return try snapshot(session)
         }
         session.initialReadRetry = nil
@@ -5458,6 +5486,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       requireClaudeSafeguardPause: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       allowPendingClaudeModelObservation: Bool = false,
+                      allowPendingDeepSeekComposerHandoff: Bool = false,
+                      allowPendingQwenProvisionalRoute: Bool = false,
                       preferQuietChatGPTCompletion: Bool = false,
                       pendingSubmissionProductRecheck: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
@@ -5680,6 +5710,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && action == "inspect" && enforceModel && !allowBlockedProvider
             && canObservePendingClaudeModel(session)
         if allowClaudeModelObservationPending { input["allowClaudeModelObservationPending"] = true }
+        let allowDeepSeekComposerHandoff = allowPendingDeepSeekComposerHandoff
+            && action == "inspect" && enforceModel && !allowBlockedProvider && !allowSavedCleanupInspection
+            && canObservePendingDeepSeekComposerHandoff(session)
+        if allowDeepSeekComposerHandoff { input["allowDeepSeekComposerHandoff"] = true }
+        let allowQwenProvisionalRoute = allowPendingQwenProvisionalRoute
+            && action == "inspect" && enforceModel && !allowBlockedProvider && !allowSavedCleanupInspection
+            && canObservePendingQwenProvisionalRoute(session)
+        if allowQwenProvisionalRoute {
+            input["allowQwenProvisionalRoute"] = true
+            input["savedSubmissionFingerprint"] = session.savedDeleteSubmission?.outboundFingerprint
+        }
         if preferQuietChatGPTCompletion {
             guard action == "inspect", !allowBlockedProvider, allowPendingChatGPTModelVerification,
                   !recheckModelAfterAwait, !recheckProductAfterAwait,
@@ -5903,7 +5944,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     return try await page(session, action: "inspect", enforceModel: enforceModel,
                         refreshChangedRoute: provider.savedConversationRoute(currentURL)?.conversation == nil,
                         recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                        allowBlockedProvider: allowBlockedProvider, allowSavedCleanupInspection: allowSavedCleanupInspection,
+                        allowBlockedProvider: allowBlockedProvider,
+                        allowPendingDeepSeekComposerHandoff: allowPendingDeepSeekComposerHandoff,
+                        allowPendingQwenProvisionalRoute: allowPendingQwenProvisionalRoute,
+                        allowSavedCleanupInspection: allowSavedCleanupInspection,
                         maximumWait: evaluationDeadline - .now)
                 }
                 guard action == "submit" else { throw Failure.ownershipFailure(.routeAfter) }
@@ -6180,6 +6224,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 let isFirstUserFailure = observed["detail"] as? String == "first_user_message"
                     || Self.isDeepSeekFirstUserFailure(observed, provider: provider)
+                    || Self.isKimiFirstUserFailure(observed, provider: provider)
                 if isFirstUserFailure {
                     recordFirstUserFailure(.adapterRejected, observed: observed)
                 }
@@ -6287,6 +6332,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 Self.inspectionLog.notice("claudeModelObservation phase=pending sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
             }
             session.claudeModelObservationPending = true
+            return observed
+        }
+        if observed["deepSeekComposerHandoffPending"] != nil {
+            // A held post-Send replacement is negative evidence only. Existing
+            // view/generation/route fences and the absolute turn deadline apply;
+            // no first-body, mode, response, or cleanup authority is adopted.
+            guard allowDeepSeekComposerHandoff, action == "inspect", enforceModel,
+                  canObservePendingDeepSeekComposerHandoff(session), session.documentGeneration == generation,
+                  currentURL == url, savedDeleteOperation == nil,
+                  Self.isDeepSeekComposerHandoffPendingObservation(observed, url: currentURL.absoluteString),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+            session.deepSeekComposerHandoffPending = true
+            return observed
+        }
+        if observed["qwenProvisionalRoutePending"] != nil {
+            guard allowQwenProvisionalRoute, action == "inspect", enforceModel,
+                  canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
+                  currentURL == url, savedDeleteOperation == nil,
+                  Self.isQwenProvisionalRoutePendingObservation(observed, url: currentURL.absoluteString),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+            session.qwenProvisionalRoutePending = true
             return observed
         }
         if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
@@ -6624,7 +6690,64 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.claudeModelObservationPending = false
             Self.inspectionLog.notice("claudeModelObservation phase=restored sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
         }
+        if (session.deepSeekComposerHandoffPending && provider == .deepseek
+            || session.qwenProvisionalRoutePending && provider == .qwen), action == "inspect", enforceModel,
+           !allowBlockedProvider, !allowSavedCleanupInspection {
+            guard session.firstUserFingerprint == session.savedDeleteSubmission?.outboundFingerprint,
+                  session.confirmedUsers == 1, !session.pendingSubmission,
+                  observed["firstUserVerified"] as? Bool == true,
+                  observed["firstUserMarkerVerified"] as? Bool == true else { throw Failure.modelUnverified }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action)
+            session.deepSeekComposerHandoffPending = false
+            session.qwenProvisionalRoutePending = false
+        }
         return observed
+    }
+
+    private func canObservePendingDeepSeekComposerHandoff(_ session: Session) -> Bool {
+        session.provider == .deepseek && canObservePendingSavedFirstBody(session)
+    }
+
+    private func canObservePendingQwenProvisionalRoute(_ session: Session) -> Bool {
+        session.provider == .qwen && canObservePendingSavedFirstBody(session)
+    }
+
+    private func canObservePendingSavedFirstBody(_ session: Session) -> Bool {
+        let selectionMatches = session.provider == .deepseek
+            ? session.modeChoice != nil && session.modelChoice == nil
+            : session.provider == .qwen && session.modeChoice == nil && session.modelChoice != nil
+        guard !Task.isCancelled, selectionMatches, !session.isDiscovery, !session.isRecoveryProbe,
+              session.state == "running", session.terminalFailure == nil, session.submitted,
+              session.requiresSavedDelete, session.savedDeleteReady, session.lifecycleVerified,
+              session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.confirmedUsers == 0, session.pendingSubmission, session.baseline == 0,
+              session.firstUserFingerprint == nil, session.conversation == nil, session.conversationIdentity == nil,
+              session.observedResponseCount == 0, session.response.isEmpty, !session.profiledFirstPositive,
+              !session.completionCandidate, session.responseCodeStructure == nil, session.savedDeleteOperation == nil,
+              session.modelSelectionVerified,
+              session.selectionEvidence != nil, let binding = session.savedDeleteSubmission,
+              session.documentGeneration == binding.generation,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == binding.generation else { return false }
+        return true
+    }
+
+    static func isQwenProvisionalRoutePendingObservation(_ value: [String: Any], url: String) -> Bool {
+        Set(value.keys) == ["qwenProvisionalRoutePending", "url", "sessionLifecycle", "temporary"]
+            && firstUserDiagnosticBool(value["qwenProvisionalRoutePending"]) == true
+            && firstUserDiagnosticBool(value["temporary"]) == false
+            && value["sessionLifecycle"] as? String == "saved_conversation_delete"
+            && value["url"] as? String == url
+            && url == "https://chat.qwen.ai/c/new-chat"
+    }
+
+    static func isDeepSeekComposerHandoffPendingObservation(_ value: [String: Any], url: String) -> Bool {
+        Set(value.keys) == ["deepSeekComposerHandoffPending", "url", "sessionLifecycle", "temporary"]
+            && firstUserDiagnosticBool(value["deepSeekComposerHandoffPending"]) == true
+            && firstUserDiagnosticBool(value["temporary"]) == false
+            && value["sessionLifecycle"] as? String == "saved_conversation_delete"
+            && value["url"] as? String == url
+            && Provider.deepseek.conversationURL(url) != nil
     }
 
     private func canObservePendingClaudeModel(_ session: Session) -> Bool {
@@ -7324,6 +7447,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
+        if session.deepSeekComposerHandoffPending || session.qwenProvisionalRoutePending,
+           session.state == "running", cleanup == nil {
+            guard canObservePendingSavedFirstBody(session),
+                  session.deepSeekComposerHandoffPending == (session.provider == .deepseek),
+                  session.qwenProvisionalRoutePending == (session.provider == .qwen),
+                  let binding = session.savedDeleteSubmission else {
+                throw Failure.modelUnverified
+            }
+            return try JSONSerialization.data(withJSONObject: [
+                "provider": session.provider.rawValue, "sessionToken": session.token, "state": "running", "text": "", "sequence": 1,
+                "sessionLifecycle": "saved_conversation_delete", "temporary": false,
+                "modelVerificationPending": true, "modelVerificationPendingReason": session.provider == .deepseek
+                    ? "deepseek_initial_composer_remount_v1" : "qwen_initial_provisional_route_v1",
+                "pendingSubmissionContext": ["documentGeneration": binding.generation.uuidString, "sequence": 1,
+                    "baselineResponseCount": 0, "responseCount": 0, "firstUserFingerprint": "",
+                    "submittedPromptFingerprint": binding.promptFingerprint]
+            ])
+        }
+
         if session.claudeModelObservationPending, session.state == "running", cleanup == nil {
             guard canObservePendingClaudeModel(session), let binding = session.freshSubmissionBinding else {
                 throw Failure.modelUnverified

@@ -92,7 +92,7 @@ async function computaSavedConversation(input, c, dom, config) {
       owner: input.ownerToken, document, window, generation: input.documentGeneration,
       model: null, selection: null, mode: null, modeSelection: null, prepared: null, inserted: null, send: null,
       submitted: false, first: null, provisional: null, canonical: null, deletion: null, terminal: false,
-      initialControls: {}, initialReadComplete: false
+      initialControls: {}, initialReadComplete: false, modeHandoff: null, submittedFingerprint: null
     };
     state = globalThis[key];
     const guard = (exactURL = true) => {
@@ -185,6 +185,48 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch', 'selection_target');
       return { selected, verification: 'website_selection', source: 'model_picker_label' };
+    }
+    function observeInitialModeHandoff(initial) {
+      // DeepSeek mounts a new empty composer after the first Send. Pin that
+      // complete replacement once; it has no mode or response authority until
+      // the exact submitted first body has survived its ordinary hash checks.
+      if (config.initialModeHandoff !== true || input.allowDeepSeekComposerHandoff !== true || !usesModes || input.action !== 'inspect'
+        || cleanupInspection || state.first || state.deletion || !state.submitted || !state.inserted
+        || !state.mode || state.modeSelection || !state.prepared || !state.send
+        || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
+        || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null
+        || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
+        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
+        || !c.equalChoice(input.expectedModeChoice, state.mode.choice)
+        || route.kind !== 'canonical' || state.canonical !== route.canonical)
+        c.fail('mode_unverified', 'composer_handoff_ineligible');
+      const form = initial.form, controls = dom.modeControls();
+      if (!form.empty || controls.scope !== form.scope || !c.enabled(form.editor)
+        || state.prepared.scope.isConnected || state.prepared.editor.isConnected || state.send.isConnected
+        || state.mode.deepThink.isConnected || state.mode.search.isConnected
+        || form.scope === state.prepared.scope || form.editor === state.prepared.editor || form.send === state.send
+        || controls.deepThink.node === state.mode.deepThink || controls.search.node === state.mode.search
+        || controls.search.selected
+        || !c.equalChoice(controls.choices[controls.deepThink.selected ? 1 : 0], state.mode.choice))
+        c.fail('mode_unverified', 'composer_handoff_binding');
+      const current = { scope: form.scope, editor: form.editor, send: form.send,
+        deepThink: controls.deepThink.node, search: controls.search.node, canonical: route.canonical };
+      if (state.modeHandoff) {
+        if (state.modeHandoff.committed || Object.keys(current).some(key => state.modeHandoff[key] !== current[key]))
+          c.fail('mode_unverified', 'composer_handoff_changed');
+      } else state.modeHandoff = { ...current, committed: false };
+      return state.modeHandoff;
+    }
+    function commitInitialModeHandoff(first, fingerprint) {
+      const claim = state.modeHandoff;
+      if (!claim || claim.committed || fingerprint !== state.submittedFingerprint
+        || dom.route().canonical !== claim.canonical || !sameFirst(first))
+        c.fail('mode_unverified', 'composer_handoff_changed');
+      // Recompute every current physical and semantic predicate after hashing;
+      // only these held controls can replace the detached pre-Send handles.
+      observeInitialModeHandoff({form: dom.composer()});
+      state.mode = { choice: state.mode.choice, deepThink: claim.deepThink, search: claim.search };
+      claim.committed = true;
     }
     function sameFirst(first) {
       const now = dom.transcript().first;
@@ -342,6 +384,24 @@ async function computaSavedConversation(input, c, dom, config) {
         firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null, conversationIdentity: null,
         deleteProof: proof(op, record, true) };
     }
+    if (config.initialProvisionalRoute === true && route.kind === 'provisional') {
+      // Qwen briefly exposes /c/new-chat after Send. This read cannot inspect
+      // canonical message IDs, grant model proof, or dispatch any action.
+      // Native independently requires its acknowledged first Send and deadline.
+      if (input.action !== 'inspect' || input.allowQwenProvisionalRoute !== true || cleanupInspection
+        || !state.submitted || !state.inserted || !state.prepared || !state.send || !state.model
+        || state.selection || state.first || state.canonical || state.deletion
+        || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null
+        || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
+        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
+        || !c.equalChoice(input.expectedModelChoice, state.model.choice)
+        || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
+        || input.savedSubmissionFingerprint !== state.submittedFingerprint)
+        c.fail('conversation_changed', 'first_user_message');
+      guard();
+      return { qwenProvisionalRoutePending: true, url: document.URL,
+        sessionLifecycle: 'saved_conversation_delete', temporary: false };
+    }
     let initial = read();
     if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
       || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(initial.t.users.length))
@@ -349,6 +409,18 @@ async function computaSavedConversation(input, c, dom, config) {
     // Diagnostic-only mode detail: Qwen retains its existing detail and both
     // providers retain all exact body, marker, identity and fingerprint gates.
     const firstFailure = detail => c.fail('conversation_changed', usesModes ? detail : 'first_user_message');
+    if (config.initialModeHandoff === true && !state.first
+      && (state.modeHandoff || state.submitted && initial.output.modeEvidence == null
+        && state.prepared?.scope.isConnected === false && state.prepared.editor.isConnected === false
+        && state.send?.isConnected === false && state.mode?.deepThink.isConnected === false
+        && state.mode.search.isConnected === false)) {
+      observeInitialModeHandoff(initial);
+      if (!initial.t.first) {
+        if (initial.t.users.length !== 0 || initial.t.answers.length !== 0) firstFailure('first_not_submitted');
+        return { deepSeekComposerHandoffPending: true, url: document.URL,
+          sessionLifecycle: 'saved_conversation_delete', temporary: false };
+      }
+    }
     if (initial.t.first) {
       if (!state.submitted || !state.inserted) firstFailure('first_not_submitted');
       if (initial.t.first.text !== state.inserted.prompt) firstFailure('first_prompt_mismatch');
@@ -358,6 +430,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
       const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
+      if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
       selectionEvidence();
       if (state.first) {
         const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
@@ -464,6 +537,7 @@ async function computaSavedConversation(input, c, dom, config) {
     if (!form.sendReady) c.fail('send_unavailable');
     const outboundFingerprint = input.savedSubmissionFingerprint;
     if (typeof outboundFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(outboundFingerprint)) c.fail('prompt_not_inserted');
+    state.submittedFingerprint = outboundFingerprint;
     state.submitted = true; form.send.click();
     return { ...initial.output, submitted: true, submissionAcknowledgement: { ownerToken: input.ownerToken,
       documentGeneration: input.documentGeneration, sequence: 1, outboundFingerprint } };
@@ -776,7 +850,7 @@ try {
     'deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
   const c = computaProviderCore(input, 'deepseek', 'https://chat.deepseek.com', actions);
   return await computaSavedConversation(input, c, computaDeepSeekDOM(c), {
-    stateKey: '__computaDeepSeekSavedSessionV1', origin: 'https://chat.deepseek.com', selectionKind: 'mode'
+    stateKey: '__computaDeepSeekSavedSessionV1', origin: 'https://chat.deepseek.com', selectionKind: 'mode', initialModeHandoff: true
   });
 } catch (error) {
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }

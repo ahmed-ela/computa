@@ -1904,6 +1904,36 @@ actor WebModelServer {
                       receiptInteger(context["responseCount"], range: 0...0) == 0 else {
                     throw Failure.invalidRequest
                 }
+            } else if session.provider == "deepseek" || session.provider == "qwen" {
+                // Only the acknowledged initial saved-chat Send may wait for
+                // its exact first body: a complete DeepSeek composer replacement
+                // or Qwen's exact provisional route. This grants no selection,
+                // first-body, response or cleanup proof.
+                let expectedReason = session.provider == "deepseek"
+                    ? "deepseek_initial_composer_remount_v1" : "qwen_initial_provisional_route_v1"
+                let selectionMatches = session.provider == "deepseek"
+                    ? session.modeChoice != nil && session.modelChoice == nil
+                    : session.modeChoice == nil && session.modelChoice != nil
+                guard selectionMatches, Set(snapshot.keys) == ["provider", "sessionToken", "state", "text", "sequence",
+                        "sessionLifecycle", "temporary", "modelVerificationPending",
+                        "modelVerificationPendingReason", "pendingSubmissionContext"],
+                      snapshot["provider"] as? String == session.provider,
+                      snapshot["sessionLifecycle"] as? String == "saved_conversation_delete",
+                      let temporary = snapshot["temporary"] as? NSNumber,
+                      CFGetTypeID(temporary) == CFBooleanGetTypeID(), !temporary.boolValue,
+                      snapshot["modelVerificationPendingReason"] as? String == expectedReason,
+                      session.resolvedSelection != nil,
+                      !session.provesNativeContinuation, !session.provesFreshSessionSubmission,
+                      session.sequence == 1, session.baselineResponseCount == 0,
+                      session.firstUserFingerprint == nil, let generation = session.documentGeneration,
+                      let context = snapshot["pendingSubmissionContext"] as? [String: Any],
+                      Set(context.keys) == ["documentGeneration", "sequence", "baselineResponseCount",
+                          "responseCount", "firstUserFingerprint", "submittedPromptFingerprint"],
+                      let rawGeneration = context["documentGeneration"] as? String,
+                      UUID(uuidString: rawGeneration) == generation,
+                      context["firstUserFingerprint"] as? String == "",
+                      context["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint,
+                      receiptInteger(context["responseCount"], range: 0...0) == 0 else { throw Failure.invalidRequest }
             } else {
                 guard session.provider == "chatgpt", session.modelChoice?.chatGPTPower != nil,
                       session.resolvedSelection != nil, snapshot["modelVerificationPendingReason"] == nil,

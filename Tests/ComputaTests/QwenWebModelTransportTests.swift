@@ -102,6 +102,208 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testProvisionalPendingReceiptIsExactNegativeShapeAndLiteralRouteOnly() {
+        let url = "https://chat.qwen.ai/c/new-chat"
+        let valid: [String: Any] = ["qwenProvisionalRoutePending": true, "url": url,
+            "sessionLifecycle": "saved_conversation_delete", "temporary": false]
+        XCTAssertTrue(EmbeddedWebModelTransport.isQwenProvisionalRoutePendingObservation(valid, url: url))
+        for (key, value) in [("qwenProvisionalRoutePending", 1 as Any), ("temporary", 0 as Any),
+            ("qwenProvisionalRoutePending", false as Any), ("sessionLifecycle", "temporary" as Any),
+            ("text", "" as Any), ("modelEvidence", NSNull() as Any), ("modeEvidence", NSNull() as Any),
+            ("firstUserFingerprint", "" as Any), ("userCount", 0 as Any)] {
+            var changed = valid; changed[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isQwenProvisionalRoutePendingObservation(changed, url: url), key)
+        }
+        for other in ["https://chat.qwen.ai/", "https://chat.qwen.ai/c/new", "https://chat.qwen.ai/c/new-chat/",
+            "https://chat.qwen.ai/c/new-chat?", "https://chat.qwen.ai/c/NEW-CHAT", "https://chat.qwen.ai/c/%6eew-chat",
+            "https://chat.qwen.ai/c/11111111-abcd-4333-8444-555555555555"] {
+            var changed = valid; changed["url"] = other
+            XCTAssertFalse(EmbeddedWebModelTransport.isQwenProvisionalRoutePendingObservation(changed, url: other))
+            XCTAssertFalse(EmbeddedWebModelTransport.isQwenProvisionalRoutePendingObservation(valid, url: other))
+        }
+    }
+
+    func testObservedPlaceholderWithholdsModelAndAnswerUntilExactCanonicalBodyForBothModels() async throws {
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, label: label)
+            let prompt = String(repeating: "Synthetic exact Qwen café 👋 'quote' <tag>\n", count: 1_500)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            let before = try await evaluate(fixture.view,
+                "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];") as? [Int]
+            for _ in 0..<2 {
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["state"] as? String, "running"); XCTAssertEqual(pending["text"] as? String, "")
+                XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_initial_provisional_route_v1")
+                XCTAssertNil(pending["modelEvidence"]); XCTAssertNil(pending["modeEvidence"])
+                XCTAssertNil(pending["modelProofContext"]); XCTAssertNil(pending["completionEvidence"])
+                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                XCTAssertEqual(context["responseCount"] as? Int, 0)
+            }
+            let revision = try await fixture.transport.changeRevision(sessionToken: token)
+            _ = try await evaluate(fixture.view, "qwenFixture.canonicalize(); return true;")
+            let changed = try await fixture.transport.waitForChange(sessionToken: token,
+                after: try XCTUnwrap(revision), until: .now + .seconds(2))
+            XCTAssertNotNil(changed)
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+            XCTAssertNil(complete["modelVerificationPending"])
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            let proof = try WebsiteModelEvidence.parse(complete["modelEvidence"], provider: "qwen", expected: choice)
+            XCTAssertEqual(proof.selected.key, label); XCTAssertEqual(proof.selected.label, label)
+            let echoValue = try await evaluate(fixture.view, "return document.querySelector('p.user-message-content').textContent;")
+            let echo = try XCTUnwrap(echoValue as? String)
+            let prefix = prompt + "\n\nComputa session marker: "
+            XCTAssertTrue(echo.hasPrefix(prefix)); XCTAssertNotNil(UUID(uuidString: String(echo.dropFirst(prefix.count))))
+            let after = try await evaluate(fixture.view,
+                "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];") as? [Int]
+            XCTAssertEqual(after, before, "Read-only pending/canonical proof must not reopen selection or replay input")
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
+    func testServerReleasesHeldPlaceholderOnlyAfterCanonicalProofAndDurableDeletion() async throws {
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")
+            defer { fixture.shutdown() }
+            var observedPending = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect",
+                   (try? await self.evaluate(fixture.view, "return location.pathname === '/c/new-chat';")) as? Bool == true {
+                    observedPending += 1
+                    if observedPending == 1 {
+                        _ = try? await self.evaluate(fixture.view, "setTimeout(()=>qwenFixture.canonicalize(),100); return true;")
+                    }
+                }
+            }
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            try await assertSavedProviderServerStream(transport: fixture.transport, provider: .qwen,
+                modelID: choice.modelID, selection: .model(choice), expectedText: "Synthetic Qwen native reply")
+            XCTAssertGreaterThanOrEqual(observedPending, 1)
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
+    func testProvisionalInspectCrossingToCanonicalDiscardsOldReceiptAndVerifiesFullBodyOnce() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic route crossing during the pending callback")
+        var crossed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !crossed {
+                crossed = true
+                _ = try? await self.evaluate(fixture.view, "qwenFixture.canonicalize(); return true;")
+            }
+        }
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertTrue(crossed)
+        XCTAssertNil(complete["modelVerificationPending"])
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64)
+        XCTAssertEqual(context["responseCount"] as? Int, 1)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testObservedPlaceholderCannotStartDiscoveryOrPreSendPreparation() async throws {
+        let discovery = try Fixture(setup: "history.replaceState({},'', '/c/new-chat')")
+        defer { discovery.shutdown() }
+        discovery.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(2))
+        do {
+            _ = try await discovery.transport.discoverModels(provider: "qwen")
+            XCTFail("A recognized placeholder is never an unbound fresh page")
+        } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+        try await assertCounts(discovery, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "history.replaceState({},'', '/c/new-chat'); return true;")
+        do {
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Must not submit from an unowned placeholder")
+            XCTFail("Pre-Send drift to a placeholder cannot gain submission authority")
+        } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+        let inputCount = try await evaluate(fixture.view, "return qwenFixture.counts.input;") as? Int
+        XCTAssertEqual(inputCount, 0)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testHeldPlaceholderCannotRenewDeadlineAcceptUnknownRouteOrBacktrack() async throws {
+        for kind in ["deadline", "unknown", "backtrack", "model-changed"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic held provisional route")
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+            if kind == "deadline" { fixture.transport.setTimeoutsForTesting(preparation: .seconds(10), response: .milliseconds(1)) }
+            else if kind == "model-changed" {
+                _ = try await evaluate(fixture.view,
+                    "document.querySelector('.wms-trigger__text').textContent='Qwen3.7-Plus'; qwenFixture.canonicalize(); return true;")
+            } else {
+                _ = try await evaluate(fixture.view,
+                    "history.replaceState({},'', '\(kind == "unknown" ? "/c/unknown-private" : "/")'); return true;")
+            }
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("A held placeholder must not survive \(kind)")
+            } catch let failure as EmbeddedWebModelTransport.Failure {
+                if kind == "deadline" { XCTAssertEqual(failure, .deadline) }
+                else if kind == "unknown" { XCTAssertEqual(failure, .unexpectedPage(.qwen)) }
+                else if kind == "model-changed" { XCTAssertEqual(failure, .modelUnverified) }
+                else { XCTAssertEqual(failure, .ownershipFailure(.routeBefore)) }
+            }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            let inputs = try await evaluate(fixture.view, "return qwenFixture.counts.input;") as? Int
+            XCTAssertEqual(inputs, 1)
+        }
+    }
+
+    func testDocumentReplacementCannotInheritHeldPlaceholderAndCancellationCannotReplay() async throws {
+        for replaceDocument in [false, true] {
+            let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic held page cancellation")
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["modelVerificationPending"] as? Bool, true)
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            if replaceDocument {
+                let createdID = try XCTUnwrap(fixture.createdID)
+                let oldGeneration = fixture.browser.documentGeneration(for: createdID)
+                fixture.view.loadHTMLString(QwenFixturePage.html, baseURL: URL(string: "https://chat.qwen.ai/c/new-chat"))
+                let deadline = ContinuousClock.now + .seconds(3)
+                while ContinuousClock.now < deadline,
+                      fixture.view.isLoading || fixture.browser.documentGeneration(for: createdID) == oldGeneration {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertNotEqual(fixture.browser.documentGeneration(for: createdID), oldGeneration)
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("A new document cannot inherit the submitted lease")
+                } catch let failure as EmbeddedWebModelTransport.Failure {
+                    XCTAssertEqual(failure, .ownershipFailure(.documentGenerationBefore))
+                }
+            }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "failed", "A provisional route cannot authorize deletion")
+            let cancelled = try await call(fixture, "webProviderCancel", token)
+            XCTAssertEqual(cancelled["cleanup"] as? String, "failed", "No canonical body exists to authorize deletion")
+            do {
+                _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic held page cancellation")
+                XCTFail("Cancellation must not make the Send claim reusable")
+            } catch { }
+            try await assertCounts(fixture, sends: replaceDocument ? 0 : 1, headers: 0, selections: 0, confirmations: 0)
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        }
+    }
+
     func testServerReleasesEachObservedModelStreamOnlyAfterDurableOwnedDeletion() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(); defer { fixture.shutdown() }

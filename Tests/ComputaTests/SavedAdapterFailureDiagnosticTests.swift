@@ -319,4 +319,54 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testDeepSeekRemountPendingIsExactNegativeCanonicalReceipt() {
+        let url = "https://chat.deepseek.com/a/chat/s/11111111-abcd-4333-8444-555555555555"
+        let valid: [String: Any] = ["deepSeekComposerHandoffPending": true, "url": url,
+            "sessionLifecycle": "saved_conversation_delete", "temporary": false]
+        XCTAssertTrue(EmbeddedWebModelTransport.isDeepSeekComposerHandoffPendingObservation(valid, url: url))
+        for (key, value) in [("deepSeekComposerHandoffPending", 1 as Any), ("temporary", 0 as Any),
+            ("text", "" as Any), ("modeEvidence", NSNull() as Any), ("userCount", 0 as Any),
+            ("url", "https://chat.deepseek.com/" as Any), ("sessionLifecycle", "temporary" as Any)] {
+            var invalid = valid; invalid[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekComposerHandoffPendingObservation(invalid, url: url), key)
+        }
+        XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekComposerHandoffPendingObservation(valid,
+            url: url.replacingOccurrences(of: "11111111", with: "22222222")))
+        for detail in ["composer_handoff_ineligible", "composer_handoff_binding", "composer_handoff_changed"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "mode_unverified", "detail": detail], provider: .deepseek, action: "inspect"),
+                "action=inspect error=mode_unverified detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "mode_unverified", "detail": detail], provider: .qwen, action: "inspect"),
+                "action=inspect error=other detail=other")
+        }
+    }
+
+    @MainActor func testKimiFirstUserReasonsRetainExactOwnershipClassificationAndFiniteLogging() {
+        let details = ["first_body_count", "first_root_hidden", "first_root_id_invalid", "first_turn_link_mismatch", "first_body_shape",
+            "first_submission_unclaimed", "first_insertion_missing", "first_full_echo_mismatch", "first_marker_invalid",
+            "first_marker_mismatch", "first_marker_suffix", "first_changed_during_hash", "first_pinned_identity_changed",
+            "first_pinned_fingerprint_mismatch", "first_expected_fingerprint_mismatch", "first_binding_not_authorized", "first_disappeared"]
+        for detail in details {
+            let error = detail == "first_body_count" ? "document_changed" : "conversation_changed"
+            let observed: [String: Any] = ["error": error, "detail": detail, "text": "PRIVATE_CANARY"]
+            XCTAssertTrue(EmbeddedWebModelTransport.isKimiFirstUserFailure(observed, provider: .kimi))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(observed, provider: .kimi, action: "inspect"),
+                "action=inspect error=\(error) detail=\(detail)")
+            for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .kimi {
+                XCTAssertFalse(EmbeddedWebModelTransport.isKimiFirstUserFailure(observed, provider: provider))
+            }
+            for other in ["model_unverified", "composer_unavailable", detail == "first_body_count" ? "conversation_changed" : "document_changed"] {
+                XCTAssertFalse(EmbeddedWebModelTransport.isKimiFirstUserFailure(["error": other, "detail": detail], provider: .kimi))
+            }
+        }
+        let malformed: [Any] = ["first_unknown", "first_full_echo_mismatch PRIVATE_CANARY", true, ["private": "PRIVATE_CANARY"]]
+        for detail in malformed {
+            XCTAssertFalse(EmbeddedWebModelTransport.isKimiFirstUserFailure(["error": "conversation_changed", "detail": detail], provider: .kimi))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "conversation_changed", "detail": detail], provider: .kimi, action: "inspect"),
+                "action=inspect error=conversation_changed detail=\(detail is String ? "other" : "absent")")
+        }
+    }
+
 }

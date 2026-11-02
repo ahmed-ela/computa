@@ -35,6 +35,23 @@ function deletion(hash: string) {
   } };
 }
 
+
+function remountComposer(f: ReturnType<typeof fixture>, old = f.scope) {
+  const clone = (source: any): any => {
+    const node = new f.Node(source.tagName, { ...source.values }, source.text);
+    for (const child of source.children) node.append(clone(child));
+    return node;
+  };
+  const scope = clone(old); old.detach(); f.body.append(scope);
+  const [deepThink, search] = scope.querySelectorAll('.ds-toggle-button');
+  return { scope, editor: scope.querySelectorAll('textarea')[0], deepThink, search,
+    send: scope.querySelectorAll('[role="button"].ds-button--primary.ds-button--circle')[0] };
+}
+function toggle(node: any, selected: boolean) {
+  node.values['aria-pressed'] = String(selected);
+  node.values.class = 'ds-toggle-button' + (selected ? ' ds-toggle-button--selected' : '');
+}
+
 describe('DeepSeek composed mode adapter (not live qualification)', () => {
   test('discovery exposes modes only and performs no toggle or backend-model assertion', async () => {
     const f = fixture({ fresh: true }); f.setMode(false, true);
@@ -421,4 +438,85 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     expect(result.error).toBe('document_changed'); expect(result.deleteProof).toBeUndefined();
     expect((await f.run('confirmConversationDeletion', input)).detail).toBe('terminal_operation'); expect(f.confirm.clicks).toBe(1);
   });
+  test('one complete composer remount waits without authority then binds the exact first prompt in both modes', async () => {
+    for (const key of ['chat','deepthink']) for (const delayed of [false,true]) {
+      const f = fixture({fresh:true}); const choice = mode(key), hash = await submitted(f,choice);
+      const replacement = remountComposer(f);
+      if (delayed) {
+        f.userTurn.detach(); f.answerTurn.detach();
+        for (let n=0;n<2;n++) expect(await f.run('inspect',{expectedModeChoice:choice})).toEqual({
+          deepSeekComposerHandoffPending:true,url:conversation,sessionLifecycle:'saved_conversation_delete',temporary:false });
+        f.body.append(f.userTurn,f.answerTurn);
+      }
+      const result = await f.run('inspect',{expectedModeChoice:choice});
+      expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+      expect(result.firstUserFingerprint).toBe(hash); expect(result.modeEvidence.selected).toEqual(choice);
+      expect(result.text).toBe(raw); expect(result.answerComplete).toBe(true);
+      expect(f.world.__computaDeepSeekSavedSessionV1.mode.deepThink).toBe(replacement.deepThink);
+      const del=deletion(hash);
+      await f.run('deleteConversation',del); await f.run('selectConversationDeletion',del);
+      await f.run('confirmConversationDeletion',del);
+      expect((await f.run('observeDeletedConversation',del)).deleteProof.conversationDeleted).toBe(true);
+      expect(f.send.clicks).toBe(1); expect(replacement.send.clicks).toBe(0);
+      expect(replacement.deepThink.clicks).toBe(0); expect(replacement.search.clicks).toBe(0);
+    }
+  });
+  test('remount handoff rejects partial, connected, changed, ambiguous or repeated composers without repair', async () => {
+    for (const kind of ['connected-old','old-toggle','search-on','wrong-mode','duplicate-toggle','nonempty-editor','second-remount','changed-route','wrong-prompt','after-binding']) {
+      const f=fixture({fresh:true}); await submitted(f);
+      if(kind==='after-binding') expect((await f.run('inspect',{expectedModeChoice:mode()})).firstUserVerified).toBe(true);
+      const replacement=remountComposer(f);
+      if(kind==='connected-old'){f.scope.values.hidden='';f.body.append(f.scope);}
+      if(kind==='old-toggle'){replacement.deepThink.detach();replacement.scope.append(f.deepThink);}
+      if(kind==='search-on')toggle(replacement.search,true);
+      if(kind==='wrong-mode')toggle(replacement.deepThink,true);
+      if(kind==='duplicate-toggle')replacement.scope.append(replacement.deepThink.cloneNode(true));
+      if(kind==='nonempty-editor')replacement.editor.value='Synthetic unsent draft';
+      if(kind==='wrong-prompt')f.firstText.text+=' altered';
+      if(kind==='second-remount' || kind==='changed-route'){
+        f.userTurn.detach();f.answerTurn.detach();
+        expect((await f.run('inspect',{expectedModeChoice:mode()})).deepSeekComposerHandoffPending).toBe(true);
+        if(kind==='second-remount')remountComposer(f,replacement.scope);
+        else f.document.URL=conversation.replace('12345678-','87654321-');
+      }
+      const result=await f.run('inspect',{expectedModeChoice:mode()});
+      expect(result.error).toBeDefined();expect(result.modeEvidence).toBeUndefined();expect(result.text).toBeUndefined();
+      expect(f.send.clicks).toBe(1);expect(replacement.send.clicks).toBe(0);
+      expect(replacement.deepThink.clicks).toBe(0);expect(replacement.search.clicks).toBe(0);
+    }
+  });
+  test('pending handoff requires the exact first-Send authorization and cannot invent hash proof', async () => {
+    for(const overrides of [{allowDeepSeekComposerHandoff:false},{allowFirstUserBinding:false},
+      {expectedFirstUserMarker:'22222222-3333-4444-8555-666666666666'},
+      {expectedFirstUserFingerprint:'f'.repeat(64)},{expectedModeChoice:mode('deepthink')},
+      {savedCleanupInspection:true}]){
+      const f=fixture({fresh:true});await submitted(f);remountComposer(f);
+      f.userTurn.detach();f.answerTurn.detach();
+      const result=await f.run('inspect',{expectedModeChoice:mode(),...overrides});
+      expect(result.error).toBeDefined();expect(result.deepSeekComposerHandoffPending).toBeUndefined();
+      expect(f.send.clicks).toBe(1);
+    }
+    const f=fixture({fresh:true});await select(f);await f.run('prepare');await f.run('insert',{prompt});
+    await f.run('submit',{prompt,savedSubmissionFingerprint:'f'.repeat(64)});remountComposer(f);
+    const result=await f.run('inspect',{expectedModeChoice:mode()});
+    expect(result.error).toBe('mode_unverified');expect(result.firstUserVerified).toBeUndefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  test('the awaited first-body hash cannot transfer controls after any owned-node or mode change', async () => {
+    for(const kind of ['body','new-composer','old-reconnected','search','mode','route']){
+      const f=fixture({fresh:true});await submitted(f);const replacement=remountComposer(f);
+      f.beforeDigest(()=>{
+        if(kind==='body')f.firstText.text+=' changed during hash';
+        if(kind==='new-composer')remountComposer(f,replacement.scope);
+        if(kind==='old-reconnected'){f.scope.values.hidden='';f.body.append(f.scope);}
+        if(kind==='search')toggle(replacement.search,true);
+        if(kind==='mode')toggle(replacement.deepThink,true);
+        if(kind==='route')f.document.URL=conversation.replace('12345678-','87654321-');
+      });
+      const result=await f.run('inspect',{expectedModeChoice:mode()});
+      expect(result.error).toBeDefined();expect(result.firstUserVerified).toBeUndefined();
+      expect(f.send.clicks).toBe(1);expect(replacement.send.clicks).toBe(0);
+    }
+  });
+
 });

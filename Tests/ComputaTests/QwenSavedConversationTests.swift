@@ -4,14 +4,20 @@ import XCTest
 
 final class QwenSavedConversationTests: XCTestCase {
     private let root = URL(string: "https://chat.qwen.ai/")!
+    private let provisional = URL(string: "https://chat.qwen.ai/c/new-chat")!
     private let conversation = URL(string: "https://chat.qwen.ai/c/11111111-abcd-4333-8444-555555555555")!
 
-    func testQwenRecognizesOnlyExactRootAndCanonicalUUIDWithoutQueries() {
+    func testQwenRecognizesExactRootObservedPlaceholderAndCanonicalUUIDWithoutQueries() {
         XCTAssertEqual(SavedConversationRoute(root, policy: .qwen), .fresh)
+        XCTAssertEqual(SavedConversationRoute(provisional, policy: .qwen), .provisional("/c/new-chat"))
+        XCTAssertNil(SavedConversationRoute(provisional, policy: .qwen)?.conversation)
         XCTAssertEqual(SavedConversationRoute(conversation, policy: .qwen)?.conversation, conversation.absoluteString)
         for raw in ["http://chat.qwen.ai/", "https://chat.qwen.ai:443/", "https://user@chat.qwen.ai/",
                     "https://chat.qwen.ai/?", "https://chat.qwen.ai/#", "https://chat.qwen.ai/?incognito",
                     "https://chat.qwen.ai/c/p1111111-2222-4333-8444-555555555555",
+                    "https://chat.qwen.ai/c/new", "https://chat.qwen.ai/c/new-private", "https://chat.qwen.ai/c/NEW-CHAT",
+                    "https://chat.qwen.ai/c/%6eew-chat", "https://chat.qwen.ai/c/new-chat/", "https://chat.qwen.ai/c/new-chat?",
+                    "https://chat.qwen.ai/c/new-chat#", "https://chat.qwen.ai/c/new-chat?model=PRIVATE",
                     "https://chat.qwen.ai/chat/11111111-abcd-4333-8444-555555555555",
                     "https://www.kimi.ai/chat/11111111-abcd-4333-8444-555555555555",
                     conversation.absoluteString + "/", conversation.absoluteString + "?chat_enter_method=home",
@@ -38,6 +44,23 @@ final class QwenSavedConversationTests: XCTestCase {
         XCTAssertEqual(routes.canonical, conversation.absoluteString)
     }
 
+    func testObservedPlaceholderIsMonotonicAfterSendAndNeverConversationOwnership() {
+        var routes = SavedConversationRoutes(policy: .qwen)
+        XCTAssertTrue(routes.observe(root, submitted: false))
+        XCTAssertFalse(routes.observe(provisional, submitted: false))
+        XCTAssertNil(routes.provisional); XCTAssertNil(routes.canonical)
+        XCTAssertTrue(routes.observe(provisional, submitted: true))
+        XCTAssertTrue(routes.observe(provisional, submitted: true))
+        XCTAssertEqual(routes.provisional, "/c/new-chat"); XCTAssertNil(routes.canonical)
+        XCTAssertFalse(routes.observe(root, submitted: true))
+        XCTAssertFalse(routes.observe(URL(string: "https://chat.qwen.ai/c/new-private")!, submitted: true))
+        XCTAssertTrue(routes.observe(conversation, submitted: true))
+        XCTAssertEqual(routes.canonical, conversation.absoluteString)
+        XCTAssertFalse(routes.observe(provisional, submitted: true))
+        XCTAssertFalse(routes.observe(root, submitted: true))
+        XCTAssertFalse(routes.observe(URL(string: conversation.absoluteString.replacingOccurrences(of: "11111111", with: "22221111"))!, submitted: true))
+    }
+
     @MainActor func testQwenDeclaresSavedDeletionWithoutBorrowingTemporaryOrProvisionalAuthority() {
         let provider = EmbeddedWebModelTransport.Provider.qwen
         XCTAssertTrue(provider.lifecycle == .savedConversationDelete)
@@ -46,6 +69,10 @@ final class QwenSavedConversationTests: XCTestCase {
         XCTAssertEqual(provider.host, "chat.qwen.ai")
         XCTAssertTrue(provider.accepts(root.absoluteString))
         XCTAssertTrue(provider.accepts(conversation.absoluteString))
+        XCTAssertTrue(provider.accepts(provisional.absoluteString))
+        XCTAssertNil(provider.conversationURL(provisional.absoluteString))
+        XCTAssertFalse(provider.acceptsUnboundStart(provisional))
+        XCTAssertFalse(provider.acceptsTemporaryToggle(provisional))
         XCTAssertTrue(provider.acceptsUnboundStart(root))
         XCTAssertFalse(provider.acceptsUnboundStart(conversation))
         XCTAssertFalse(provider.acceptsTemporaryToggle(root))

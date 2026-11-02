@@ -1,18 +1,16 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: installed 0.8.0 (392), 2026-11-02 UTC, source
-`a7d4d774659ab6b028e8000b9870e6d95bd58f10`. All three fresh native marker
-checks failed: Kimi Instant before Send, Qwen Plus at the post-submit route
-check, and DeepSeek Chat after verified mode selection and submission. No
-accepted answer or tool result was produced. Qwen's terminal error now preserves
-its exact unexpected-page cause; the generic high-demand wording is gone.
-DeepSeek's detailed first-container and replaced-toggle observations came from
-cleanup, after the primary failures, and do not establish those primary causes.
-Kimi, Qwen and DeepSeek are enabled for controlled pilots; native responses,
-verified saved-chat cleanup and tool workflows remain unqualified. Candidate393
-fixes a reproduced Kimi editor-clipping error and adds bounded Qwen/DeepSeek
-diagnostics, without new route or ownership acceptance. Its source checks pass;
-no build393 installation or live result is claimed. PR #20 remains draft.
+Status: installed 0.8.0 (393), 2026-11-02 UTC, source
+`e39490152c7f463bb4c5b4382ba78cf0707a2f04`. All three fresh native marker
+checks failed and cleanup remains unconfirmed. Kimi Instant now passes selection
+and Send, then rejects first-message ownership; the failing predicate is unknown.
+DeepSeek's primary observation captured a complete composer/control replacement
+with Chat still selected and Search off. Qwen still rejects its post-Send route;
+a separate direct probe identified the exact `/c/new-chat` transition.
+No native answer or tool result was accepted. Candidate394 adds finite Kimi
+ownership reasons and a narrowly bound DeepSeek composer handoff; exact Qwen
+provisional-route support is integrated. The source gates passed; packaging and
+fresh installed qualification remain pending. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -578,6 +576,70 @@ The five prepared browser/terminal/file fixtures remain unstarted until the
 corresponding native response and durable cleanup gates pass. Qwen Max and
 DeepThink were not submitted in this build392 marker set.
 
+### Installed393 results and candidate394 boundaries
+
+Signed build393 was installed and matched to source
+`e39490152c7f463bb4c5b4382ba78cf0707a2f04`, its artifact/install receipts and
+running executable (PID20347). One fresh zero-tool marker per selection failed:
+
+| Selection | Duration | Primary observation | Cleanup |
+| --- | ---: | --- | --- |
+| Kimi Instant | 2,361 ms | Verified Instant and Send handoff, then `inspect / conversation_changed / first_user_message` | Unconfirmed |
+| Qwen3.7-Plus | 3,228 ms | `unexpected_website_page` at `submit / after`, sequence1 | Unconfirmed |
+| DeepSeek Chat | 1,255 ms | Initial optional mode proof rejected after the complete composer/control replacement | Unconfirmed |
+
+Kimi's submission record at 12:26:24.613Z contains an empty first-user fingerprint,
+so it is not proof of the complete website echo. The first ownership error at
+12:26:24.653Z preceded task failure and cleanup. A read-only normal-browser reload
+of that exact saved conversation later showed the requested marker response and
+a visible, connected SPAN with one text node, no element children, equal valid
+root/turn UUIDs and one valid final session-marker suffix. Its 62,794-character
+body was unchanged by NFC and contained no terminal LF, CR or NBSP. Expected full
+outbound bytes/fingerprint were not retained, so exact outbound equality and the
+failed-time predicate remain unknown. This later website response does not
+change the failed native result. The saved conversation was retained; only the
+normal inspection tab was closed and developer settings restored.
+
+DeepSeek's first negative mode packet at 12:28:47.493Z now precedes failure and
+cleanup. The previously pinned composer, DeepThink control and Search control
+were all disconnected and replaced; the current mode still matched Chat with
+Search off, and no first body had been bound. This identifies the primary
+rejected observation, unlike the cleanup-only packets from 391/392. It does not
+authorize automatic adoption of replacement controls or establish a final answer.
+
+Qwen's native failure retained only a finite eight-byte ASCII slug beginning
+with `new`, not the full token. A separate one-Send normal-browser probe observed
+the exact same-document sequence root → `/c/new-chat` → canonical UUID. The exact
+provisional path appeared 57 ms after Send, lasted 727 ms, and became canonical
+at 784 ms. One exact user and answer were observed. The direct probe conversation
+was manually deleted through its scoped confirmation; the fresh root, empty
+composer/transcript, disconnected captured nodes/dialog and absent history
+reference were verified. Its test tab and developer settings were restored.
+This direct response/deletion does not qualify the native adapter or resolve
+its original failed cleanup receipt.
+
+Candidate394 splits Kimi's existing first-user checks into finite reasons while
+preserving predicate order, native ownership classification, verification and
+one-time logging. The DeepSeek source candidate permits only a held, complete
+initial composer replacement after the acknowledged single Send. Pending reads
+carry no mode, body, answer or cleanup authority; exact first-body/hash and fresh
+Chat/DeepThink/Search proof must establish the handoff before normal processing.
+Partial, repeated, foreign or already-bound replacements remain failures.
+Qwen's exact `/c/new-chat` transition has a narrowly scoped provisional path;
+it grants no conversation identity, response or deletion authority before
+canonical first-body verification. The integrated source passed 115 distinct
+native tests and 226 JavaScript/resource/version tests (6,481 assertions).
+Real WebKit cases cover the post-Send placeholder, a read crossing canonical
+promotion, both Qwen models, both DeepSeek modes, strict negative observations,
+unchanged deadlines, no replay and durable owned deletion. Three test-only
+compile/assertion issues were corrected; no unresolved test failure remains.
+Packaging and fresh installed qualification are pending; no live394 pass is claimed.
+Qwen Max, DeepThink and all prepared browser/terminal/file workflows remain
+unstarted in this 393 marker set. Evidence is retained privately under
+`work/new-website-providers-20261102/build393/` in the three marker-capture
+summaries, `kimi-settled-first-user-probe.json` and
+`qwen-exact-new-chat-probe.json`.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
@@ -625,12 +687,12 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Resolve Kimi's pre-Send composer readiness failure and separate startup menu
-   rejection; require an Instant reply and exact saved-chat deletion before tools.
-2. Capture Qwen's unknown post-submit route and DeepSeek's first negative mode
-   observation, then verify fresh responses and cleanup without replaying failures.
+1. Capture Kimi's exact first-user predicate without weakening full echo, marker
+   or physical ownership checks; require an Instant reply and durable deletion.
+2. Gate and install the exact Qwen provisional-route and DeepSeek complete-remount
+   candidates, then verify fresh native responses and cleanup without replay.
 3. Verify DeepSeek's completion signal while an actual response is still streaming.
-4. Preserve the same negative fixtures for route/model changes, duplicate
-   controls, uncertain Send, lost ownership and delayed/unconfirmed deletion.
-5. Record each installed model's actual tool results and durable cleanup
-   separately. Fixture passes and direct markers do not qualify native tasks.
+4. Preserve negative fixtures for foreign routes/models, partial/repeated remounts,
+   uncertain Send, lost ownership and delayed/unconfirmed deletion.
+5. Record each installed selection's actual browser, terminal and file results
+   with durable cleanup. Fixture passes and direct markers are separate evidence.

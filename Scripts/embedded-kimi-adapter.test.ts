@@ -951,4 +951,51 @@ describe('Kimi saved-conversation adapter', () => {
     }
   });
 
+  test('first-user diagnostics identify the original failing predicate without exposing content or allowing replay', async () => {
+    for (const reason of ['first_body_count','first_root_hidden','first_root_id_invalid','first_turn_link_mismatch',
+      'first_body_shape','first_submission_unclaimed','first_insertion_missing','first_full_echo_mismatch',
+      'first_marker_invalid','first_marker_mismatch','first_marker_suffix','first_binding_not_authorized']) {
+      const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
+      const state = f.world.__computaKimiSavedSessionV1, overrides: Record<string,unknown> = {};
+      if (reason === 'first_body_count') f.remove(f.messages.userBody);
+      if (reason === 'first_root_hidden') f.messages.user.getClientRects = () => [];
+      if (reason === 'first_root_id_invalid') f.messages.user.setAttribute('data-archer-id','PRIVATE_INVALID_ID');
+      if (reason === 'first_turn_link_mismatch') f.messages.user.setAttribute('data-conversation-turn-id',marker);
+      if (reason === 'first_body_shape') f.messages.userBody.append(new f.Node('A',{},'PRIVATE_LINK_TEXT'));
+      if (reason === 'first_submission_unclaimed') { state.submitted = false; f.document.URL = 'https://www.kimi.ai/'; }
+      if (reason === 'first_insertion_missing') state.inserted = null;
+      if (reason === 'first_full_echo_mismatch') f.messages.userBody.text = f.messages.userBody.text.replace('Exact','Wrong');
+      if (reason === 'first_marker_invalid') overrides.expectedFirstUserMarker = 'PRIVATE_INVALID_MARKER';
+      if (reason === 'first_marker_mismatch') overrides.expectedFirstUserMarker = generation;
+      if (reason === 'first_marker_suffix') { state.inserted.marker = generation; overrides.expectedFirstUserMarker = generation; }
+      if (reason === 'first_binding_not_authorized') overrides.allowFirstUserBinding = false;
+      const result = await f.run('inspect',overrides);
+      expect(result).toEqual({error:reason === 'first_body_count' ? 'document_changed' : 'conversation_changed',detail:reason});
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_'); expect(result.firstUserVerified).toBeUndefined();
+      expect((await f.run('inspect')).detail).toBe(reason === 'first_submission_unclaimed' ? reason : 'terminal_operation');
+      expect(f.counts()).toEqual({insertions:1,sends:1,confirms:0});
+    }
+  });
+
+  test('digest and pinned-first-user diagnostics preserve exact physical and native fingerprint checks', async () => {
+    for (const reason of ['first_changed_during_hash','first_pinned_identity_changed','first_pinned_fingerprint_mismatch',
+      'first_expected_fingerprint_mismatch','first_disappeared']) {
+      const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
+      const overrides: Record<string,unknown> = {};
+      if (reason === 'first_changed_during_hash') f.onDigest(() => { f.messages.userBody.text += 'PRIVATE_CHANGED_TEXT'; });
+      else {
+        expect((await f.run('inspect')).firstUserVerified).toBe(true);
+        if (reason === 'first_pinned_identity_changed') f.messages.content.replaceChildren(f.messages.userBody.cloneNode(true));
+        if (reason === 'first_pinned_fingerprint_mismatch') f.world.__computaKimiSavedSessionV1.first.fingerprint = '0'.repeat(64);
+        if (reason === 'first_expected_fingerprint_mismatch') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+        if (reason === 'first_disappeared') { f.remove(f.messages.user); f.remove(f.messages.answer); }
+      }
+      const result = await f.run('inspect',overrides);
+      expect(result).toEqual({error:'conversation_changed',detail:reason}); expect(result.firstUserVerified).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+      expect((await f.run('inspect')).detail).toBe('terminal_operation');
+      expect(f.counts()).toEqual({insertions:1,sends:1,confirms:0});
+    }
+  });
+
 });

@@ -1068,6 +1068,81 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testDeepSeekPendingRemountContractWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "deepseek")
+    }
+
+    func testQwenPendingProvisionalRouteWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen")
+    }
+
+    private func verifyPendingSavedFirstBodyContract(provider: String) async throws {
+        for mutation in PendingSavedFirstBodyMutation.allCases {
+            let label = provider + "-pending-first-body-" + mutation.rawValue
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            let data = try turnRequest(input: [["role": "user", "content": "Observe the synthetic first body without replay"]],
+                model: syntheticWebsiteModelID(provider))
+            do {
+                let response = try await server.fixtureInfer(data, taskID: label)
+                XCTAssertEqual(mutation, .none, "Malformed negative observation must not publish output")
+                XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("OK"))
+            } catch {
+                if mutation == .missingFinalSelection {
+                    guard case .modelUnverified? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected final positive selection proof rejection: \(error)"); continue
+                    }
+                } else {
+                    guard case .invalidRequest? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected strict pending rejection for \(mutation): \(error)"); continue
+                    }
+                    XCTAssertNotEqual(mutation, .none)
+                }
+            }
+            let journal = try turnJournal(root: root, task: label)
+            if mutation != .none {
+                XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+            }
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count,
+                mutation == .none || mutation == .missingFinalSelection ? 1 : 0)
+        }
+    }
+
+    func testDeepSeekPendingRemountCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "deepseek")
+    }
+
+    func testQwenPendingProvisionalRouteCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen")
+    }
+
+    private func verifyPendingSavedFirstBodyDeadline(provider: String) async throws {
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let base = FixtureWebModelTransport(cleanupResult: "deleted")
+        let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, repeatPending: true)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(150))
+        let data = try turnRequest(input: [["role": "user", "content": "Bound synthetic missing first body"]],
+            model: syntheticWebsiteModelID(provider))
+        do {
+            _ = try await server.fixtureInfer(data, taskID: provider + "-pending-first-body-deadline")
+            XCTFail("Repeated negative observations must not extend the absolute deadline")
+        } catch {
+            guard case .deadline? = error as? WebModelServer.Failure else { return XCTFail("Expected deadline: \(error)") }
+        }
+        let count = await transport.pendingPolls(), changed = await transport.waitDeadlineChanged()
+        XCTAssertGreaterThan(count, 0); XCTAssertFalse(changed)
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertFalse(operations.contains("webProviderPoll"))
+    }
+
     func testClaudePendingModelPollsKeepProvedSubmissionButWithholdCompletionUntilFreshProof() async throws {
         for pendingCount in [1, 3] {
             let label = "claude-pending-restored-\(pendingCount)"
@@ -3649,6 +3724,91 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
             throw EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission)
         }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+private enum PendingSavedFirstBodyMutation: String, CaseIterable, Sendable {
+    case none, numericFlag, falseFlag, text, modeEvidence, modelEvidence, complete, wrongReason, wrongProvider
+    case wrongGeneration, wrongPrompt, firstFingerprint, responseCount, wrongSequence, extraContext, extraField
+    case numericTemporary, initialUnbound, previousBody, missingFinalSelection
+}
+
+/// Synthetic saved-provider negative receipt, outside the normal proof adapter.
+/// Separate WebKit fixtures exercise the actual route and detached DOM paths.
+private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
+    private let base: WebsiteInferenceFixtureTransport
+    private let provider: String
+    private let mutation: PendingSavedFirstBodyMutation
+    private let repeatPending: Bool
+    private var pending: Data?
+    private var emitted = 0
+    private var waitDeadline: ContinuousClock.Instant?
+    private var deadlineChanged = false
+    init(base: FixtureWebModelTransport, provider: String, mutation: PendingSavedFirstBodyMutation = .none, repeatPending: Bool = false) {
+        self.base = WebsiteInferenceFixtureTransport(base); self.provider = provider; self.mutation = mutation; self.repeatPending = repeatPending
+    }
+    func pendingPolls() -> Int { emitted }
+    func waitDeadlineChanged() -> Bool { deadlineChanged }
+    func changeRevision(sessionToken: String) -> UInt64? { UInt64(emitted) }
+    func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        if let waitDeadline { deadlineChanged = deadlineChanged || waitDeadline != deadline }
+        else { waitDeadline = deadline }
+        try Task.checkCancellation()
+        if repeatPending { try await Task.sleep(for: .milliseconds(1)) }
+        return UInt64(emitted)
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll", let pending, repeatPending || emitted == 0 {
+            emitted += 1; return pending
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if ["ready", "running", "complete"].contains(value["state"] as? String ?? "") {
+            value["sessionLifecycle"] = "saved_conversation_delete"; value["temporary"] = false
+            if provider == "deepseek" {
+                value["modeEvidence"] = ["selected": ["key": "chat", "label": "Chat"],
+                    "source": "website_mode_toggle", "backendModel": NSNull(), "search": false] as [String: Any]
+            }
+        }
+        if operation == "webProviderSend" {
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            let prompt = try XCTUnwrap(input["prompt"]), token = try XCTUnwrap(value["sessionToken"] as? String)
+            var context = try XCTUnwrap(value["modelProofContext"] as? [String: Any])
+            if mutation != .previousBody { context["firstUserFingerprint"] = "" }
+            value["modelProofContext"] = context
+            context["firstUserFingerprint"] = ""
+            context["submittedPromptFingerprint"] = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+            var packet: [String: Any] = ["provider": provider, "sessionToken": token, "state": "running", "text": "", "sequence": 1,
+                "sessionLifecycle": "saved_conversation_delete", "temporary": false,
+                "modelVerificationPending": true, "modelVerificationPendingReason": provider == "deepseek"
+                    ? "deepseek_initial_composer_remount_v1" : "qwen_initial_provisional_route_v1"]
+            switch mutation {
+            case .numericFlag: packet["modelVerificationPending"] = 1
+            case .falseFlag: packet["modelVerificationPending"] = false
+            case .text: packet["text"] = "Synthetic text must not escape"
+            case .modeEvidence: packet["modeEvidence"] = value["modeEvidence"] ?? NSNull()
+            case .modelEvidence: packet["modelEvidence"] = NSNull()
+            case .complete: packet["state"] = "complete"
+            case .wrongReason: packet["modelVerificationPendingReason"] = "unknown"
+            case .wrongProvider: packet["provider"] = provider == "deepseek" ? "qwen" : "deepseek"
+            case .wrongGeneration: context["documentGeneration"] = UUID().uuidString
+            case .wrongPrompt: context["submittedPromptFingerprint"] = String(repeating: "0", count: 64)
+            case .firstFingerprint: context["firstUserFingerprint"] = String(repeating: "a", count: 64)
+            case .responseCount: context["responseCount"] = 1
+            case .wrongSequence: context["sequence"] = 2
+            case .extraContext: context["unexpected"] = true
+            case .extraField: packet["unexpected"] = true
+            case .numericTemporary: packet["temporary"] = 0
+            case .none, .initialUnbound, .previousBody, .missingFinalSelection: break
+            }
+            packet["pendingSubmissionContext"] = context
+            pending = try JSONSerialization.data(withJSONObject: packet)
+            if mutation == .initialUnbound { return try XCTUnwrap(pending) }
+        }
+        if operation == "webProviderPoll", mutation == .missingFinalSelection {
+            value.removeValue(forKey: provider == "deepseek" ? "modeEvidence" : "modelEvidence")
+        }
+        return try JSONSerialization.data(withJSONObject: value)
     }
 }
 

@@ -465,9 +465,11 @@ try {
     let first = null, answer = null;
     if (users.length) {
       const root = users[0], id = root.getAttribute('data-archer-id');
-      const body = one(visible(root, '.user-content .user-content__text'), 'first_user_message');
-      if (!c.visible(root) || !c.uuid(id) || root.getAttribute('data-conversation-turn-id') !== id
-        || body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_user_message');
+      const body = one(visible(root, '.user-content .user-content__text'), 'first_body_count');
+      if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
+      if (!c.uuid(id)) c.fail('conversation_changed', 'first_root_id_invalid');
+      if (root.getAttribute('data-conversation-turn-id') !== id) c.fail('conversation_changed', 'first_turn_link_mismatch');
+      if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
       first = { root, body, id, text: body.textContent };
       if (answers.length) {
         answer = answers[0];
@@ -725,28 +727,32 @@ try {
     || input.expectedUserCounts.some(value => ![0, 1].includes(value))
     || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
   if (initial.t.first && !state.deletion?.confirmAcknowledged) {
-    if (!state.submitted || !state.inserted || initial.t.first.text !== state.inserted.prompt
-      || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
-      || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
-      c.fail('conversation_changed', 'first_user_message');
+    if (!state.submitted) c.fail('conversation_changed', 'first_submission_unclaimed');
+    if (!state.inserted) c.fail('conversation_changed', 'first_insertion_missing');
+    if (initial.t.first.text !== state.inserted.prompt) c.fail('conversation_changed', 'first_full_echo_mismatch');
+    if (!c.uuid(input.expectedFirstUserMarker)) c.fail('conversation_changed', 'first_marker_invalid');
+    if (input.expectedFirstUserMarker !== state.inserted.marker) c.fail('conversation_changed', 'first_marker_mismatch');
+    if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
+      c.fail('conversation_changed', 'first_marker_suffix');
     // A provisional route is a pending observation, never first-body authority.
     if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
     const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
-    guard(); if (!sameFirst(initial.t.first)) c.fail('conversation_changed', 'first_user_message');
+    guard(); if (!sameFirst(initial.t.first)) c.fail('conversation_changed', 'first_changed_during_hash');
     modelEvidence();
     if (state.first) {
       const unacknowledgedRead = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
-      if (!sameFirst(state.first) || state.first.fingerprint !== fingerprint
-        || input.expectedFirstUserFingerprint !== fingerprint && !unacknowledgedRead)
-        c.fail('conversation_changed', 'first_user_message');
+      if (!sameFirst(state.first)) c.fail('conversation_changed', 'first_pinned_identity_changed');
+      if (state.first.fingerprint !== fingerprint) c.fail('conversation_changed', 'first_pinned_fingerprint_mismatch');
+      if (input.expectedFirstUserFingerprint !== fingerprint && !unacknowledgedRead)
+        c.fail('conversation_changed', 'first_expected_fingerprint_mismatch');
     } else {
       if (input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null)
-        c.fail('conversation_changed', 'first_user_message');
+        c.fail('conversation_changed', 'first_binding_not_authorized');
       state.first = { ...initial.t.first, fingerprint };
     }
     Object.assign(initial, read());
     Object.assign(initial.output, { firstUserVerified: true, firstUserMarkerVerified: true, firstUserFingerprint: fingerprint });
-  } else if (state.first && !state.deletion?.confirmAcknowledged) c.fail('conversation_changed', 'first_user_message');
+  } else if (state.first && !state.deletion?.confirmAcknowledged) c.fail('conversation_changed', 'first_disappeared');
 
   if (deletionActions.includes(input.action)) {
     const op = deletionOperation();

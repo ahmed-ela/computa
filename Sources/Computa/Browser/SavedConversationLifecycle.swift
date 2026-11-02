@@ -39,7 +39,11 @@ enum SavedConversationRoute: Equatable {
         let id = String(url.path.dropFirst(policy.conversationPrefix.count))
         let suffix = items.isEmpty ? "" : "?chat_enter_method=home"
         guard url.absoluteString == policy.origin + policy.conversationPrefix + id + suffix else { return nil }
-        if policy == .kimi,
+        if policy == .qwen, id == "new-chat" {
+            // Observed same-document placeholder after the sole Send. It has
+            // no conversation identity; canonical ownership remains separate.
+            self = .provisional(url.path)
+        } else if policy == .kimi,
            id.range(of: #"^p[a-f0-9]{7}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"#, options: .regularExpression) != nil {
             self = .provisional(url.path)
         } else if let uuid = UUID(uuidString: id), uuid.uuidString.lowercased() == id {

@@ -1002,6 +1002,32 @@ final class KimiWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testDetailedFirstUserFailureRetainsOwnershipCategoryAndCannotDeleteOrReplay() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.holdProvisional = true; return true;")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic body for exact ownership")
+        _ = try await evaluate(fixture.view, """
+            kimiFixture.canonicalize();
+            const body = document.querySelector('.user-content .user-content__text');
+            if (!body || !body.textContent.startsWith('Synthetic body')) throw new Error('Missing exact synthetic body');
+            body.textContent = body.textContent.replace('Synthetic body', 'Different body');
+            return true;
+            """)
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("Changed full echo cannot become first-user ownership")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            guard case .ownershipFailure(.javaScriptFirstUser) = error else {
+                XCTFail("A finite diagnostic must preserve first_user_message ownership classification"); return
+            }
+        }
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+    }
+
     func testForeignCanonicalRouteCannotDeleteOrCloseItsOwnedView() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

@@ -130,7 +130,7 @@ export function fixture(options: { fresh?: boolean; completeOnSend?: boolean } =
   let beforeDigest: (() => void | Promise<void>) | undefined;
   const run = (action: string, overrides: Record<string, unknown> = {}) => adapter({ provider: 'deepseek', action, expectedURL: document.URL,
     ownerToken, documentGeneration: generation, bindOwner: true, expectedUserCounts: [0, 1], expectedFirstUserMarker: marker,
-    allowFirstUserBinding: action === 'inspect', expectedFirstUserFingerprint: null, ...overrides },
+    allowFirstUserBinding: action === 'inspect', allowDeepSeekComposerHandoff: action === 'inspect', expectedFirstUserFingerprint: null, ...overrides },
     document, window, world, { origin: 'https://chat.deepseek.com' }, style, Observer, TextArea, FixtureInputEvent,
     { subtle: { digest: async (...args: Parameters<typeof crypto.subtle.digest>) => { await beforeDigest?.(); return crypto.subtle.digest(...args); } } });
   return { observers, signals, notifyAttribute, Node, body, document, world, window, read, run, scope, editor, deepThink, search, send, svg, path,

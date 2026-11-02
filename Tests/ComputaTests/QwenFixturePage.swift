@@ -41,7 +41,7 @@ enum QwenFixturePage {
   const userID = '902f136d-bddf-4078-a667-030715aeff87';
   const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
   const canonical = 'https://chat.qwen.ai/c/' + conversationID;
-  const options = { delayUser: false, holdRoot: false, holdResponse: false, menuDelayMs: 0,
+  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, menuDelayMs: 0,
     dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false, modelCloseOrder: "simultaneous", modelOptionCloseOrder: "simultaneous",
     reply: '{"type":"message","text":"Synthetic Qwen native reply"}' };
   const counts = { input: 0, sends: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
@@ -160,7 +160,10 @@ enum QwenFixturePage {
     counts.sends++;
     if (submitted) throw new Error('Synthetic duplicate Send');
     submitted = true; sent = editor.value; editor.value = ''; sendScope.replaceChildren();
-    if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
+    if (options.useProvisional) {
+      window.history.replaceState({}, '', '/c/new-chat');
+      if (!options.holdProvisional) delayed(options.canonicalDelayMs, canonicalize);
+    } else if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
     finishPickerClose: closePicker, finishOptionClose: closePicker,
