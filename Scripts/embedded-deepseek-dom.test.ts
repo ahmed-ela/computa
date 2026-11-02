@@ -124,7 +124,7 @@ describe('DeepSeek DOM driver', () => {
       if (kind === 'menu_ack') record.menuAcknowledged = false;
       if (kind === 'selection_ack') record.deleteAcknowledged = false;
       if (kind === 'menu_binding') record.menu = null;
-      if (kind === 'visible_menu') f.body.append(f.menu);
+      if (kind === 'visible_menu') f.body.append(new f.Node('DIV', { role: 'menu', class: 'ds-dropdown-menu' }));
       const detail = { menu_ack: 'delete_confirm_menu_unacknowledged', selection_ack: 'delete_confirm_selection_unacknowledged',
         menu_binding: 'delete_confirm_menu_unbound', visible_menu: 'delete_confirm_menu_still_visible' }[kind];
       fails(() => f.read().deletionConfirmation(record), detail);
@@ -132,6 +132,27 @@ describe('DeepSeek DOM driver', () => {
     }
     const f = fixture(), record = f.record(); f.body.append(f.menu);
     fails(() => f.read().deletionMenu(record), 'delete_menu_selection_spent'); expect(f.mutations()).toBe(0);
+  });
+  test('the pinned menu closing after Delete supplies no confirmation authority', () => {
+    const f = fixture(), record: any = f.record(); record.dialog = null; f.body.append(f.menu);
+    expect(f.read().deletionConfirmation(record)).toBeNull();
+    f.body.append(f.modal);
+    expect(f.read().deletionConfirmation(record)).toBeNull();
+    f.menu.detach();
+    expect(f.read().deletionConfirmation(record).target).toBe(f.confirm);
+    expect(f.mutations()).toBe(0);
+  });
+  test('menu settling cannot hide foreign menus or changed ownership or revive a bound dialog', () => {
+    for (const kind of ['foreign', 'duplicate', 'authored', 'body', 'bound-dialog', 'unacknowledged']) {
+      const f = fixture(), record: any = f.record(); record.dialog = null; f.body.append(f.menu);
+      if (kind === 'foreign') { f.menu.detach(); f.body.append(new f.Node('DIV', { role: 'menu', class: 'ds-dropdown-menu' })); }
+      if (kind === 'duplicate') f.body.append(new f.Node('DIV', { role: 'menu', class: 'ds-dropdown-menu' }));
+      if (kind === 'authored') f.answer.append(f.menu);
+      if (kind === 'body') f.firstText.text += '!';
+      if (kind === 'bound-dialog') record.dialog = f.dialog;
+      if (kind === 'unacknowledged') record.deleteAcknowledged = false;
+      fails(() => f.read().deletionConfirmation(record)); expect(f.mutations()).toBe(0);
+    }
   });
   test('route drift, wrong wording and duplicate dialogs prevent confirmation', () => {
     for (const kind of ['route', 'wording', 'duplicate']) {

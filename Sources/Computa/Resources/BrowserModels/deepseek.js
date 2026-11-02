@@ -73,7 +73,7 @@ function computaProviderCore(request, provider, origin, actions) {
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
         ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
-          : provider === 'qwen' ? ['role', 'aria-haspopup']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
           : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
@@ -92,7 +92,7 @@ async function computaSavedConversation(input, c, dom, config) {
       owner: input.ownerToken, document, window, generation: input.documentGeneration,
       model: null, selection: null, mode: null, modeSelection: null, prepared: null, inserted: null, send: null,
       submitted: false, first: null, provisional: null, canonical: null, deletion: null, terminal: false,
-      initialControls: {}, initialReadComplete: false, modeHandoff: null, submittedFingerprint: null
+      initialControls: {}, initialReadComplete: false, modeHandoff: null, responseIdentity: null, submittedFingerprint: null
     };
     state = globalThis[key];
     const guard = (exactURL = true) => {
@@ -229,12 +229,27 @@ async function computaSavedConversation(input, c, dom, config) {
       claim.committed = true;
     }
     function sameFirst(first) {
-      const now = dom.transcript().first;
+      const current = dom.transcript();
+      validateInitialResponseIdentity(current);
+      const now = current.first;
       return !!first && !!now && first.root === now.root && first.body === now.body
         && first.container === now.container && first.id === now.id && first.text === now.text;
     }
+    function validateInitialResponseIdentity(t) {
+      const held = state.responseIdentity;
+      if (!held) return;
+      const first = t.first, answer = t.pendingAnswer || t.answer;
+      if (dom.route().canonical !== held.canonical || !first || !answer
+        || first.root !== held.first.root || first.container !== held.first.container
+        || first.body !== held.first.body || first.id !== held.first.id || first.text !== held.first.text
+        || first.root.parentElement !== held.userTurn || held.userTurn.parentElement !== held.outer
+        || answer.root !== held.answer.root || answer.content !== held.answer.content
+        || answer.root.parentElement !== held.answer.turn || held.answer.turn.parentElement !== held.outer)
+        c.fail('conversation_changed', 'response_scope');
+    }
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
+      validateInitialResponseIdentity(t);
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action))
@@ -401,6 +416,44 @@ async function computaSavedConversation(input, c, dom, config) {
       guard();
       return { qwenProvisionalRoutePending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
+    }
+    if (config.initialResponseIdentity === true && state.submitted && !state.first && route.kind === 'canonical'
+      && (input.allowQwenInitialResponseIdentity === true || state.responseIdentity)) {
+      // A canonical route alone grants nothing. The native first-Send grant and
+      // the exact rendered outbound body are mandatory, but no positive body,
+      // model, response or deletion proof is published until the ID is strict.
+      if (input.action !== 'inspect' || input.allowQwenInitialResponseIdentity !== true || cleanupInspection
+        || !state.inserted || !state.prepared || !state.send || !state.model || state.selection || state.deletion
+        || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null
+        || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
+        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
+        || !c.equalChoice(input.expectedModelChoice, state.model.choice)
+        || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
+        || input.savedSubmissionFingerprint !== state.submittedFingerprint)
+        c.fail('conversation_changed', 'first_user_message');
+      const candidate = dom.initialResponseIdentityTranscript();
+      validateInitialResponseIdentity(candidate);
+      if (candidate.pendingAnswer) {
+        if (candidate.users.length !== 1 || candidate.answers.length !== 1 || !candidate.first
+          || candidate.first.text !== state.inserted.prompt || !Array.isArray(input.expectedUserCounts)
+          || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
+          || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1))
+          c.fail('conversation_changed', 'first_user_message');
+        selectionEvidence();
+        if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
+          first: candidate.first, answer: candidate.pendingAnswer,
+          userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
+        const fingerprint = await c.hash(c.bodyText(candidate.first.text));
+        guard();
+        const current = dom.initialResponseIdentityTranscript();
+        validateInitialResponseIdentity(current);
+        selectionEvidence();
+        if (fingerprint !== state.submittedFingerprint) c.fail('conversation_changed', 'first_user_message');
+        if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
+          sessionLifecycle: 'saved_conversation_delete', temporary: false };
+        // The same nodes may settle during hashing. Re-enter the ordinary
+        // strict transcript, full body hash, model and completion checks below.
+      }
     }
     let initial = read();
     if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
@@ -800,7 +853,14 @@ function computaDeepSeekDOM(c) {
     if (record.menuAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_menu_unacknowledged');
     if (record.deleteAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_selection_unacknowledged');
     if (!record.menu?.classList.contains('ds-dropdown-menu')) c.fail('conversation_changed', 'delete_confirm_menu_unbound');
-    if (visible(document, '[role="menu"]').length) c.fail('conversation_changed', 'delete_confirm_menu_still_visible');
+    const menus = visible(document, '[role="menu"]');
+    if (menus.length) {
+      // Delete closes its menu asynchronously. The same pinned menu may still
+      // be visible during the first confirmation read; it grants no target.
+      // A foreign/replaced menu, or one returning after dialog binding, fails.
+      if (!record.dialog && menus.length === 1 && menus[0] === record.menu && !authored(record.menu)) return null;
+      c.fail('conversation_changed', 'delete_confirm_menu_still_visible');
+    }
     const dialog = optional(visible(document, '[role="dialog"]'), 'delete_dialog');
     if (!dialog) return null;
     const modal = dialog.closest('.ds-modal');

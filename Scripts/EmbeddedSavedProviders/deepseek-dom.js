@@ -244,7 +244,14 @@ function computaDeepSeekDOM(c) {
     if (record.menuAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_menu_unacknowledged');
     if (record.deleteAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_selection_unacknowledged');
     if (!record.menu?.classList.contains('ds-dropdown-menu')) c.fail('conversation_changed', 'delete_confirm_menu_unbound');
-    if (visible(document, '[role="menu"]').length) c.fail('conversation_changed', 'delete_confirm_menu_still_visible');
+    const menus = visible(document, '[role="menu"]');
+    if (menus.length) {
+      // Delete closes its menu asynchronously. The same pinned menu may still
+      // be visible during the first confirmation read; it grants no target.
+      // A foreign/replaced menu, or one returning after dialog binding, fails.
+      if (!record.dialog && menus.length === 1 && menus[0] === record.menu && !authored(record.menu)) return null;
+      c.fail('conversation_changed', 'delete_confirm_menu_still_visible');
+    }
     const dialog = optional(visible(document, '[role="dialog"]'), 'delete_dialog');
     if (!dialog) return null;
     const modal = dialog.closest('.ds-modal');

@@ -1076,13 +1076,17 @@ final class WebModelServerTests: XCTestCase {
         try await verifyPendingSavedFirstBodyContract(provider: "qwen")
     }
 
-    private func verifyPendingSavedFirstBodyContract(provider: String) async throws {
+    func testQwenPendingInitialResponseIdentityWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen", initialResponseIdentity: true)
+    }
+
+    private func verifyPendingSavedFirstBodyContract(provider: String, initialResponseIdentity: Bool = false) async throws {
         for mutation in PendingSavedFirstBodyMutation.allCases {
             let label = provider + "-pending-first-body-" + mutation.rawValue
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
             let base = FixtureWebModelTransport(cleanupResult: "deleted")
-            let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, mutation: mutation)
+            let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, mutation: mutation, initialResponseIdentity: initialResponseIdentity)
             await server.configureEmbeddedTransport(transport)
             let data = try turnRequest(input: [["role": "user", "content": "Observe the synthetic first body without replay"]],
                 model: syntheticWebsiteModelID(provider))
@@ -1122,10 +1126,14 @@ final class WebModelServerTests: XCTestCase {
         try await verifyPendingSavedFirstBodyDeadline(provider: "qwen")
     }
 
-    private func verifyPendingSavedFirstBodyDeadline(provider: String) async throws {
+    func testQwenPendingInitialResponseIdentityCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", initialResponseIdentity: true)
+    }
+
+    private func verifyPendingSavedFirstBodyDeadline(provider: String, initialResponseIdentity: Bool = false) async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         let base = FixtureWebModelTransport(cleanupResult: "deleted")
-        let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, repeatPending: true)
+        let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, repeatPending: true, initialResponseIdentity: initialResponseIdentity)
         await server.configureEmbeddedTransport(transport)
         await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(150))
         let data = try turnRequest(input: [["role": "user", "content": "Bound synthetic missing first body"]],
@@ -3740,12 +3748,13 @@ private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
     private let provider: String
     private let mutation: PendingSavedFirstBodyMutation
     private let repeatPending: Bool
+    private let initialResponseIdentity: Bool
     private var pending: Data?
     private var emitted = 0
     private var waitDeadline: ContinuousClock.Instant?
     private var deadlineChanged = false
-    init(base: FixtureWebModelTransport, provider: String, mutation: PendingSavedFirstBodyMutation = .none, repeatPending: Bool = false) {
-        self.base = WebsiteInferenceFixtureTransport(base); self.provider = provider; self.mutation = mutation; self.repeatPending = repeatPending
+    init(base: FixtureWebModelTransport, provider: String, mutation: PendingSavedFirstBodyMutation = .none, repeatPending: Bool = false, initialResponseIdentity: Bool = false) {
+        self.base = WebsiteInferenceFixtureTransport(base); self.provider = provider; self.mutation = mutation; self.repeatPending = repeatPending; self.initialResponseIdentity = initialResponseIdentity
     }
     func pendingPolls() -> Int { emitted }
     func waitDeadlineChanged() -> Bool { deadlineChanged }
@@ -3781,7 +3790,7 @@ private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
             var packet: [String: Any] = ["provider": provider, "sessionToken": token, "state": "running", "text": "", "sequence": 1,
                 "sessionLifecycle": "saved_conversation_delete", "temporary": false,
                 "modelVerificationPending": true, "modelVerificationPendingReason": provider == "deepseek"
-                    ? "deepseek_initial_composer_remount_v1" : "qwen_initial_provisional_route_v1"]
+                    ? "deepseek_initial_composer_remount_v1" : initialResponseIdentity ? "qwen_initial_response_identity_v1" : "qwen_initial_provisional_route_v1"]
             switch mutation {
             case .numericFlag: packet["modelVerificationPending"] = 1
             case .falseFlag: packet["modelVerificationPending"] = false

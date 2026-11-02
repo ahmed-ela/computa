@@ -73,7 +73,7 @@ function computaProviderCore(request, provider, origin, actions) {
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
         ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
-          : provider === 'qwen' ? ['role', 'aria-haspopup']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
           : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }

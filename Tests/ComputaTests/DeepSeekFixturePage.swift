@@ -42,11 +42,13 @@ enum DeepSeekFixturePage {
   const canonical = 'https://chat.deepseek.com' + conversationPath;
   const arrow = 'M8.3125 0.980206C8.66767 1.05312 8.97902 1.2042 9.2627 1.43235C9.48724 1.613 9.73029 1.85795 9.97949 2.10716L14.707 6.8347L13.293 8.24876L9 3.95579V15.0417H7V3.95579L2.70703 8.24876L1.29297 6.8347L6.02051 2.10716C6.26971 1.85795 6.51277 1.613 6.7373 1.43235C6.97662 1.23988 7.28445 1.04404 7.6875 0.980206C7.8973 0.947029 8.1031 0.955183 8.3125 0.980206Z';
   const options = { holdResponse: false, delayUser: false, canonicalDelayMs: 0, menuDelayMs: 0,
-    dialogDelayMs: 0, retainHistoryLink: false, inertSearch: false, inertDeepThink: false,
+    dialogDelayMs: 0, holdDeletionMenu: false, holdDialog: false, menuWakeupMs: 0,
+    deleteMenuMutation: 'none', retainHistoryLink: false, inertSearch: false, inertDeepThink: false,
     searchDelayMs: 0, deepThinkDelayMs: 0, firstUserSiblingKind: 'none',
     reply: '{"type":"message","text":"Synthetic DeepSeek native reply"}' };
   const counters = { inputs: 0, sends: 0, deepThinkClicks: 0, searchClicks: 0, historyOpens: 0,
-    deleteSelections: 0, confirmations: 0, earlySends: 0 };
+    deleteSelections: 0, confirmations: 0, earlySends: 0,
+    menuWakeups: 0, prematureConfirmations: 0 };
   let editor = document.querySelector('textarea');
   let [deepThink, search] = document.querySelectorAll('.ds-toggle-button');
   let send = document.querySelector('.ds-button--circle');
@@ -61,6 +63,9 @@ enum DeepSeekFixturePage {
     return element;
   };
   const delayed = (milliseconds, action) => milliseconds > 0 ? setTimeout(action, milliseconds) : action();
+  let menuWakeupTimer = null;
+  function stopMenuWakeups() { if (menuWakeupTimer !== null) clearInterval(menuWakeupTimer); menuWakeupTimer = null; }
+  function closeDeletionMenu() { deletionMenu?.remove(); stopMenuWakeups(); }
   const selected = element => element.getAttribute('aria-pressed') === 'true';
   const setToggle = (element, value) => {
     element.setAttribute('aria-pressed', String(value));
@@ -102,6 +107,7 @@ enum DeepSeekFixturePage {
     cancel.addEventListener('click', () => modal.remove());
     confirm.addEventListener('click', () => {
       counters.confirmations++;
+      if (document.querySelector('[role=menu]')) counters.prematureConfirmations++;
       modal.remove(); userTurn.remove(); answerTurn?.remove(); deletionMenu?.remove();
       if (!options.retainHistoryLink) ownHistory.remove();
       editor.value = ''; setArrow(true); send.classList.add('ds-button--disabled');
@@ -114,7 +120,16 @@ enum DeepSeekFixturePage {
     remove.append(node('div', { class: 'ds-dropdown-menu-option__label' }, 'Delete'));
     deletionMenu.append(remove); document.body.append(deletionMenu);
     remove.addEventListener('click', () => {
-      counters.deleteSelections++; deletionMenu.remove(); delayed(options.dialogDelayMs, showConfirmation);
+      counters.deleteSelections++;
+      if (!options.holdDeletionMenu) closeDeletionMenu();
+      if (options.deleteMenuMutation === 'foreign') document.body.append(deletionMenu.cloneNode(true));
+      if (options.deleteMenuMutation === 'replaced') {
+        const replacement = deletionMenu.cloneNode(true); deletionMenu.replaceWith(replacement); deletionMenu = replacement;
+      }
+      if (options.menuWakeupMs > 0) menuWakeupTimer = setInterval(() => {
+        counters.menuWakeups++; deletionMenu.setAttribute('data-state', 'closing-' + (counters.menuWakeups % 2));
+      }, options.menuWakeupMs);
+      if (!options.holdDialog) delayed(options.dialogDelayMs, showConfirmation);
     });
   }
   function appendUser() {
@@ -201,11 +216,11 @@ enum DeepSeekFixturePage {
     send.addEventListener('click', () => counters.earlySends++);
   }
   window.deepseekFixture = { options, counters, canonical, conversationID, appendUser, completeResponse,
-    resumeStreaming, canonicalize, setMode, remountComposer,
+    resumeStreaming, canonicalize, setMode, remountComposer, closeDeletionMenu, showConfirmation, stopMenuWakeups,
     snapshot() { return { counters: { ...counters }, submitted, promptCount: prompts.length,
       promptLength: sent.length, userPresent: !!userTurn?.isConnected, answerPresent: !!answerTurn?.isConnected,
       mode: selected(deepThink) ? 'deepthink' : 'chat', search: selected(search), canonical: location.href === canonical,
-      root: location.pathname === '/', dialogPresent: !!modal?.isConnected, historyPresent: !!ownHistory?.isConnected }; } };
+      root: location.pathname === '/', menuPresent: !!deletionMenu?.isConnected, dialogPresent: !!modal?.isConnected, historyPresent: !!ownHistory?.isConnected }; } };
   window.fixtureReady = true;
 })();
 </script></body></html>

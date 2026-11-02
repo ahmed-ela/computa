@@ -418,6 +418,96 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testSameClaimedDeletionMenuWaitsForRemovalWithAndWithoutDialogOverlap() async throws {
+        for overlap in [false, true] {
+            for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+                let fixture = try Fixture(setup: "deepseekFixture.options.holdDeletionMenu=true; deepseekFixture.options.holdDialog=\(!overlap)")
+                defer { fixture.shutdown() }
+                let token = try await start(fixture, mode: mode)
+                _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic held menu and dialog ordering")
+                _ = try await wait(fixture, token, state: "complete")
+                var selectedPending = false
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    guard action == "selectConversationDeletion", !selectedPending else { return }
+                    selectedPending = true
+                    let held = (try? await self.evaluate(fixture.view, "return deepseekFixture.snapshot();")) as? [String: Any]
+                    XCTAssertEqual(held?["menuPresent"] as? Bool, true)
+                    XCTAssertEqual(held?["dialogPresent"] as? Bool, overlap)
+                    let counts = held?["counters"] as? [String: Any]
+                    XCTAssertEqual(counts?["deleteSelections"] as? Int, 1)
+                    XCTAssertEqual(counts?["confirmations"] as? Int, 0)
+                    // The same physical menu disappears on a later DOM event.
+                    // In the non-overlap case the dialog appears later still.
+                    _ = try? await self.evaluate(fixture.view, """
+                        setTimeout(() => deepseekFixture.closeDeletionMenu(), 100);
+                        if (deepseekFixture.options.holdDialog) setTimeout(() => deepseekFixture.showConfirmation(), 200);
+                        return true;
+                        """)
+                }
+                let first = Task { try await self.call(fixture, "webProviderFinish", token)["cleanup"] as? String }
+                let second = Task { try await self.call(fixture, "webProviderCancel", token)["cleanup"] as? String }
+                let a = try await first.value, b = try await second.value
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                XCTAssertTrue(selectedPending)
+                XCTAssertEqual(a, "deleted"); XCTAssertEqual(b, "deleted")
+                let repeated = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(repeated["cleanup"] as? String, "deleted")
+                try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+                let early = try await evaluate(fixture.view, "return deepseekFixture.counters.prematureConfirmations;") as? Int
+                XCTAssertEqual(early, 0, "An overlapping dialog is not actionable while the owned menu remains visible")
+                XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+                XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+            }
+        }
+    }
+
+    func testForeignOrReplacedMenuAfterDeleteSelectionFailsWithoutConfirmOrReplay() async throws {
+        for mutation in ["foreign", "replaced"] {
+            let fixture = try Fixture(setup: "deepseekFixture.options.holdDeletionMenu=true; deepseekFixture.options.deleteMenuMutation='\(mutation)'")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic changed deletion menu")
+            _ = try await wait(fixture, token, state: "complete")
+            let failed = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(failed["cleanup"] as? String, "failed", mutation)
+            let repeated = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(repeated["cleanup"] as? String, "failed", mutation)
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 0)
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testHeldDeletionMenuDOMWakeupsCannotRenewFixedCleanupDeadlineOrRepeatSelection() async throws {
+        let fixture = try Fixture(setup: "deepseekFixture.options.holdDeletionMenu=true; deepseekFixture.options.menuWakeupMs=50")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic bounded held deletion menu")
+        _ = try await wait(fixture, token, state: "complete")
+        var observations = 0
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "observeDeletedConversation" { observations += 1 }
+        }
+        // Exercise the actual ten-second native cleanup deadline. Frequent
+        // read-only DOM wakeups and a concurrent finish must not renew it.
+        let started = ContinuousClock.now
+        let first = Task { try await self.call(fixture, "webProviderFinish", token)["cleanup"] as? String }
+        let second = Task { try await self.call(fixture, "webProviderCancel", token)["cleanup"] as? String }
+        let a = try await first.value, b = try await second.value
+        let elapsed = ContinuousClock.now - started
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        _ = try await evaluate(fixture.view, "deepseekFixture.stopMenuWakeups(); return true;")
+        XCTAssertEqual(a, "failed"); XCTAssertEqual(b, "failed")
+        XCTAssertGreaterThanOrEqual(elapsed, .seconds(9))
+        XCTAssertLessThan(elapsed, .seconds(14))
+        XCTAssertGreaterThan(observations, 1)
+        let ticks = try await evaluate(fixture.view, "return deepseekFixture.counters.menuWakeups;") as? Int
+        XCTAssertGreaterThan(try XCTUnwrap(ticks), 1)
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 0)
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testChangedCanonicalRouteCannotDeleteForeignChat() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

@@ -41,7 +41,7 @@ enum QwenFixturePage {
   const userID = '902f136d-bddf-4078-a667-030715aeff87';
   const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
   const canonical = 'https://chat.qwen.ai/c/' + conversationID;
-  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, menuDelayMs: 0,
+  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, holdResponseIdentity: false, menuDelayMs: 0,
     dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false, modelCloseOrder: "simultaneous", modelOptionCloseOrder: "simultaneous",
     reply: '{"type":"message","text":"Synthetic Qwen native reply"}' };
   const counts = { input: 0, sends: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
@@ -129,13 +129,24 @@ enum QwenFixturePage {
         });
       });
     });
-    if (!options.holdResponse) completeResponse();
+    if (options.holdResponseIdentity) mountPendingResponseIdentity();
+    else if (!options.holdResponse) completeResponse();
   }
-  function completeResponse() {
+  function mountPendingResponseIdentity() {
     if (!turn || assistant) return;
     const answerTurn = node('div', { class: 'qwen-chat-message-select-turn-message' });
     const root = node('div', { class: 'qwen-chat-message qwen-chat-message-assistant' });
-    assistant = node('div', { class: 'chat-response-message', id: 'chat-response-message-' + answerID });
+    assistant = node('div', { class: 'chat-response-message', id: 'chat-response-message-' });
+    assistant.append(node('div', { class: 'response-loading' }));
+    root.append(assistant); answerTurn.append(root); turn.append(answerTurn);
+  }
+  function completeResponse() {
+    if (!turn || assistant?.querySelector('.phase-answer')) return;
+    const root = assistant?.parentElement || node('div', { class: 'qwen-chat-message qwen-chat-message-assistant' });
+    const answerTurn = root.parentElement || node('div', { class: 'qwen-chat-message-select-turn-message' });
+    if (!assistant) assistant = node('div', { class: 'chat-response-message' });
+    assistant.id = 'chat-response-message-' + answerID;
+    assistant.replaceChildren();
     const flow = node('div', { class: 'chat-response-message-render-flow' });
     flow.append(node('div', { class: 'qwen-chat-thinking-tool-status-card-wraper' }, 'Synthetic status chrome'));
     const phase = node('div', { class: 'response-message-content t2t phase-answer' });
@@ -166,6 +177,7 @@ enum QwenFixturePage {
     } else if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
+    settleResponseIdentity: () => { assistant.id = "chat-response-message-" + answerID; },
     finishPickerClose: closePicker, finishOptionClose: closePicker,
     pickerState: () => ({ pending: pickerClosePending, optionPending: optionClosePending, expanded: trigger.getAttribute('aria-expanded'), visible: !picker.hidden }),
     snapshot: () => ({ ...counts, path: location.pathname, model: modelName.textContent,

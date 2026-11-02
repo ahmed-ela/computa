@@ -73,7 +73,7 @@ function computaProviderCore(request, provider, origin, actions) {
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
         ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
-          : provider === 'qwen' ? ['role', 'aria-haspopup']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
           : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
@@ -450,10 +450,31 @@ try {
     more.selected = selected;
     return selected;
   }
-  function modelEvidence(required = true) {
+  function modelEvidence(required = true, stage = 'action') {
     const p = picker(), selected = state.model?.choice;
-    if (state.selection?.stage === 'selected' || !selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
-      if (required) c.fail('model_unverified'); else return null;
+    // Preserve the original short-circuit order and exact picker read. These
+    // finite predicates only explain rejection; they never restore a binding.
+    const reason = state.selection?.stage === 'selected' ? 'model_evidence_selection_pending'
+      : !selected ? 'model_evidence_unbound'
+      : !p.closed ? 'model_evidence_picker_open'
+      : p.trigger !== state.model.trigger ? 'model_evidence_trigger_replaced'
+      : p.label !== selected.label ? 'model_evidence_label_changed' : null;
+    if (reason) {
+      if (!required) return null;
+      let diagnostic;
+      try {
+        diagnostic = { version: 1, reason, stage, required: true,
+          submitted: state.submitted === true, firstBodyBound: !!state.first,
+          selectionPending: state.selection?.stage === 'selected', boundSelectionPresent: !!selected,
+          pickerClosed: p.closed === true, triggerSameNode: !!selected && p.trigger === state.model.trigger,
+          boundTriggerConnected: state.model?.trigger?.isConnected === true,
+          labelMatches: !!selected && p.label === selected.label };
+      } catch { /* Metadata cannot replace the original model rejection. */ }
+      try { c.fail('model_unverified', reason); }
+      catch (error) {
+        if (diagnostic && error?.computaAdapterFailure) error.modelEvidenceDiagnostic = diagnostic;
+        throw error;
+      }
     }
     if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch');
     return { selected, verification: 'website_selection', source: 'model_picker_label' };
@@ -512,7 +533,7 @@ try {
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
     verifyUserCount(1); verifyFirstPrompt({ text: body.textContent });
-    const form = composer(), evidence = modelEvidence();
+    const form = composer(), evidence = modelEvidence(true, 'optimistic_first');
     // Native accepts this existing negative receipt only after the sole Send
     // is acknowledged, while its first body and canonical lineage are unbound.
     // No response, first-user identity, fingerprint or cleanup authority exists.
@@ -773,7 +794,7 @@ try {
     if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
     const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
     guard(); if (!sameFirst(initial.t.first)) c.fail('conversation_changed', 'first_changed_during_hash');
-    modelEvidence();
+    modelEvidence(true, 'canonical_first_hash');
     if (state.first) {
       const unacknowledgedRead = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
       if (!sameFirst(state.first)) c.fail('conversation_changed', 'first_pinned_identity_changed');
@@ -872,7 +893,7 @@ try {
   if (input.action === 'prepare') {
     if (!fresh() || state.prepared) c.fail('composer_not_empty');
     state.prepared = { editor: form.editor, scope: form.scope, send: form.send };
-    form.editor.focus(); guard(); modelEvidence();
+    form.editor.focus(); guard(); modelEvidence(true, 'prepare_recheck');
     if (composer().editor !== form.editor || !composer().empty) c.fail('composer_not_empty');
     return { ...initial.output, prepared: document.activeElement === form.editor };
   }
@@ -893,7 +914,7 @@ try {
     // inserted-prompt proof. Native may only observe sendReady after this call.
     if (!document.execCommand('insertText', false, prompt)) { state.terminal = true; c.fail('insert_command_rejected'); }
     state.inserted.dispatched = true;
-    guard(); modelEvidence();
+    guard(); modelEvidence(true, 'insert_recheck');
     const after = composer();
     if (after.editor !== form.editor || after.scope !== form.scope || after.send !== form.send
       || after.text !== prompt && !after.empty) { state.terminal = true; c.fail('prompt_not_inserted'); }
@@ -933,6 +954,8 @@ try {
     || error?.error === 'document_changed' && (kimiDraftState.initialReadComplete || kimiDraftState.model
       || kimiDraftState.selection || kimiDraftState.prepared || kimiDraftState.inserted)))
     kimiDraftState.terminal = true;
-  return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }
+  return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.error === 'model_unverified' && error.modelEvidenceDiagnostic
+      ? { modelEvidenceDiagnostic: error.modelEvidenceDiagnostic } : {}) }
     : { error: 'document_changed', detail: 'unexpected_exception' };
 }

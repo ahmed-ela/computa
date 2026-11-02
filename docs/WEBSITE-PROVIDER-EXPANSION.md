@@ -704,6 +704,55 @@ browser/terminal/file workflow or live cleanup pass is claimed. Evidence is
 retained privately under `work/new-website-providers-20261102/build397/`, with
 source/test hashes in `final-source-gates.json`.
 
+### Installed397 results and next transition fixes
+
+Signed build397 (`e8055b34b072bead7a6bc206662f45421fcfe565`) was installed
+with source, package, signature, installed-file and running-process receipts.
+Each fresh marker was dispatched once. Neither is a qualification pass:
+
+| Selection | Duration | Result |
+| --- | ---: | --- |
+| Kimi Instant | 2,717 ms | Required model evidence rejected 50.6 ms after Send; no final answer; cleanup unconfirmed |
+| DeepSeek Chat | 4,118 ms | Response and Chat mode verified; deletion confirmation read rejected the still-visible menu; no released final answer; cleanup unconfirmed |
+
+Kimi's `detail=absent` means its error supplied no predicate detail, not that
+the model control was absent. The next diagnostic distinguishes the existing
+five model-evidence predicates and their call stage; it changes no acceptance
+condition, action or recovery behavior.
+
+DeepSeek's new finite diagnostic was `delete_confirm_menu_still_visible` in
+`selectConversationDeletion`. The engine reads confirmation immediately after
+clicking Delete, before the website necessarily removes the menu. The candidate
+waits without a confirmation target only for the same pinned menu, before any
+dialog has been bound. Foreign, duplicate, authored or returning menus and
+changed conversation ownership still fail. The original deadline, one-click
+claims and full dialog/deletion checks remain required. The DOM regression
+fails on the previous code and passes with this change.
+
+A separate Qwen3.7-Plus direct website probe on installed396 observed an answer
+container with the exact ID prefix but an empty UUID suffix at 415 ms after
+Send, still empty after canonical route promotion at 844 ms, and valid on the
+same nodes at 2,019 ms. Full prompt, selected model, user UUID and physical
+ancestry checks held. The exact marker returned and its test conversation was
+deleted once with root, empty composer and history-absence checks. Developer
+settings and test tabs were restored. This is direct website evidence, not a
+native harness pass or retroactive proof of build394's exact DOM.
+
+The Qwen candidate grants only an explicit negative initial-identity wait while
+those strict predicates hold. UUID settlement must re-enter normal ownership
+and response proof. A Qwen-only ID mutation wakeup makes that transition
+observable; generic canonical `ownershipPending` remains prohibited. The
+integrated adapter suite passed 302 JavaScript tests with 8,463 assertions,
+plus nine version tests with 56 assertions. All 121 distinct native tests passed:
+23 DeepSeek transport, 26 Qwen transport, 46 Kimi transport, three Kimi model
+diagnostics, 19 saved-adapter diagnostics and four Qwen server pending-contract
+cases. Native coverage includes both Qwen models, both DeepSeek modes, exact
+negative packets, ID-only wakeups, delayed menu removal with and without dialog
+overlap, foreign/replaced menus, one-dispatch claims and unchanged deadlines.
+Installation and fresh qualification of these candidates remain pending.
+Failed397 tasks were preserved and no provider submission was replayed.
+Evidence is private under the build397 and build398 workspace directories.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered

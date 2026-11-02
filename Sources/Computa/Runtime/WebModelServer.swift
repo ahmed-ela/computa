@@ -1907,10 +1907,10 @@ actor WebModelServer {
             } else if session.provider == "deepseek" || session.provider == "qwen" {
                 // Only the acknowledged initial saved-chat Send may wait for
                 // its exact first body: a complete DeepSeek composer replacement
-                // or Qwen's exact provisional route. This grants no selection,
-                // first-body, response or cleanup proof.
-                let expectedReason = session.provider == "deepseek"
-                    ? "deepseek_initial_composer_remount_v1" : "qwen_initial_provisional_route_v1"
+                // or Qwen's exact provisional route or initial empty response ID.
+                // This grants no selection, first-body, response or cleanup proof.
+                let expectedReasons = session.provider == "deepseek"
+                    ? ["deepseek_initial_composer_remount_v1"] : ["qwen_initial_provisional_route_v1", "qwen_initial_response_identity_v1"]
                 let selectionMatches = session.provider == "deepseek"
                     ? session.modeChoice != nil && session.modelChoice == nil
                     : session.modeChoice == nil && session.modelChoice != nil
@@ -1921,7 +1921,7 @@ actor WebModelServer {
                       snapshot["sessionLifecycle"] as? String == "saved_conversation_delete",
                       let temporary = snapshot["temporary"] as? NSNumber,
                       CFGetTypeID(temporary) == CFBooleanGetTypeID(), !temporary.boolValue,
-                      snapshot["modelVerificationPendingReason"] as? String == expectedReason,
+                      expectedReasons.contains(snapshot["modelVerificationPendingReason"] as? String ?? ""),
                       session.resolvedSelection != nil,
                       !session.provesNativeContinuation, !session.provesFreshSessionSubmission,
                       session.sequence == 1, session.baselineResponseCount == 0,
