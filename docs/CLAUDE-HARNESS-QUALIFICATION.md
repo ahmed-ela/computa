@@ -2045,3 +2045,39 @@ The initial attempt had exactly one start, Send and poll. The adjacent page
 inspection, completion-only failure and cleanup-retry cases also passed.
 These use a synthetic transport and the real bundled engine; they do not claim
 a new live Claude response. Nine versioning tests also passed.
+
+Build381, source `cb601de8f3f7d2f3608a4e3afb44ce767d60e687`, was signed,
+installed and launched on November 1. The installed executable and bundled
+runtime match the validated signed artifact. The prior build380 app is retained
+as the installer backup. This deployment does not retroactively save its missing
+Opus 5 diagnostic.
+
+### Opus 3 raw-output rendering probe
+
+A new manual Incognito conversation on the normal embedded Claude website
+tested a formatting alternative without changing the production harness. Opus 3
+was selected and verified before one harmless Send. The exact submitted prompt
+requested seven inert string values by Unicode code point, covering quotes,
+backslashes, underscore, asterisk, backtick and newline. A prior literal-JSON
+draft was changed by editor substitutions and was replaced before any Send.
+
+Claude finished the response. Its normal Copy response control returned valid
+raw JSON matching every requested value. The visible response body differed:
+it used typographic quotes, removed escaping and interpreted underscore,
+asterisk and backtick delimiters as formatting. Its captured body was not valid
+JSON. The accessibility heading retained some escapes but also lost delimiter
+characters, so it is not a lossless substitute either.
+
+This rejects adopting raw-output instructions with the current rendered-text
+fallback. It does not demonstrate a defect in the existing fenced-code path or
+qualify Opus 3 tool use. A future raw-output path would first need a verified,
+lossless response source without mutating the user's clipboard; the Copy result
+is evidence worth investigating, not an implemented transport. No parser,
+retry, ownership, refusal or safeguards rule was relaxed.
+
+The probe used public desktop controls only, with no Inspector or developer
+settings. No tools or file actions were requested. The test's Incognito chat was
+exited, the normal new-chat URL observed, and only the created tab closed; the
+browser then showed its empty state. Evidence is retained privately under
+`work/claude-qualification-20261031/opus3-raw-render381-a/`. All-model native
+workflow qualification remains incomplete.
