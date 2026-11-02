@@ -1859,15 +1859,33 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .kimi:
             providerDetails = ["model_trigger", "model_label", "unexpected_exception", "picker_binding", "picker_label", "picker_menu_binding",
                 "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
-                "more_binding", "more_row_shape", "more_checked_count", "more_selected_label"]
+                "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
+                "more_aria_links_changed", "more_boundary_spent", "more_center_changed",
+                "more_center_invalid", "more_center_occluded", "more_claim_changed",
+                "more_claim_missing", "more_close_policy", "more_current_label_changed",
+                "more_initial_expansion", "more_label_changed", "more_label_count",
+                "more_label_value", "more_main_menu_changed", "more_main_trigger_changed",
+                "more_related_changed", "more_related_disconnected", "more_selection_state",
+                "more_submenu_changed", "more_submenu_count", "more_submenu_expansion",
+                "more_submenu_labelledby", "more_top_checked", "more_trigger_changed",
+                "more_trigger_count", "more_trigger_disabled", "more_trigger_links"]
                 + ["picker_open", "picker_close", "model_option", "more_open", "more_close"].flatMap { stage in
                     ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
                 }
         case .qwen:
             providerDetails = ["model_trigger", "model_label", "model_menu", "stop_control", "stop_conversation",
-                "response_actions", "response_container", "delete_cancel", "delete_confirm"]
+                "response_actions", "response_container", "delete_cancel", "delete_confirm",
+                "initial_picker_not_closed", "initial_model_label", "initial_menu_present", "picker_expanded_invalid",
+                "picker_menu_shape", "picker_menu_collapsed", "picker_menu_missing", "picker_menu_binding", "picker_menu_replaced",
+                "model_choice_invalid", "model_option_disabled", "model_selected_invalid", "model_selected_contradiction",
+                "model_choices_empty", "model_choices_duplicate", "model_checked_count", "picker_selected_label",
+                "selection_binding", "selection_target", "picker_not_closed", "model_target_missing"]
+                + ["picker_open", "picker_verify", "model_option", "picker_close"].flatMap { stage in
+                    ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
+                }
         case .deepseek:
             providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
+                "mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed",
                 "delete_anchor", "delete_buttons"]
         default: return nil
         }

@@ -321,10 +321,53 @@ describe('Kimi saved-conversation adapter', () => {
     }
   });
 
+  test('finite More reasons distinguish a replaced trigger, replaced label, changed ARIA and moved center without replay', async () => {
+    const cases: [string, (f: ReturnType<typeof adapterFixture>) => void][] = [
+      ['more_trigger_changed', f => { const next = f.more.cloneNode(true); f.remove(f.more); f.menu.append(next); }],
+      ['more_label_changed', f => { const next = f.moreCurrent.cloneNode(true), parent = f.moreCurrent.parentElement!; f.remove(f.moreCurrent); parent.append(next); }],
+      ['more_aria_links_changed', f => { f.more.setAttribute('aria-controls', 'private-fixture-identifier'); }],
+      ['more_center_changed', f => {
+        const original = f.more.getBoundingClientRect.bind(f.more);
+        f.more.getBoundingClientRect = () => { const rect = original(); return { ...rect, left: rect.left + 0.5 }; };
+      }],
+    ];
+    for (const [detail, mutate] of cases) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      f.more.onDispatch = (event: any) => { original(event); if (event.type === 'pointerover') mutate(f); };
+      const result = await discover(f);
+      expect(result).toEqual({ error: 'model_unverified', detail });
+      expect(f.more.events.map((event: any) => event.type)).toEqual(['pointerover']);
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.length).toBe(1); expect(f.trigger.clicks).toBe(1);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+      expect(JSON.stringify(result)).not.toContain('private-fixture-identifier');
+    }
+  });
+
+  test('finite pre-entry reasons distinguish More shape and expansion without dispatching hover', async () => {
+    const cases: [string, (f: ReturnType<typeof adapterFixture>) => void][] = [
+      ['more_trigger_count', f => { f.remove(f.more); }],
+      ['more_trigger_links', f => { f.more.setAttribute('aria-controls', ''); }],
+      ['more_close_policy', f => { f.more.setAttribute('data-close-on-select', 'private-fixture-value'); }],
+      ['more_label_count', f => { f.remove(f.moreCurrent); }],
+      ['more_label_value', f => { f.moreCurrent.text = 'private-fixture-label'; }],
+      ['more_initial_expansion', f => { f.more.setAttribute('aria-expanded', 'true'); }],
+    ];
+    for (const [detail, mutate] of cases) {
+      const f = adapterFixture({ nestedSelected: true });
+      await f.run('discoverModels', { expectedModelChoice: undefined }); mutate(f);
+      const result = await discover(f);
+      expect(result).toEqual({ error: 'model_unverified', detail });
+      expect(f.more.events.length).toBe(0); expect(f.trigger.clicks).toBe(1);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+      expect(JSON.stringify(result)).not.toContain('private-fixture');
+    }
+  });
+
   test('zero top-level checks require a verified nested selection, never an inferred current model', async () => {
     const f = adapterFixture(); f.options.forEach(row => row.setAttribute('aria-checked', 'false'));
     const result = await discover(f);
-    expect(result).toMatchObject({ error: 'model_unverified', detail: 'more_binding' });
+    expect(result).toMatchObject({ error: 'model_unverified', detail: 'more_label_value' });
     expect(f.more.events.length).toBe(0); expect(f.counts().sends).toBe(0);
   });
 

@@ -33,6 +33,31 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
             "action=other error=model_unverified detail=other")
     }
 
+    @MainActor func testQwenDiscoveryReasonsRemainFiniteAndNeverIncludePageValues() throws {
+        let details = ["initial_picker_not_closed", "initial_model_label", "initial_menu_present", "picker_expanded_invalid",
+            "picker_menu_shape", "picker_menu_collapsed", "picker_menu_missing", "picker_menu_binding", "picker_menu_replaced",
+            "model_choice_invalid", "model_option_disabled", "model_selected_invalid", "model_selected_contradiction",
+            "model_choices_empty", "model_choices_duplicate", "model_checked_count", "picker_selected_label",
+            "selection_binding", "selection_target", "picker_not_closed", "model_target_missing"]
+            + ["picker_open", "picker_verify", "model_option", "picker_close"].flatMap { stage in
+                ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
+            }
+        for detail in details {
+            let diagnostic = try XCTUnwrap(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail, "label": "PRIVATE_PAGE_CANARY",
+                 "url": "https://private.invalid/PRIVATE_PAGE_CANARY"], provider: .qwen, action: "discoverModels"))
+            XCTAssertEqual(diagnostic, "action=discoverModels error=model_unverified detail=\(detail)")
+            XCTAssertLessThan(diagnostic.utf8.count, 160)
+            XCTAssertFalse(diagnostic.contains("PRIVATE_PAGE_CANARY"))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail + " PRIVATE_PAGE_CANARY"], provider: .qwen, action: "discoverModels"),
+                "action=discoverModels error=model_unverified detail=other")
+        }
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+            ["error": "model_unverified", "detail": "picker_menu_shape"], provider: .deepseek, action: "discoverModes"),
+            "action=discoverModes error=model_unverified detail=other")
+    }
+
     @MainActor func testInternalSelectionActionsMapToFiniteDeepSeekModeDiagnostics() {
         let provider = EmbeddedWebModelTransport.Provider.deepseek
         for (internalAction, adapterAction) in [("discoverModels", "discoverModes"),
@@ -42,6 +67,17 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
                 ["error": "mode_unverified", "detail": "mode_toggle"], provider: provider,
                 action: provider.selectionAdapterAction(internalAction)),
                 "action=\(adapterAction) error=mode_unverified detail=mode_toggle")
+        }
+    }
+
+    @MainActor func testDeepSeekModeBindingFailureStagesRemainFiniteAndProviderScoped() {
+        for detail in ["mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "mode_unverified", "detail": detail], provider: .deepseek, action: "inspect"),
+                "action=inspect error=mode_unverified detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "mode_unverified", "detail": detail], provider: .qwen, action: "inspect"),
+                "action=inspect error=other detail=other")
         }
     }
 
@@ -62,6 +98,25 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
                 "action=inspect error=document_changed detail=absent")
             XCTAssertNil(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(["pending": true], provider: provider, action: "inspect"))
             XCTAssertNil(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(["error": true], provider: provider, action: "inspect"))
+        }
+    }
+
+    @MainActor func testKimiMoreReasonsAreExactFiniteLabelsAndRemainProviderScoped() throws {
+        for detail in ["more_trigger_changed", "more_label_changed", "more_aria_links_changed", "more_center_changed",
+                       "more_center_occluded", "more_initial_expansion", "more_close_policy"] {
+            let diagnostic = try XCTUnwrap(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail], provider: .kimi, action: "discoverModels"))
+            XCTAssertEqual(diagnostic, "action=discoverModels error=model_unverified detail=\(detail)")
+            XCTAssertLessThan(diagnostic.utf8.count, 160)
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail], provider: .qwen, action: "discoverModels"),
+                "action=discoverModels error=model_unverified detail=other")
+        }
+        for detail in ["more_center_changed_PRIVATE_PAGE_CANARY", "more_trigger_changed https://private.invalid",
+                       "more_aria_links_changed\nPRIVATE_PAGE_CANARY"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail], provider: .kimi, action: "discoverModels"),
+                "action=discoverModels error=model_unverified detail=other")
         }
     }
 

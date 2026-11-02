@@ -1,4 +1,4 @@
-// Standalone composition; not registered or exposed by the native catalog yet.
+// Standalone composition; native catalog admission is separate from this adapter.
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit', 'stop',
     'deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];

@@ -251,19 +251,22 @@ try {
   }
   function moreTrigger(p) {
     const candidates = visible(p.menu, 'button[data-testid="model-more-trigger"][role="menuitem"][aria-haspopup="menu"]');
-    if (candidates.length !== 1) c.fail('model_unverified', 'more_binding');
+    if (candidates.length !== 1) c.fail('model_unverified', 'more_trigger_count');
     const trigger = candidates[0], triggerID = trigger.getAttribute('id'), menuID = trigger.getAttribute('aria-controls');
     const labels = visible(trigger, '.more-models-current');
     if (!triggerID || !menuID || /\s/.test(triggerID + menuID) || triggerID === p.trigger.getAttribute('id')
-      || menuID === p.menu.getAttribute('id') || trigger.getAttribute('data-close-on-select') !== 'false'
-      || !c.enabled(trigger) || labels.length !== 1 || c.normalize(labels[0].textContent) !== p.label)
-      c.fail('model_unverified', 'more_binding');
+      || menuID === p.menu.getAttribute('id')) c.fail('model_unverified', 'more_trigger_links');
+    if (trigger.getAttribute('data-close-on-select') !== 'false') c.fail('model_unverified', 'more_close_policy');
+    if (!c.enabled(trigger)) c.fail('model_unverified', 'more_trigger_disabled');
+    if (labels.length !== 1) c.fail('model_unverified', 'more_label_count');
+    if (c.normalize(labels[0].textContent) !== p.label) c.fail('model_unverified', 'more_label_value');
     return { trigger, triggerID, menuID, label: labels[0], menu: null, selected: null };
   }
   function moreBoundary(p, selection, entering) {
     const more = selection.more, phase = entering ? 'moreOpening' : 'moreClosing';
-    if (!more || (entering ? more.boundary !== undefined : more.boundary !== 'entered'))
-      c.fail('model_unverified', 'more_binding');
+    if (!more) c.fail('model_unverified', 'more_claim_missing');
+    if (entering ? more.boundary !== undefined : more.boundary !== 'entered')
+      c.fail('model_unverified', 'more_boundary_spent');
     // Spend the complete transition before its first dispatch. A failed or
     // partially dispatched transition is terminal, never resumed or replayed.
     more.boundary = entering ? 'entering' : 'exiting';
@@ -273,12 +276,19 @@ try {
     const validate = () => {
       guard();
       const current = picker(), binding = moreTrigger(current);
-      if (state.terminal || state.selection !== selection || selection.stage !== phase
-        || selection.more !== more || current.trigger !== p.trigger || current.menu !== p.menu
-        || current.label !== p.label || binding.trigger !== target || binding.label !== more.label
-        || binding.triggerID !== more.triggerID || binding.menuID !== more.menuID
-        || !relatedTarget.isConnected || relatedTarget !== (entering ? current.menu : document.body)
-        || choices(current.menu).some(row => row.checked)) c.fail('model_unverified', 'more_binding');
+      if (state.terminal || state.selection !== selection || selection.stage !== phase)
+        c.fail('model_unverified', 'more_selection_state');
+      if (selection.more !== more) c.fail('model_unverified', 'more_claim_changed');
+      if (current.trigger !== p.trigger) c.fail('model_unverified', 'more_main_trigger_changed');
+      if (current.menu !== p.menu) c.fail('model_unverified', 'more_main_menu_changed');
+      if (current.label !== p.label) c.fail('model_unverified', 'more_current_label_changed');
+      if (binding.trigger !== target) c.fail('model_unverified', 'more_trigger_changed');
+      if (binding.label !== more.label) c.fail('model_unverified', 'more_label_changed');
+      if (binding.triggerID !== more.triggerID || binding.menuID !== more.menuID)
+        c.fail('model_unverified', 'more_aria_links_changed');
+      if (!relatedTarget.isConnected) c.fail('model_unverified', 'more_related_disconnected');
+      if (relatedTarget !== (entering ? current.menu : document.body)) c.fail('model_unverified', 'more_related_changed');
+      if (choices(current.menu).some(row => row.checked)) c.fail('model_unverified', 'more_top_checked');
       if (!entering) {
         const submenuPresent = visible(document, 'div.kimi-menu-positioner[role="menu"]')
           .some(node => node.getAttribute('id') === more.menuID);
@@ -288,10 +298,10 @@ try {
       }
       pickerHit(target, entering ? 'more_open' : 'more_close');
       const now = target.getBoundingClientRect();
-      if (![clientX, clientY].every(Number.isFinite)
-        || now.left + now.width / 2 !== clientX || now.top + now.height / 2 !== clientY
-        || !target.contains(document.elementFromPoint(clientX, clientY)))
-        c.fail('model_unverified', 'more_binding');
+      if (![clientX, clientY].every(Number.isFinite)) c.fail('model_unverified', 'more_center_invalid');
+      if (now.left + now.width / 2 !== clientX || now.top + now.height / 2 !== clientY)
+        c.fail('model_unverified', 'more_center_changed');
+      if (!target.contains(document.elementFromPoint(clientX, clientY))) c.fail('model_unverified', 'more_center_occluded');
     };
     const boundary = entering ? ['over', 'enter'] : ['out', 'leave'];
     // dispatchEvent does not synthesize mouse compatibility events. These four
@@ -316,16 +326,20 @@ try {
   }
   function nestedSelection(p, selection, rows) {
     const more = selection.more, current = moreTrigger(p);
-    if (!more || current.trigger !== more.trigger || current.triggerID !== more.triggerID
-      || current.menuID !== more.menuID || current.label !== more.label || rows.some(row => row.checked))
-      c.fail('model_unverified', 'more_binding');
+    if (!more) c.fail('model_unverified', 'more_claim_missing');
+    if (current.trigger !== more.trigger) c.fail('model_unverified', 'more_trigger_changed');
+    if (current.triggerID !== more.triggerID || current.menuID !== more.menuID)
+      c.fail('model_unverified', 'more_aria_links_changed');
+    if (current.label !== more.label) c.fail('model_unverified', 'more_label_changed');
+    if (rows.some(row => row.checked)) c.fail('model_unverified', 'more_top_checked');
     const matches = visible(document, 'div.kimi-menu-positioner[role="menu"]')
       .filter(node => node.getAttribute('id') === more.menuID);
-    if (matches.length > 1) c.fail('model_unverified', 'more_binding');
+    if (matches.length > 1) c.fail('model_unverified', 'more_submenu_count');
     const menu = matches[0];
     if (!menu) return null;
-    if (menu.getAttribute('aria-labelledby') !== more.triggerID || more.trigger.getAttribute('aria-expanded') !== 'true'
-      || more.menu && more.menu !== menu) c.fail('model_unverified', 'more_binding');
+    if (menu.getAttribute('aria-labelledby') !== more.triggerID) c.fail('model_unverified', 'more_submenu_labelledby');
+    if (more.trigger.getAttribute('aria-expanded') !== 'true') c.fail('model_unverified', 'more_submenu_expansion');
+    if (more.menu && more.menu !== menu) c.fail('model_unverified', 'more_submenu_changed');
     more.menu = menu;
     const options = visible(menu, 'div[data-testid="model-more-option"][role="menuitemradio"]', 32).map(node => {
       const labels = visible(node, '.kimi-menu-item__label'), checked = node.getAttribute('aria-checked');
@@ -514,9 +528,12 @@ try {
     let checked = rows.find(row => row.checked);
     if (selection.stage === 'moreClosing') {
       const current = moreTrigger(p), more = selection.more;
-      if (!more || current.trigger !== more.trigger || current.label !== more.label
-        || current.triggerID !== more.triggerID || current.menuID !== more.menuID || rows.some(row => row.checked))
-        c.fail('model_unverified', 'more_binding');
+      if (!more) c.fail('model_unverified', 'more_claim_missing');
+      if (current.trigger !== more.trigger) c.fail('model_unverified', 'more_trigger_changed');
+      if (current.label !== more.label) c.fail('model_unverified', 'more_label_changed');
+      if (current.triggerID !== more.triggerID || current.menuID !== more.menuID)
+        c.fail('model_unverified', 'more_aria_links_changed');
+      if (rows.some(row => row.checked)) c.fail('model_unverified', 'more_top_checked');
       if (visible(document, 'div.kimi-menu-positioner[role="menu"]').some(node => node.getAttribute('id') === more.menuID)) {
         nestedSelection(p, selection, rows);
         return { ...read().output, pending: true };
@@ -527,7 +544,7 @@ try {
     } else if (!checked) {
       if (selection.stage === 'opening') {
         const more = moreTrigger(p);
-        if (more.trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'more_binding');
+        if (more.trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'more_initial_expansion');
         pickerHit(more.trigger, 'more_open');
         selection.more = more; selection.stage = 'moreOpening';
         moreBoundary(p, selection, true);

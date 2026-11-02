@@ -119,29 +119,32 @@ async function computaSavedConversation(input, c, dom, config) {
     if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
       c.fail('conversation_changed', 'conversation_url');
     const usesModes = config.selectionKind === 'mode';
+    const pickerHit = (node, stage) => {
+      const reason = c.hitFailure(node);
+      if (reason) c.fail('model_unverified', stage + '_' + reason);
+    };
     function selectionEvidence(required = true) {
       if (usesModes) {
         const controls = dom.modeControls(), selected = state.mode?.choice;
-        if (input.modelChoice != null || input.expectedModelChoice != null) c.fail('mode_unverified');
-        if (!selected || controls.search.selected || controls.deepThink.node !== state.mode.deepThink
-          || controls.search.node !== state.mode.search) {
-          if (required) c.fail('mode_unverified');
-          return null;
-        }
+        if (input.modelChoice != null || input.expectedModelChoice != null) c.fail('mode_unverified', 'mode_named_input');
+        // Finite diagnostics only: retain the same required/optional failure
+        // behavior and physical pins; never adopt remounted controls here.
+        const unverified = detail => { if (required) c.fail('mode_unverified', detail); return null; };
+        if (!selected) return unverified('mode_unbound');
+        if (controls.search.selected) return unverified('search_selected');
+        if (controls.deepThink.node !== state.mode.deepThink) return unverified('deepthink_replaced');
+        if (controls.search.node !== state.mode.search) return unverified('search_replaced');
         const evidence = dom.modeEvidence();
-        if (!c.equalChoice(evidence.selected, selected)) {
-          if (required) c.fail('mode_unverified');
-          return null;
-        }
+        if (!c.equalChoice(evidence.selected, selected)) return unverified('mode_choice_changed');
         if (input.expectedModeChoice != null && !c.equalChoice(selected, input.expectedModeChoice)) c.fail('mode_mismatch');
         return evidence;
       }
       const p = dom.picker(), selected = state.model?.choice;
       if (!selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
-        if (required) c.fail('model_unverified');
+        if (required) c.fail('model_unverified', 'selection_binding');
         return null;
       }
-      if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch');
+      if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch', 'selection_target');
       return { selected, verification: 'website_selection', source: 'model_picker_label' };
     }
     function sameFirst(first) {
@@ -227,43 +230,45 @@ async function computaSavedConversation(input, c, dom, config) {
       if (usesModes) c.fail('mode_unverified');
       if (!fresh()) c.fail('not_fresh');
       const desired = input.action === 'selectModel' ? input.modelChoice : null;
-      if (desired !== null && !c.choiceValid(desired)) c.fail('model_unverified');
+      if (desired !== null && !c.choiceValid(desired)) c.fail('model_unverified', 'model_choice_invalid');
       const p = dom.picker();
       if (state.model && (!desired || c.equalChoice(state.model.choice, desired)))
         return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
       if (!state.selection) {
-        if (!p.closed || !c.hit(p.trigger)) c.fail('model_unverified');
+        if (!p.closed) c.fail('model_unverified', 'picker_not_closed');
+        pickerHit(p.trigger, 'picker_open');
         state.selection = { trigger: p.trigger, target: desired, stage: 'opening', menu: null, choice: null, choices: null };
         p.trigger.click(); return { ...read().output, pending: true };
       }
       const selection = state.selection;
       if (p.trigger !== selection.trigger || !!desired !== !!selection.target
-        || desired && !c.equalChoice(desired, selection.target)) c.fail('model_mismatch');
+        || desired && !c.equalChoice(desired, selection.target)) c.fail('model_mismatch', 'selection_target');
       if (selection.stage === 'closing') {
         if (!p.closed) return { ...read().output, pending: true };
-        if (p.label !== selection.choice.label) c.fail('model_mismatch');
+        if (p.label !== selection.choice.label) c.fail('model_mismatch', 'picker_selected_label');
         state.model = { choice: selection.choice, trigger: p.trigger, choices: selection.choices };
         state.selection = null;
         return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
       }
       if (selection.stage === 'selected' && p.closed) {
-        if (!c.hit(p.trigger)) c.fail('model_unverified');
+        pickerHit(p.trigger, 'picker_verify');
         selection.stage = 'verifying'; selection.menu = null;
         p.trigger.click(); return { ...read().output, pending: true };
       }
       if (!p.menu) return { ...read().output, pending: true };
-      if (selection.menu && selection.menu !== p.menu) c.fail('model_unverified');
+      if (selection.menu && selection.menu !== p.menu) c.fail('model_unverified', 'picker_menu_replaced');
       selection.menu = p.menu;
       const rows = dom.modelRows(p.menu), checked = rows.find(row => row.selected);
       const target = desired ? rows.find(row => c.equalChoice(row.choice, desired)) : checked;
-      if (!target || p.label !== checked.choice.label) c.fail('model_mismatch');
+      if (!target) c.fail('model_mismatch', 'model_target_missing');
+      if (p.label !== checked.choice.label) c.fail('model_mismatch', 'picker_selected_label');
       if (!target.selected) {
         if (selection.stage !== 'opening') return { ...read().output, pending: true };
-        if (!c.hit(target.node)) c.fail('model_unverified');
+        pickerHit(target.node, 'model_option');
         selection.stage = 'selected'; target.node.click(); return { ...read().output, pending: true };
       }
       selection.choice = target.choice; selection.choices = rows.map(row => row.choice); selection.stage = 'closing';
-      if (!c.hit(p.trigger)) c.fail('model_unverified');
+      pickerHit(p.trigger, 'picker_close');
       p.trigger.click(); return { ...read().output, pending: true };
     }
     if (state.deletion && !deletionActions.includes(input.action)) c.fail('conversation_changed', 'deleting_session');
@@ -446,9 +451,9 @@ function computaQwenDOM(c) {
     const editor = control('composer', document, 'textarea.message-input-textarea');
     const trigger = control('model_trigger', document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]');
     const name = trigger ? control('model_label', trigger, '.wms-trigger__text') : null;
-    if (trigger && (trigger.getAttribute('aria-expanded') !== 'false'
-      || name && (name.children.length !== 0 || !c.normalize(name.textContent)))) reject('model_unverified');
-    if (visible(document, '[role="listbox"]').length) reject('model_unverified');
+    if (trigger && trigger.getAttribute('aria-expanded') !== 'false') reject('model_unverified', 'initial_picker_not_closed');
+    if (trigger && name && (name.children.length !== 0 || !c.normalize(name.textContent))) reject('model_unverified', 'initial_model_label');
+    if (visible(document, '[role="listbox"]').length) reject('model_unverified', 'initial_menu_present');
     if (editor) {
       const scope = retain('composer_scope', editor.closest('.message-input-container-area'));
       if (!scope || c.nodes(scope, 'textarea.message-input-textarea').length !== 1
@@ -467,26 +472,29 @@ function computaQwenDOM(c) {
     const name = leaf(trigger, '.wms-trigger__text', 'model_label');
     const menus = visible(document, '[role="listbox"]').filter(node => !authored(node));
     const menu = optional(menus, 'model_menu');
-    if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))
-      || menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models'
-        || trigger.getAttribute('aria-expanded') !== 'true')
-      || !menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified');
+    if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))) c.fail('model_unverified', 'picker_expanded_invalid');
+    if (menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models')) c.fail('model_unverified', 'picker_menu_shape');
+    if (menu && trigger.getAttribute('aria-expanded') !== 'true') c.fail('model_unverified', 'picker_menu_collapsed');
+    if (!menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'picker_menu_missing');
     return { trigger, menu, label: c.normalize(name.textContent), closed: menu === null };
   }
   function modelRows(menu) {
-    if (picker().menu !== menu) c.fail('model_unverified');
+    if (picker().menu !== menu) c.fail('model_unverified', 'picker_menu_binding');
     const rows = visible(menu, '.wms-list__item[role="option"]', 32).map(node => {
       const label = c.normalize(leaf(node, '.wms-list__name-text', 'model_label').textContent);
       // No DOM model identifier was observed. Keep the exact label as an opaque
       // website key, separate from Alibaba's API IDs and catalog.
       const choice = { key: label, label }, selected = node.getAttribute('aria-selected');
-      if (!c.choiceValid(choice) || !c.enabled(node) || !['true', 'false'].includes(selected)
-        || node.classList.contains('wms-list__item--selected') !== (selected === 'true')) c.fail('model_unverified');
+      if (!c.choiceValid(choice)) c.fail('model_unverified', 'model_choice_invalid');
+      if (!c.enabled(node)) c.fail('model_unverified', 'model_option_disabled');
+      if (!['true', 'false'].includes(selected)) c.fail('model_unverified', 'model_selected_invalid');
+      if (node.classList.contains('wms-list__item--selected') !== (selected === 'true')) c.fail('model_unverified', 'model_selected_contradiction');
       return { node, choice, selected: selected === 'true' };
     });
-    if (!rows.length || new Set(rows.map(row => row.choice.key)).size !== rows.length
-      || rows.filter(row => row.selected).length !== 1
-      || rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified');
+    if (!rows.length) c.fail('model_unverified', 'model_choices_empty');
+    if (new Set(rows.map(row => row.choice.key)).size !== rows.length) c.fail('model_unverified', 'model_choices_duplicate');
+    if (rows.filter(row => row.selected).length !== 1) c.fail('model_unverified', 'model_checked_count');
+    if (rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified', 'picker_selected_label');
     return rows;
   }
   function composer() {
@@ -648,7 +656,7 @@ function computaQwenDOM(c) {
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
 
-// Standalone composition; not registered or exposed by the native catalog yet.
+// Standalone composition; native catalog admission is separate from this adapter.
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit', 'stop',
     'deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];

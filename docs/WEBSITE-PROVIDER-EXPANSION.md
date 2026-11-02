@@ -305,6 +305,34 @@ the provider selector passed 23 tests with 420 assertions, type checking and
 the production WebUI build. Earlier failed runs remain retained alongside the
 passing logs under `build388/`. These results do not establish live qualification.
 
+### Installed build388 result
+
+Build388 (`239e343`) was signed, installed and launched as process 61936.
+Kimi discovery now fails immediately with `more_binding`; the earlier timeout
+became a concrete rejection, but the grouped guard does not yet identify its
+cause. Qwen discovery similarly fails with a detail-less `model_unverified`.
+Neither provider received a native prompt. DeepSeek discovered both modes.
+
+One fresh DeepSeek Chat marker was submitted once. Selection evidence proved
+Chat with Search off at dispatch, but the first post-send inspection failed
+`mode_unverified`, and native saved-chat cleanup remained unconfirmed. The task
+has no accepted answer or tool call and remains a failed qualification record.
+Reopening that exact synthetic conversation in the normal browser showed the
+expected raw-JSON marker response and Search on. This later UI observation does
+not prove the earlier failing state or rule out replaced controls. The synthetic
+conversation was manually deleted through its scoped menu and confirmation;
+the root route, empty composer and absent test history entry were observed.
+The original native failed/unconfirmed receipt was not rewritten.
+
+Evidence: `build388/provider-startup388-complete.log`,
+`build388/deepseek-chat388-marker-a-capture/summary.json` and
+`build388/deepseek-marker-manual-cleanup.json`. Candidate389 adds only finite
+diagnostic reasons at these existing checks. It does not relax their acceptance,
+repeat a spent operation or claim that the underlying live issue is repaired.
+Its focused gate passed 68 native WebKit/diagnostic tests and 176 JavaScript,
+resource and version tests with 3,225 assertions. Fresh installed diagnosis is
+still required; the build388 failure is not converted into a pass.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered

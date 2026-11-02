@@ -137,6 +137,31 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     }
   });
 
+  test('mode binding failures identify finite stages without accepting changed controls or replaying Send', async () => {
+    for (const timing of ['before-read', 'during-hash']) {
+      for (const kind of ['mode_unbound', 'search_selected', 'deepthink_replaced', 'search_replaced', 'mode_choice_changed', 'mode_named_input']) {
+        const f = fixture({ fresh: true }); await submitted(f);
+        const change = () => {
+          if (kind === 'mode_unbound') f.world.__computaDeepSeekSavedSessionV1.mode = null;
+          if (kind === 'search_selected') f.setMode(false, true);
+          if (kind === 'mode_choice_changed') f.setMode(true, false);
+          if (kind === 'deepthink_replaced') { f.deepThink.detach(); f.scope.append(f.deepThink.cloneNode(true)); }
+          if (kind === 'search_replaced') { f.search.detach(); f.scope.append(f.search.cloneNode(true)); }
+        };
+        if (timing === 'before-read') change(); else f.beforeDigest(change);
+        const result = await f.run('inspect', { expectedModeChoice: mode(),
+          ...(kind === 'mode_named_input' ? { expectedModelChoice: mode() } : {}) });
+        expect(result.error).toBe('mode_unverified'); expect(result.detail).toBe(kind);
+        expect(result.modeEvidence).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+        expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
+        expect((await f.run('inspect')).detail).toBe('terminal_operation');
+        expect((await f.run('deleteConversation')).detail).toBe('terminal_operation');
+        expect(f.send.clicks).toBe(1); expect(f.deepThink.clicks).toBe(0); expect(f.search.clicks).toBe(0);
+        expect(f.trigger.clicks).toBe(0); expect(f.remove.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+      }
+    }
+  });
+
   test('mismatched first body or canonical route cannot be substituted after submission', async () => {
     for (const kind of ['body', 'route', 'hash']) {
       const f = fixture({ fresh: true }); const hash = await owned(f);

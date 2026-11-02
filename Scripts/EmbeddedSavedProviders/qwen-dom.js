@@ -23,9 +23,9 @@ function computaQwenDOM(c) {
     const editor = control('composer', document, 'textarea.message-input-textarea');
     const trigger = control('model_trigger', document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]');
     const name = trigger ? control('model_label', trigger, '.wms-trigger__text') : null;
-    if (trigger && (trigger.getAttribute('aria-expanded') !== 'false'
-      || name && (name.children.length !== 0 || !c.normalize(name.textContent)))) reject('model_unverified');
-    if (visible(document, '[role="listbox"]').length) reject('model_unverified');
+    if (trigger && trigger.getAttribute('aria-expanded') !== 'false') reject('model_unverified', 'initial_picker_not_closed');
+    if (trigger && name && (name.children.length !== 0 || !c.normalize(name.textContent))) reject('model_unverified', 'initial_model_label');
+    if (visible(document, '[role="listbox"]').length) reject('model_unverified', 'initial_menu_present');
     if (editor) {
       const scope = retain('composer_scope', editor.closest('.message-input-container-area'));
       if (!scope || c.nodes(scope, 'textarea.message-input-textarea').length !== 1
@@ -44,26 +44,29 @@ function computaQwenDOM(c) {
     const name = leaf(trigger, '.wms-trigger__text', 'model_label');
     const menus = visible(document, '[role="listbox"]').filter(node => !authored(node));
     const menu = optional(menus, 'model_menu');
-    if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))
-      || menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models'
-        || trigger.getAttribute('aria-expanded') !== 'true')
-      || !menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified');
+    if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))) c.fail('model_unverified', 'picker_expanded_invalid');
+    if (menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models')) c.fail('model_unverified', 'picker_menu_shape');
+    if (menu && trigger.getAttribute('aria-expanded') !== 'true') c.fail('model_unverified', 'picker_menu_collapsed');
+    if (!menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'picker_menu_missing');
     return { trigger, menu, label: c.normalize(name.textContent), closed: menu === null };
   }
   function modelRows(menu) {
-    if (picker().menu !== menu) c.fail('model_unverified');
+    if (picker().menu !== menu) c.fail('model_unverified', 'picker_menu_binding');
     const rows = visible(menu, '.wms-list__item[role="option"]', 32).map(node => {
       const label = c.normalize(leaf(node, '.wms-list__name-text', 'model_label').textContent);
       // No DOM model identifier was observed. Keep the exact label as an opaque
       // website key, separate from Alibaba's API IDs and catalog.
       const choice = { key: label, label }, selected = node.getAttribute('aria-selected');
-      if (!c.choiceValid(choice) || !c.enabled(node) || !['true', 'false'].includes(selected)
-        || node.classList.contains('wms-list__item--selected') !== (selected === 'true')) c.fail('model_unverified');
+      if (!c.choiceValid(choice)) c.fail('model_unverified', 'model_choice_invalid');
+      if (!c.enabled(node)) c.fail('model_unverified', 'model_option_disabled');
+      if (!['true', 'false'].includes(selected)) c.fail('model_unverified', 'model_selected_invalid');
+      if (node.classList.contains('wms-list__item--selected') !== (selected === 'true')) c.fail('model_unverified', 'model_selected_contradiction');
       return { node, choice, selected: selected === 'true' };
     });
-    if (!rows.length || new Set(rows.map(row => row.choice.key)).size !== rows.length
-      || rows.filter(row => row.selected).length !== 1
-      || rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified');
+    if (!rows.length) c.fail('model_unverified', 'model_choices_empty');
+    if (new Set(rows.map(row => row.choice.key)).size !== rows.length) c.fail('model_unverified', 'model_choices_duplicate');
+    if (rows.filter(row => row.selected).length !== 1) c.fail('model_unverified', 'model_checked_count');
+    if (rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified', 'picker_selected_label');
     return rows;
   }
   function composer() {
