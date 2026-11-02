@@ -36,6 +36,17 @@ Source-bound offline and installed website-model results are recorded in the
 individual live provider/model checks and Qwen qualification remain separate.
 Existing Chrome and native desktop tooling retain their separate behavior.
 
+## Kimi, Qwen and DeepSeek website integrations
+
+- [ ] Add and qualify the three signed-in websites, separately from Alibaba's
+  existing Qwen API integration. Provider labels/icons and explicit existing
+  session lifecycle selection are prepared; no new website adapter is enabled.
+  Discover concrete models from each live picker, verify the exact submitted
+  message and final response, and delete only the owned test conversation.
+  Kimi Instant returned a synthetic JSON marker through normal embedded-browser
+  UI on build381. That is direct website evidence, not a harness/tool-use pass.
+  See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
+
 ## Claude website-model qualification
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**

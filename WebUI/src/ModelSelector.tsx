@@ -29,7 +29,11 @@ export function ModelLabel({ model, option }: { model: string; option?: ModelOpt
   </span>;
 }
 
-const websiteDefaultModels = new Set(['browser/chatgpt', 'browser/gemini', 'browser/claude', 'browser/groq']);
+const websiteProviderNames: Record<WebsiteModelProvider, string> = {
+  chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq',
+  kimi: 'Kimi', qwen: 'Qwen', deepseek: 'DeepSeek',
+};
+const websiteDefaultModels = new Set(Object.keys(websiteProviderNames).map((provider) => `browser/${provider}`));
 // Temporarily hide the other Alibaba catalog models, including dated duplicates.
 // Keep their saved configuration and runtime support; only expose Qwen3.7 Flash.
 const showAdditionalAlibabaModels = false;
@@ -43,7 +47,7 @@ function isVisibleModel(model: string): boolean {
 }
 
 const providerNames: Record<string, string> = {
-  chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq',
+  ...websiteProviderNames,
   cerebras: 'Cerebras', alibaba: 'Alibaba', openai: 'OpenAI',
 };
 
@@ -124,15 +128,16 @@ type WebsiteModelsRefreshAction = Extract<NativeAction, { action: 'refreshWebsit
 
 export function websiteModelsRefreshAction(model?: string): WebsiteModelsRefreshAction | undefined {
   if (model === undefined) return { action: 'refreshWebsiteModels' };
-  const match = /^browser\/(chatgpt|gemini|claude|groq)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
-  return match && match[0] === model ? { action: 'refreshWebsiteModels', provider: match[1] as WebsiteModelProvider } : undefined;
+  const match = /^browser\/([a-z][a-z0-9_-]*)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
+  return match && match[0] === model && Object.hasOwn(websiteProviderNames, match[1])
+    ? { action: 'refreshWebsiteModels', provider: match[1] as WebsiteModelProvider } : undefined;
 }
 
 export function WebsiteModelsRefresh({ model, refreshing = false, canRefresh = false, onRefresh }: {
   model?: string; refreshing?: boolean; canRefresh?: boolean; onRefresh: (action: WebsiteModelsRefreshAction) => void }) {
   const action = websiteModelsRefreshAction(model);
   if (!action) return null;
-  const provider = action.provider && ({ chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq' })[action.provider];
+  const provider = action.provider && websiteProviderNames[action.provider];
   const label = provider ? `Refresh ${provider} models` : 'Refresh models';
   return <Button variant="ghost" size="sm" aria-label={provider ? label : 'Refresh website models'}
     title={canRefresh ? `Read the model choices available in your signed-in ${provider ? `${provider} website` : 'websites'}`

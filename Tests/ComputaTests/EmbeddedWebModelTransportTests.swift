@@ -12791,6 +12791,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testGroqExplicitClearClosesOnlyItsVerifiedTranscriptAfterOneSend() async throws {
         let fixture = try Fixture(page: Self.groqFixturePage())
         defer { fixture.shutdown() }
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
         let (token, view) = try await startGroqFixture(fixture)
         await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Forbidden second request"])
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -12801,6 +12803,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(counts?[2] as? Bool, false); XCTAssertEqual(counts?[3] as? Bool, false)
         let repeated = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(repeated["cleanup"] as? String, "transcript_cleared")
+        XCTAssertFalse(actions.contains("enableTemporary"), "Visible transcript clearing must never imply a temporary-mode action")
+        XCTAssertEqual(actions.filter { $0 == "clearTranscript" }.count, 1,
+                       "The explicit lifecycle must retain its single owned clearing action")
         try await assertHumanTabIntact(fixture)
     }
 
@@ -13455,6 +13460,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))
             defer { fixture.shutdown() }
+            var actions: [String] = []
+            fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
             let started = try await call(fixture.transport, "webProviderStart", ["provider": provider.rawValue])
             XCTAssertEqual(started["provider"] as? String, provider.rawValue)
             let token = try XCTUnwrap(started["sessionToken"] as? String)
@@ -13474,6 +13481,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(insertions, 1)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertNil(finished["sessionLifecycle"], "Temporary closure must not report visible transcript clearing")
+            XCTAssertFalse(actions.contains("clearTranscript"))
+            XCTAssertFalse(actions.contains("observeClearTranscript"))
             XCTAssertNil(fixture.browser.webView(for: tabID))
             XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
             XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
@@ -17028,6 +17038,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testOwnedTemporaryChatSendsLiteralTextAndClosesOnlyItsTab() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
         let started = try await fixturePhaseProbe("start") { try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]) }
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let ownedID = try XCTUnwrap(fixture.createdTabs.last)
@@ -17062,6 +17074,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(finished["sessionLifecycle"], "Temporary closure must not report visible transcript clearing")
+        XCTAssertFalse(actions.contains("clearTranscript"))
+        XCTAssertFalse(actions.contains("observeClearTranscript"))
         XCTAssertNil(fixture.browser.webView(for: ownedID))
         XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
         XCTAssertEqual(fixture.browser.selectedTabID, fixture.humanID)

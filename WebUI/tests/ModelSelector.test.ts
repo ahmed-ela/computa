@@ -183,6 +183,39 @@ describe('website model selectors', () => {
     expect(staleElements.some((element) => element.attributes['data-value'] === 'browser/groq')).toBe(false);
   });
 
+  test('new website providers display only supplied model choices and preserve missing selections', async () => {
+    for (const [provider, name] of [['kimi', 'Kimi'], ['qwen', 'Qwen'], ['deepseek', 'DeepSeek']]) {
+      const defaultModel = `browser/${provider}`;
+      const choice = { ...options[1], id: `${defaultModel}/choice/observed`,
+        label: `${name} / Fixture model / Exact name · Built-in browser` };
+      const hiddenDefault = { ...choice, id: defaultModel, label: `${name} / Website default · Built-in browser` };
+      const missing = `${defaultModel}/choice/missing`;
+      const input = [hiddenDefault, choice];
+      for (const model of [choice.id, missing]) {
+        const html = renderToStaticMarkup(h(ModelSelector, { options: input, model, label: 'Task model', onSelect: () => {} })).html;
+        const groups = await renderedProviderGroups(html);
+        expect(groups.map(({ name, icons, ids }) => ({ name, icons, ids }))).toEqual([
+          { name, icons: [provider], ids: model === missing ? [choice.id, missing] : [choice.id] },
+        ]);
+        expect((await textBySelector(html, '.model-option-name'))).toContain('Fixture model / Exact name');
+        const items = (await parsedElements(html)).filter((element) => element.attributes.role === 'menuitemradio');
+        expect(items.find((element) => element.attributes['data-value'] === choice.id)?.attributes['aria-disabled']).toBeUndefined();
+        if (model === missing) expect(items.find((element) => element.attributes['data-value'] === missing)?.attributes['aria-disabled']).toBe('true');
+      }
+      expect(groupModelOptions([hiddenDefault], defaultModel)).toEqual([]);
+      expect(groupModelOptions([], options[1].id).some(({ id }) => id === provider)).toBe(false);
+      const selected: string[] = [];
+      selectionHandlers.length = 0;
+      renderToStaticMarkup(h(ModelSelector, { options: input, model: missing, label: 'Task model',
+        onSelect: (value: string) => selected.push(value) }));
+      const change = selectionHandlers[0];
+      for (const value of [defaultModel, missing, `${defaultModel}/choice/not-observed`]) change(value);
+      expect(selected).toEqual([]);
+      change(choice.id);
+      expect(selected).toEqual([choice.id]);
+    }
+  });
+
   test('saved local and website-default models stay readable but remain absent from the choices', async () => {
     const local = { id: 'local/saved-model', label: 'Local / Saved model · MLX', detail: 'Saved local selection', highMemory: false };
     for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model'],
@@ -252,6 +285,9 @@ describe('website model selectors', () => {
       ['browser/gemini/choice/fast', 'gemini', 'gemini'],
       ['browser/claude/choice/fast', 'claude', 'claude'],
       ['browser/groq/choice/observed', 'groq', 'groq'],
+      ['browser/kimi/choice/observed', 'kimi', 'kimi'],
+      ['browser/qwen/choice/observed', 'qwen', 'qwen'],
+      ['browser/deepseek/choice/observed', 'deepseek', 'deepseek'],
       ['api/cerebras/model/fixture', 'cerebras', 'cerebras'],
     ]) {
       const elements = await parsedElements(renderToStaticMarkup(h(ModelProviderIcon, { model })).html);
@@ -299,7 +335,8 @@ describe('website model selectors', () => {
   });
 
   test('task refresh addresses only its selected website provider for default and concrete choices', () => {
-    for (const [provider, label] of [['gemini', 'Gemini'], ['chatgpt', 'ChatGPT'], ['claude', 'Claude'], ['groq', 'Groq']]) {
+    for (const [provider, label] of [['gemini', 'Gemini'], ['chatgpt', 'ChatGPT'], ['claude', 'Claude'], ['groq', 'Groq'],
+      ['kimi', 'Kimi'], ['qwen', 'Qwen'], ['deepseek', 'DeepSeek']]) {
       for (const model of [`browser/${provider}`, `browser/${provider}/choice/eyJrZXkiOiJmaXh0dXJlIn0`]) {
         expect(websiteModelsRefreshAction(model)).toEqual({ action: 'refreshWebsiteModels', provider });
         const html = renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html;
@@ -328,6 +365,17 @@ describe('website model selectors', () => {
       const html = renderToStaticMarkup(h(WebsiteModelsRefresh, { model: 'browser/gemini', ...state, onRefresh: () => {} })).html;
       expect(html).toContain('aria-label="Refresh Gemini models"');
       expect(html).toMatch(/<button[^>]*disabled/);
+    }
+  });
+
+  test('new provider refresh scopes reject lookalikes, API routes and malformed identities', () => {
+    for (const provider of ['kimi', 'qwen', 'deepseek']) {
+      for (const model of [`api/${provider}/model/fixture`, `browser/${provider.toUpperCase()}`, `browser/${provider}-like`,
+        `browser/${provider}\n`, `browser/${provider}/choice/`, `browser/${provider}/choice/value\n`,
+        `browser/${provider}/choice/value/extra`, `browser/${provider}/not-choice/value`]) {
+        expect(websiteModelsRefreshAction(model)).toBeUndefined();
+        expect(renderToStaticMarkup(h(WebsiteModelsRefresh, { model, canRefresh: true, onRefresh: () => {} })).html).toBe('');
+      }
     }
   });
 

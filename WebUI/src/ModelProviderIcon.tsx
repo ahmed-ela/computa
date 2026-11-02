@@ -2,11 +2,14 @@ import openai from './assets/providers/openai.svg';
 import gemini from './assets/providers/gemini.svg';
 import claude from './assets/providers/claude.svg';
 import groq from './assets/providers/groq.svg';
+import kimi from './assets/providers/kimi.svg';
+import qwen from './assets/providers/qwen.svg';
+import deepseek from './assets/providers/deepseek.svg';
 import cerebras from './assets/providers/cerebras.svg';
 import { Icon } from './Icon';
 
 // Local, licensed brand marks; selectors never fetch provider images at runtime.
-const marks: Record<string, string> = { chatgpt: openai, openai, gemini, claude, groq, cerebras };
+const marks: Record<string, string> = { chatgpt: openai, openai, gemini, claude, groq, kimi, qwen, deepseek, cerebras };
 
 export function ModelProviderIcon({ model }: { model: string }) {
   const [transport, provider] = model.split('/');

@@ -48,6 +48,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     enum Provider: String, CaseIterable {
         case chatgpt, claude, gemini, groq
 
+        /// Each provider must explicitly declare the lifecycle its adapter
+        /// proves. A new provider never inherits temporary mode by exclusion.
+        enum Lifecycle { case temporary, visibleTranscriptClear }
+
+        var lifecycle: Lifecycle {
+            switch self {
+            case .chatgpt, .claude, .gemini: .temporary
+            case .groq: .visibleTranscriptClear
+            }
+        }
+
         var host: String {
             switch self {
             case .chatgpt: "chatgpt.com"
@@ -362,9 +373,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var temporaryRequested = false
         // Explicit clearing is a separate lifecycle, never temporary mode or
         // a promise about the provider's server-side retention.
-        var requiresExplicitClear: Bool { provider == .groq && !isDiscovery }
+        var requiresExplicitClear: Bool { provider.lifecycle == .visibleTranscriptClear && !isDiscovery }
         var explicitClearReady = false
-        var lifecycleVerified: Bool { provider == .groq ? explicitClearReady : temporary }
+        var lifecycleVerified: Bool {
+            switch provider.lifecycle {
+            case .temporary: temporary
+            case .visibleTranscriptClear: explicitClearReady
+            }
+        }
         struct ExplicitClearSubmission {
             let generation: UUID
             let url: URL
@@ -1473,18 +1489,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func observesLifecycle(_ observed: [String: Any], session: Session) -> Bool {
-        if session.provider == .groq {
+        switch session.provider.lifecycle {
+        case .temporary:
+            return observed["temporary"] as? Bool == true
+        case .visibleTranscriptClear:
             guard observed["sessionLifecycle"] as? String == "explicit_clear",
                   let temporary = observed["temporary"] as? NSNumber,
                   CFGetTypeID(temporary) == CFBooleanGetTypeID() else { return false }
             return !temporary.boolValue
         }
-        return observed["temporary"] as? Bool == true
     }
 
     private func requireLifecycle(_ observed: [String: Any], session: Session) throws {
         guard session.lifecycleVerified, observesLifecycle(observed, session: session) else {
-            throw session.provider == .groq ? Failure.explicitClearUnverified : Failure.temporaryUnverified
+            switch session.provider.lifecycle {
+            case .temporary: throw Failure.temporaryUnverified
+            case .visibleTranscriptClear: throw Failure.explicitClearUnverified
+            }
         }
     }
 
@@ -2243,8 +2264,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             } else if observed["composer"] as? Bool == true {
                 if observesLifecycle(observed, session: session) {
-                    if session.provider == .groq { session.explicitClearReady = true }
-                    else { session.temporary = true }
+                    switch session.provider.lifecycle {
+                    case .temporary: session.temporary = true
+                    case .visibleTranscriptClear: session.explicitClearReady = true
+                    }
                     if let choice = session.modelChoice {
                         if let evidence = try? WebsiteModelEvidence.parse(observed["modelEvidence"], provider: session.provider.rawValue, expected: choice) {
                             session.modelEvidence = evidence
@@ -2282,7 +2305,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                         session.state = "ready"
                     } else { session.state = "ready" }
-                } else if session.provider != .groq, !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
+                } else if session.provider.lifecycle == .temporary, !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
                     session.temporaryRequested = true
                     _ = try await page(session, action: "enableTemporary")
                 }
@@ -5529,7 +5552,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.claudeModelObservationPending = true
             return observed
         }
-        if session.provider == .groq, !observesLifecycle(observed, session: session) {
+        if session.provider.lifecycle == .visibleTranscriptClear, !observesLifecycle(observed, session: session) {
             throw Failure.explicitClearUnverified
         }
         if provider == .groq, observed["pending"] as? Bool == true, observed["url"] == nil {
@@ -6429,7 +6452,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let pendingModel = session.provider == .chatgpt && session.state == "running" && session.modelVerificationPending
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": pendingModel ? "" : session.response, "sequence": session.sequence]
-        if session.provider == .groq { value["sessionLifecycle"] = "explicit_clear"; value["temporary"] = false }
+        switch session.provider.lifecycle {
+        case .temporary: break
+        case .visibleTranscriptClear:
+            value["sessionLifecycle"] = "explicit_clear"; value["temporary"] = false
+        }
         if pendingModel { value["modelVerificationPending"] = true }
         if !pendingModel, let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
