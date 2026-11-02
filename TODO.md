@@ -48,7 +48,10 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   Opus 5's safeguard block remains unresolved; build380's warning-layout fix is
   synthetically validated but not live-qualified for that case. Preserve the
   other models' refusals, format failures, eligibility limits and historical
-  unconfirmed cleanup. Further cases need a relevant compatibility change or
+  unconfirmed cleanup. Fresh build380 tasks confirmed Sonnet 5/Sonnet 4.6 and
+  Opus 4.7/Opus 4.8 refusals with zero tool calls. Opus 3 again failed both
+  format attempts; both exact replies are now captured, without a demonstrated
+  parser defect. Further cases need a relevant compatibility change or
   new eligibility evidence, exact model/ownership proof, protected tests,
   independently observed receipts, task-tab closure and durable cleanup.
   Keep strict parsing and existing correction limits; do not replay uncertain

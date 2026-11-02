@@ -29,8 +29,10 @@ by a new live Opus 5 case and does not establish prompt acceptance. The failed
 native page's exact state was not retained. No Retry or alternate-model action
 is authorized by the warning.
 
-Sonnet 5, Sonnet 4.6, Opus 4.7 and Opus 4.8 retain their recorded workflow or
-marker refusals. Opus 3 retains its two-attempt format failure. Prior picker
+Fresh build380 fixtures also failed for Sonnet 5, Sonnet 4.6, Opus 4.7 and
+Opus 4.8: each ended in a valid refusal with no native tool calls. Opus 3
+returned two malformed responses; both exact replies are now retained. These
+current-build failures are detailed in the follow-up round below. Prior picker
 observations marked Fable models credit-gated and did not expose Haiku 4.5;
 those observations do not establish current eligibility. Historical failures,
 including unconfirmed cleanup, remain recorded below. Full qualification stays
@@ -1875,3 +1877,92 @@ Private evidence is retained under
 | haiku55-workflow380-c | 4fc33d2fa7593f9f64794ed9fbac00b5097113831af47399a53eb25b5c83e4b2 | 633d0fa614cc0a0beb3df36113ac85b72dccc77cbae95e4cd22144eee46a66e1 |
 | opus55-workflow380-d | 082fd39a6d1373e89a285fd8e97ac6483e8d4f1a3877ace8ee1ee696cabd81cd | 9ac13295edd8d92721f3e1c7407ed5fede3afffcd0c9a008498689f811d01d1b |
 | opus46-workflow380-f | 69063bea9a5b7a7c245707042fe9fe94381a7720ddf044615ae7b5a9114bcf06 | 05b5ca984aacdd7bb31f340dff201056cf234f633302efb26b01f2a62c2c5082 |
+
+
+## Build380 follow-up: remaining models, November 1
+
+The next controlled round kept installed source e62bbbaf and PID35137 unchanged.
+Each available choice below received one new native task with its own fixture,
+nonce, fresh loopback port and exact composer/model readback. These current-build
+checks follow older failures that predated the API-only presentation change;
+they are not a matched causal experiment and do not erase those earlier cases.
+
+| Model | Duration | Inferences / tools | Result |
+| --- | ---: | ---: | --- |
+| Opus 3 | 21.883 s | 2 / 0 | Both responses malformed; no accepted answer. |
+| Sonnet 4.6 | 17.908 s | 2 / 0 | Malformed JSON, then a valid refusal. |
+| Sonnet 5 | 10.439 s | 1 / 0 | Valid refusal. |
+| Opus 4.7 | 30.621 s | 1 / 0 | Valid refusal. |
+| Opus 4.8 | 46.371 s | 1 / 0 | Valid refusal. |
+
+Every fixture failed its requested workflow: all four seed files stayed
+unchanged, no model-issued tests ran, and there was no browser submission or
+receipt. Each independent fixture grader retained 7/19 checks and its negative
+verdict. Its failing test run is independent audit evidence, not model execution.
+Exact website selection, document/first-user proof and saved closed cleanup were
+joined separately for all seven inferences. No prompt was manually replayed.
+
+### Opus 3: the missing corrective reply is now captured
+
+The first 327-byte reply contains a 156-byte syntactically valid tool-call object
+plus authored paragraphs before and after it. The existing correction received
+a 199-byte reply containing the same proposed browser action and a new authored
+paragraph before its JSON. Both complete replies fail JSON parsing at offset
+zero. Their DOM evidence records one code block and outside authored content,
+so preserving the whole response and rejecting partial extraction is correct.
+The first saved closure preceded the single correction, and the second session
+closed 95 ms after native terminal. There was no third inference or tool release.
+
+Task-bound, one-shot diagnostic arms captured each future rejection separately.
+The first output was archived before the second arm was created; neither arm
+requested a provider response or changed correction limits. Both raw replies,
+submission/session joins and finite extraction records are retained privately.
+This closes the second-reply evidence gap for this new case, not retrospectively
+for build374. The V6 audit remains negative at 20/27 checks.
+
+### Sonnet 4.6: malformed JSON followed by refusal
+
+Its captured first reply contains an isolated 883-byte code block that is itself
+invalid JSON: an extra closing brace occurs where the call array should continue.
+This is not only a copied code-widget label. The production predicate correctly
+admitted one format correction after saved closure. The next reply was an
+ordinary refusal of the external relay, file, command and browser workflow.
+No tool proposal was released or executed.
+
+The strict independent V6 audit stays negative at 25/27. One failure is the
+substantive absence of workflow dispatch. The other is the auditor's existing
+build365-only gate for isolated-malformed-code eligibility; it does not support
+build380, although its correction-pair checks all pass. Read-only source review
+confirmed that the current production predicate accepts the captured structure.
+No auditor gate was widened and no full qualification pass is claimed.
+
+### Sonnet 5, Opus 4.7 and Opus 4.8: valid refusals
+
+All three returned ordinary final text declining to propose host tool actions.
+They described the lack of website-native local tools or treated relay proposals
+as fabricated execution. These are the models' stated reasons, not proof that
+Computa lacks its native tools. The current contract already distinguishes
+proposals from execution and requires matching host outputs as evidence.
+No malformed reply, correction, website error or native tool dispatch occurred.
+Their V6 audits retain 26/27 checks, failing actual workflow dispatch.
+
+No response-handler defect was established by this round. The negative cases
+do not justify accepting partial action JSON, suppressing refusals or increasing
+retry limits. Full Claude qualification remains incomplete, alongside the prior
+Opus 5 safeguard block and historical unconfirmed cleanup. Further repair needs
+a demonstrated interoperability defect or changed provider behavior; repeated
+unchanged tasks would not establish a fix.
+
+All five new fixture servers were identity-checked and stopped; their listeners
+are absent. Diagnostic captures and unused arms were archived, and global arm
+and output slots were clear afterward. These tests changed no production code,
+Inspector/developer settings, real account content, parser rules or retry limits.
+Independent review records remain under the private evidence cases:
+
+| Case | Independent review SHA-256 |
+| --- | --- |
+| `opus3-workflow380-g` | `02d3eead9cb0f25b5661d4a2a8119993a683664648e6876aa323da8457740eb8` |
+| `sonnet46-workflow380-h` | `26043ee30f8aa0c732d9d187dd050f8d026cfeb1f5a31afd9675c94cd660c87a` |
+| `sonnet5-workflow380-i` | `45a158c4f7bcd6462d1ed07ba9f5990e8783a9db74bc73d397943bbe082f0f19` |
+| `opus47-workflow380-j` | `46e7ed84c91e1178f909760fc20311216a445adb5a9f44b095adbcf48081ea8b` |
+| `opus48-workflow380-k` | `589c2fc8f4810ba94bd1468eb9ceb09c0e983a0118698d6b41df61c4d01e1639` |
