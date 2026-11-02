@@ -2304,3 +2304,20 @@ The capture records the server's projected prompt at `pre_send` with
 `submissionVerified=false`, not the page or network request. A later exact
 submission-journal join is still required. Installed capture and proof of what
 tool-result content reaches the provider remain pending.
+
+### Build386: fresh Opus 3 run stopped before the continuation
+
+The fresh `claude-exec386-a` task on signed installed build386 requested a
+synthetic local file whose random contents were absent from the prompt.
+Task `e1cb8977-c3e0-46b1-bae5-7ea1eb95501d`, thread
+`01a19b82-7342-7d83-b4ca-12d32a48bb07`, turn
+`01a19b82-7471-76f1-a225-49fee6470fc6` failed after 11.803 seconds with
+`invalid_model_output`, zero native tools and no final answer. Its one inference
+had verified Opus 3 selection/submission and a closed, saved `not_created`
+cleanup receipt. This is a failed run, not a terminal or file-read pass.
+
+The post-exec capture did not trigger because no tool ran. It therefore does
+not demonstrate missing tool output or prove its presence in a continuation.
+The exact unused arm was archived and retired under the existing lock after
+identity, inode and hash checks. No prompt was replayed. Evidence is retained
+in `work/new-website-providers-20261102/build386/claude-exec386-a/`.

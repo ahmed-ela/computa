@@ -474,14 +474,22 @@ try {
         if (more.trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'more_binding');
         pickerHit(more.trigger, 'more_open');
         selection.more = more; selection.stage = 'moreOpening';
-        more.trigger.click(); return { ...read().output, pending: true };
+        // One claimed entry event; acknowledgement still requires the exact
+        // bound submenu and checked row on a later ordinary read.
+        more.trigger.dispatchEvent(new PointerEvent('pointerover', {
+          bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true, relatedTarget: p.menu,
+        })); return { ...read().output, pending: true };
       }
       if (selection.stage !== 'moreOpening') c.fail('model_unverified', 'model_checked_count');
       const selected = nestedSelection(p, selection, rows);
       if (!selected) return { ...read().output, pending: true };
       pickerHit(selection.more.trigger, 'more_close');
       selection.stage = 'moreClosing';
-      selection.more.trigger.click(); return { ...read().output, pending: true };
+      // One claimed exit event, with no click fallback or event sequence.
+      // Absent acknowledgement leaves this close spent until its deadline.
+      selection.more.trigger.dispatchEvent(new PointerEvent('pointerout', {
+        bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true, relatedTarget: document.body,
+      })); return { ...read().output, pending: true };
     } else if (selection.more) c.fail('model_unverified', 'model_checked_count');
     if (p.label !== checked.choice.label) c.fail('model_mismatch');
     const target = desired ? rows.find(row => c.equalChoice(row.choice, desired)) : checked;

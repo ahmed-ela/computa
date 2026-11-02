@@ -1,12 +1,12 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build386 preparation, 2026-11-02 UTC. Installed 0.8.0 (385),
-source `5d7a1fc662c7632687d48bd1ec45819b99b19cd0`, includes Kimi's nested
-selection handling but still reached the 45-second startup discovery deadline.
-No prompt was sent and no Kimi choices were exposed. The specific pending
-stage was not captured before the owned page closed. Candidate386 is being
-prepared to retain bounded discovery diagnostics before cleanup; it is not a
-verified repair. Installed recovery and tool-use qualification remain pending.
+Status: candidate build387 preparation, 2026-11-02 UTC. Installed 0.8.0 (386),
+source `31afeb27797339a6d5f96384810647c203b9a63c`, captured Kimi discovery
+stalling at `moreOpening`: the main menu was open but the submenu remained
+collapsed after its claimed click. No prompt was sent and no choices were
+exposed. Candidate387 replaces the submenu click with one pointer entry/exit
+event, matching normal UI hover behavior. Live recovery and tool-use
+qualification remain pending.
 Qwen and DeepSeek have no enabled native website adapter yet. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
@@ -194,8 +194,8 @@ menu failed to open, selection was still pending, or another preparation step
 was waiting. The bounded installed observation is
 `work/new-website-providers-20261102/build385/kimi-discovery-timeout385.json`.
 
-Inspector approval for the new Kimi tab remains pending. Candidate386's next
-change is diagnostic-only: preserve finite discovery-stage evidence before
+At that checkpoint Inspector approval was pending. Build386's next
+change was diagnostic-only: preserve finite discovery-stage evidence before
 cleanup closes the owned page. Existing picker reads expose a fixed phase and
 booleans for main/submenu presence, expansion, collapse and claimed actions.
 Native validation admits only exact keys and Boolean types, removes the
@@ -206,8 +206,8 @@ The focused build386 native gate passed 99 tests. The combined JavaScript and
 version gate passed 64 tests with 682 assertions (55 Kimi adapter tests and nine
 version tests). Results and log hashes are retained in
 `work/new-website-providers-20261102/build386/final-source-gates.json`.
-Installed reproduction remains pending; these diagnostic fixture passes do not
-establish a fix or Kimi qualification.
+The installed reproduction below captured the missing stage; these diagnostic
+fixture passes do not establish a fix or Kimi qualification.
 
 A separate normal-UI observation on installed385 found that Accessibility Press
 on More models left the submenu closed, while pointer hover opened the checked
@@ -215,6 +215,35 @@ K3 row. The top menu was dismissed without changing a model or sending a prompt.
 Screenshots are retained as `build386/kimi-more-axpress385.png` and
 `build386/kimi-more-hover385.png` under the workspace evidence directory. This is
 UI interaction evidence, not proof of how the adapter's DOM event behaves.
+
+### Build386 reproduction and candidate387 hover interaction
+
+The signed build386 was installed and verified as process 41226. One fresh
+startup discovery reached the deadline with `phase=moreOpening`, a present,
+expanded main menu, and a claimed but absent, collapsed submenu. The same
+finite state was retained before cleanup. The existing DOM observer accepted
+17 events; no prompt was submitted. The exact log and evidence receipt are
+`build386/kimi-startup386-complete.log` and
+`build386/kimi-discovery386-evidence.json` in the workspace evidence directory.
+
+In a normal signed-in Kimi tab on the same build, hovering over More models
+opened the checked K3 row; moving into blank page space closed the submenu
+while leaving the main menu open. The main menu was then dismissed without
+changing the model or sending a message. No Web Inspector setting was enabled.
+
+Candidate387 changes only the claimed submenu interactions to `pointerover`
+and `pointerout`. It keeps the exact physical controls, ARIA relationships,
+checked-row proof, native deadline and later Instant selection verification.
+An unacknowledged event remains spent; there is no click fallback or sequence
+of alternate events. This is a reversible interaction hypothesis requiring a
+fresh live discovery, not a claim that synthetic events already work on Kimi.
+
+The candidate387 gate passed 44 native tests, including delayed actual-WebKit
+submenu acknowledgements with one entry, one exit, zero submenu clicks and
+zero Send actions. The combined JavaScript/version gate passed 72 tests with
+799 assertions. The prior click implementation fails the new hover-only
+fixture. These fixtures validate the candidate mechanism and protections;
+live discovery and response checks remain required.
 
 ### Direct website observations before native qualification
 

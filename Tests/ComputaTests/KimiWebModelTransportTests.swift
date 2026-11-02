@@ -53,7 +53,7 @@ final class KimiWebModelTransportTests: XCTestCase {
                 installed = true
                 _ = try? await self.evaluate(fixture.view, """
                     window.fixtureMoreDispatches = 0;
-                    document.getElementById('fixture-more-trigger').addEventListener('click', event => {
+                    document.getElementById('fixture-more-trigger').addEventListener('pointerover', event => {
                         window.fixtureMoreDispatches++;
                         event.preventDefault(); event.stopImmediatePropagation();
                     }, true);
@@ -80,6 +80,27 @@ final class KimiWebModelTransportTests: XCTestCase {
         let clicks = try await evaluate(fixture.view, "return window.fixtureMoreDispatches;") as? Int
         XCTAssertEqual(clicks, 1)
         try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testDelayedSubmenuPointerAcknowledgementsDoNotReplayEntryOrExit() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, """
+                    kimiFixture.options.moreOpenDelayMs = 100;
+                    kimiFixture.options.moreCloseDelayMs = 100; return true;
+                    """)
+            }
+        }
+        let choices = try await fixture.transport.discoverModels(provider: "kimi")
+        XCTAssertEqual(choices, [choice]); XCTAssertTrue(configured)
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.moreClicks,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(actions, [1, 1, 0, 0])
         XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }

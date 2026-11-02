@@ -147,9 +147,12 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   const show = () => { f.menu.removeAttribute('hidden'); f.trigger.setAttribute('aria-expanded', 'true'); };
   hide();
   f.trigger.onClick = () => f.trigger.getAttribute('aria-expanded') === 'true' ? hide() : show();
-  f.more.onClick = () => {
-    if (f.more.getAttribute('aria-expanded') === 'true') hideMore();
-    else { f.moreMenu.removeAttribute('hidden'); f.more.setAttribute('aria-expanded', 'true'); }
+  // Experimental fixture contract: clicks are inert; only the proposed
+  // pointer entry/exit events operate this synthetic submenu. Not live proof.
+  f.more.onDispatch = (event: any) => {
+    if (event.type === 'pointerout') hideMore();
+    else if (event.type === 'pointerover') { f.moreMenu.removeAttribute('hidden'); f.more.setAttribute('aria-expanded', 'true'); }
+    else throw new Error('Unexpected submenu event');
   };
   for (const row of f.options) row.onClick = () => {
     f.options.forEach(other => other.setAttribute('aria-checked', other === row ? 'true' : 'false'));
@@ -241,7 +244,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     document.URL = options.provisional ? provisional : canonical;
     if (!options.delayedUser) appendUser();
   };
-  const execute = new AsyncFunction('input', 'document', 'window', 'location', 'globalThis', 'getComputedStyle', 'MutationObserver', 'crypto',
+  const execute = new AsyncFunction('input', 'document', 'window', 'location', 'globalThis', 'getComputedStyle', 'MutationObserver', 'crypto', 'PointerEvent',
     adapterSource);
   let fingerprint: string | undefined, conversation: string | undefined;
   const run = async (action = 'inspect', overrides: Record<string, unknown> = {}) => {
@@ -261,7 +264,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     },
     { subtle: { digest: async (algorithm: string, bytes: Uint8Array) => {
       const value = await crypto.subtle.digest(algorithm, bytes); const hook = digestHook; digestHook = undefined; hook?.(); return value;
-    } } });
+    } } }, class { constructor(public type: string, init: Record<string, unknown>) { Object.assign(this, init); } });
     if (result.firstUserVerified) { fingerprint = result.firstUserFingerprint; conversation = result.conversationIdentity; }
     return result;
   };

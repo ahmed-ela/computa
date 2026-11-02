@@ -65,10 +65,11 @@ enum KimiFixturePage {
       const provisional = '/chat/p1111111-2222-4333-8444-555555555555?chat_enter_method=home';
       const options = { delayUser: false, holdProvisional: false, holdResponse: false,
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
+        moreOpenDelayMs: 0, moreCloseDelayMs: 0,
         lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
       const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
-        modelOpens: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0,
+        modelOpens: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0, moreClicks: 0,
         headerOpens: 0, deleteSelections: 0, confirmations: 0 };
       let outbound = null, user = null, answer = null, historyLink = null;
       let nativeInput = null, pendingCommit = null, lexicalSettled = false;
@@ -80,9 +81,17 @@ enum KimiFixturePage {
         if (!menu.hidden) hideModel();
         else { counters.modelOpens++; menu.hidden = false; model.setAttribute('aria-expanded', 'true'); }
       });
-      more.addEventListener('click', () => {
-        if (!moreMenu.hidden) { counters.moreCloses++; hideMore(); }
-        else { counters.moreOpens++; moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }
+      // Candidate fixture only: a click has no submenu effect. Real WebKit
+      // dispatch reaches these ordinary handlers; no adapter state is read.
+      more.addEventListener('click', () => { counters.moreClicks++; });
+      more.addEventListener('pointerover', event => {
+        if (event.target !== more || event.pointerType !== 'mouse' || event.relatedTarget !== menu) return;
+        counters.moreOpens++;
+        setTimeout(() => { moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }, options.moreOpenDelayMs);
+      });
+      more.addEventListener('pointerout', event => {
+        if (event.target !== more || event.pointerType !== 'mouse' || event.relatedTarget !== document.body) return;
+        counters.moreCloses++; setTimeout(hideMore, options.moreCloseDelayMs);
       });
       moreOption.addEventListener('click', () => { counters.moreSelections++; });
       for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.addEventListener('click', () => {
