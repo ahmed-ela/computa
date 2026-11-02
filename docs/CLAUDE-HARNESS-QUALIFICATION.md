@@ -1,58 +1,45 @@
 # Claude harness qualification
 
-Claude qualification resumed on October 31, 2026. A November 1 picker inspection
-on installed build359 observed Sonnet 5.5, Haiku 5.5, Sonnet 5 and Sonnet 4.6, plus
-Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6 and Opus 3 as enabled controls.
-Fable 5.1 and Fable 5 require usage credits. Haiku 4.5 remains absent. This
-read-only inspection sent no prompt and changed no model; enabled picker controls
-are availability observations, not successful inference or workflow evidence.
-Each newly visible Opus choice requires independent qualification; the
-individual results below do not qualify the others.
+Installed build380 uses source `e62bbbaf80018b4edbc027112af1d5636a048a4a`.
+Later documentation commits do not change that installed source. Four fresh,
+independently audited local workflows have passed on this build:
 
-As of November 1, build379 (`0633fc3`) is installed. Its captured Opus 5 request
-still reached the five-minute deadline after verified submission, with no
-answer. The same corrected prompt in an ordinary foreground Incognito tab
-showed Claude's `reasoning_extraction` safeguards pause. Removing API-only
-controls did not resolve that provider block. DOM inspection found two concrete
-classifier mismatches: the reason is inside `CODE`, and the button says
-`Edit and retry with Opus 5`. These explain the missed foreground warning;
-the native page was already closed, so its exact state remains unproved.
-Build380 addresses those detection mismatches; its live qualification is pending.
-A separate short direct Opus 5 prompt on build377 had passed;
-that different payload and presentation did not establish the timeout's cause.
-A fresh Opus 4.8 workflow returned a valid refusal without tool use. The latest
-bounded Opus 4.6 full-workflow pass remains build374; build377 has not established
-a new Claude workflow pass, nor has build378. Earlier build374 Opus 4.8 and Opus 4.7 workflows
-returned valid refusals, and Opus 3 failed with two malformed replies and no
-tool use. The earlier Sonnet
-5.5 full workflow ran on build368 (`2dea3d2`). A later
-Fable 5.1 marker on build370 failed as recorded below; no Claude qualification
-on build371 is claimed. The separate Opus 5 reproductions on builds 373 and 374
-failed as recorded below. The
-`v0.8.0-alpha.363` release was published after PR #19 was squash-merged at
-`0c182d7`; its tree exactly matches that release's actual build source `e2a0fe4`.
-The signed bundle and frozen build inputs were revalidated
-before publication. The package is not notarized. Full Claude qualification
-remains open in issue #15; release publication does not establish model reliability.
+| Model | Duration | Inferences / tools | Result |
+| --- | ---: | ---: | --- |
+| Sonnet 5.5 | 50.569 s | 9 / 8 | Full fixture passed without recorded tool errors. |
+| Haiku 5.5 | 89.894 s | 13 / 13 | Full fixture passed; three pre-edit test commands failed, including two redundant reruns. |
+| Opus 5.5 | 71.237 s | 9 / 10 | Full fixture passed without recorded tool errors. |
+| Opus 4.6 | 134.677 s | 10 / 11 | Fresh full fixture passed without recorded errors or correction. |
 
-Current bounded evidence includes a new Sonnet 5.5 full-workflow pass on
-installed build368, earlier Sonnet markers, and a Haiku 5.5 workflow pass on
-build361. Opus 5.5 completed one full workflow on build363. Build368's Opus 4.6
-marker passed, but its full workflow failed after a successful file edit. A
-fresh build374 Opus 4.6 workflow subsequently passed as recorded below; that
-result does not explain or erase the earlier failure.
-Opus 4.7 added prose to its earlier marker; its fresh build374 workflow returned
-a valid refusal without tool use. Opus 3's earlier malformed marker reply was
-rejected; its fresh build374 workflow also failed after one format correction.
-Build362's Sonnet 5 marker received a valid refusal. Sonnet 4.6 has passed
-markers but still fails full workflows: build364 corrected its malformed first
-reply, then received a valid refusal. Opus 5 still loses current model proof
-after submission, including a bounded remount timeout on build368. Opus 4.8's
-earlier verified response failed its exact-marker task, and its fresh build374
-workflow returned a refusal without tool use. Remaining workflows are still
-required.
-These results are independent cases, not an all-model pass or a measured
-reliability rate.
+A separate earlier Opus 4.6 run completed the functional fixture in 153.929 s
+after one malformed reply and bounded correction. Its raw rejected reply was not
+captured, so its full transport/correction audit remains incomplete. The later
+pass does not diagnose or erase that failure.
+
+Each completed pass joins the permitted function edit, six protected tests,
+correct reference, exactly one accepted loopback submission, browser-observed
+receipt, final answer, task-tab closure and saved website-session cleanup.
+These are separate bounded results, not an all-model pass or a reliability rate.
+
+Opus 5 remains unqualified. The captured build379 request timed out in the
+harness; a separate foreground copy of that exact prompt showed Claude's
+`reasoning_extraction` safeguards pause. Build380 recognizes the observed
+warning layout in tested fixtures, but that detection fix has not been exercised
+by a new live Opus 5 case and does not establish prompt acceptance. The failed
+native page's exact state was not retained. No Retry or alternate-model action
+is authorized by the warning.
+
+Sonnet 5, Sonnet 4.6, Opus 4.7 and Opus 4.8 retain their recorded workflow or
+marker refusals. Opus 3 retains its two-attempt format failure. Prior picker
+observations marked Fable models credit-gated and did not expose Haiku 4.5;
+those observations do not establish current eligibility. Historical failures,
+including unconfirmed cleanup, remain recorded below. Full qualification stays
+open in [issue #15](https://github.com/ahmed-ela/computa/issues/15).
+
+The earlier `v0.8.0-alpha.363` release followed PR #19's squash merge at
+`0c182d7`; its tree matches build source `e2a0fe4`, and its signed inputs were
+revalidated before publication. It was not notarized. That release and its older
+passes remain distinct from the installed build380 results.
 
 ## Subsequent ownership failure and installed diagnostics
 
@@ -1823,4 +1810,68 @@ the actual warning structure and negative cases for altered, duplicated, quoted
 or hidden controls. Two native test methods passed all nine real-WebKit pause,
 completion-race and ownership scenarios. The nine versioning tests also passed.
 Product and test inputs stayed unchanged during the adapter/native runs. Live
-build380 qualification remains pending.
+qualification was pending at that checkpoint; the subsequent results follow.
+
+
+## Installed build380 workflow round, November 1
+
+All five fresh tasks used the same installed source e62bbbaf, process 35137.
+Signed-package and installation receipts, process start identity and installed
+executable hashes were retained. The binary did not change during the round.
+Each case had a separate fixture, nonce and previously unused loopback port.
+The native composer and selected Claude model were checked before one Send;
+the adapter independently verified website selection for every accepted reply.
+The UTC timestamps extend into November 2; local testing was November 1 EST.
+
+The four fully audited passes appear in the opening table. Each passed all
+19 functional-fixture checks and 27 transport checks. Independent review joined
+the exact commands, scoped diff, protected test files, single accepted POST,
+unpredictable browser receipt, final answer and native explicit-close receipt.
+All website inference sessions have saved closed cleanup receipts and release
+records. Task-browser closure was verified separately from provider cleanup.
+No correction occurred in those four passes.
+
+Haiku 5.5 ran the intentionally failing tests three times before its patch,
+including two redundant reruns. Those three exit-one results are retained; the
+subsequent six-test pass was model-dispatched and independently rerun. Sonnet
+5.5 and Opus 5.5 had no recorded tool errors. The fresh Opus 4.6 pass also had
+no recorded errors or correction. These observations are not an error-rate
+estimate or arbitrary-website coverage.
+
+The separate opus46-workflow380-e run completed its functional workflow in
+153.929 s with 11 inferences and nine successful native tool calls. Its third
+response was rejected as malformed_website_reply; the existing single format
+correction then allowed progress. The exact durable claimed, first-closed and
+finished records are retained, with distinct sessions and first closure before
+the second start. Detailed rejected-reply capture was not armed for this case.
+Consequently, the raw rejected text is absent and the strict correction capture
+and V6 audit could not complete. No manifest was fabricated or auditor rule
+relaxed. Its 19 functional checks and separate native tab-close proof passed,
+but full transport/correction qualification remains incomplete.
+
+The subsequent fresh opus46-workflow380-f had one task-bound diagnostic arm
+created while its journal contained only the initial start request. It passed
+without a malformed reply, so the capture remained unused. The exact arm was
+archived and retired after terminal evidence; global arm/output slots were
+clear. This new pass does not explain the earlier malformed response. The
+incomplete earlier review is retained as independent-scope-review.json under
+its own case, SHA-256
+`fd3a81737195150f4a16a92575f80b32fdc3565b76524685cb432f00bcf874c8`.
+
+All five fixture servers were identity-checked and stopped, with listeners
+absent. Temporary Inspector/developer settings from the prior investigation
+were restored before this round. No real account actions or failed provider
+requests were replayed. The Opus 5 warning detector remains covered by local
+regression tests; this round does not supply a live Opus 5 detection result or
+a successful Opus 5 workflow. No merge or release is implied.
+
+Private evidence is retained under
+`work/claude-qualification-20261031/evidence/<case>/` and its corresponding
+`fixtures/cases/<fixture>/audit/`. The immutable audit hashes are:
+
+| Case | Transport audit SHA-256 | Fixture audit SHA-256 |
+| --- | --- | --- |
+| sonnet55-workflow380-b | b7712aff3c986549985039b4eececafc3c1f5f24187e4b67c4386615431014ec | cf13eb1fbb468b19da6f0786276813eef66bd4eae105966208b7a3c29bea7f5f |
+| haiku55-workflow380-c | 4fc33d2fa7593f9f64794ed9fbac00b5097113831af47399a53eb25b5c83e4b2 | 633d0fa614cc0a0beb3df36113ac85b72dccc77cbae95e4cd22144eee46a66e1 |
+| opus55-workflow380-d | 082fd39a6d1373e89a285fd8e97ac6483e8d4f1a3877ace8ee1ee696cabd81cd | 9ac13295edd8d92721f3e1c7407ed5fede3afffcd0c9a008498689f811d01d1b |
+| opus46-workflow380-f | 69063bea9a5b7a7c245707042fe9fe94381a7720ddf044615ae7b5a9114bcf06 | 05b5ca984aacdd7bb31f340dff201056cf234f633302efb26b01f2a62c2c5082 |

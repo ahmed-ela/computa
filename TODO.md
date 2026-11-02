@@ -39,29 +39,22 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 ## Claude website-model qualification
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
-  Full Claude qualification remains incomplete. Installed build364 passed
-  Sonnet 5.5's exact marker and one full local workflow (52.510 seconds, nine
-  verified inferences, eight tools, six protected tests and one accepted POST).
-  Earlier bounded workflow passes include Haiku 5.5 on build361 and Opus 5.5
-  on build363. Build364 corrected Sonnet 4.6's isolated malformed first reply,
-  then received a valid refusal with zero tools executed. Opus 5 failed after
-  its verified header detached; Opus 4.8 returned extra prose and failed its
-  exact marker. Startup Claude discovery failed verification and retained its
-  cache; visible Fable rows do not establish current availability.
-  Candidate365 adds a bounded read-only remount wait with fresh model and
-  first-user proof, no picker/Send replay and the existing 1.8-second deadline.
-  Its 960 adapter/version tests and 27 native Claude tests passed; build,
-  installation and live qualification are pending.
-  Diagnose capability refusals and capture the earlier Haiku call-shape defect
-  if it recurs; preserve the historical unconfirmed quota-cleanup record and
-  verify any new quota event separately. Complete and
-  repeat fresh browser, terminal and file-editing fixtures for each available
-  model on the intended build, with exact selection/ownership, protected tests,
-  independently observed submission receipts, task-tab closure and durable
-  website cleanup. Preserve strict parsing and do not replay uncertain actions.
-  See the [qualification evidence](docs/CLAUDE-HARNESS-QUALIFICATION.md).
-  This is a future-work entry, not a qualification pass or an instruction to
-  restart Claude testing now.
+  Installed build380 (`e62bbbaf`) has independent full local workflow passes for
+  Sonnet 5.5, Haiku 5.5, Opus 5.5 and Opus 4.6. Haiku's pass includes three pre-edit failed
+  test commands; it is not an error-free tool run. A separate earlier Opus 4.6
+  run completed after a malformed reply and correction, but missing raw reply
+  evidence prevents its full transport audit. The fresh pass does not diagnose
+  that earlier response.
+  Opus 5's safeguard block remains unresolved; build380's warning-layout fix is
+  synthetically validated but not live-qualified for that case. Preserve the
+  other models' refusals, format failures, eligibility limits and historical
+  unconfirmed cleanup. Further cases need a relevant compatibility change or
+  new eligibility evidence, exact model/ownership proof, protected tests,
+  independently observed receipts, task-tab closure and durable cleanup.
+  Keep strict parsing and existing correction limits; do not replay uncertain
+  actions or unchanged provider blocks. These bounded passes do not complete
+  all-model qualification or establish general reliability. See the
+  [qualification evidence](docs/CLAUDE-HARNESS-QUALIFICATION.md).
 
 ## Preserved runtime fixes — 29 September 2026
 
