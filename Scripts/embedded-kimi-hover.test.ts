@@ -195,3 +195,101 @@ test('pending main close cannot adopt a replacement menu or changed selected lab
     expect(f.counts().sends).toBe(0);
   }
 });
+
+
+function movingMore(f: ReturnType<typeof adapterFixture>) {
+  const rect = f.more.getBoundingClientRect.bind(f.more), hit = f.document.elementFromPoint;
+  let dx = 0, dy = 0, blocked: { x: number; y: number } | null = null;
+  f.more.getBoundingClientRect = () => { const r = rect(); return { ...r, left: r.left + dx, top: r.top + dy }; };
+  f.document.elementFromPoint = (x: number, y: number) => {
+    const node = hit(x, y); if (node !== f.more) return node;
+    const r = f.more.getBoundingClientRect();
+    return x > r.left && x < r.left + r.width && y > r.top && y < r.top + r.height
+      && !(blocked?.x === x && blocked?.y === y) ? f.more : f.body;
+  };
+  return { shift: (x: number, y: number) => { dx = x; dy = y; },
+    block: (x: number, y: number) => { blocked = { x, y }; } };
+}
+
+test('a small layout shift preserves the original boundary point for discovery and Instant selection', async () => {
+  for (const action of ['discover', 'select']) for (const phase of ['pointerover', 'pointerout']) {
+    const f = adapterFixture({ nestedSelected: true }), layout = movingMore(f), dispatch = f.more.onDispatch!;
+    f.more.onDispatch = (event: any) => { dispatch(event); if (event.type === phase) layout.shift(4, 2); };
+    const result = action === 'discover' ? await settle(f) : await f.select();
+    expect(result.error).toBeUndefined();
+    if (action === 'discover') expect(result.modelChoices).toEqual([instant]);
+    else expect(result.modelEvidence.selected).toEqual(instant);
+    expect(f.more.events.map((event: any) => event.type)).toEqual([...entry, ...exit]);
+    for (const offset of [0, 4]) {
+      const phaseEvents = f.more.events.slice(offset, offset + 4) as any[];
+      expect(new Set(phaseEvents.map(event => event.clientX)).size).toBe(1);
+      expect(new Set(phaseEvents.map(event => event.clientY)).size).toBe(1);
+    }
+    expect(f.more.clicks + f.moreOption.clicks).toBe(0);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});
+
+test('a claimed point leaving the target, becoming occluded, or losing its physical binding stops without replay', async () => {
+  for (const phase of ['pointerover', 'pointerout']) for (const change of ['outside', 'occluded', 'replacement']) {
+    const f = adapterFixture({ nestedSelected: true }), layout = movingMore(f), dispatch = f.more.onDispatch!;
+    f.more.onDispatch = (event: any) => {
+      dispatch(event); if (event.type !== phase) return;
+      if (change === 'outside') layout.shift(101, 0);
+      else if (change === 'occluded') { layout.shift(4, 2); layout.block(event.clientX, event.clientY); }
+      else { const parent = f.more.parentElement!, replacement = f.more.cloneNode(true); f.remove(f.more); parent.append(replacement); }
+    };
+    const result = await settle(f);
+    expect(result.error).toBe('model_unverified');
+    if (change === 'outside') expect(result.detail).toBe('more_point_outside');
+    else if (change === 'occluded') expect(result.detail).toBe('more_center_occluded');
+    else expect(result.detail).toBe(phase === 'pointerover' ? 'more_trigger_changed' : 'picker_menu_binding');
+    const expectedEvents = phase === 'pointerover' ? ['pointerover'] : [...entry, 'pointerout'];
+    expect(f.more.events.map((event: any) => event.type)).toEqual(expectedEvents);
+    for (let repeat = 0; repeat < 3; repeat++) expect((await discover(f)).detail).toBe('terminal_operation');
+    expect(f.more.events.map((event: any) => event.type)).toEqual(expectedEvents);
+    expect(f.more.clicks + f.moreOption.clicks).toBe(0);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});
+
+
+test('legacy coordinate flooring cannot move a claimed event outside or behind an overlay', async () => {
+  for (const phase of ['pointerover', 'pointerout']) for (const change of ['left', 'top', 'occluded']) {
+    const f = adapterFixture({ nestedSelected: true, mouseCoordinates: Math.floor });
+    const originalRect = f.more.getBoundingClientRect.bind(f.more);
+    f.more.getBoundingClientRect = () => { const r = originalRect(); return { ...r, left: r.left + 0.25, top: r.top + 0.25 }; };
+    const layout = movingMore(f), dispatch = f.more.onDispatch!;
+    f.more.onDispatch = (event: any) => {
+      dispatch(event); if (event.type !== phase) return;
+      const r = f.more.getBoundingClientRect();
+      if (change === 'left') layout.shift(Math.floor(event.clientX) + 0.125 - r.left, 0);
+      else if (change === 'top') layout.shift(0, Math.floor(event.clientY) + 0.125 - r.top);
+      else layout.block(Math.floor(event.clientX), Math.floor(event.clientY));
+    };
+    const result = await settle(f);
+    expect(result.detail).toBe(change === 'occluded' ? 'more_event_point_occluded' : 'more_event_point_outside');
+    const count = phase === 'pointerover' ? 2 : 6;
+    expect(f.more.events.map((event: any) => event.type)).toEqual([...entry, ...exit].slice(0, count));
+    for (let repeat = 0; repeat < 3; repeat++) expect((await discover(f)).detail).toBe('terminal_operation');
+    expect(f.more.events).toHaveLength(count); expect(f.more.clicks).toBe(0); expect(f.counts().sends).toBe(0);
+  }
+});
+
+test('safe legacy flooring preserves the sequence but any other coordinate encoding rejects before dispatch', async () => {
+  for (const encode of [Math.floor, (value: number) => value + 0.125, () => NaN]) {
+    const f = adapterFixture({ nestedSelected: true, mouseCoordinates: encode });
+    const rect = f.more.getBoundingClientRect.bind(f.more);
+    f.more.getBoundingClientRect = () => { const r = rect(); return { ...r, left: r.left + 0.25, top: r.top + 0.25 }; };
+    const result = await settle(f);
+    if (encode === Math.floor) {
+      expect(result.modelChoices).toEqual([instant]);
+      expect(f.more.events.map((event: any) => event.type)).toEqual([...entry, ...exit]);
+    } else {
+      expect(result.detail).toBe('more_event_coordinates');
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.map((event: any) => event.type)).toEqual(['pointerover', 'pointerenter']);
+    }
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});

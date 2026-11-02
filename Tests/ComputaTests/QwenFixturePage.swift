@@ -42,9 +42,9 @@ enum QwenFixturePage {
   const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
   const canonical = 'https://chat.qwen.ai/c/' + conversationID;
   const options = { delayUser: false, holdRoot: false, holdResponse: false, menuDelayMs: 0,
-    dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false,
+    dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false, modelCloseOrder: "simultaneous", modelOptionCloseOrder: "simultaneous",
     reply: '{"type":"message","text":"Synthetic Qwen native reply"}' };
-  const counts = { input: 0, sends: 0, modelOpens: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
+  const counts = { input: 0, sends: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
   const editor = document.querySelector('textarea'), sendScope = document.querySelector('.chat-prompt-send-button');
   const trigger = document.querySelector('.wms-trigger'), modelName = trigger.querySelector('.wms-trigger__text');
   const picker = document.querySelector('.wms-list'), rows = [...picker.querySelectorAll('[role=option]')];
@@ -57,15 +57,30 @@ enum QwenFixturePage {
     return result;
   };
   const delayed = (milliseconds, action) => milliseconds > 0 ? setTimeout(action, milliseconds) : action();
-  const closePicker = () => { picker.hidden = true; trigger.setAttribute('aria-expanded', 'false'); };
+  let pickerClosePending = false, optionClosePending = false;
+  const closePicker = () => { picker.hidden = true; trigger.setAttribute('aria-expanded', 'false'); pickerClosePending = false; optionClosePending = false; };
+  const requestPickerClose = () => {
+    counts.modelCloses++;
+    // Synthetic split-order completion. The test releases the second channel
+    // only after native transport has observed the pending close callback.
+    if (options.modelCloseOrder === 'ariaFirst') {
+      pickerClosePending = true; trigger.setAttribute('aria-expanded', 'false');
+    } else if (options.modelCloseOrder === 'domFirst') {
+      pickerClosePending = true; picker.hidden = true;
+    } else closePicker();
+  };
   trigger.addEventListener('click', () => {
-    if (!picker.hidden) closePicker();
+    if (!picker.hidden) requestPickerClose();
     else { counts.modelOpens++; picker.hidden = false; trigger.setAttribute('aria-expanded', 'true'); }
   });
   rows.forEach(row => row.addEventListener('click', () => {
     counts.modelSelections++; modelName.textContent = row.querySelector('.wms-list__name-text').textContent;
     rows.forEach(other => { other.setAttribute('aria-selected', String(row === other)); other.classList.toggle('wms-list__item--selected', row === other); });
-    closePicker();
+    if (options.modelOptionCloseOrder === 'ariaFirst') {
+      optionClosePending = true; trigger.setAttribute('aria-expanded', 'false');
+    } else if (options.modelOptionCloseOrder === 'domFirst') {
+      optionClosePending = true; picker.hidden = true;
+    } else closePicker();
   }));
   const sendButton = node('button', { class: 'send-button', 'aria-label': 'Send' }, 'Send');
   const stopButton = node('button', { class: 'stop-button', 'aria-label': 'Stop', 'data-chat-id': conversationID }, 'Stop');
@@ -148,6 +163,8 @@ enum QwenFixturePage {
     if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
+    finishPickerClose: closePicker, finishOptionClose: closePicker,
+    pickerState: () => ({ pending: pickerClosePending, optionPending: optionClosePending, expanded: trigger.getAttribute('aria-expanded'), visible: !picker.hidden }),
     snapshot: () => ({ ...counts, path: location.pathname, model: modelName.textContent,
       composerLength: editor.value.length, firstUserLength: userBody?.textContent.length || 0,
       users: document.querySelectorAll('.qwen-chat-message-user').length,

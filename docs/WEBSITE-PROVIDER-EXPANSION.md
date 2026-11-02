@@ -1,11 +1,12 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build390, 2026-11-02 UTC. Installed 0.8.0 (389), source
-`0f3f358734c13a72de3ffb0a19a966e12d552659`, opens Kimi's submenu but rejects
-its closing transition. Qwen rejects an occluded picker before input. DeepSeek
-discovers both modes but rejects first-message ownership after one Send.
-The candidate addresses menu acknowledgement and initial hit readiness, and
-adds exact finite DeepSeek failure reasons. All three are enabled for controlled
+Status: candidate build391, 2026-11-02 UTC. Installed 0.8.0 (390), source
+`046f348229a62525e7d648ac9f68eaebff2e2b3c`, completes Kimi discovery but rejects
+a moved center during task selection. Qwen reaches its menu-close transition
+but rejects mismatched ARIA/visibility. DeepSeek rejects the initial user-message
+container's child count after one Send. The candidate keeps Kimi's original
+point on its bound target, observes Qwen's claimed close, and captures bounded
+failure-time DeepSeek structure. All three are enabled for controlled
 pilots; installed responses, cleanup and tool workflows remain unqualified.
 PR #20 remains draft.
 
@@ -370,6 +371,71 @@ adapter diagnostic. Unknown details and other providers cannot use the mapping.
 The final mapping correction passed 23 focused native tests, including a real
 WebKit changed-body failure with no answer, replay or deletion authority. These
 overlap the earlier 73-test run and are not additional independent coverage.
+
+### Installed build390 results
+
+Signed build390 (`046f348`) launched as process 79931. Kimi startup discovery
+completed. Its live trace captured the exact split close: the same submenu
+remained present after ARIA became collapsed, then disappeared; the main menu
+also acknowledged ARIA before disappearance. This confirms the timing case
+addressed by candidate390 for that discovery run.
+
+The first fresh Kimi Instant marker task failed during model selection with
+`more_center_changed`, before website Send. It has no response or tool result.
+Qwen startup progressed past the initial hit check, then failed
+`picker_menu_collapsed`; no Qwen prompt was sent. These are separate remaining
+selection failures, not provider qualification passes.
+
+One fresh DeepSeek Chat marker failed `first_container_children` at the first
+post-send inspection. The new diagnostic identifies the rejected structural
+condition, but not the extra child's identity. Native ownership remains
+`first_user_message`; no answer or tool call was accepted. Kimi and DeepSeek
+cleanup receipts remain unconfirmed. Neither failed request was replayed.
+
+Evidence is retained under `build390/provider-startup-and-markers390.log`,
+`kimi-instant390-marker-a-capture/summary.json` and
+`deepseek-chat390-marker-a-capture/summary.json` in the workspace evidence
+directory. All native/signed/install/launch receipts bind this exact build.
+
+### Candidate391 targeting, close acknowledgement and structural capture
+
+Kimi retains each boundary's original coordinates. A small layout shift can
+move the center while leaving that fixed point inside the same physical target;
+exact center equality was not needed to establish that hit. The candidate
+requires the original point to remain inside the current rectangle/viewport and
+hit the same bound control, alongside the existing ownership, ARIA, selected-row
+and event-sequence checks. Movement outside, occlusion or replacement remains
+terminal; coordinates are never recentered and events are never replayed.
+Each constructed event is checked too: WebKit's exact legacy mouse-coordinate
+flooring must still be inside and hit that target. Fractional rectangle edges
+are checked independently because native hit testing can include such an edge.
+
+Qwen's driver observes split DOM/ARIA completion only for the engine's already
+claimed final close. A still-visible menu must remain the same physical menu
+with the same checked row, selected label and verified choice list. Both
+visibility and ARIA must close before selection proof is published. Other
+phases retain their strict checks and the native preparation deadline.
+The model option's automatic close has a separate claimed pending phase. Its
+label and checked row may acknowledge the prior choice or exact clicked target
+in either order; the retained menu, target and choice list cannot change. Both
+close channels and the target label must settle before one fresh reopening
+verifies the checked row. Pending option state never publishes model evidence.
+
+DeepSeek's child-count rejection remains unchanged. The rejected read now
+provides capped child counts, tag enums and text-equality/emptiness flags from
+those same nodes. Native code reconstructs exact fields and types, emitting at
+most five bounded records under the existing once-per-session failure latch.
+Prompt text, URLs, classes and arbitrary page metadata are excluded. The packet
+is diagnostic only and cannot authorize an answer, another Send or deletion.
+The first native run exposed two incorrect new fixture assumptions: failed
+started sessions retain their owned views, and WebKit can hit a fractional
+edge outside the DOM rectangle. The fixture expectations were corrected while
+keeping explicit coordinate bounds, event counts and no-input checks intact;
+no production cleanup or targeting rule was relaxed to satisfy those assertions.
+The final combined candidate passed 84 focused native WebKit/diagnostic tests
+and 203 JavaScript/resource/version tests with 4,414 assertions in two disjoint
+runs. Independent read-only review found no new authority or replay regression.
+Installed responses and cleanup are still required before qualification.
 
 ### Direct website observations before native qualification
 

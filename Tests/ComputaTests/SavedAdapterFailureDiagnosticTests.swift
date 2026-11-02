@@ -118,6 +118,77 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(["error": "conversation_changed"], provider: .deepseek))
     }
 
+    private func firstContainerFailure() -> [String: Any] {
+        ["error": "conversation_changed", "detail": "first_container_children",
+         "firstContainerDiagnostic": ["version": 1, "containerChildren": 2, "wrapperChildren": 1, "bodyChildren": 0,
+             "rootEqualsBody": true, "containerEqualsBody": true, "rootEmpty": false,
+             "containerEmpty": false, "bodyEmpty": false, "childrenOmitted": false,
+             "children": [["tag": "DIV", "children": 1, "empty": false, "containsBody": true],
+                          ["tag": "BUTTON", "children": 0, "empty": true, "containsBody": false]]]]
+    }
+
+    @MainActor func testDeepSeekFirstContainerMetadataIsFiniteFailureOnlyAndProviderScoped() throws {
+        let observed = firstContainerFailure()
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek))
+        XCTAssertEqual(records.count, 3)
+        let summary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[0].utf8)) as? [String: Any])
+        XCTAssertEqual(summary["containerChildren"] as? Int, 2)
+        XCTAssertEqual(summary["rootEqualsBody"] as? Bool, true)
+        for record in records { XCTAssertLessThanOrEqual(record.utf8.count, 512) }
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .deepseek {
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: provider))
+        }
+        for (key, value) in [("error", "document_changed"), ("detail", "first_container_text")] {
+            var other = observed; other[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(other, provider: .deepseek))
+        }
+        var textMismatch = observed
+        var packet = try XCTUnwrap(observed["firstContainerDiagnostic"] as? [String: Any])
+        packet["rootEqualsBody"] = false; packet["containerEqualsBody"] = false
+        textMismatch["firstContainerDiagnostic"] = packet
+        let mismatch = try XCTUnwrap(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(textMismatch, provider: .deepseek))
+        XCTAssertTrue(mismatch[0].contains("\"containerEqualsBody\":false"))
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(textMismatch, provider: .deepseek, action: "inspect"),
+                       "action=inspect error=conversation_changed detail=first_container_children")
+        XCTAssertTrue(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(textMismatch, provider: .deepseek))
+    }
+
+    @MainActor func testDeepSeekFirstContainerMetadataRejectsPrivateAndMalformedPacketFields() throws {
+        let original = firstContainerFailure()
+        let packet = try XCTUnwrap(original["firstContainerDiagnostic"] as? [String: Any])
+        let changes: [(String, Any)] = [("version", true), ("version", 2), ("containerChildren", true),
+            ("containerChildren", 1), ("containerChildren", 17), ("containerChildren", 2.5), ("wrapperChildren", -1),
+            ("bodyChildren", 1), ("rootEqualsBody", 1), ("containerEqualsBody", "true"), ("bodyEmpty", NSNull()),
+            ("childrenOmitted", true), ("private", "PRIVATE_PAGE_CANARY"), ("children", [])]
+        for (key, value) in changes {
+            var malformed = packet; malformed[key] = value
+            var observed = original; observed["firstContainerDiagnostic"] = malformed
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek), key)
+        }
+        let children = try XCTUnwrap(packet["children"] as? [[String: Any]])
+        for (key, value) in [("tag", "PRIVATE_PAGE_CANARY" as Any), ("tag", "div" as Any), ("children", true as Any),
+                              ("children", 17 as Any), ("empty", 0 as Any), ("containsBody", "true" as Any),
+                              ("url", "https://private.invalid/PRIVATE_PAGE_CANARY" as Any)] {
+            var rows = children; rows[1][key] = value
+            var malformed = packet; malformed["children"] = rows
+            var observed = original; observed["firstContainerDiagnostic"] = malformed
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek), key)
+        }
+        for key in packet.keys {
+            var malformed = packet; malformed.removeValue(forKey: key)
+            var observed = original; observed["firstContainerDiagnostic"] = malformed
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek), key)
+        }
+        var capped = packet
+        capped["containerChildren"] = 16; capped["wrapperChildren"] = 16; capped["childrenOmitted"] = true
+        capped["children"] = [children[0], children[1], children[1], children[1]]
+        var observed = original; observed["firstContainerDiagnostic"] = capped
+        XCTAssertEqual(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek)?.count, 5)
+        observed["text"] = "PRIVATE_PAGE_CANARY"; observed["url"] = "https://private.invalid/PRIVATE_PAGE_CANARY"
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.deepSeekFirstContainerDiagnosticRecords(observed, provider: .deepseek))
+        XCTAssertFalse(records.joined().contains("PRIVATE_PAGE_CANARY"))
+    }
+
     @MainActor func testPrivateOrMalformedValuesNeverEnterTheDiagnosticAndOutputRemainsBounded() throws {
         let privateValues = ["PRIVATE_PAGE_CANARY", "https://private.invalid/?token=PRIVATE_PAGE_CANARY",
             "model_unverified\nPRIVATE_PAGE_CANARY", String(repeating: "PRIVATE_PAGE_CANARY", count: 512)]
@@ -140,7 +211,8 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
 
     @MainActor func testKimiMoreReasonsAreExactFiniteLabelsAndRemainProviderScoped() throws {
         for detail in ["more_trigger_changed", "more_label_changed", "more_aria_links_changed", "more_center_changed",
-                       "more_center_occluded", "more_initial_expansion", "more_close_policy"] {
+                       "more_center_occluded", "more_point_outside", "more_event_coordinates",
+                       "more_event_point_outside", "more_event_point_occluded", "more_initial_expansion", "more_close_policy"] {
             let diagnostic = try XCTUnwrap(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
                 ["error": "model_unverified", "detail": detail], provider: .kimi, action: "discoverModels"))
             XCTAssertEqual(diagnostic, "action=discoverModels error=model_unverified detail=\(detail)")

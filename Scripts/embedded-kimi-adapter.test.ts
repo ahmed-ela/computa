@@ -321,14 +321,14 @@ describe('Kimi saved-conversation adapter', () => {
     }
   });
 
-  test('finite More reasons distinguish a replaced trigger, replaced label, changed ARIA and moved center without replay', async () => {
+  test('finite More reasons distinguish a replaced trigger, replaced label, changed ARIA and an escaped boundary point without replay', async () => {
     const cases: [string, (f: ReturnType<typeof adapterFixture>) => void][] = [
       ['more_trigger_changed', f => { const next = f.more.cloneNode(true); f.remove(f.more); f.menu.append(next); }],
       ['more_label_changed', f => { const next = f.moreCurrent.cloneNode(true), parent = f.moreCurrent.parentElement!; f.remove(f.moreCurrent); parent.append(next); }],
       ['more_aria_links_changed', f => { f.more.setAttribute('aria-controls', 'private-fixture-identifier'); }],
-      ['more_center_changed', f => {
+      ['more_point_outside', f => {
         const original = f.more.getBoundingClientRect.bind(f.more);
-        f.more.getBoundingClientRect = () => { const rect = original(); return { ...rect, left: rect.left + 0.5 }; };
+        f.more.getBoundingClientRect = () => { const rect = original(); return { ...rect, left: rect.left + rect.width + 1 }; };
       }],
     ];
     for (const [detail, mutate] of cases) {

@@ -30,6 +30,108 @@ final class QwenWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testClaimedPickerCloseWaitsForBothDOMAndARIAWithoutRepeatingInput() async throws {
+        for order in ["ariaFirst", "domFirst"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.modelCloseOrder = '\(order)';")
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+            var observedSplit = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "discoverModels", !observedSplit,
+                    let state = try? await self.evaluate(fixture.view, "return qwenFixture.pickerState();") as? [String: Any],
+                    state["pending"] as? Bool == true else { return }
+                observedSplit = true
+                XCTAssertEqual(state["expanded"] as? String, order == "ariaFirst" ? "false" : "true")
+                XCTAssertEqual(state["visible"] as? Bool, order == "ariaFirst")
+                let counts = try? await self.evaluate(fixture.view,
+                    "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+                XCTAssertEqual(counts as? [Int], [1,1,0,0,0])
+                _ = try? await self.evaluate(fixture.view,
+                    "setTimeout(() => qwenFixture.finishPickerClose(), 100); return true;")
+            }
+            let choices = try await fixture.transport.discoverModels(provider: "qwen")
+            XCTAssertTrue(observedSplit)
+            XCTAssertEqual(Set(choices.map(\.key)), ["Qwen3.7-Plus", "Qwen3.8-Max"])
+            let counts = try await evaluate(fixture.view,
+                "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+            XCTAssertEqual(counts as? [Int], [1,1,0,0,0])
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testClaimedPickerCloseRejectsReplacedMenuOrCheckedRowWithoutAnotherClick() async throws {
+        for selector in [".wms-list", ".wms-list__item--selected"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.modelCloseOrder = 'ariaFirst';")
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+            var replaced = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "discoverModels", !replaced,
+                    let state = try? await self.evaluate(fixture.view, "return qwenFixture.pickerState();") as? [String: Any],
+                    state["pending"] as? Bool == true else { return }
+                replaced = true
+                _ = try? await self.evaluate(fixture.view,
+                    "const node=document.querySelector('\(selector)'); node.replaceWith(node.cloneNode(true)); return true;")
+            }
+            do {
+                _ = try await fixture.transport.discoverModels(provider: "qwen")
+                XCTFail("A replacement must not inherit the claimed close")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            XCTAssertTrue(replaced)
+            let counts = try await evaluate(fixture.view,
+                "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+            XCTAssertEqual(counts as? [Int], [1,1,0,0,0])
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        }
+    }
+
+    func testUnfinishedPickerCloseKeepsPreparationDeadlineWithoutAnotherClick() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.modelCloseOrder = 'ariaFirst';")
+        defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "qwen")
+            XCTFail("One channel cannot verify a close")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+        let counts = try await evaluate(fixture.view,
+            "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+        XCTAssertEqual(counts as? [Int], [1,1,0,0,0])
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testClaimedModelOptionCloseWaitsThenReopensForCheckedRowVerification() async throws {
+        for order in ["ariaFirst", "domFirst"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.modelOptionCloseOrder = '\(order)';")
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+            var observedSplit = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "selectModel", !observedSplit,
+                    let state = try? await self.evaluate(fixture.view, "return qwenFixture.pickerState();") as? [String: Any],
+                    state["optionPending"] as? Bool == true else { return }
+                observedSplit = true
+                XCTAssertEqual(state["expanded"] as? String, order == "ariaFirst" ? "false" : "true")
+                XCTAssertEqual(state["visible"] as? Bool, order == "ariaFirst")
+                let counts = try? await self.evaluate(fixture.view,
+                    "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+                XCTAssertEqual(counts as? [Int], [1,0,1,0,0])
+                _ = try? await self.evaluate(fixture.view,
+                    "setTimeout(() => qwenFixture.finishOptionClose(), 100); return true;")
+            }
+            let token = try await start(fixture, label: "Qwen3.7-Plus")
+            XCTAssertTrue(observedSplit)
+            let counts = try await evaluate(fixture.view,
+                "return [qwenFixture.counts.modelOpens,qwenFixture.counts.modelCloses,qwenFixture.counts.modelSelections,qwenFixture.counts.input,qwenFixture.counts.sends];")
+            XCTAssertEqual(counts as? [Int], [2,1,1,0,0])
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testObservedPlusAndMaxUseOneExactRawReplyAndVerifiedSavedDeletion() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(); defer { fixture.shutdown() }
@@ -218,7 +320,7 @@ final class QwenWebModelTransportTests: XCTestCase {
         var createdID: UUID?
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init() throws {
+        init(setup: String = "") throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -229,7 +331,7 @@ final class QwenWebModelTransportTests: XCTestCase {
                 let id = try self.browser.createUnloadedModelTabForTesting()
                 let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
                 self.createdID = id; self.retainedView = view
-                view.loadHTMLString(QwenFixturePage.html, baseURL: url)
+                view.loadHTMLString(QwenFixturePage.html + "<script>" + setup + "</script>", baseURL: url)
                 return id
             })
         }

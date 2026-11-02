@@ -285,7 +285,7 @@ try {
     const target = more.trigger, relatedTarget = entering ? p.menu : document.body;
     const rectangle = target.getBoundingClientRect();
     const clientX = rectangle.left + rectangle.width / 2, clientY = rectangle.top + rectangle.height / 2;
-    const validate = () => {
+    const validate = (event, pointer) => {
       guard();
       const current = picker(), binding = moreTrigger(current);
       if (state.terminal || state.selection !== selection || selection.stage !== phase)
@@ -310,11 +310,26 @@ try {
           c.fail('model_unverified', 'more_selected_label');
       }
       pickerHit(target, entering ? 'more_open' : 'more_close');
-      const now = target.getBoundingClientRect();
-      if (![clientX, clientY].every(Number.isFinite)) c.fail('model_unverified', 'more_center_invalid');
-      if (now.left + now.width / 2 !== clientX || now.top + now.height / 2 !== clientY)
-        c.fail('model_unverified', 'more_center_changed');
+      const now = target.getBoundingClientRect(), right = now.left + now.width, bottom = now.top + now.height;
+      if (![clientX, clientY, now.left, now.top, now.width, now.height, right, bottom].every(Number.isFinite)
+        || now.width <= 0 || now.height <= 0) c.fail('model_unverified', 'more_center_invalid');
+      // Keep the claimed point fixed across the entire boundary. Layout may
+      // move its center without changing the physical control under that point.
+      // Never recenter or continue once the point leaves the bound rectangle.
+      if (!(clientX > now.left && clientX < right && clientY > now.top && clientY < bottom
+        && clientX >= 0 && clientX < window.innerWidth && clientY >= 0 && clientY < window.innerHeight))
+        c.fail('model_unverified', 'more_point_outside');
       if (!target.contains(document.elementFromPoint(clientX, clientY))) c.fail('model_unverified', 'more_center_occluded');
+      // WebKit may floor legacy MouseEvent coordinates. Validate that actual
+      // representation too; a rounded point cannot inherit the float's hit.
+      const x = event.clientX, y = event.clientY;
+      const represents = (actual, expected) => actual === expected || !pointer && actual === Math.floor(expected);
+      if (![x, y].every(Number.isFinite) || !represents(x, clientX) || !represents(y, clientY))
+        c.fail('model_unverified', 'more_event_coordinates');
+      if (!(x > now.left && x < right && y > now.top && y < bottom
+        && x >= 0 && x < window.innerWidth && y >= 0 && y < window.innerHeight))
+        c.fail('model_unverified', 'more_event_point_outside');
+      if (!target.contains(document.elementFromPoint(x, y))) c.fail('model_unverified', 'more_event_point_occluded');
     };
     const boundary = entering ? ['over', 'enter'] : ['out', 'leave'];
     // dispatchEvent does not synthesize mouse compatibility events. These four
@@ -322,17 +337,17 @@ try {
     // Enter/leave neither bubble nor cross a shadow boundary; over/out do both.
     for (const EventType of [PointerEvent, MouseEvent]) {
       for (let index = 0; index < boundary.length; index++) {
-        validate();
         const pointer = EventType === PointerEvent, crosses = index === 0;
         const event = new EventType((pointer ? 'pointer' : 'mouse') + boundary[index], {
           bubbles: crosses, cancelable: crosses, composed: crosses, view: window,
           relatedTarget, clientX, clientY, buttons: 0, button: pointer ? -1 : 0,
           ...(pointer ? { pointerType: 'mouse', pointerId: 1, isPrimary: true } : {}),
         });
+        validate(event, pointer);
         // Default prevention is not ownership revocation or menu proof.
         // Preserve the fixed sequence; later bound DOM reads decide success.
         target.dispatchEvent(event);
-        validate();
+        validate(event, pointer);
       }
     }
     more.boundary = entering ? 'entered' : 'exited';

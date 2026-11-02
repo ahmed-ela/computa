@@ -128,7 +128,8 @@ export const submissionFingerprint = createHash('sha256').update(prompt.replace(
 
 export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean;
   insertionFails?: boolean; insertionThrows?: boolean; delayedInsertion?: boolean; paragraphInsertion?: boolean;
-  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean; hoverEvents?: 'mouse' | 'pointer' } = {}) {
+  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean; hoverEvents?: 'mouse' | 'pointer';
+  mouseCoordinates?: (value: number) => number } = {}) {
   const f = kimiFixture(), { Node, document, body, window } = f;
   const fixturePrompt = options.outbound ?? prompt;
   const fixtureFingerprint = createHash('sha256').update(fixturePrompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
@@ -275,7 +276,12 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
       preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
     }, class {
       defaultPrevented = false; cancelable = false;
-      constructor(public type: string, init: Record<string, unknown>) { Object.assign(this, init); }
+      constructor(public type: string, init: Record<string, unknown>) {
+        Object.assign(this, init);
+        if (options.mouseCoordinates) Object.assign(this, {
+          clientX: options.mouseCoordinates(Number(init.clientX)), clientY: options.mouseCoordinates(Number(init.clientY)),
+        });
+      }
       preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
     });
     if (result.firstUserVerified) { fingerprint = result.firstUserFingerprint; conversation = result.conversationIdentity; }

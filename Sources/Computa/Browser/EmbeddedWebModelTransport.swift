@@ -1852,6 +1852,44 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return deepSeekFirstUserFailureDetails.contains(detail)
     }
 
+    /// Failure-time layout only; never an ownership proof. Reconstruct fixed
+    /// records from exact keys/types, at most four children and capped counts.
+    static func deepSeekFirstContainerDiagnosticRecords(_ observed: [String: Any], provider: Provider) -> [String]? {
+        guard provider == .deepseek, observed["error"] as? String == "conversation_changed",
+              observed["detail"] as? String == "first_container_children",
+              let packet = observed["firstContainerDiagnostic"] as? [String: Any],
+              Set(packet.keys) == ["version", "containerChildren", "wrapperChildren", "bodyChildren",
+                  "rootEqualsBody", "containerEqualsBody", "rootEmpty", "containerEmpty", "bodyEmpty", "childrenOmitted", "children"],
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let count = ComputerToolArgumentContract.exactInt64(packet["containerChildren"]), (2...16).contains(count),
+              let wrapperCount = ComputerToolArgumentContract.exactInt64(packet["wrapperChildren"]), (0...16).contains(wrapperCount),
+              ComputerToolArgumentContract.exactInt64(packet["bodyChildren"]) == 0,
+              let omitted = firstUserDiagnosticBool(packet["childrenOmitted"]), omitted == (count > 4),
+              let children = packet["children"] as? [[String: Any]], children.count == min(4, Int(count)) else { return nil }
+        var summary: [String: Any] = ["version": 1, "containerChildren": count, "wrapperChildren": wrapperCount,
+            "bodyChildren": 0, "childrenOmitted": omitted]
+        for key in ["rootEqualsBody", "containerEqualsBody", "rootEmpty", "containerEmpty", "bodyEmpty"] {
+            guard let flag = firstUserDiagnosticBool(packet[key]) else { return nil }
+            summary[key] = flag
+        }
+        var records: [[String: Any]] = [summary]
+        for (index, child) in children.enumerated() {
+            guard Set(child.keys) == ["tag", "children", "empty", "containsBody"],
+                  let tag = child["tag"] as? String, ["DIV", "SPAN", "BUTTON", "SVG", "P", "BR", "INPUT", "TEXTAREA", "other"].contains(tag),
+                  let childCount = ComputerToolArgumentContract.exactInt64(child["children"]), (0...16).contains(childCount),
+                  let empty = firstUserDiagnosticBool(child["empty"]),
+                  let containsBody = firstUserDiagnosticBool(child["containsBody"]) else { return nil }
+            records.append(["index": index, "tag": tag, "children": childCount, "empty": empty, "containsBody": containsBody])
+        }
+        var encoded: [String] = []
+        for record in records {
+            guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), data.count <= 512,
+                  let string = String(data: data, encoding: .utf8) else { return nil }
+            encoded.append(string)
+        }
+        return encoded
+    }
+
     /// Fixed native identifiers only. Page prose, URLs, exception messages and
     /// arbitrary detail fields never enter the diagnostic, even on failure.
     static func savedAdapterFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
@@ -1875,7 +1913,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
                 "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
                 "more_aria_links_changed", "more_boundary_spent", "more_center_changed",
-                "more_center_invalid", "more_center_occluded", "more_claim_changed",
+                "more_center_invalid", "more_center_occluded", "more_point_outside", "more_claim_changed",
+                "more_event_coordinates", "more_event_point_outside", "more_event_point_occluded",
                 "more_claim_missing", "more_close_policy", "more_current_label_changed",
                 "more_initial_expansion", "more_label_changed", "more_label_count",
                 "more_label_value", "more_main_menu_changed", "more_main_trigger_changed",
@@ -5887,6 +5926,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                let diagnostic = Self.savedAdapterFailureDiagnostic(observed, provider: provider, action: provider.selectionAdapterAction(action)) {
                 session.loggedSavedAdapterFailure = true
                 Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+                if let records = Self.deepSeekFirstContainerDiagnosticRecords(observed, provider: provider) {
+                    for record in records {
+                        Self.inspectionLog.error("firstContainerDiagnostic version=1 provider=deepseek generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence) structure=\(record, privacy: .public)")
+                    }
+                }
             }
             logClaudeRemountHostFailure(observed, session: session, action: action,
                                        generation: generation, allowsBlockedProvider: allowBlockedProvider)

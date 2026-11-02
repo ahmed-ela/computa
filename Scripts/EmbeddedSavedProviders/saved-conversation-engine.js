@@ -41,6 +41,14 @@ async function computaSavedConversation(input, c, dom, config) {
       const reason = c.hitFailure(node);
       if (reason) c.fail('model_unverified', stage + '_' + reason);
     };
+    const picker = () => {
+      const closing = state.selection?.stage === 'closing' ? state.selection : null;
+      const selecting = state.selection?.stage === 'selected' ? state.selection : null;
+      // The driver may observe a split DOM/ARIA close only for this claimed,
+      // still-owned operation. It cannot adopt a menu or dispatch another click.
+      if (closing || selecting) guard();
+      return dom.picker(closing, selecting);
+    };
     function selectionEvidence(required = true) {
       if (usesModes) {
         const controls = dom.modeControls(), selected = state.mode?.choice;
@@ -57,8 +65,9 @@ async function computaSavedConversation(input, c, dom, config) {
         if (input.expectedModeChoice != null && !c.equalChoice(selected, input.expectedModeChoice)) c.fail('mode_mismatch');
         return evidence;
       }
-      const p = dom.picker(), selected = state.model?.choice;
-      if (!selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
+      const p = picker(), selected = state.model?.choice;
+      if (state.selection?.stage === 'selected' || !selected || !p.closed
+        || p.trigger !== state.model.trigger || p.label !== selected.label) {
         if (required) c.fail('model_unverified', 'selection_binding');
         return null;
       }
@@ -149,7 +158,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!fresh()) c.fail('not_fresh');
       const desired = input.action === 'selectModel' ? input.modelChoice : null;
       if (desired !== null && !c.choiceValid(desired)) c.fail('model_unverified', 'model_choice_invalid');
-      const p = dom.picker();
+      const p = picker();
       if (state.model && (!desired || c.equalChoice(state.model.choice, desired)))
         return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
       if (!state.selection) {
@@ -168,9 +177,12 @@ async function computaSavedConversation(input, c, dom, config) {
         state.selection = null;
         return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
       }
-      if (selection.stage === 'selected' && p.closed) {
+      if (selection.stage === 'selected') {
+        // A claimed option may close asynchronously. Do not fight that close
+        // with another click, and do not treat its label as model authority.
+        if (!p.closed || p.label !== selection.target.label) return { ...read().output, pending: true };
         pickerHit(p.trigger, 'picker_verify');
-        selection.stage = 'verifying'; selection.menu = null;
+        selection.stage = 'verifying'; selection.menu = null; selection.option = null;
         p.trigger.click(); return { ...read().output, pending: true };
       }
       if (!p.menu) return { ...read().output, pending: true };
@@ -183,9 +195,11 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!target.selected) {
         if (selection.stage !== 'opening') return { ...read().output, pending: true };
         pickerHit(target.node, 'model_option');
+        selection.option = { node: target.node, previous: checked, choices: rows.map(row => row.choice) };
         selection.stage = 'selected'; target.node.click(); return { ...read().output, pending: true };
       }
-      selection.choice = target.choice; selection.choices = rows.map(row => row.choice); selection.stage = 'closing';
+      selection.choice = target.choice; selection.checked = target.node;
+      selection.choices = rows.map(row => row.choice); selection.stage = 'closing';
       pickerHit(p.trigger, 'picker_close');
       p.trigger.click(); return { ...read().output, pending: true };
     }
@@ -344,7 +358,9 @@ async function computaSavedConversation(input, c, dom, config) {
     if (state && (!error?.computaAdapterFailure || state.deletion || (state.submitted || state.initialReadComplete
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
-    return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }
+    return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+      ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
+        && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}) }
       : { error: 'document_changed' };
   }
 }

@@ -106,6 +106,146 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testSmallLayoutShiftKeepsTheClaimedPointAndSelectsInstantWithoutRetargeting() async throws {
+        for boundary in ["pointerover", "pointerout"] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            var configured = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, """
+                        const target = document.getElementById('fixture-more-trigger');
+                        target.addEventListener('\(boundary)', () => { target.style.transform = 'translate(4px, 2px)'; }, {once:true});
+                        return true;
+                        """)
+                }
+            }
+            let token = try await start(fixture)
+            XCTAssertTrue(configured)
+            try await assertMoreBoundaryEvents(fixture, requireCentered: false)
+            let value = try await evaluate(fixture.view, "return kimiFixture.moreEvents;")
+            let rows = try XCTUnwrap(value as? [[String: Any]])
+            guard rows.count == 8 else { XCTFail("Expected exactly one entry and exit boundary"); continue }
+            XCTAssertTrue(rows.contains { $0["centered"] as? Bool == false }, "The fixture must actually move the center")
+            for offset in [0, 4] {
+                let x = try XCTUnwrap(rows[offset]["clientX"] as? Double), y = try XCTUnwrap(rows[offset]["clientY"] as? Double)
+                for index in offset..<(offset + 4) {
+                    let mouse = index % 4 >= 2
+                    let actualX = try XCTUnwrap(rows[index]["clientX"] as? Double)
+                    let actualY = try XCTUnwrap(rows[index]["clientY"] as? Double)
+                    XCTAssertTrue(actualX == x || mouse && actualX == floor(x))
+                    XCTAssertTrue(actualY == y || mouse && actualY == floor(y))
+                }
+            }
+            let actual = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.moreClicks,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(actual, [1, 1, 0, 1, 0, 0])
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testClaimedPointOutsideOrOccludedStopsTheRemainingBoundaryWithoutRetargeting() async throws {
+        for boundary in ["pointerover", "pointerout"] {
+            for mutation in ["outside", "occluded"] {
+                let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+                var configured = false
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    if action == "inspect", !configured {
+                        configured = true
+                        _ = try? await self.evaluate(fixture.view, """
+                            const target = document.getElementById('fixture-more-trigger');
+                            target.addEventListener('\(boundary)', event => {
+                                if ('\(mutation)' === 'outside') {
+                                    target.style.transform = `translateX(${target.getBoundingClientRect().width + 1}px)`;
+                                } else {
+                                    target.style.transform = 'translate(4px, 2px)';
+                                    const overlay = document.createElement('div');
+                                    Object.assign(overlay.style, {position:'fixed',left:(event.clientX-1)+'px',top:(event.clientY-1)+'px',
+                                        width:'2px',height:'2px',zIndex:'10000',background:'red'});
+                                    document.body.append(overlay);
+                                }
+                            }, {once:true}); return true;
+                            """)
+                    }
+                }
+                do { _ = try await start(fixture); XCTFail("A lost fixed point must not grant readiness") }
+                catch { }
+                XCTAssertTrue(configured)
+                let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+                XCTAssertEqual(events, boundary == "pointerover" ? ["pointerover"]
+                    : ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointerout"])
+                let actual = try await evaluate(fixture.view,
+                    "return [kimiFixture.counters.modelOpens,kimiFixture.counters.moreClicks,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+                XCTAssertEqual(actual, [1, 0, 0, 0, 0])
+                XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)),
+                    "The started session retains its owned view after failed readiness; cleanup is unconfirmed")
+                XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+            }
+        }
+    }
+
+    func testLegacyMouseRepresentationCannotEscapeOrOccludeTheClaimedPoint() async throws {
+        for change in ["left", "top", "occluded"] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            var configured = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, """
+                        const target = document.getElementById('fixture-more-trigger');
+                        target.style.transform = 'translate(0.25px, 0.25px)';
+                        target.addEventListener('pointerover', event => {
+                            const before = target.getBoundingClientRect();
+                            if ('\(change)' === 'left') {
+                                target.style.transform = `translate(${0.25 + Math.floor(event.clientX) + 0.125 - before.left}px,0.25px)`;
+                            } else if ('\(change)' === 'top') {
+                                target.style.transform = `translate(0.25px,${0.25 + Math.floor(event.clientY) + 0.125 - before.top}px)`;
+                            } else {
+                                const overlay = document.createElement('div');
+                                Object.assign(overlay.style, {position:'fixed',left:(Math.floor(event.clientX)-0.125)+'px',
+                                    top:(Math.floor(event.clientY)-0.125)+'px',width:'0.25px',height:'0.25px',zIndex:'10000',background:'red'});
+                                document.body.append(overlay);
+                            }
+                            const rect = target.getBoundingClientRect();
+                            const mouse = new MouseEvent('mousemove', {clientX:event.clientX,clientY:event.clientY});
+                            const inside = (x,y) => x > rect.left && x < rect.right && y > rect.top && y < rect.bottom;
+                            window.fixtureDeliveredPoint = {originalInside:inside(event.clientX,event.clientY),
+                                deliveredInside:inside(mouse.clientX,mouse.clientY),
+                                originalHit:target.contains(document.elementFromPoint(event.clientX,event.clientY)),
+                                deliveredHit:target.contains(document.elementFromPoint(mouse.clientX,mouse.clientY)),
+                                floored:mouse.clientX === Math.floor(event.clientX) && mouse.clientY === Math.floor(event.clientY)};
+                        }, {once:true}); return true;
+                        """)
+                }
+            }
+            do { _ = try await start(fixture); XCTFail("The delivered mouse point cannot inherit the float point's proof") }
+            catch { }
+            XCTAssertTrue(configured)
+            let evidence = try await evaluate(fixture.view, "return fixtureDeliveredPoint;") as? [String: Any]
+            XCTAssertEqual(evidence?["originalInside"] as? Bool, true)
+            XCTAssertEqual(evidence?["originalHit"] as? Bool, true)
+            XCTAssertEqual(evidence?["floored"] as? Bool, true)
+            let deliveredInside = try XCTUnwrap(evidence?["deliveredInside"] as? Bool)
+            let deliveredHit = try XCTUnwrap(evidence?["deliveredHit"] as? Bool)
+            XCTAssertEqual(deliveredInside, change == "occluded")
+            // WebKit hit testing can include a fractional edge outside the DOM
+            // rectangle. The explicit bounds check must reject it independently.
+            if change == "occluded" { XCTAssertFalse(deliveredHit) }
+            FileHandle.standardError.write(Data("KimiFixtureDeliveredPoint scope=\(change) deliveredInside=\(deliveredInside) deliveredHit=\(deliveredHit)\n".utf8))
+            let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+            XCTAssertEqual(events, ["pointerover", "pointerenter"])
+            let actual = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.modelOpens,kimiFixture.counters.moreClicks,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(actual, [1, 0, 0, 0, 0])
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)),
+                    "The started session retains its owned view after failed readiness; cleanup is unconfirmed")
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testClaimedMenuClosesWaitForBothDOMAndARIAAcknowledgementsWithoutReplay() async throws {
         for (scope, order) in [("more", "ariaFirst"), ("more", "domFirst"), ("main", "ariaFirst"), ("main", "domFirst")] {
             let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
@@ -300,7 +440,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
-    private func assertMoreBoundaryEvents(_ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line) async throws {
+    private func assertMoreBoundaryEvents(_ fixture: Fixture, requireCentered: Bool = true, file: StaticString = #filePath, line: UInt = #line) async throws {
         let value = try await evaluate(fixture.view, "return kimiFixture.moreEvents;")
         let rows = try XCTUnwrap(value as? [[String: Any]])
         XCTAssertEqual(rows.compactMap { $0["type"] as? String }, ["pointerover", "pointerenter", "mouseover", "mouseenter",
@@ -309,7 +449,7 @@ final class KimiWebModelTransportTests: XCTestCase {
             for key in ["bubbles", "cancelable", "composed"] {
                 XCTAssertEqual(row[key] as? Bool, index % 2 == 0, key, file: file, line: line)
             }
-            for key in ["targetMatches", "relatedMatches", "centered", "deliveredHit"] {
+            for key in ["targetMatches", "relatedMatches", "deliveredHit"] + (requireCentered ? ["centered"] : []) {
                 XCTAssertEqual(row[key] as? Bool, true,
                     "\(key) event=\(row["type"] ?? "missing") delivered=(\(row["clientX"] ?? "missing"),\(row["clientY"] ?? "missing")) center=(\(row["centerX"] ?? "missing"),\(row["centerY"] ?? "missing"))",
                     file: file, line: line)

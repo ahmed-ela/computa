@@ -86,6 +86,30 @@ function computaDeepSeekDOM(c) {
     return { selected: modes.choices[modes.deepThink.selected ? 1 : 0],
       source: 'website_mode_toggle', backendModel: null, search: false };
   }
+  function rejectFirstContainer(root, container, body) {
+    // Failure-only metadata from the already selected nodes. No extra selector,
+    // action, page read or body value leaves this call; diagnostic failure cannot
+    // replace the original terminal rejection. Counts saturate at 16, rows at 4.
+    let diagnostic;
+    try {
+      const rootText = root.textContent, containerText = container.textContent, bodyText = body.textContent;
+      const children = container.children, tags = ['DIV', 'SPAN', 'BUTTON', 'SVG', 'P', 'BR', 'INPUT', 'TEXTAREA'];
+      const count = node => Math.min(16, node.children.length);
+      diagnostic = { version: 1, containerChildren: count(container), wrapperChildren: count(children[0]),
+        bodyChildren: count(body), rootEqualsBody: rootText === bodyText, containerEqualsBody: containerText === bodyText,
+        rootEmpty: rootText === '', containerEmpty: containerText === '', bodyEmpty: bodyText === '',
+        childrenOmitted: children.length > 4, children: Array.from({ length: Math.min(4, children.length) }, (_, index) => {
+          const child = children[index];
+          return { tag: tags.includes(child.tagName) ? child.tagName : 'other', children: count(child),
+            empty: child.textContent === '', containsBody: child.contains(body) };
+        }) };
+    } catch { /* Retain only the original fixed failure if metadata is unavailable. */ }
+    try { c.fail('conversation_changed', 'first_container_children'); }
+    catch (error) {
+      if (diagnostic && error?.computaAdapterFailure) error.firstContainerDiagnostic = diagnostic;
+      throw error;
+    }
+  }
   function transcript() {
     const roots = c.nodes(document, '.ds-message', 2);
     const users = roots.filter(root => root.classList.contains('d29f3d7d'));
@@ -101,7 +125,7 @@ function computaDeepSeekDOM(c) {
     // collapsed rendering from a changed prompt without publishing either body.
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (!id || !/^-?[0-9]{1,10}$/.test(id)) c.fail('conversation_changed', 'first_id_invalid');
-    if (container.children.length !== 1) c.fail('conversation_changed', 'first_container_children');
+    if (container.children.length !== 1) rejectFirstContainer(root, container, body);
     if (container.children[0].children.length !== 1) c.fail('conversation_changed', 'first_wrapper_children');
     if (container.textContent !== body.textContent) c.fail('conversation_changed', 'first_container_text');
     if (root.textContent !== body.textContent) c.fail('conversation_changed', 'first_root_text');

@@ -195,6 +195,46 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     }
   });
 
+  test('first-container failure captures finite same-read structure but never grants ownership or retries', async () => {
+    for (const variant of ['empty', 'text', 'many', 'unknown-tag', 'snapshot-throws']) {
+      const f = fixture({ fresh: true }); await submitted(f);
+      const count = variant === 'many' ? 20 : 1;
+      for (let index = 0; index < count; index++) {
+        const extra = new f.Node(variant === 'unknown-tag' ? 'PRIVATE_TAG_CANARY' : 'BUTTON',
+          { class: 'PRIVATE_CLASS_CANARY', 'data-url': 'https://private.invalid/PRIVATE_URL_CANARY' },
+          variant === 'text' ? 'PRIVATE_TEXT_CANARY' : '');
+        f.collapse.append(extra);
+      }
+      if (variant === 'snapshot-throws') Object.defineProperty(f.user, 'textContent', {
+        get() { throw new Error('PRIVATE_EXCEPTION_CANARY'); }
+      });
+      const rejected = await f.run('inspect', { expectedModeChoice: mode() });
+      expect(rejected.error).toBe('conversation_changed'); expect(rejected.detail).toBe('first_container_children');
+      if (variant === 'snapshot-throws') expect(rejected.firstContainerDiagnostic).toBeUndefined();
+      else {
+        const packet = rejected.firstContainerDiagnostic;
+        expect(Object.keys(packet).sort()).toEqual(['version', 'containerChildren', 'wrapperChildren', 'bodyChildren',
+          'rootEqualsBody', 'containerEqualsBody', 'rootEmpty', 'containerEmpty', 'bodyEmpty', 'childrenOmitted', 'children'].sort());
+        expect(packet.version).toBe(1); expect(packet.containerChildren).toBe(Math.min(16, count + 1));
+        expect(packet.wrapperChildren).toBe(1); expect(packet.bodyChildren).toBe(0);
+        expect(packet.rootEqualsBody).toBe(variant !== 'text'); expect(packet.containerEqualsBody).toBe(variant !== 'text');
+        expect(packet.rootEmpty).toBe(false); expect(packet.containerEmpty).toBe(false); expect(packet.bodyEmpty).toBe(false);
+        expect(packet.childrenOmitted).toBe(variant === 'many'); expect(packet.children.length).toBe(Math.min(4, count + 1));
+        expect(packet.children[0]).toEqual({ tag: 'DIV', children: 1, empty: false, containsBody: true });
+        expect(packet.children[1]).toEqual({ tag: variant === 'unknown-tag' ? 'other' : 'BUTTON', children: 0,
+          empty: variant !== 'text', containsBody: false });
+        expect(JSON.stringify(packet)).not.toContain('PRIVATE'); expect(JSON.stringify(packet).length).toBeLessThan(1024);
+      }
+      for (const key of ['text', 'firstUserVerified', 'firstUserFingerprint', 'modeEvidence', 'deletionProof'])
+        expect(rejected[key]).toBeUndefined();
+      for (const action of ['inspect', 'submit', 'deleteConversation']) {
+        const terminal = await f.run(action);
+        expect(terminal.detail).toBe('terminal_operation'); expect(terminal.firstContainerDiagnostic).toBeUndefined();
+      }
+      expect(f.send.clicks).toBe(1); expect(f.trigger.clicks).toBe(0); expect(f.remove.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+    }
+  });
+
   test('mismatched first body or canonical route cannot be substituted after submission', async () => {
     for (const kind of ['body', 'route', 'hash']) {
       const f = fixture({ fresh: true }); const hash = await owned(f);

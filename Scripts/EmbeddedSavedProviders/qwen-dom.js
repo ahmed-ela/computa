@@ -42,7 +42,7 @@ function computaQwenDOM(c) {
     // wake this read; native retains its original preparation deadline.
     return !!editor && !!trigger && !!name && c.hit(trigger);
   }
-  function picker() {
+  function picker(closing = null, selecting = null) {
     const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')
       .filter(node => !authored(node)), 'model_trigger');
     const name = leaf(trigger, '.wms-trigger__text', 'model_label');
@@ -50,12 +50,51 @@ function computaQwenDOM(c) {
     const menu = optional(menus, 'model_menu');
     if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))) c.fail('model_unverified', 'picker_expanded_invalid');
     if (menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models')) c.fail('model_unverified', 'picker_menu_shape');
-    if (menu && trigger.getAttribute('aria-expanded') !== 'true') c.fail('model_unverified', 'picker_menu_collapsed');
-    if (!menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'picker_menu_missing');
-    return { trigger, menu, label: c.normalize(name.textContent), closed: menu === null };
+    const label = c.normalize(name.textContent), expanded = trigger.getAttribute('aria-expanded');
+    if (closing) {
+      if (closing.trigger !== trigger || !closing.menu || !closing.checked || !c.choiceValid(closing.choice)
+        || label !== closing.choice.label) c.fail('model_unverified', 'selection_binding');
+      if (menu) {
+        if (menu !== closing.menu) c.fail('model_unverified', 'picker_menu_replaced');
+        const rows = rowsInMenu(menu, label), checked = rows.find(row => row.selected);
+        if (checked.node !== closing.checked || !c.equalChoice(checked.choice, closing.choice)
+          || rows.length !== closing.choices.length
+          || rows.some((row, index) => !c.equalChoice(row.choice, closing.choices[index])))
+          c.fail('model_unverified', 'selection_binding');
+      }
+    }
+    if (selecting) {
+      const option = selecting.option;
+      if (selecting.trigger !== trigger || !selecting.menu || !option?.node || !option.previous?.node
+        || !c.choiceValid(selecting.target) || !c.choiceValid(option.previous.choice)
+        || label !== selecting.target.label && label !== option.previous.choice.label)
+        c.fail('model_unverified', 'selection_binding');
+      if (menu) {
+        if (menu !== selecting.menu) c.fail('model_unverified', 'picker_menu_replaced');
+        // Label and checked-row acknowledgement may settle independently, but
+        // both are restricted to the prior selection or this exact clicked target.
+        const rows = rowsInMenu(menu, null), checked = rows.find(row => row.selected);
+        const target = rows.find(row => c.equalChoice(row.choice, selecting.target));
+        const checkedNode = c.equalChoice(checked.choice, selecting.target) ? option.node
+          : c.equalChoice(checked.choice, option.previous.choice) ? option.previous.node : null;
+        if (target?.node !== option.node || checked.node !== checkedNode || rows.length !== option.choices.length
+          || rows.some((row, index) => !c.equalChoice(row.choice, option.choices[index])))
+          c.fail('model_unverified', 'selection_binding');
+      }
+    }
+    // A claimed close may settle ARIA and physical visibility separately. The
+    // retained menu/checked row remains unverified until BOTH channels close.
+    // No other phase gains permission to accept an inconsistent picker state.
+    if (menu && expanded !== 'true' && !closing && !selecting) c.fail('model_unverified', 'picker_menu_collapsed');
+    if (!menu && expanded !== 'false' && !closing && !selecting) c.fail('model_unverified', 'picker_menu_missing');
+    return { trigger, menu, label, closed: menu === null && expanded === 'false' };
   }
   function modelRows(menu) {
-    if (picker().menu !== menu) c.fail('model_unverified', 'picker_menu_binding');
+    const p = picker();
+    if (p.menu !== menu) c.fail('model_unverified', 'picker_menu_binding');
+    return rowsInMenu(menu, p.label);
+  }
+  function rowsInMenu(menu, selectedLabel) {
     const rows = visible(menu, '.wms-list__item[role="option"]', 32).map(node => {
       const label = c.normalize(leaf(node, '.wms-list__name-text', 'model_label').textContent);
       // No DOM model identifier was observed. Keep the exact label as an opaque
@@ -70,7 +109,7 @@ function computaQwenDOM(c) {
     if (!rows.length) c.fail('model_unverified', 'model_choices_empty');
     if (new Set(rows.map(row => row.choice.key)).size !== rows.length) c.fail('model_unverified', 'model_choices_duplicate');
     if (rows.filter(row => row.selected).length !== 1) c.fail('model_unverified', 'model_checked_count');
-    if (rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified', 'picker_selected_label');
+    if (selectedLabel !== null && rows.find(row => row.selected).choice.label !== selectedLabel) c.fail('model_unverified', 'picker_selected_label');
     return rows;
   }
   function composer() {
