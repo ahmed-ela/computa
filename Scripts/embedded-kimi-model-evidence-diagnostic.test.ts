@@ -6,18 +6,18 @@ async function sent(optimistic=false){
  for(const action of ['prepare','insert','sendReady','submit'])expect((await f.run(action)).error).toBeUndefined();
  expect(f.counts().sends).toBe(1);return f;
 }
-function mutate(f:any,kind:string){
+function mutate(f:any,kind:string,keepOld=false){
  const s=f.world.__computaKimiSavedSessionV1;
  if(kind==='selection_pending')s.selection={stage:'selected',trigger:f.trigger,menu:f.menu,target:instant,option:{triggerID:f.trigger.getAttribute('id'),menuID:f.trigger.getAttribute('aria-controls'),choice:instant,previous:{choice:instant}}};
  if(kind==='unbound')s.model=null;
  if(kind==='picker_open')f.trigger.click();
- if(kind==='trigger_replaced'){const clone=f.trigger.cloneNode(true);f.remove(f.trigger);f.body.append(clone);}
+ if(kind==='trigger_replaced'){const clone=f.trigger.cloneNode(true);if(keepOld)f.trigger.setAttribute('hidden','');else f.remove(f.trigger);f.body.append(clone);}
  if(kind==='label_changed')f.triggerName.text='PRIVATE_CANARY_LABEL';
 }
 describe('Kimi finite rejected model evidence',()=>{
  test('each old disjunct remains a rejection and reports its finite predicate and exact call path',async()=>{
   for(const optimistic of [true,false])for(const kind of ['selection_pending','unbound','picker_open','trigger_replaced','label_changed']){
-   const f=await sent(optimistic);mutate(f,kind);const before=f.counts(),r=await f.run();
+   const f=await sent(optimistic);mutate(f,kind,optimistic&&kind==='trigger_replaced');const before=f.counts(),r=await f.run();
    expect(r.error).toBe('model_unverified');expect(r.detail).toBe('model_evidence_'+kind);
    const d=r.modelEvidenceDiagnostic;expect(Object.keys(d).sort()).toEqual(keys);expect(d.version).toBe(1);
    expect(d.reason).toBe(r.detail);expect(d.stage).toBe(optimistic?'optimistic_first':'canonical_first_hash');

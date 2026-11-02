@@ -602,7 +602,10 @@ async function computaSavedConversation(input, c, dom, config) {
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
-        ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}) }
+        ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
+        && error.detail === 'first_user_message' && error.qwenFirstUserDiagnostic
+        ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}) }
       : { error: 'document_changed' };
   }
 }
@@ -734,6 +737,30 @@ function computaQwenDOM(c) {
     return { editor, scope, text: editor.value, empty: editor.value === '', send, stop,
       sendReady: !!send && c.enabled(editor) && c.hit(send), streaming: !!stop };
   }
+  function rejectFirstUser(root, container, turn, id, conversationID) {
+    // Failure-only predicates from the already selected nodes. No raw ID,
+    // URL, body, extra selector or action is retained. Diagnostic failure must
+    // not replace the original ownership rejection or authorize recovery.
+    let diagnostic;
+    try {
+      const chatID = container.getAttribute('data-chat-id');
+      const flags = { rootVisible: c.visible(root), messageIDValid: c.uuid(id),
+        chatIDMatches: chatID === conversationID,
+        turnClassMatches: turn?.classList.contains('qwen-chat-message-select-turn-message') === true,
+        outerClassMatches: turn?.parentElement?.classList.contains('qwen-chat-message-select-turn') === true,
+        messageIDPresent: id !== null, messageIDEmpty: id === '',
+        chatIDPresent: chatID !== null, chatIDEmpty: chatID === '' };
+      const reason = !flags.rootVisible ? 'root_hidden' : !flags.messageIDValid ? 'message_id_invalid'
+        : !flags.chatIDMatches ? 'chat_id_mismatch' : !flags.turnClassMatches ? 'turn_class_missing'
+        : !flags.outerClassMatches ? 'outer_class_missing' : null;
+      if (reason) diagnostic = { version: 1, reason, ...flags };
+    } catch { /* Keep the original error when diagnostic reads are unavailable. */ }
+    try { c.fail('conversation_changed', 'first_user_message'); }
+    catch (error) {
+      if (diagnostic && error?.computaAdapterFailure) error.qwenFirstUserDiagnostic = diagnostic;
+      throw error;
+    }
+  }
   function transcript(allowInitialResponseIdentity = false) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
@@ -746,7 +773,7 @@ function computaQwenDOM(c) {
     const id = container.getAttribute('data-msg-id');
     if (!c.visible(root) || !c.uuid(id) || container.getAttribute('data-chat-id') !== current.id
       || !turn?.classList.contains('qwen-chat-message-select-turn-message')
-      || !turn.parentElement?.classList.contains('qwen-chat-message-select-turn')) c.fail('conversation_changed', 'first_user_message');
+      || !turn.parentElement?.classList.contains('qwen-chat-message-select-turn')) rejectFirstUser(root, container, turn, id, current.id);
     let answer = null, pendingAnswer = null;
     if (answers.length) {
       const node = answers[0], answerTurn = node.parentElement;

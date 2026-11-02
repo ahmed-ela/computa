@@ -70,6 +70,23 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testKimiInitialModelRemountDiagnosticsRemainFiniteAndProviderScoped() {
+        for detail in ["initial_model_remount_unbound", "initial_model_remount_changed",
+                       "initial_model_remount_first_changed", "initial_model_remount_fingerprint"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail], provider: .kimi, action: "inspect"),
+                "action=inspect error=model_unverified detail=\(detail)")
+            for provider in [EmbeddedWebModelTransport.Provider.qwen, .deepseek] {
+                XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                    ["error": "model_unverified", "detail": detail], provider: provider, action: "inspect"),
+                    "action=inspect error=model_unverified detail=other")
+            }
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail + " PRIVATE_BODY"], provider: .kimi, action: "inspect"),
+                "action=inspect error=model_unverified detail=other")
+        }
+    }
+
     @MainActor func testDeepSeekCleanupFailureReasonsRemainFiniteAndProviderScoped() {
         for detail in ["delete_menu_open_unacknowledged", "delete_menu_selection_spent", "delete_confirm_menu_unacknowledged", "delete_confirm_selection_unacknowledged", "delete_confirm_menu_unbound", "delete_confirm_menu_still_visible"] {
             XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(

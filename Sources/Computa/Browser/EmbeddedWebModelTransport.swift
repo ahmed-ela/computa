@@ -1862,6 +1862,40 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return observed["error"] as? String == (detail == "first_body_count" ? "document_changed" : "conversation_changed")
     }
 
+    /// Finite failure-only Qwen first-user predicates. This cannot grant
+    /// ownership, replace an error category, or relax first-message binding.
+    static func qwenFirstUserDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
+        guard provider == .qwen, observed["error"] as? String == "conversation_changed",
+              observed["detail"] as? String == "first_user_message",
+              let packet = observed["qwenFirstUserDiagnostic"] as? [String: Any],
+              Set(packet.keys) == ["version", "reason", "rootVisible", "messageIDValid", "chatIDMatches",
+                  "turnClassMatches", "outerClassMatches", "messageIDPresent", "messageIDEmpty", "chatIDPresent", "chatIDEmpty"],
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let reason = packet["reason"] as? String else { return nil }
+        var flags: [String: Bool] = [:]
+        var safe: [String: Any] = ["version": 1, "reason": reason]
+        for key in ["rootVisible", "messageIDValid", "chatIDMatches", "turnClassMatches", "outerClassMatches",
+                    "messageIDPresent", "messageIDEmpty", "chatIDPresent", "chatIDEmpty"] {
+            guard let value = firstUserDiagnosticBool(packet[key]) else { return nil }
+            flags[key] = value; safe[key] = value
+        }
+        guard flags["messageIDEmpty"] != true || flags["messageIDPresent"] == true,
+              flags["messageIDValid"] != true || flags["messageIDPresent"] == true && flags["messageIDEmpty"] == false,
+              flags["chatIDEmpty"] != true || flags["chatIDPresent"] == true,
+              flags["chatIDMatches"] != true || flags["chatIDPresent"] == true && flags["chatIDEmpty"] == false else { return nil }
+        let expected: String
+        if flags["rootVisible"] == false { expected = "root_hidden" }
+        else if flags["messageIDValid"] == false { expected = "message_id_invalid" }
+        else if flags["chatIDMatches"] == false { expected = "chat_id_mismatch" }
+        else if flags["turnClassMatches"] == false { expected = "turn_class_missing" }
+        else if flags["outerClassMatches"] == false { expected = "outer_class_missing" }
+        else { return nil }
+        guard reason == expected,
+              let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 512,
+              let result = String(data: data, encoding: .utf8) else { return nil }
+        return result
+    }
+
     /// Metadata from an already rejected Kimi selection read. This validates
     /// a closed finite schema and cannot authorize selection or recovery.
     static func kimiModelEvidenceDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
@@ -2036,6 +2070,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
                 "picker_menu_ambiguous", "picker_menu_labelledby", "picker_menu_scope", "picker_menu_expansion",
                 "option_close_binding", "option_close_selection",
+                "initial_model_remount_unbound", "initial_model_remount_changed",
+                "initial_model_remount_first_changed", "initial_model_remount_fingerprint",
                 "editor_hit_disabled", "editor_hit_invalid_geometry", "editor_hit_outside_viewport", "editor_hit_ancestor_limit",
                 "editor_hit_ancestor_changed", "editor_hit_outside_clip", "editor_hit_occluded",
                 "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
@@ -6162,6 +6198,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                let diagnostic = Self.savedAdapterFailureDiagnostic(observed, provider: provider, action: provider.selectionAdapterAction(action)) {
                 session.loggedSavedAdapterFailure = true
                 Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+                if let structure = Self.qwenFirstUserDiagnostic(observed, provider: provider) {
+                    Self.inspectionLog.error("firstUserDiagnostic version=1 provider=qwen action=\(action == "inspect" ? "inspect" : "other", privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
+                }
                 if let structure = Self.kimiModelEvidenceDiagnostic(observed, provider: provider) {
                     Self.inspectionLog.error("modelEvidenceDiagnostic version=1 provider=kimi action=\(action == "inspect" ? "inspect" : "other", privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
                 }

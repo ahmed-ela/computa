@@ -95,7 +95,8 @@ try {
   const key = '__computaKimiSavedSessionV1';
   if (globalThis[key] === undefined) globalThis[key] = { owner: input.ownerToken,
     document, window, generation: input.documentGeneration, model: null, selection: null,
-    prepared: null, inserted: null, submitted: false, first: null, provisional: null,
+    prepared: null, inserted: null, submitted: false, submissionAcknowledged: false,
+    initialModelRemount: null, first: null, provisional: null,
     canonical: null, deletion: null, initialControls: {}, initialReadComplete: false, terminal: false };
   const state = globalThis[key];
   kimiDraftState = state;
@@ -450,8 +451,11 @@ try {
     more.selected = selected;
     return selected;
   }
-  function modelEvidence(required = true, stage = 'action') {
-    const p = picker(), selected = state.model?.choice;
+  function modelEvidence(required = true, stage = 'action', observedPicker = null) {
+    const p = observedPicker || picker(), selected = state.model?.choice;
+    const remount = state.initialModelRemount;
+    if (remount && (remount.stage !== 'verified' || state.model?.trigger !== remount.trigger
+      || remount.previousTrigger.isConnected)) c.fail('model_unverified', 'initial_model_remount_changed');
     // Preserve the original short-circuit order and exact picker read. These
     // finite predicates only explain rejection; they never restore a binding.
     const reason = state.selection?.stage === 'selected' ? 'model_evidence_selection_pending'
@@ -516,7 +520,7 @@ try {
     if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
       c.fail('conversation_changed', 'first_marker_suffix');
   }
-  function initialUserIdentityPending() {
+  function optimisticFirstUser() {
     // The observed optimistic first user has two present-but-empty IDs. Its
     // replacement receives real UUIDs before the provisional route promotes.
     // Keep that transient root out of transcript(), hashing and first binding.
@@ -533,7 +537,9 @@ try {
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
     verifyUserCount(1); verifyFirstPrompt({ text: body.textContent });
-    const form = composer(), evidence = modelEvidence(true, 'optimistic_first');
+    return { root, body };
+  }
+  function initialUserPendingReceipt(form, evidence) {
     // Native accepts this existing negative receipt only after the sole Send
     // is acknowledged, while its first body and canonical lineage are unbound.
     // No response, first-user identity, fingerprint or cleanup authority exists.
@@ -542,6 +548,63 @@ try {
       text: '', answerComplete: false, busy: true, ownershipPending: true,
       conversationIdentity: null, firstUserIdentity: null, firstUserVerified: false,
       firstUserMarkerVerified: false, firstUserFingerprint: null };
+  }
+  async function revalidateInitialModelRemount(first, form, p) {
+    // Kimi replaces its home-view model trigger after the sole acknowledged
+    // Send. Revalidate exactly that first optimistic-user transition; never
+    // repair generic model evidence, a bound conversation or a second remount.
+    const model = state.model, inserted = state.inserted, prepared = state.prepared;
+    if (state.initialModelRemount || state.submissionAcknowledged !== true || state.selection !== null
+      || !model || !c.equalChoice(model.choice, input.expectedModelChoice)
+      || !Array.isArray(model.choices) || model.choices.filter(choice => c.equalChoice(choice, model.choice)).length !== 1
+      || model.trigger.isConnected || !p.closed || p.label !== model.choice.label
+      || !form.empty || !/^[a-f0-9]{64}$/.test(inserted?.outboundFingerprint || ''))
+      c.fail('model_unverified', 'initial_model_remount_unbound');
+    const choice = { ...model.choice }, prompt = inserted.prompt, fingerprint = inserted.outboundFingerprint;
+    const remount = { stage: 'checking', previousTrigger: model.trigger, trigger: p.trigger,
+      triggerID: p.trigger.getAttribute('id'), menuID: p.trigger.getAttribute('aria-controls') };
+    state.initialModelRemount = remount; // Spend before the only awaited check.
+    const recheck = () => {
+      guard();
+      if (state.initialModelRemount !== remount || remount.stage !== 'checking' || state.model !== model
+        || state.inserted !== inserted || state.prepared !== prepared || state.submissionAcknowledged !== true
+        || state.selection !== null || model.trigger !== remount.previousTrigger || model.trigger.isConnected
+        || !c.equalChoice(model.choice, choice) || !c.equalChoice(choice, input.expectedModelChoice)
+        || inserted.prompt !== prompt || inserted.outboundFingerprint !== fingerprint)
+        c.fail('model_unverified', 'initial_model_remount_changed');
+      const current = optimisticFirstUser();
+      if (!current || current.root !== first.root || current.body !== first.body)
+        c.fail('conversation_changed', 'initial_model_remount_first_changed');
+      const now = picker(), currentForm = composer();
+      const triggers = c.nodes(document, 'div.current-model[data-testid="model-select-trigger"][aria-haspopup="menu"]')
+        .filter(node => !authored(node));
+      if (triggers.length !== 1 || triggers[0] !== remount.trigger || now.trigger !== remount.trigger
+        || !now.closed || now.label !== choice.label || !document.documentElement.contains(now.trigger)
+        || now.trigger.getAttribute('id') !== remount.triggerID || now.trigger.getAttribute('aria-controls') !== remount.menuID
+        || currentForm.editor !== form.editor || currentForm.scope !== form.scope || currentForm.send !== form.send
+        || !currentForm.empty)
+        c.fail('model_unverified', 'initial_model_remount_changed');
+      return { form: currentForm, picker: now };
+    };
+    recheck();
+    const actual = await c.hash(c.bodyText(prompt));
+    const current = recheck();
+    if (actual !== fingerprint) c.fail('conversation_changed', 'initial_model_remount_fingerprint');
+    // Only the trigger binding changes. The selected key/label/catalog retain
+    // their earlier checked-row proof, with exact current label revalidation.
+    // No user identity, canonical route, response or cleanup proof is granted.
+    state.model = { ...model, trigger: remount.trigger };
+    remount.stage = 'verified';
+    return initialUserPendingReceipt(current.form, modelEvidence(true, 'optimistic_first', current.picker));
+  }
+  function initialUserIdentityPending() {
+    const first = optimisticFirstUser();
+    if (!first) return null;
+    const form = composer(), p = picker();
+    if (state.model && state.selection === null && p.closed && p.trigger !== state.model.trigger
+      && state.model.trigger.isConnected === false && p.label === state.model.choice.label)
+      return revalidateInitialModelRemount(first, form, p);
+    return initialUserPendingReceipt(form, modelEvidence(true, 'optimistic_first', p));
   }
   function sameFirst(first) {
     guard(); const now = transcript().first;
@@ -784,7 +847,7 @@ try {
       conversationIdentity: null, deleteProof: deleteProof(op, record, true) };
   }
   const pendingIdentity = initialUserIdentityPending();
-  if (pendingIdentity) return pendingIdentity;
+  if (pendingIdentity) return await pendingIdentity;
   const initial = read();
   state.initialReadComplete = true;
   verifyUserCount(initial.t.users.length);
@@ -940,6 +1003,7 @@ try {
     || outboundFingerprint !== state.inserted.outboundFingerprint)
     c.fail('prompt_not_inserted');
   state.submitted = true; form.send.click();
+  state.submissionAcknowledged = true;
   // This proves only that the single exact-draft click returned. Native pins
   // this receipt to its pending outbound; the next ordinary read must still
   // prove the canonical route and complete first user before any answer.

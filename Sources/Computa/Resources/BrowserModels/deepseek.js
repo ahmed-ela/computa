@@ -602,7 +602,10 @@ async function computaSavedConversation(input, c, dom, config) {
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
-        ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}) }
+        ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
+        && error.detail === 'first_user_message' && error.qwenFirstUserDiagnostic
+        ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}) }
       : { error: 'document_changed' };
   }
 }

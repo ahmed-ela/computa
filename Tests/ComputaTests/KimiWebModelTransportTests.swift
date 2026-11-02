@@ -1032,6 +1032,71 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testInitialModelTriggerRemountRemainsPendingUntilExactCanonicalReplyAndDeletion() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic first model trigger replacement")
+        let detached = try await evaluate(fixture.view, """
+            const previous = document.querySelector('.current-model');
+            const next = previous.cloneNode(true); previous.replaceWith(next);
+            return !previous.isConnected && next.isConnected;
+            """) as? Bool
+        XCTAssertEqual(detached, true)
+        for _ in 0 ..< 2 {
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["state"] as? String, "running")
+            XCTAssertEqual(pending["text"] as? String, "")
+            let context = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+            XCTAssertEqual(context["responseCount"] as? Int, 0)
+        }
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+        _ = try await evaluate(fixture.view, "kimiFixture.replaceOptimisticUser(); kimiFixture.canonicalize(); return true;")
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        XCTAssertEqual(proof["responseCount"] as? Int, 1)
+        let selected = try WebsiteModelEvidence.parse(complete["modelEvidence"], provider: "kimi", expected: choice)
+        XCTAssertEqual(selected.selected.key, choice.key)
+        XCTAssertEqual(selected.selected.label, choice.label)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testSecondOrCanonicalModelTriggerRemountCannotRebindOrReplay() async throws {
+        for phase in ["second", "canonical"] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+            let prompt = "Synthetic forbidden model trigger replacement"
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            if phase == "second" {
+                _ = try await evaluate(fixture.view, "const old = document.querySelector('.current-model'); old.replaceWith(old.cloneNode(true)); return true;")
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["state"] as? String, "running")
+                XCTAssertEqual(pending["text"] as? String, "")
+            } else {
+                _ = try await evaluate(fixture.view, "kimiFixture.replaceOptimisticUser(); kimiFixture.canonicalize(); return true;")
+            }
+            _ = try await evaluate(fixture.view, "const old = document.querySelector('.current-model'); old.replaceWith(old.cloneNode(true)); return true;")
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("A \(phase) remount cannot replace model proof") }
+            catch let error as EmbeddedWebModelTransport.Failure { XCTAssertEqual(error, .modelUnverified) }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("A rejected remount cannot replay Send") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testOptimisticEmptyFirstIDsRejectCanonicalOrChangedEvidenceWithoutReplay() async throws {
         for mutation in ["canonical", "malformed", "prompt", "nestedBody", "model"] {
             let fixture = try Fixture(); defer { fixture.shutdown() }

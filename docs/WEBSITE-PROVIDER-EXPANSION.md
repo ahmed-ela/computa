@@ -783,6 +783,37 @@ The failed tasks and unconfirmed cleanup records remain intact. No uncertain
 Send was replayed. The complete selectable-model workflow matrix, Claude
 failures and Gemini verification block remain open.
 
+### Candidate399: first-submit picker replacement and durable errors
+
+Kimi can now revalidate one detached model trigger during the observed
+optimistic first-user window, after the sole Send returns its acknowledgement.
+The prior checked selection/catalog, exact complete echoed prompt and original
+outbound digest remain required. The new unique, closed picker, first-user
+nodes, owner, document, route and composer must stay stable across the digest
+check. A second replacement, returning old trigger, different model or changed
+prompt fails. The result remains negative/pending until normal canonical
+first-user and response verification succeeds; it cannot authorize cleanup.
+
+Qwen adds failure-only first-user predicates distinguishing visibility, message
+ID, chat-ID link and parent structure. Its error category, ownership rejection
+and one-dispatch behavior are unchanged. Only finite booleans/enums enter the
+native log; page content, identifiers and URLs do not.
+
+The history fix in `027c80e` preserves the exact fixed native model-verification
+and cleanup envelopes instead of silently losing them and restoring a generic
+engine error. Unknown prose and extra metadata remain rejected, and failed
+persistence is reported. It passed 55 focused native tests, including cold
+runtime restoration without provider replay. Previously lost diagnoses are not
+guessed from generic historical errors. Build399 installation and live provider
+results are still pending.
+
+The integrated399 source passed 123 distinct native adapter/diagnostic tests
+and 324 JavaScript/version tests (9,857 assertions). The native Kimi regression
+verifies a first-trigger replacement through exact Instant selection, canonical
+reply and once-only deletion, and rejects second/canonical replacements without
+replaying Send. The separate 55-test history gate still matches its unchanged
+implementation/test files; these are separate results, not duplicate counts.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
