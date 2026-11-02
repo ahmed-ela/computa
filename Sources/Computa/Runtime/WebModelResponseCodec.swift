@@ -417,7 +417,8 @@ enum WebModelResponseCodec {
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty)
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
+            includedInstructionText: includedInstructionText, responseFormat: isClaude ? .literalFencedJSON : .fencedJSON,
+            singleActionRelay: isChatGPT,
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
         let prompt = """

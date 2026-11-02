@@ -46,16 +46,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Every session pins one provider. A valid route on another provider can
     /// never satisfy its ownership checks, including before its first submit.
     enum Provider: String, CaseIterable {
-        case chatgpt, claude, gemini, groq
+        case chatgpt, claude, gemini, groq, kimi
 
         /// Each provider must explicitly declare the lifecycle its adapter
         /// proves. A new provider never inherits temporary mode by exclusion.
-        enum Lifecycle { case temporary, visibleTranscriptClear }
+        enum Lifecycle { case temporary, visibleTranscriptClear, savedConversationDelete }
 
         var lifecycle: Lifecycle {
             switch self {
             case .chatgpt, .claude, .gemini: .temporary
             case .groq: .visibleTranscriptClear
+            case .kimi: .savedConversationDelete
             }
         }
 
@@ -65,6 +66,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: "claude.ai"
             case .gemini: "gemini.google.com"
             case .groq: "chat.groq.com"
+            case .kimi: "www.kimi.ai"
             }
         }
 
@@ -74,6 +76,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: "Claude"
             case .gemini: "Gemini"
             case .groq: "Groq"
+            case .kimi: "Kimi"
             }
         }
 
@@ -83,6 +86,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: URL(string: "https://claude.ai/new?incognito")!
             case .gemini: URL(string: "https://gemini.google.com/app")!
             case .groq: URL(string: "https://chat.groq.com/")!
+            case .kimi: URL(string: "https://www.kimi.ai/")!
             }
         }
 
@@ -107,6 +111,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         func accepts(_ raw: String) -> Bool {
             guard let url = originURL(raw) else { return false }
+            if self == .kimi { return KimiSavedConversationRoute(url) != nil }
             return isFreshPath(url.path) || conversationURL(raw) != nil
         }
 
@@ -120,6 +125,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Only the root and its model query have been observed. Neither
             // a saved-conversation route nor temporary mode is established.
             case .groq: return nil
+            case .kimi: return KimiSavedConversationRoute(url)?.conversation
             }
             guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
             return "https://\(host)" + (url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path)
@@ -136,7 +142,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt: return "https://\(host)/"
             case .claude: return "https://\(host)/new"
-            case .groq: return "https://\(host)/"
+            case .groq, .kimi: return "https://\(host)/"
             case .gemini:
                 guard let range = url.path.range(of: #"^/(?:u/[0-9]{1,3}/)?app(?=/|$)"#, options: .regularExpression) else { return nil }
                 return "https://\(host)" + String(url.path[range])
@@ -151,11 +157,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: return query.contains { $0.name == "incognito" }
             case .gemini: return false // Gemini changes its mode without changing the route.
             case .groq: return false // A model query is not temporary-session proof.
+            case .kimi: return false // Saved-chat deletion is not temporary mode.
             }
         }
 
         func acceptsUnboundStart(_ url: URL) -> Bool {
             guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
+            if self == .kimi { return url == startURL }
             return self == .gemini || self == .chatgpt ? true : acceptsTemporaryToggle(url)
         }
 
@@ -198,7 +206,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: path == "/"
             case .claude: path == "/new" || path == "/new/"
             case .gemini: path.range(of: #"^/(?:u/[0-9]{1,3}/)?app/?$"#, options: .regularExpression) != nil
-            case .groq: path == "/"
+            case .groq, .kimi: path == "/"
             }
         }
     }
@@ -234,8 +242,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     enum Failure: Error, LocalizedError, Equatable {
         case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged, turnLimit, cookieMaintenancePending
-        case signInRequired, temporaryUnverified, explicitClearUnverified, notFresh, composerUnavailable
-        case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
+        case signInRequired, temporaryUnverified, explicitClearUnverified, savedDeleteUnverified, notFresh, composerUnavailable
+        case pageUnavailable, responseTooLarge, responseInterrupted, responseFormatUnavailable, preparationDeadline, deadline
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
         case usageLimited(Provider), responseFailed(Provider), responseBlocked(Provider), responseRenderingFailed
@@ -252,10 +260,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseFailed: "website_response_failed"
             case .responseBlocked: "website_response_blocked"
             case .responseRenderingFailed: "website_response_rendering_failed"
+            case .responseFormatUnavailable: "unsupported_website_response"
             case .responseStreamFailed: "website_response_stream_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
-            case .explicitClearUnverified: "website_lifecycle_unverified"
+            case .explicitClearUnverified, .savedDeleteUnverified: "website_lifecycle_unverified"
             case .ownershipFailure: "website_ownership_unverified"
             case .turnLimit: "website_turn_limit"
             default: nil
@@ -269,11 +278,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited: "wait_for_quota_reset"
             case .responseFailed: "inspect_website"
             case .responseBlocked: "inspect_website"
-            case .responseRenderingFailed: "inspect_website"
+            case .responseRenderingFailed, .responseFormatUnavailable: "inspect_website"
             case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
-            case .explicitClearUnverified: "inspect_website"
+            case .explicitClearUnverified, .savedDeleteUnverified: "inspect_website"
             case .ownershipFailure: "inspect_website"
             default: nil
             }
@@ -302,6 +311,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying."
             case .temporaryUnverified: "The AI website did not confirm temporary or incognito chat mode. No further prompt was sent."
             case .explicitClearUnverified: "The website did not confirm the owned chat's explicit-clear lifecycle. No further prompt was sent."
+            case .savedDeleteUnverified: "The website did not confirm the owned saved-chat deletion lifecycle. No further prompt was sent."
+            case .responseFormatUnavailable: "The complete website reply could not be read in a supported literal format. No proposed action was executed."
             case .notFresh: "The new model page was not empty. It was not modified."
             case .composerUnavailable: "The website's message editor could not accept the exact prompt. No send was retried."
             case .editorFailure(let reason): "The website's message editor could not accept the exact prompt (\(reason)). No send was retried."
@@ -381,10 +392,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // a promise about the provider's server-side retention.
         var requiresExplicitClear: Bool { provider.lifecycle == .visibleTranscriptClear && !isDiscovery }
         var explicitClearReady = false
+        var requiresSavedDelete: Bool { provider.lifecycle == .savedConversationDelete && !isDiscovery }
+        var savedDeleteReady = false
+        var kimiRoutes = KimiSavedConversationRoutes()
+        var savedDeleteSubmission: FreshSubmissionBinding?
+        final class SavedDeleteOperation {
+            let id = UUID()
+            let generation: UUID, url: URL, conversation: String, fingerprint: String, model: WebsiteModelChoice
+            var progress = KimiDeletionProgress()
+            init(generation: UUID, url: URL, conversation: String, fingerprint: String, model: WebsiteModelChoice) {
+                self.generation = generation; self.url = url; self.conversation = conversation
+                self.fingerprint = fingerprint; self.model = model
+            }
+            var dictionary: [String: Any] {
+                ["id": id.uuidString, "documentGeneration": generation.uuidString, "sequence": 1,
+                 "firstUserFingerprint": fingerprint, "conversationURL": conversation]
+            }
+        }
+        var savedDeleteOperation: SavedDeleteOperation?
         var lifecycleVerified: Bool {
             switch provider.lifecycle {
             case .temporary: temporary
             case .visibleTranscriptClear: explicitClearReady
+            case .savedConversationDelete: savedDeleteReady
             }
         }
         struct ExplicitClearSubmission {
@@ -1083,7 +1113,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             choice = parsed
         } else { choice = nil }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
-        guard provider != .groq || choice != nil else { throw Failure.invalidRequest }
+        guard provider != .groq && provider != .kimi || choice != nil else { throw Failure.invalidRequest }
         let claudeResponseStream: ClaudeResponseStreamLease?
         if let candidate = streamCandidate, provider == .claude, choice != nil,
            let admission, admission.provider == provider.rawValue, admission.modelID == choice?.modelID,
@@ -1186,6 +1216,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 guard !session.requiresExplicitClear || !session.submitted && session.sequence == 0
                     && session.explicitClearOperation == nil else { throw Failure.invalidRequest }
+                guard !session.requiresSavedDelete || !session.submitted && session.sequence == 0
+                    && session.savedDeleteOperation == nil else { throw Failure.invalidRequest }
                 browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                 // Count the full outbound bytes, including the ownership marker.
                 // These are finite engineering bounds, not provider context sizes.
@@ -1303,6 +1335,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.explicitClearSubmission = .init(generation: generation, url: url,
                         outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
+                if session.requiresSavedDelete {
+                    guard session.savedDeleteSubmission == nil, let generation = session.documentGeneration,
+                          session.view.url == session.provider.startURL, session.sequence == 0, !session.submitted,
+                          session.baseline == 0, session.confirmedUsers == 0 else { throw Failure.notFresh }
+                    session.savedDeleteSubmission = .init(generation: generation,
+                        promptFingerprint: Self.promptFingerprint(prompt), outboundFingerprint: Self.outboundFingerprint(outbound))
+                }
                 let readinessRequest = firstInstantReadinessRequest(session)
                 var readinessReceipt: PreparedEditorReadinessReceipt?
                 let inserted = try await page(session, action: "insert", prompt: outbound,
@@ -1384,7 +1423,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.loggedPendingModelVerification = false
                 session.state = "running"
                 let submittedSequence = session.sequence
-                let sent = try await page(session, action: "submit", prompt: outbound)
+                // Kimi's first callback proves only this one dispatch. A nested
+                // first-body read cannot run before its acknowledgement below.
+                // The next poll still proves canonical ownership and the model.
+                let sent = try await page(session, action: "submit", prompt: outbound,
+                    recheckModelAfterAwait: session.provider != .kimi)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
                 session.acknowledgedSendSequence = submittedSequence
                 logModelNativeLifecycle(session, phase: .submitted)
@@ -1616,6 +1659,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         switch session.provider.lifecycle {
         case .temporary:
             return observed["temporary"] as? Bool == true
+        case .savedConversationDelete:
+            guard observed["sessionLifecycle"] as? String == "saved_conversation_delete",
+                  let temporary = observed["temporary"] as? NSNumber,
+                  CFGetTypeID(temporary) == CFBooleanGetTypeID() else { return false }
+            return !temporary.boolValue
         case .visibleTranscriptClear:
             guard observed["sessionLifecycle"] as? String == "explicit_clear",
                   let temporary = observed["temporary"] as? NSNumber,
@@ -1629,6 +1677,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch session.provider.lifecycle {
             case .temporary: throw Failure.temporaryUnverified
             case .visibleTranscriptClear: throw Failure.explicitClearUnverified
+            case .savedConversationDelete: throw Failure.savedDeleteUnverified
             }
         }
     }
@@ -2391,6 +2440,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     switch session.provider.lifecycle {
                     case .temporary: session.temporary = true
                     case .visibleTranscriptClear: session.explicitClearReady = true
+                    case .savedConversationDelete: session.savedDeleteReady = true
                     }
                     if let choice = session.modelChoice {
                         if let evidence = try? WebsiteModelEvidence.parse(observed["modelEvidence"], provider: session.provider.rawValue, expected: choice) {
@@ -2620,8 +2670,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.candidateSince = nil
                             }
                         }
-                        if currentAnswerVerified, session.requiresExplicitClear {
-                            // Groq's native model recheck also yields. Its model
+                        if currentAnswerVerified, session.requiresExplicitClear || session.requiresSavedDelete {
+                            // Saved/cleared sessions' native model recheck also yields. Its model
                             // identity alone cannot preserve an older completed
                             // answer across changed text or resumed streaming.
                             let final = try await page(session, action: "inspect",
@@ -2639,7 +2689,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 && final["firstUserMarkerVerified"] as? Bool == true
                                 && session.firstUserFingerprint != nil
                                 && final["firstUserFingerprint"] as? String == session.firstUserFingerprint
-                                && session.explicitClearSubmission?.outboundFingerprint == session.firstUserFingerprint
+                                && (session.requiresSavedDelete
+                                    ? session.savedDeleteSubmission?.outboundFingerprint == session.firstUserFingerprint
+                                        && session.conversation != nil
+                                    : session.explicitClearSubmission?.outboundFingerprint == session.firstUserFingerprint)
                             completionObservation = final
                             if !currentAnswerVerified {
                                 session.completionCandidate = false
@@ -4929,7 +4982,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
                       preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                       explicitClearOperation: Session.ExplicitClearOperation? = nil,
+                      savedDeleteOperation: Session.SavedDeleteOperation? = nil,
+                      allowKimiCleanupInspection: Bool = false,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        if allowKimiCleanupInspection {
+            guard session.provider == .kimi, action == "inspect", allowBlockedProvider, enforceModel,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait, savedDeleteOperation == nil else { throw Failure.invalidRequest }
+        }
+        let savedDeleteAction = KimiDeletionProgress.Action(rawValue: action)
+        guard (savedDeleteAction != nil) == (savedDeleteOperation != nil) else { throw Failure.invalidRequest }
+        if let operation = savedDeleteOperation {
+            guard isCurrent(operation, session: session), enforceModel,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait else { throw Failure.staleSession }
+        }
         let explicitClearAction = ["clearTranscript", "observeClearTranscript"].contains(action)
         guard explicitClearAction == (explicitClearOperation != nil) else { throw Failure.invalidRequest }
         if requireClaudeSafeguardPause {
@@ -4994,12 +5059,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .groq {
             guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
+        if provider == .kimi, savedDeleteOperation == nil {
+            guard session.kimiRoutes.observe(url, submitted: session.submitted) else { throw Failure.ownershipFailure(.routeBefore) }
+        }
         let context = provider.routeContext(url.absoluteString)
         if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
         let current = provider.conversationURL(url.absoluteString)
         let promotion = provider.isLocalConversation(session.conversation) && current != nil
             && current != session.conversation && !provider.isLocalConversation(current) && !session.promoted
-        if let owned = session.conversation, current != owned, !promotion { throw Failure.ownershipFailure(.routeBefore) }
+        if let owned = session.conversation, current != owned, !promotion, savedDeleteOperation == nil { throw Failure.ownershipFailure(.routeBefore) }
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
             : session.pendingSubmission ? [session.confirmedUsers, session.sequence] : [session.confirmedUsers]
@@ -5060,7 +5128,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.sequence > 1,
         ]
         if requireClaudeSafeguardPause { input["requireClaudeSafeguardPause"] = true }
-        if provider == .groq { input["documentGeneration"] = generation.uuidString }
+        if allowKimiCleanupInspection { input["kimiCleanupInspection"] = true }
+        if provider == .groq || provider == .kimi { input["documentGeneration"] = generation.uuidString }
+        if provider == .kimi, action == "submit" {
+            guard let binding = session.savedDeleteSubmission, binding.generation == generation,
+                  session.sequence == 1, session.pendingSubmission else { throw Failure.invalidRequest }
+            input["savedSubmissionFingerprint"] = binding.outboundFingerprint
+        }
+        if let operation = savedDeleteOperation {
+            input["deleteOperation"] = operation.dictionary
+            input["expectedUserCounts"] = [0, 1]
+        }
         if let explicitClearOperation { input["clearOperation"] = explicitClearOperation.dictionary }
         if pendingSubmissionProductRecheck {
             guard action == "verifyProductMode", !enforceModel, !recheckModelAfterAwait, !recheckProductAfterAwait,
@@ -5315,7 +5393,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                !session.temporaryRequested, !session.submitted { throw Failure.pageUnavailable }
             throw Failure.ownershipFailure(.routeAfter)
         }
-        if currentURL != url {
+        if provider == .kimi, savedDeleteOperation == nil {
+            guard session.kimiRoutes.observe(currentURL, submitted: session.submitted) else { throw Failure.ownershipFailure(.routeAfter) }
+        }
+        if currentURL != url, provider == .kimi {
+            if let operation = savedDeleteOperation {
+                guard operation.progress.claimed.contains(.confirmDelete),
+                      (savedDeleteAction == .confirmDelete || savedDeleteAction == .observe),
+                      url == operation.url, currentURL == provider.startURL else { throw Failure.ownershipFailure(.routeAfter) }
+            } else if session.submitted, session.sequence == 1, session.conversation == nil {
+                guard KimiSavedConversationRoute(url) != KimiSavedConversationRoute(currentURL) else { throw Failure.ownershipFailure(.routeAfter) }
+                if ["inspect", "verifyModel"].contains(action), refreshChangedRoute {
+                    return try await page(session, action: "inspect", enforceModel: enforceModel,
+                        refreshChangedRoute: KimiSavedConversationRoute(currentURL)?.conversation == nil,
+                        recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
+                        allowBlockedProvider: allowBlockedProvider, allowKimiCleanupInspection: allowKimiCleanupInspection,
+                        maximumWait: evaluationDeadline - .now)
+                }
+                guard action == "submit" else { throw Failure.ownershipFailure(.routeAfter) }
+            } else { throw Failure.ownershipFailure(.routeAfter) }
+        }
+        if currentURL != url, provider != .kimi {
             if provider == .groq, session.isDiscovery, action == "inspect", session.state == "loading",
                session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
                !session.submitted, !session.pendingSubmission, session.sequence == 0,
@@ -5478,6 +5576,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 logModelMismatch(observed, session: session, action: action, stage: "adapter_error")
                 throw Failure.modelMismatch
             case "model_unavailable": throw Failure.modelUnavailable
+            case "unsupported_response_format": throw Failure.responseFormatUnavailable
             case "acknowledged_user_append":
                 // A read-only picker observation can cross the DOM append for
                 // our already acknowledged Send. Discard that observation and
@@ -5676,6 +5775,34 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.claudeModelObservationPending = true
             return observed
         }
+        if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
+            throw Failure.savedDeleteUnverified
+        }
+        if provider == .kimi, action == "submit" {
+            guard enforceModel, !recheckModelAfterAwait, session.requiresSavedDelete, session.savedDeleteReady,
+                  session.submitted, session.pendingSubmission, session.sequence == 1, session.acknowledgedSendSequence == 0,
+                  session.firstUserFingerprint == nil, session.conversation == nil, url == provider.startURL,
+                  let binding = session.savedDeleteSubmission, binding.generation == generation,
+                  observed["url"] as? String == url.absoluteString,
+                  ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+                  ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+                  let submitted = observed["submitted"] as? NSNumber, CFGetTypeID(submitted) == CFBooleanGetTypeID(), submitted.boolValue,
+                  KimiSubmissionAcknowledgement.matches(observed["submissionAcknowledgement"], owner: session.token,
+                    generation: generation, fingerprint: binding.outboundFingerprint),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+            session.modelEvidence = try validatedModelEvidence(observed, session: session, action: action)
+            return observed
+        }
+        if let operation = savedDeleteOperation {
+            guard isCurrent(operation, session: session), generation == operation.generation,
+                  observed["url"] as? String == currentURL.absoluteString,
+                  observesLifecycle(observed, session: session),
+                  operation.progress.accept(observed["deleteProof"], id: operation.id, generation: generation,
+                    fingerprint: operation.fingerprint, conversation: operation.conversation),
+                  currentURL == operation.url || operation.progress.phase == .observing && currentURL == provider.startURL,
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.unboundCleanup) }
+            return observed
+        }
         if session.provider.lifecycle == .visibleTranscriptClear, !observesLifecycle(observed, session: session) {
             throw Failure.explicitClearUnverified
         }
@@ -5699,6 +5826,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if pendingSubmissionProductRecheck {
             guard canRecheckUnacknowledgedChatGPTProduct(session),
                   Self.isChatGPTPendingProductReceipt(observed) else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+        }
+        if provider == .kimi, observed["ownershipPending"] as? Bool == true {
+            guard action == "inspect", session.submitted, session.sequence == 1, session.pendingSubmission,
+                  session.acknowledgedSendSequence == 1, session.conversation == nil, session.firstUserFingerprint == nil,
+                  let binding = session.savedDeleteSubmission, binding.generation == generation,
+                  KimiSavedConversationRoute(currentURL)?.conversation == nil,
+                  (0...1).contains(count(observed, "userCount")), observed["text"] as? String == "",
+                  observed["answerComplete"] as? Bool == false else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
+            session.modelEvidence = try validatedModelEvidence(observed, session: session, action: action)
+            return ["temporary": false, "sessionLifecycle": "saved_conversation_delete", "userCount": 0,
+                "responseCount": session.baseline, "text": "", "busy": true, "answerComplete": false, "ownershipPending": true]
         }
         // Once the first message is bound, the final model read also proves
         // Chat mode and the same owned lineage. Initial binding, pending appends
@@ -5805,6 +5943,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         logFirstUserStructure(records, sequence: session.sequence)
                     }
                 }
+                if session.requiresSavedDelete {
+                    guard let submitted = session.savedDeleteSubmission, submitted.generation == generation,
+                          submitted.outboundFingerprint == fingerprint, session.acknowledgedSendSequence == 1,
+                          session.sequence == 1, count(observed, "userCount") == 1,
+                          provider.conversationURL(currentURL.absoluteString) != nil else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
+                }
                 if session.requiresExplicitClear {
                     guard let submitted = session.explicitClearSubmission,
                           submitted.generation == generation, submitted.url == currentURL,
@@ -5854,7 +5998,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                            allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                            maximumWait: evaluationDeadline - .now)
                 }
-                if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
+                if provider != .kimi, !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
                     session.conversation = conversation
@@ -5868,6 +6012,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         "answerComplete": false, "ownershipPending": true,
                         "debugStructure": observed["debugStructure"] as? String ?? ""]
                 if session.requiresExplicitClear { pending["sessionLifecycle"] = "explicit_clear" }
+                if session.requiresSavedDelete { pending["sessionLifecycle"] = "saved_conversation_delete" }
                 if observed["modelVerificationPending"] as? Bool == true { pending["modelVerificationPending"] = true }
                 else if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
                 if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
@@ -5893,6 +6038,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.promoted = true
             } else if session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                 guard session.submitted else { throw Failure.notFresh }
+                if provider == .kimi {
+                    guard session.firstUserFingerprint != nil, count(observed, "userCount") == 1 else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
+                }
                 session.conversation = conversation
             }
             if count(observed, "userCount") > 0, session.conversationIdentity == nil,
@@ -6306,6 +6454,84 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         sessions[sessionToken]?.postBlockDiagnostic?.task?.cancel()
     }
 
+    private func isCurrent(_ operation: Session.SavedDeleteOperation, session: Session) -> Bool {
+        session.requiresSavedDelete && session.savedDeleteReady && !session.temporary
+            && sessions[session.token] === session && browser.webView(for: session.tabID) === session.view
+            && session.documentGeneration == operation.generation
+            && browser.documentGeneration(for: session.tabID) == operation.generation
+            && session.modelChoice == operation.model && session.modelSelectionVerified && session.modelEvidence != nil
+            && session.conversation == operation.conversation
+            && session.submitted && !session.pendingSubmission && session.sequence == 1
+            && session.acknowledgedSendSequence == 1 && session.confirmedUsers == 1
+            && session.firstUserFingerprint == operation.fingerprint
+            && session.savedDeleteSubmission.map {
+                $0.generation == operation.generation && $0.outboundFingerprint == operation.fingerprint
+            } == true
+            && session.savedDeleteOperation === operation
+            && (session.view.url == operation.url || operation.progress.claimed.contains(.confirmDelete)
+                && session.view.url == session.provider.startURL)
+    }
+
+    /// Deletion owns one canonical chat. Each UI stage is claimed once; delayed
+    /// menus, dialogs and removal are observed without replaying any mutation.
+    private func deleteOwnedConversation(_ session: Session) async throws -> String {
+        guard session.requiresSavedDelete, session.savedDeleteReady, !session.temporary else {
+            throw Failure.ownershipFailure(.unboundCleanup)
+        }
+        if !session.submitted {
+            guard session.sequence == 0, !session.pendingSubmission, session.acknowledgedSendSequence == 0,
+                  session.firstUserFingerprint == nil, session.savedDeleteOperation == nil,
+                  session.view.url == session.provider.startURL else { throw Failure.ownershipFailure(.unboundCleanup) }
+            let observed = try await page(session, action: "inspect", recheckModelAfterAwait: false,
+                recheckProductAfterAwait: false, allowBlockedProvider: true, allowKimiCleanupInspection: true)
+            try requireLifecycle(observed, session: session)
+            guard count(observed, "userCount") == 0, count(observed, "responseCount") == 0,
+                  observed["busy"] as? Bool == false, observed["composer"] as? Bool == true else { throw Failure.notFresh }
+            return "not_created"
+        }
+        let operation: Session.SavedDeleteOperation
+        if let existing = session.savedDeleteOperation { operation = existing }
+        else {
+            let observed = try await page(session, action: "inspect", recheckModelAfterAwait: false,
+                recheckProductAfterAwait: false, allowBlockedProvider: true, allowKimiCleanupInspection: true)
+            try requireLifecycle(observed, session: session)
+            guard observed["ownershipPending"] as? Bool != true, session.sequence == 1, session.confirmedUsers == 1,
+                  !session.pendingSubmission, session.acknowledgedSendSequence == 1, count(observed, "userCount") == 1,
+                  let fingerprint = session.firstUserFingerprint, let generation = session.documentGeneration,
+                  let url = session.view.url, let conversation = session.conversation,
+                  session.provider.conversationURL(url.absoluteString) == conversation,
+                  let model = session.modelChoice else { throw Failure.ownershipFailure(.unboundCleanup) }
+            operation = .init(generation: generation, url: url, conversation: conversation, fingerprint: fingerprint, model: model)
+            session.savedDeleteOperation = operation
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            guard isCurrent(operation, session: session) else { throw Failure.ownershipFailure(.unboundCleanup) }
+            let revision = try browser.modelChangeRevision(for: session.tabID)
+            let action = operation.progress.claimNext()
+            let observed = try await page(session, action: action.rawValue, recheckModelAfterAwait: false,
+                recheckProductAfterAwait: false, allowBlockedProvider: true,
+                savedDeleteOperation: operation, maximumWait: deadline - .now)
+            if operation.progress.deleted {
+                guard isCurrent(operation, session: session), session.view.url == session.provider.startURL,
+                      ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+                      ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+                      let busy = observed["busy"] as? NSNumber, CFGetTypeID(busy) == CFBooleanGetTypeID(), !busy.boolValue,
+                      let composer = observed["composer"] as? NSNumber, CFGetTypeID(composer) == CFBooleanGetTypeID(), composer.boolValue else {
+                    throw Failure.ownershipFailure(.unboundCleanup)
+                }
+                return "deleted"
+            }
+            // A ready next stage has its own claim. A spent stage always waits
+            // for a new read-only observation; it can never regain dispatch.
+            if operation.progress.nextActionReady,
+               (operation.progress.phase == .menu && !operation.progress.claimed.contains(.selectDelete)
+                || operation.progress.phase == .confirmation && !operation.progress.claimed.contains(.confirmDelete)) { continue }
+            _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
+        }
+        throw Failure.ownershipFailure(.unboundCleanup)
+    }
+
     private func isCurrent(_ operation: Session.ExplicitClearOperation, session: Session) -> Bool {
         session.requiresExplicitClear && session.explicitClearReady && !session.temporary
             && sessions[session.token] === session && browser.webView(for: session.tabID) === session.view
@@ -6479,6 +6705,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // by a human tab. Close exactly this read-only view even after
                 // a sign-in redirect; inference cleanup authority is unchanged.
                 guard !session.submitted, browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+            } else if session.requiresSavedDelete {
+                let cleanup = try await deleteOwnedConversation(session)
+                browser.closeTab(session.tabID)
+                session.responseProfile?.mark(.physicalClose)
+                guard browser.webView(for: session.tabID) == nil,
+                      !browser.tabs.contains(where: { $0.id == session.tabID }), session.view.superview == nil else { throw Failure.staleSession }
+                sessions.removeValue(forKey: session.token)
+                session.state = "finished"
+                return try snapshot(session, cleanup: cleanup)
             } else if session.requiresExplicitClear {
                 let cleanup = try await clearOwnedTranscript(session)
                 browser.closeTab(session.tabID)
@@ -6583,6 +6818,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .temporary: break
         case .visibleTranscriptClear:
             value["sessionLifecycle"] = "explicit_clear"; value["temporary"] = false
+        case .savedConversationDelete:
+            value["sessionLifecycle"] = "saved_conversation_delete"; value["temporary"] = false
         }
         if pendingModel { value["modelVerificationPending"] = true }
         if !pendingModel, let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }

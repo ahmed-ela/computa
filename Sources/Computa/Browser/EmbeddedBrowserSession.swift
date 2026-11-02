@@ -1986,7 +1986,7 @@ final class EmbeddedBrowserSession {
                                   originHost: String = "chatgpt.com") throws {
         let entry = try entry(tabID)
         guard UUID(uuidString: ownerToken) != nil, entry.modelChanges == nil,
-              ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com"].contains(originHost) else { throw Failure.tabClosed }
+              ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com", "www.kimi.ai"].contains(originHost) else { throw Failure.tabClosed }
         entry.modelChanges = EmbeddedModelChangeChannel(ownerToken: ownerToken)
         entry.modelSignalWorld = world
         entry.modelSignalOriginHost = originHost

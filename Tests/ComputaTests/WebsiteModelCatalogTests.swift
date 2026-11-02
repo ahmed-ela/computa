@@ -54,6 +54,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
         for provider in WebsiteModelCatalog.providers {
             let choice = provider == "chatgpt"
                 ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
+                : provider == "kimi" ? WebsiteModelChoice(provider: provider, key: "k28-instant", label: "Instant")
                 : WebsiteModelChoice(provider: provider, key: "fixture-key/with-symbols", label: "Fixture Model 東京 👋")
             XCTAssertTrue(choice.isValid)
             XCTAssertEqual(WebsiteModelCatalog.choice(for: choice.modelID), choice)
@@ -147,6 +148,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
     func testObservedMenuCachePersistsExactChoicesAndRejectsCorruptData() throws {
         let preferences = isolatedTestPreferences()
         let choices = WebsiteModelCatalog.providers.map {  $0 == "chatgpt" ? WebsiteModelChoice(provider: $0, key: "chat/latest/medium", label: "Medium")
+                : $0 == "kimi" ? WebsiteModelChoice(provider: $0, key: "k28-instant", label: "Instant")
                 : WebsiteModelChoice(provider: $0, key: "fixture-key", label: "Fixture Label") }
         WebsiteModelCatalog.save(choices, to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), choices)

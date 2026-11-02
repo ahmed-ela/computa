@@ -1,10 +1,12 @@
 # Claude harness qualification
 
-Installed build381 uses source `cb601de8f3f7d2f3608a4e3afb44ce767d60e687`.
-It fixes durable blocked-response diagnostics; it does not change response
-acceptance. The four independently audited workflow passes below were obtained
+Installed build382 uses source `58df7e22cf1d0ab06c94e8891228fd4576fc7863`.
+Its fresh Opus 3 marker passed, but the subsequent workflow and first-tool
+requests failed before tool dispatch. Candidate build383 adds a Claude-only
+response-presentation experiment; live validation is pending. Details are in
+the November 2 results below. The four independently audited workflow passes were obtained
 on build380, source `e62bbbaf80018b4edbc027112af1d5636a048a4a`, and have not been
-reattributed to build381:
+reattributed to later builds:
 
 | Model | Duration | Inferences / tools | Result |
 | --- | ---: | ---: | --- |
@@ -2165,4 +2167,62 @@ their deadline during record validation, before the first eligibility check.
 The server fixture now resolves the existing temporary directory with `realpath`
 so its synthetic arm meets the unchanged no-symlink requirement. Model-picker
 checks passed 21 tests/404 assertions, frontend type checking passed, and version
-checks passed 9 tests/56 assertions. Live build-382 qualification remains pending.
+checks passed 9 tests/56 assertions. The later live results are recorded below.
+
+## Installed build382: Opus 3 marker and separate failures, November 2 UTC
+
+The signed and installed build382 matches source
+`58df7e22cf1d0ab06c94e8891228fd4576fc7863`. A fresh Opus 3 synthetic marker
+completed in 8.707 seconds with one inference, no native tools and the exact
+expected answer. Its task, submission fingerprint, completed response and saved
+closed website-session receipt were independently joined. The optional passive
+diagnostic observed one matching HTTP 200 event stream, the synthetic marker
+and `message_stop`. These metadata corroborate that one response; they neither
+authorized the answer nor qualify tool use.
+
+A separate fresh terminal/file/browser fixture failed after 8.377 seconds,
+before any native tool call. The response diagnostic reports `invalid_json`,
+160 bytes and no fence. Its raw reply was not retained, so this case does not
+establish whether authored prose, rendering loss or another format caused the
+failure. The exact website session has confirmed saved cleanup. The local
+fixture files remained unchanged, no receipt was submitted, and the owned
+loopback server was stopped. The marker pass does not convert this run into
+a workflow pass.
+
+The next fresh first-tool diagnostic failed after 23.752 seconds with zero
+native tools. Its first rejected response is retained in full: 269 bytes
+containing an authored introduction followed by a valid 219-byte tool-call
+JSON object and rendered code-widget labels. The introduction was outside the
+response envelope, so rejecting the whole response was correct. This is
+distinct from the earlier raw-output rendering experiment. The existing single
+format-correction allowance used a second fresh session only after the first
+closed; its response also failed `invalid_json` at 446 bytes without a fence.
+The corrected raw response was not retained. Both exact sessions have saved
+closed receipts; there was no operator replay or executed tool call.
+
+Private evidence is retained under
+`work/claude-qualification-20261031/claude-response-native-core382-a/live382-opus3-evidence/`,
+`evidence/opus3-workflow382-a/` and `evidence/opus3-firsttool382-b/` beneath the
+same qualification workspace. The consumed rejected-reply capture was archived
+and removed from the active capture location after its identity and bytes were
+verified. These results leave Opus 3 workflow qualification incomplete.
+
+## Candidate build383: literal response-boundary experiment
+
+The existing instructions already required one fenced JSON response and no
+outside prose; the capture did not expose a missing parser rule. Candidate
+build383 changes only Claude's final response handoff to describe the entire
+visible reply as the envelope, with literal first and last fence lines. It
+places explanations and progress inside `message.text` or `tool_calls.commentary`
+and forbids introductions or attribution outside the block. This tests a
+presentation hypothesis, not a proved repair.
+
+The original request, tool definitions, permissions, provider routing, strict
+whole-response parser and single correction allowance are unchanged. Mixed
+authored prose, trailing prose and rendered-widget text still fail rather than
+being stripped to extract a valid inner object. Other providers retain their
+previous handoff bytes. The focused native run passed all 230 tests across
+instruction, response-codec, Claude correction and Kimi lifecycle suites;
+the Kimi cases are included in that count. Fresh installed Claude first-tool
+and workflow checks remain pending before any claim that the wording fixes
+the live failure.

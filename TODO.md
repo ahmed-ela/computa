@@ -39,12 +39,16 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 ## Kimi, Qwen and DeepSeek website integrations
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
-  existing Qwen API integration. Provider labels/icons and explicit existing
-  session lifecycle selection are prepared; no new website adapter is enabled.
+  existing Qwen API integration. Candidate383 enables only Kimi Instant for an
+  installed pilot after 31 adapter and 23 native fixture passes; live native
+  qualification remains pending. Qwen and DeepSeek adapters remain disabled.
   Discover concrete models from each live picker, verify the exact submitted
   message and final response, and delete only the owned test conversation.
-  Kimi Instant returned a synthetic JSON marker through normal embedded-browser
-  UI on build381. That is direct website evidence, not a harness/tool-use pass.
+  Kimi Instant returned direct synthetic markers; build382 Qwen3.7-Plus and
+  Qwen3.8-Max each returned one exact direct marker and their test conversations
+  were deleted. DeepSeek returned its first direct Chat marker; scoped deletion
+  inspection remains pending. These direct website observations are not native
+  harness/tool-use passes.
   See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
 
 ## Claude website-model qualification
@@ -60,7 +64,13 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   typed-block/confirmed-cleanup check, but no accepted response or workflow.
   Build381 fixes a separately reproduced loss of that specific error on history
   reload. It does not repair provider acceptance or restore missing old records.
-  Build381 is installed. The later Opus 3 manual probe proved that rendered raw
+  Build382 is installed. Its fresh Opus 3 exact marker passed, but a separate
+  full workflow and first-tool request failed before any tool dispatch. The
+  first-tool capture proved authored prose outside otherwise valid tool JSON;
+  the existing single correction also failed. Candidate383's Claude-only
+  literal first/last-line handoff is a presentation experiment awaiting live
+  validation, with strict parsing and correction limits unchanged.
+  The earlier Opus 3 manual probe proved that rendered raw
   JSON loses punctuation while response Copy preserves the source. An offline
   Copy-interception experiment passed bounded capture tests but exposed native
   clipboard writers in other JavaScript worlds; it is not a production fix.

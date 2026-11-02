@@ -8,7 +8,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     let label: String
 
     var isValid: Bool {
-        WebsiteModelCatalog.providers.contains(provider)
+        WebsiteModelCatalog.knownProviders.contains(provider)
             && Self.validField(key) && Self.validField(label)
     }
 
@@ -34,6 +34,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     }
 
     var isRetired: Bool {
+        if provider == "kimi" { return key != "k28-instant" || label != "Instant" }
         guard provider == "chatgpt" else { return false }
         guard let power = chatGPTPower else { return true }
         if power == .pro {
@@ -110,7 +111,11 @@ enum WebsiteModelCatalog {
         label: WebsiteModelChoice.ChatGPTPower.instant.label
     ).modelID
 
-    static let providers = ["chatgpt", "gemini", "claude", "groq"]
+    // Kimi Instant has passed offline adapter/native gates and is admitted for
+    // the installed pilot. Live tool qualification remains pending; agent modes
+    // stay excluded by the exact key/label policy in WebsiteModelChoice.
+    static let providers = ["chatgpt", "gemini", "claude", "groq", "kimi"]
+    static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi"]
     static let maximumChoicesPerProvider = 32
     static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
     static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
@@ -137,6 +142,7 @@ enum WebsiteModelCatalog {
         case "gemini": "Gemini"
         case "claude": "Claude"
         case "groq": "Groq"
+        case "kimi": "Kimi"
         default: provider
         }
     }
@@ -147,7 +153,7 @@ enum WebsiteModelCatalog {
         }
         guard modelID.utf8.count <= 768 else { return nil }
         let parts = modelID.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 4, parts[0] == "browser", providers.contains(String(parts[1])), parts[2] == "choice" else { return nil }
+        guard parts.count == 4, parts[0] == "browser", knownProviders.contains(String(parts[1])), parts[2] == "choice" else { return nil }
         let encoded = String(parts[3])
         guard !encoded.isEmpty, encoded.utf8.allSatisfy({
             (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
@@ -164,12 +170,14 @@ enum WebsiteModelCatalog {
 
     static func choice(for modelID: String) -> WebsiteModelChoice? { selection(for: modelID)?.choice }
 
-    /// History retains structurally valid old IDs; a new inference must use the
-    /// current normal-Chat preset contract, including an explicit power choice.
+    /// History retains structurally valid old IDs; inference requires the
+    /// current provider policy, including explicit ChatGPT power and Kimi choices.
     static func inferenceSelection(for modelID: String) -> Selection? {
-        guard let selected = selection(for: modelID) else { return nil }
+        guard let selected = selection(for: modelID), providers.contains(selected.provider) else { return nil }
         if selected.provider == "chatgpt" {
             guard let choice = selected.choice, choice.isSelectable, choice.modelID == modelID else { return nil }
+        } else if selected.provider == "kimi" {
+            guard let choice = selected.choice, choice.isSelectable else { return nil }
         } else if let choice = selected.choice, !choice.isSelectable { return nil }
         return selected
     }
@@ -209,7 +217,7 @@ enum WebsiteModelCatalog {
     }
 
     static func option(for choice: WebsiteModelChoice, available: Bool = true) -> LocalModelOption {
-        let selectable = available && choice.isObservedChoice
+        let selectable = available && providers.contains(choice.provider) && choice.isObservedChoice
         return LocalModelOption(id: choice.modelID,
             label: "\(providerLabel(choice.provider)) / \(choice.label) · Built-in browser",
             detail: choice.isRetired
@@ -223,7 +231,7 @@ enum WebsiteModelCatalog {
     }
 
     static func validate(_ choices: [WebsiteModelChoice], provider: String) throws {
-        guard providers.contains(provider), !choices.isEmpty, choices.count <= maximumChoicesPerProvider,
+        guard knownProviders.contains(provider), !choices.isEmpty, choices.count <= maximumChoicesPerProvider,
               choices.allSatisfy({ $0.isValid && $0.provider == provider }),
               Set(choices.map(\.key)).count == choices.count,
               Set(choices.map(\.label)).count == choices.count else { throw Failure.invalidChoices }
@@ -240,8 +248,8 @@ enum WebsiteModelCatalog {
         let legacy = storedKey != preferenceKey
         guard let data = preferences.data(forKey: storedKey), data.count <= 100 * 1_024,
               let choices = try? JSONDecoder().decode([WebsiteModelChoice].self, from: data),
-              choices.count <= providers.count * maximumChoicesPerProvider else { return [] }
-        for provider in providers {
+              choices.count <= knownProviders.count * maximumChoicesPerProvider else { return [] }
+        for provider in knownProviders {
             let subset = choices.filter { $0.provider == provider }
             if !subset.isEmpty {
                 do { try validate(subset, provider: provider) } catch { return [] }
@@ -252,20 +260,20 @@ enum WebsiteModelCatalog {
         // not hide duplicate or malformed entries from cache validation.
         // Earlier catalogs did not bind an automatic latest family to a Chat
         // power preset. Retire only those provider entries until fresh discovery.
-        let selectable = choices.filter { $0.isObservedChoice && (!legacy || $0.provider != "chatgpt") }
+        let selectable = choices.filter { providers.contains($0.provider) && $0.isObservedChoice && (!legacy || $0.provider != "chatgpt") }
         if legacy || selectable.count != choices.count { save(selectable, to: preferences) }
         return selectable
     }
 
     static func save(_ choices: [WebsiteModelChoice], to preferences: UserDefaults) {
-        guard choices.count <= providers.count * maximumChoicesPerProvider, choices.allSatisfy(\.isValid) else { return }
-        for provider in providers {
+        guard choices.count <= knownProviders.count * maximumChoicesPerProvider, choices.allSatisfy(\.isValid) else { return }
+        for provider in knownProviders {
             let subset = choices.filter { $0.provider == provider }
             if !subset.isEmpty {
                 do { try validate(subset, provider: provider) } catch { return }
             }
         }
-        guard let data = try? WebsiteModelChoice.encoder.encode(choices.filter(\.isObservedChoice)) else { return }
+        guard let data = try? WebsiteModelChoice.encoder.encode(choices.filter { providers.contains($0.provider) && $0.isObservedChoice }) else { return }
         preferences.set(data, forKey: preferenceKey)
     }
 }

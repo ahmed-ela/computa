@@ -388,6 +388,29 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testLiteralFencedHandoffChangesOnlyResponsePresentation() {
+        let oldTask = "Generate Computa's next JSON response object. This website does not execute calls."
+        let literalTask = "Return the response envelope as your entire visible reply. This website does not execute calls."
+        let boundary = ComputaAgentInstructions.literalFencedResponseBoundary
+        for names in [[], ["relay.exec_command"], ["relay.exec_command", "relay.apply_patch"]] {
+            let custom: Set<String> = names.contains("relay.apply_patch") ? ["relay.apply_patch"] : []
+            let original = ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom)
+            let literal = ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom,
+                responseFormat: .literalFencedJSON)
+            XCTAssertEqual(literal.replacingOccurrences(of: literalTask, with: oldTask)
+                .replacingOccurrences(of: "\n" + boundary, with: ""), original,
+                "Authority, schemas, permissions, examples and completion rules remain byte-exact")
+            XCTAssertEqual(literal.components(separatedBy: boundary).count - 1, 1)
+            XCTAssertTrue(literal.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+            XCTAssertTrue(boundary.contains("exactly ```json and its final line exactly ```"))
+            XCTAssertFalse(boundary.split(separator: "\n").contains { $0.hasPrefix("```") },
+                "Describing literal delimiters must not open another code block in the submitted prompt")
+            XCTAssertFalse(original.contains(boundary))
+            XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                customToolNames: custom, responseFormat: .rawJSON).contains(boundary))
+        }
+    }
+
     func testWebsiteResponseExamplesDescribeSelectedSerializationWithoutNestedRequestFences() throws {
         let fencedInstructions = """
         Return exactly one fenced JSON code block labelled json.
@@ -1737,7 +1760,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(original)
             let handoff = try assertRequestValuesAndHandoff(original, request: request)
             XCTAssertTrue(handoff.contains("Exact currently offered local function names: relay.exec_command, relay.write_stdin\n"))
-            XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+            let boundary = provider == "claude" ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
+            XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertFalse(handoff.contains("obsolete.exec_command"))
             XCTAssertFalse(handoff.contains("functions.exec_command"))
             XCTAssertTrue(request.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[1]"))
@@ -1760,7 +1784,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = try assertRequestValuesAndHandoff(original, request: request)
         XCTAssertTrue(handoff.contains("No tools means no tool call"))
         XCTAssertTrue(handoff.contains("Exact currently offered local function names: (none)\n"))
-        XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+        XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n"
+            + ComputaAgentInstructions.literalFencedResponseBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
         XCTAssertFalse(handoff.contains("old.exec_command"))
         XCTAssertTrue(handoff.contains("Exact currently offered custom names: (none)\n"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The recorded result is explained."}"#, request: request, requireEnvelope: true), .message("The recorded result is explained."))
@@ -2133,7 +2158,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay,
+            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "claude" ? .literalFencedJSON : .fencedJSON,
+            singleActionRelay: request.singleActionRelay,
             allowedToolNames: expectedAllowedToolNames)
         let closingFence = ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +

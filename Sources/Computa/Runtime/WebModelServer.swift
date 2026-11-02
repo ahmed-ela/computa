@@ -1986,7 +1986,8 @@ actor WebModelServer {
         if let turnScoped { policy = turnScoped }
         else if provider == "chatgpt" { policy = nil }
         else { policy = Self.requiresNativeContinuationProof(provider: provider) }
-        let transactionMode = provider == "groq" ? "explicit_clear_per_inference"
+        let transactionMode = provider == "kimi" ? "saved_conversation_delete_per_inference"
+            : provider == "groq" ? "explicit_clear_per_inference"
             : policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending"
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
             "transactionMode": transactionMode,

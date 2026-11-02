@@ -917,8 +917,19 @@ enum ComputaAgentInstructions {
 
     enum WebResponseFormat {
         case fencedJSON
+        case literalFencedJSON
         case rawJSON
     }
+
+    /// Presentation experiment for Claude's authored introductions around valid
+    /// tool-call JSON. This grants no extraction, correction or tool authority.
+    static let literalFencedResponseBoundary = """
+    Your entire visible reply is the response envelope. Its first line must be
+    exactly ```json and its final line exactly ```. Put every explanation or
+    progress update inside message.text or tool_calls.commentary as appropriate.
+    Include no greeting, introduction, attribution or text before or after that
+    single code block.
+    """
 
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
@@ -961,18 +972,29 @@ enum ComputaAgentInstructions {
         }
         let serializationExamples = callExamples.isEmpty ? "" : callExamples.joined(separator: "\nOR\n") + "\nOR\n"
         let responseFormatInstructions: String
+        let responseTask: String
+        let responseBoundary: String
         switch responseFormat {
-        case .fencedJSON:
+        case .fencedJSON, .literalFencedJSON:
             responseFormatInstructions = """
             Return exactly one fenced JSON code block labelled json.
             Examples below are JSON contents; put one inside that code block.
             """
+            if case .literalFencedJSON = responseFormat {
+                responseTask = "Return the response envelope as your entire visible reply. This website does not execute calls."
+                responseBoundary = "\n" + literalFencedResponseBoundary
+            } else {
+                responseTask = "Generate Computa's next JSON response object. This website does not execute calls."
+                responseBoundary = ""
+            }
         case .rawJSON:
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
             Examples below are complete raw response objects.
             """
+            responseTask = "Generate Computa's next JSON response object. This website does not execute calls."
+            responseBoundary = ""
         }
         // Keep examples unfenced: the submitted request must render as one
         // request code block between text, not nested protocol-example blocks.
@@ -1022,7 +1044,7 @@ enum ComputaAgentInstructions {
         """ : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        Generate Computa's next JSON response object. This website does not execute calls.
+        \(responseTask)
         A tool_calls request claims no execution or direct access.
         Within tool_choice, governing rules and user scope, request necessary work as
         tool_calls with exact current offered names and schemas.
@@ -1066,7 +1088,7 @@ enum ComputaAgentInstructions {
         One object; no outside text. JSON-escape quotes, backslashes and newlines:
         \(serializationExamples)\
         Exact-OK message:
-        {"type":"message","text":"OK"}
+        {"type":"message","text":"OK"}\(responseBoundary)
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
     }
