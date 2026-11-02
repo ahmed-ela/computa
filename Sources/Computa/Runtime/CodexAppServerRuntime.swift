@@ -2412,9 +2412,12 @@ private extension CodexAppServerRuntime {
         }
 
         private func persistWebsiteTurnFailure(taskID: AgentTask.ID, threadID: String, turnID: String, diagnostic: String) {
-            guard let modelID = modelForTask[taskID], let record = WebsiteTurnFailureStore.Record.make(taskID: taskID,
-                threadID: threadID, turnID: turnID, modelID: modelID, diagnosticText: diagnostic) else { return }
-            if !websiteTurnFailureStore().append(record) {
+            guard let modelID = modelForTask[taskID] else { return }
+            let record = WebsiteTurnFailureStore.Record.make(taskID: taskID,
+                threadID: threadID, turnID: turnID, modelID: modelID, diagnosticText: diagnostic)
+            // Rejected finite-envelope coverage is also unavailable persistence;
+            // do not silently imply that the live diagnosis will survive reload.
+            if record.map({ websiteTurnFailureStore().append($0) }) != true {
                 events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
                     title: "Website error record unavailable", body: "The failed turn remains stopped, but its native website diagnostic could not be saved locally.", turnID: turnID)))
             }

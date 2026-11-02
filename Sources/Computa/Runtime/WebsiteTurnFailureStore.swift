@@ -52,7 +52,24 @@ struct WebsiteTurnFailureStore: Sendable {
                       let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,
                       !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
                 nativeError = reason
-            case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
+            case "browser_model_error":
+                // Several finite native failures share this legacy wire code.
+                // Match the complete generated envelope, never arbitrary prose
+                // or a code-only guess, before retaining the exact diagnosis.
+                let fixedFailures: [any Error] = [
+                    EmbeddedWebModelTransport.Failure.pageUnavailable,
+                    EmbeddedWebModelTransport.Failure.modelUnverified,
+                    EmbeddedWebModelTransport.Failure.modelMismatch,
+                    WebModelServer.Failure.modelUnverified,
+                    WebModelServer.Failure.modelMismatch,
+                    WebModelServer.Failure.cleanupFailed,
+                ]
+                guard let fixed = fixedFailures.first(where: { failure in
+                    guard let bytes = try? WebModelServer.errorBody(for: failure),
+                          let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
+                    return NSDictionary(dictionary: supplied).isEqual(to: envelope)
+                }) else { return nil }
+                nativeError = fixed
             case "unsupported_website_response":
                 if provider == "chatgpt" {
                     nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse

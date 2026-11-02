@@ -749,9 +749,39 @@ diagnostics, 19 saved-adapter diagnostics and four Qwen server pending-contract
 cases. Native coverage includes both Qwen models, both DeepSeek modes, exact
 negative packets, ID-only wakeups, delayed menu removal with and without dialog
 overlap, foreign/replaced menus, one-dispatch claims and unchanged deadlines.
-Installation and fresh qualification of these candidates remain pending.
+These candidates were installed as build398; fresh results follow below.
 Failed397 tasks were preserved and no provider submission was replayed.
 Evidence is private under the build397 and build398 workspace directories.
+
+### Installed398 results (2026-11-02)
+
+Signed build398, source `6692a5c8eb7eec4a1acbb7ce5b65e02634c9906a`,
+has verified source, package, installed-file and running-process receipts.
+Each fresh marker was sent once:
+
+| Selection | Duration | Result |
+| --- | ---: | --- |
+| DeepSeek Chat | 5,300 ms | Exact final marker, Chat/Search-off proof and durable deleted-conversation receipt |
+| DeepSeek DeepThink | 5,475 ms | Exact final marker, DeepThink/Search-off proof and durable deleted-conversation receipt |
+| Qwen3.7-Plus | 4,100 ms | First-user ownership rejected; no final answer; cleanup unconfirmed |
+| Kimi Instant | 2,604 ms | Initial model-trigger replacement rejected; no final answer; cleanup unconfirmed |
+
+Both DeepSeek records passed independent marker audits. Their closed journals
+had moved into the existing retention database; exact task/turn byte strings,
+stored hashes and cleanup receipts were joined without replay or reconstructing
+evidence. Neither marker establishes browser, terminal or file-edit qualification.
+
+Kimi's finite diagnostic identifies `model_evidence_trigger_replaced` during
+`optimistic_first`: Send was claimed, no first body was bound, the original
+picker trigger was disconnected, and the unique closed replacement retained
+the exact selected label. This is a specific DOM-lifecycle mismatch, not an
+account limit. Qwen's `first_user_message` remains a compound predicate; the
+failure alone does not identify whether its ID, chat link, visibility or parent
+structure changed. Qwen Max remains untested on398 after this failure.
+
+The failed tasks and unconfirmed cleanup records remain intact. No uncertain
+Send was replayed. The complete selectable-model workflow matrix, Claude
+failures and Gemini verification block remain open.
 
 ### Direct website observations before native qualification
 
