@@ -1,8 +1,10 @@
 # Claude harness qualification
 
-Installed build380 uses source `e62bbbaf80018b4edbc027112af1d5636a048a4a`.
-Later documentation commits do not change that installed source. Four fresh,
-independently audited local workflows have passed on this build:
+Installed build381 uses source `cb601de8f3f7d2f3608a4e3afb44ce767d60e687`.
+It fixes durable blocked-response diagnostics; it does not change response
+acceptance. The four independently audited workflow passes below were obtained
+on build380, source `e62bbbaf80018b4edbc027112af1d5636a048a4a`, and have not been
+reattributed to build381:
 
 | Model | Duration | Inferences / tools | Result |
 | --- | ---: | ---: | --- |
@@ -41,7 +43,7 @@ open in [issue #15](https://github.com/ahmed-ela/computa/issues/15).
 The earlier `v0.8.0-alpha.363` release followed PR #19's squash merge at
 `0c182d7`; its tree matches build source `e2a0fe4`, and its signed inputs were
 revalidated before publication. It was not notarized. That release and its older
-passes remain distinct from the installed build380 results.
+passes remain distinct from the build380 workflow results.
 
 ## Subsequent ownership failure and installed diagnostics
 
@@ -2081,3 +2083,41 @@ exited, the normal new-chat URL observed, and only the created tab closed; the
 browser then showed its empty state. Evidence is retained privately under
 `work/claude-qualification-20261031/opus3-raw-render381-a/`. All-model native
 workflow qualification remains incomplete.
+
+## Offline Copy-source experiment, November 2 UTC
+
+The next experiment used disposable local HTML and a standalone WKWebView,
+without a provider request, normal browser profile, Inspector or app restart.
+A page-world helper installed before page scripts captured one synchronous
+`navigator.clipboard.writeText` payload from an isolated-world button click.
+It preserved the entire synthetic source, including punctuation and surrounding
+authored prose. It rejected late, duplicate, unsupported, revoked and wrong-target
+writes. Review found a nested foreign-click provenance bug in the prototype;
+the correction clears the candidate on any foreign or additional click.
+
+The corrected helper passed 27 Node tests and 11 bounded real-WebKit scenarios.
+Those results are acquisition evidence only. Real clipboard APIs were replaced
+by rejecting test stubs below the helper; none was invoked, and the system
+pasteboard change count stayed unchanged. The fixture's sole AppKit window was
+hidden, non-key and non-main; Computa retained foreground focus. All 23 fixture
+processes, including the earlier round and window investigation, exited.
+
+The production gate failed. Actual WebKit observation found an unpatched native
+writer in another content world and in a newly created `about:blank` iframe.
+The iframe's method reference survived removal while the top-page helper could
+still arm. The test inspected these references without invoking them. The checked
+public SDK headers supplied no clipboard-write denial hook. Thus a page-level
+JavaScript wrapper cannot establish the required no-clipboard-mutation invariant
+for this design. No Copy-source path was added to the application, and raw output
+must not use the current lossy rendered fallback.
+
+Evidence is retained under
+`work/claude-qualification-20261031/copy-source-offline382-a/`.
+The final helper SHA-256 is
+`a19b7211fde5cb946f103c9390150f53e3f9e10265c23db1b8328179d01e7bc0`;
+the native round-two result SHA-256 is
+`3343f9327155289ae95a96dbaa72b6b4549c0392fba313c6c09ffd2fafd4e27c`.
+The directory's `382` label identifies an experiment, not an installed build.
+The next investigation is a bounded passive observation of one owned synthetic
+response, retaining event shapes rather than credentials or reasoning text.
+Its actual provider protocol and response-authority checks remain unverified.

@@ -39,7 +39,7 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 ## Claude website-model qualification
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
-  Installed build380 (`e62bbbaf`) has independent full local workflow passes for
+  Build380 (`e62bbbaf`) has independent full local workflow passes for
   Sonnet 5.5, Haiku 5.5, Opus 5.5 and Opus 4.6. Haiku's pass includes three pre-edit failed
   test commands; it is not an error-free tool run. A separate earlier Opus 4.6
   run completed after a malformed reply and correction, but missing raw reply
@@ -49,6 +49,10 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   typed-block/confirmed-cleanup check, but no accepted response or workflow.
   Build381 fixes a separately reproduced loss of that specific error on history
   reload. It does not repair provider acceptance or restore missing old records.
+  Build381 is installed. The later Opus 3 manual probe proved that rendered raw
+  JSON loses punctuation while response Copy preserves the source. An offline
+  Copy-interception experiment passed bounded capture tests but exposed native
+  clipboard writers in other JavaScript worlds; it is not a production fix.
   Preserve the
   other models' refusals, format failures, eligibility limits and historical
   unconfirmed cleanup. Fresh build380 tasks confirmed Sonnet 5/Sonnet 4.6 and
