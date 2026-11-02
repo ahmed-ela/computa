@@ -92,6 +92,32 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testDeepSeekFirstUserClassificationAcceptsOnlyExactFiniteAliases() {
+        let details = ["first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children",
+            "first_container_text", "first_root_text", "first_not_submitted", "first_prompt_mismatch",
+            "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash",
+            "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch",
+            "first_binding_not_authorized", "first_disappeared"]
+        for detail in details {
+            for provider in EmbeddedWebModelTransport.Provider.allCases {
+                XCTAssertEqual(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(
+                    ["error": "conversation_changed", "detail": detail], provider: provider), provider == .deepseek)
+            }
+            for error in ["document_changed", "model_unverified", "PRIVATE_PAGE_CANARY"] {
+                XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(
+                    ["error": error, "detail": detail], provider: .deepseek))
+            }
+            XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(
+                ["error": "conversation_changed", "detail": detail + " PRIVATE_PAGE_CANARY"], provider: .deepseek))
+        }
+        let malformed: [Any] = ["first_unknown", "first_user_message", true, ["private": "PRIVATE_PAGE_CANARY"]]
+        for detail in malformed {
+            XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(
+                ["error": "conversation_changed", "detail": detail], provider: .deepseek))
+        }
+        XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(["error": "conversation_changed"], provider: .deepseek))
+    }
+
     @MainActor func testPrivateOrMalformedValuesNeverEnterTheDiagnosticAndOutputRemainsBounded() throws {
         let privateValues = ["PRIVATE_PAGE_CANARY", "https://private.invalid/?token=PRIVATE_PAGE_CANARY",
             "model_unverified\nPRIVATE_PAGE_CANARY", String(repeating: "PRIVATE_PAGE_CANARY", count: 512)]

@@ -138,6 +138,35 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testChangedFirstUserBodyRetainsExactOwnershipFailureAndNativeDiagnostic() async throws {
+        let fixture = try Fixture(setup: "deepseekFixture.options.holdResponse=true")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic first-user classification")
+        var records: [String] = []
+        fixture.transport.setFirstUserDiagnosticsObserverForTesting { records += $0 }
+        _ = try await evaluate(fixture.view, """
+            document.querySelector('.ds-collapsible-text > div > span').textContent = 'Synthetic changed first user';
+            return true;
+            """)
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("Changed first-user bytes must not release an answer")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .ownershipFailure(.javaScriptFirstUser))
+        }
+        let values = try records.compactMap { try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        XCTAssertTrue(values.contains { $0["kind"] as? String == "first_user_native"
+            && $0["provider"] as? String == "deepseek" && $0["stage"] as? String == "adapter_rejected" })
+        do {
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic first-user classification")
+            XCTFail("The failed ownership check must not replay Send")
+        } catch { }
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
     func testLostSendCallbackCannotReplayOrGrantDeletion() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

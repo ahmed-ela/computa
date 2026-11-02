@@ -363,6 +363,13 @@ Temporary Inspector settings were restored.
 Candidate390 passed 73 focused native WebKit/diagnostic tests, plus 186
 JavaScript/resource/version tests with 3,686 assertions across two disjoint
 runs. These are fixture results, not installed-provider qualification.
+Review also caught that the new diagnostic details would otherwise lose the
+native `first_user_message` failure category. An exact DeepSeek-only finite
+mapping preserves that category and its recorder while keeping the detailed
+adapter diagnostic. Unknown details and other providers cannot use the mapping.
+The final mapping correction passed 23 focused native tests, including a real
+WebKit changed-body failure with no answer, replay or deletion authority. These
+overlap the earlier 73-test run and are not additional independent coverage.
 
 ### Direct website observations before native qualification
 

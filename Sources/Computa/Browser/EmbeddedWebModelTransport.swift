@@ -1838,6 +1838,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && browser.webView(for: session.tabID) === session.view && session.view.url == session.provider.startURL
     }
 
+    private static let deepSeekFirstUserFailureDetails = [
+        "first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children", "first_container_text", "first_root_text",
+        "first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash",
+        "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared",
+    ]
+
+    /// Detailed DeepSeek diagnostics retain the original first-user failure category.
+    /// Unknown details and errors do not acquire that classification.
+    static func isDeepSeekFirstUserFailure(_ observed: [String: Any], provider: Provider) -> Bool {
+        guard provider == .deepseek, observed["error"] as? String == "conversation_changed",
+              let detail = observed["detail"] as? String else { return false }
+        return deepSeekFirstUserFailureDetails.contains(detail)
+    }
+
     /// Fixed native identifiers only. Page prose, URLs, exception messages and
     /// arbitrary detail fields never enter the diagnostic, even on failure.
     static func savedAdapterFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
@@ -1886,10 +1900,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .deepseek:
             providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
                 "mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed",
-                "first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children", "first_container_text", "first_root_text",
-                "first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash",
-                "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared",
-                "delete_anchor", "delete_buttons"]
+                "delete_anchor", "delete_buttons"] + deepSeekFirstUserFailureDetails
         default: return nil
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String
@@ -5991,10 +6002,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     logSubmissionFailure(session, action: action, stage: .adapterRejected, observed: observed)
                 }
-                if observed["detail"] as? String == "first_user_message" {
+                let isFirstUserFailure = observed["detail"] as? String == "first_user_message"
+                    || Self.isDeepSeekFirstUserFailure(observed, provider: provider)
+                if isFirstUserFailure {
                     recordFirstUserFailure(.adapterRejected, observed: observed)
                 }
-                if observed["detail"] as? String == "first_user_message",
+                if isFirstUserFailure,
                    let raw = observed["debugStructure"] as? String,
                    let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider) {
                     logFirstUserStructure(records, sequence: session.sequence, isFailure: true)
@@ -6005,7 +6018,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     "conversation_route": .javaScriptConversationRoute, "first_user_message": .javaScriptFirstUser,
                     "submission_message": .javaScriptSubmission,
                 ]
-                let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
+                let detail: OwnershipReason? = isFirstUserFailure ? .javaScriptFirstUser
+                    : (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
             case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
             case "website_verification_required":
