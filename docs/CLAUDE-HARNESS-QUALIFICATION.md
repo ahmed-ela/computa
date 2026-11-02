@@ -1,11 +1,15 @@
 # Claude harness qualification
 
-Installed build383 uses source `bc9173ff7c6566b1d3dd074dfcf3801be7b895a7`.
+Installed build384 uses source `2a42e0459d2a3568b07a50abdb400018356dff94`.
 On build382, the fresh Opus 3 marker passed, but the subsequent workflow and
 first-tool requests failed before tool dispatch. Build383 adds a Claude-only
-response-presentation experiment; its live qualification remains pending.
-Candidate384 addresses Kimi startup discovery and does not establish a Claude
-qualification result. Details are in
+response-presentation experiment. A fresh build384 Opus 3 request returned a
+valid exact marker in 9.393 seconds, with one verified inference and saved
+closure, but made zero tool calls despite being asked to run `printf`. That
+establishes a valid response for this run, not terminal execution or tool
+qualification. The exact synthetic case is
+`work/claude-qualification-20261031/evidence/opus3-firsttool384-a`.
+Full live qualification remains incomplete. Details are in
 the November 2 results below. The four independently audited workflow passes were obtained
 on build380, source `e62bbbaf80018b4edbc027112af1d5636a048a4a`, and have not been
 reattributed to later builds:

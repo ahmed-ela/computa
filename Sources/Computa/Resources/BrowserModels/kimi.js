@@ -183,15 +183,25 @@ try {
     const trigger = one(visible(document, 'div.current-model[data-testid="model-select-trigger"][aria-haspopup="menu"]')
       .filter(node => !authored(node)), 'model_trigger');
     const id = trigger.getAttribute('id'), controlled = trigger.getAttribute('aria-controls');
-    if (!id || !controlled || /\s/.test(id + controlled)) c.fail('model_unverified');
+    if (!id || !controlled || /\s/.test(id + controlled)) c.fail('model_unverified', 'picker_binding');
     const label = one(visible(trigger, '.model-name .name'), 'model_label');
-    if (label.children.length !== 0) c.fail('model_unverified');
+    if (label.children.length !== 0) c.fail('model_unverified', 'picker_label');
     const menus = visible(document, 'div.kimi-menu-positioner[role="menu"]').filter(node => !authored(node));
     const matches = menus.filter(node => node.getAttribute('id') === controlled);
-    if (matches.length > 1) c.fail('model_unverified');
+    if (matches.length > 1) c.fail('model_unverified', 'picker_menu_binding');
     const menu = matches[0] || null;
-    if (menu && (menu.getAttribute('aria-labelledby') !== id || menus.length !== 1
-      || trigger.getAttribute('aria-expanded') !== 'true')) c.fail('model_unverified');
+    const nested = state.selection?.more;
+    const ownedNested = nested && menus.length === 2 && menus.includes(menu)
+      && menus.some(node => node !== menu && node.getAttribute('id') === nested.menuID
+        && node.getAttribute('aria-labelledby') === nested.triggerID
+        && (!nested.menu || nested.menu === node))
+      && nested.trigger.isConnected && nested.trigger.getAttribute('aria-expanded') === 'true';
+    if (menu && (menu.getAttribute('aria-labelledby') !== id || menus.length !== 1 && !ownedNested
+      || trigger.getAttribute('aria-expanded') !== 'true')) c.fail('model_unverified', 'picker_menu_binding');
+    if (menu && state.selection?.menu && state.selection.menu !== menu)
+      c.fail('model_unverified', 'picker_menu_replaced');
+    if (!menu && ['moreOpening', 'moreClosing'].includes(state.selection?.stage))
+      c.fail('model_unverified', 'picker_menu_replaced');
     const ownedDeleteMenu = state.deletion && menus.length === 1
       && menus[0].getAttribute('id') === state.deletion.menuID
       && menus[0].getAttribute('aria-labelledby') === state.deletion.headerID;
@@ -207,13 +217,60 @@ try {
       const checked = node.getAttribute('aria-checked');
       if (label.children.length !== 0 || !c.choiceValid(choice) || !c.enabled(node)
         || !['agent', 'plain-chat'].includes(node.getAttribute('data-model-family'))
-        || !['true', 'false'].includes(checked)) c.fail('model_unverified');
+        || !['true', 'false'].includes(checked)) c.fail('model_unverified', 'model_row_shape');
       return { node, choice, family: node.getAttribute('data-model-family'), checked: checked === 'true' };
     });
     if (!result.length || new Set(result.map(row => row.choice.key)).size !== result.length
-      || new Set(result.map(row => row.choice.label)).size !== result.length
-      || result.filter(row => row.checked).length !== 1) c.fail('model_unverified');
+      || new Set(result.map(row => row.choice.label)).size !== result.length) c.fail('model_unverified', 'model_choices_duplicate');
+    // Zero checked top-level rows is not selection proof. Only the explicitly
+    // bound More models branch below may resolve that observed website state.
+    if (result.filter(row => row.checked).length > 1) c.fail('model_unverified', 'model_checked_count');
     return result;
+  }
+  function pickerHit(node, stage) {
+    const reason = c.hitFailure(node);
+    if (reason) c.fail('model_unverified', `${stage}_${reason}`);
+  }
+  function moreTrigger(p) {
+    const candidates = visible(p.menu, 'button[data-testid="model-more-trigger"][role="menuitem"][aria-haspopup="menu"]');
+    if (candidates.length !== 1) c.fail('model_unverified', 'more_binding');
+    const trigger = candidates[0], triggerID = trigger.getAttribute('id'), menuID = trigger.getAttribute('aria-controls');
+    const labels = visible(trigger, '.more-models-current');
+    if (!triggerID || !menuID || /\s/.test(triggerID + menuID) || triggerID === p.trigger.getAttribute('id')
+      || menuID === p.menu.getAttribute('id') || trigger.getAttribute('data-close-on-select') !== 'false'
+      || !c.enabled(trigger) || labels.length !== 1 || c.normalize(labels[0].textContent) !== p.label)
+      c.fail('model_unverified', 'more_binding');
+    return { trigger, triggerID, menuID, label: labels[0], menu: null, selected: null };
+  }
+  function nestedSelection(p, selection, rows) {
+    const more = selection.more, current = moreTrigger(p);
+    if (!more || current.trigger !== more.trigger || current.triggerID !== more.triggerID
+      || current.menuID !== more.menuID || current.label !== more.label || rows.some(row => row.checked))
+      c.fail('model_unverified', 'more_binding');
+    const matches = visible(document, 'div.kimi-menu-positioner[role="menu"]')
+      .filter(node => node.getAttribute('id') === more.menuID);
+    if (matches.length > 1) c.fail('model_unverified', 'more_binding');
+    const menu = matches[0];
+    if (!menu) return null;
+    if (menu.getAttribute('aria-labelledby') !== more.triggerID || more.trigger.getAttribute('aria-expanded') !== 'true'
+      || more.menu && more.menu !== menu) c.fail('model_unverified', 'more_binding');
+    more.menu = menu;
+    const options = visible(menu, 'div[data-testid="model-more-option"][role="menuitemradio"]', 32).map(node => {
+      const labels = visible(node, '.kimi-menu-item__label'), checked = node.getAttribute('aria-checked');
+      const choice = { key: node.getAttribute('data-model-id'), label: labels.length === 1 ? c.normalize(labels[0].textContent) : '' };
+      if (labels.length !== 1 || labels[0].children.length !== 0 || !c.choiceValid(choice) || !c.enabled(node)
+        || !['true', 'false'].includes(checked)) c.fail('model_unverified', 'more_row_shape');
+      return { node, choice, checked: checked === 'true' };
+    });
+    const all = [...rows, ...options], checked = options.filter(row => row.checked);
+    if (!options.length || new Set(all.map(row => row.choice.key)).size !== all.length
+      || new Set(all.map(row => row.choice.label)).size !== all.length) c.fail('model_unverified', 'model_choices_duplicate');
+    if (checked.length !== 1) c.fail('model_unverified', 'more_checked_count');
+    const selected = checked[0];
+    if (selected.choice.label !== p.label || more.selected && (more.selected.node !== selected.node
+      || !c.equalChoice(more.selected.choice, selected.choice))) c.fail('model_unverified', 'more_selected_label');
+    more.selected = selected;
+    return selected;
   }
   function modelEvidence(required = true) {
     const p = picker(), selected = state.model?.choice;
@@ -357,8 +414,9 @@ try {
     if (state.model && (!desired || c.equalChoice(state.model.choice, desired)))
       return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
     if (!state.selection) {
-      if (!p.closed || !c.hit(p.trigger)) c.fail('model_unverified');
-      state.selection = { trigger: p.trigger, target: desired, stage: 'opening', choice: null, choices: null };
+      if (!p.closed) c.fail('model_unverified', 'picker_not_closed');
+      pickerHit(p.trigger, 'picker_open');
+      state.selection = { trigger: p.trigger, target: desired, stage: 'opening', choice: null, choices: null, menu: null, more: null };
       p.trigger.click(); return { ...read().output, pending: true };
     }
     const selection = state.selection;
@@ -372,18 +430,49 @@ try {
       return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
     }
     if (selection.stage === 'selected' && p.closed) {
-      if (!c.hit(p.trigger)) c.fail('model_unverified');
+      pickerHit(p.trigger, 'picker_open');
+      selection.menu = null; selection.more = null;
       selection.stage = 'verifying'; p.trigger.click(); return { ...read().output, pending: true };
     }
     if (!p.menu) return { ...read().output, pending: true };
-    const rows = choices(p.menu), checked = rows.find(row => row.checked);
+    if (selection.menu && selection.menu !== p.menu) c.fail('model_unverified', 'picker_menu_replaced');
+    selection.menu = p.menu;
+    const rows = choices(p.menu);
+    let checked = rows.find(row => row.checked);
+    if (selection.stage === 'moreClosing') {
+      const current = moreTrigger(p), more = selection.more;
+      if (!more || current.trigger !== more.trigger || current.label !== more.label
+        || current.triggerID !== more.triggerID || current.menuID !== more.menuID || rows.some(row => row.checked))
+        c.fail('model_unverified', 'more_binding');
+      if (visible(document, 'div.kimi-menu-positioner[role="menu"]').some(node => node.getAttribute('id') === more.menuID)) {
+        nestedSelection(p, selection, rows);
+        return { ...read().output, pending: true };
+      }
+      if (more.trigger.getAttribute('aria-expanded') !== 'false' || !more.selected
+        || p.label !== more.selected.choice.label) c.fail('model_unverified', 'more_selected_label');
+      checked = more.selected;
+    } else if (!checked) {
+      if (selection.stage === 'opening') {
+        const more = moreTrigger(p);
+        if (more.trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'more_binding');
+        pickerHit(more.trigger, 'more_open');
+        selection.more = more; selection.stage = 'moreOpening';
+        more.trigger.click(); return { ...read().output, pending: true };
+      }
+      if (selection.stage !== 'moreOpening') c.fail('model_unverified', 'model_checked_count');
+      const selected = nestedSelection(p, selection, rows);
+      if (!selected) return { ...read().output, pending: true };
+      pickerHit(selection.more.trigger, 'more_close');
+      selection.stage = 'moreClosing';
+      selection.more.trigger.click(); return { ...read().output, pending: true };
+    } else if (selection.more) c.fail('model_unverified', 'model_checked_count');
     if (p.label !== checked.choice.label) c.fail('model_mismatch');
     const target = desired ? rows.find(row => c.equalChoice(row.choice, desired)) : checked;
     if (!target) c.fail('model_mismatch');
     if (desired && target.family !== 'plain-chat') c.fail('model_mismatch');
     if (!target.checked) {
-      if (selection.stage !== 'opening') return { ...read().output, pending: true };
-      if (!c.hit(target.node)) c.fail('model_unverified');
+      if (!['opening', 'moreClosing'].includes(selection.stage)) return { ...read().output, pending: true };
+      pickerHit(target.node, 'model_option');
       selection.stage = 'selected'; target.node.click(); return { ...read().output, pending: true };
     }
     selection.choice = target.choice;
@@ -391,7 +480,7 @@ try {
     // as inference relays. The native catalog further pins qualified key/label.
     selection.choices = rows.filter(row => row.family === 'plain-chat').map(row => row.choice);
     selection.stage = 'closing';
-    if (!c.hit(p.trigger)) c.fail('model_unverified');
+    pickerHit(p.trigger, 'picker_close');
     p.trigger.click(); return { ...read().output, pending: true };
   }
 
@@ -602,7 +691,9 @@ try {
     ownerToken: input.ownerToken, documentGeneration: input.documentGeneration,
     sequence: 1, outboundFingerprint } };
 } catch (error) {
-  if (kimiDraftState && (!error?.computaAdapterFailure || kimiDraftState.deletion || kimiDraftState.submitted
+  if (kimiDraftState && (!error?.computaAdapterFailure || kimiDraftState.deletion
+    || kimiDraftState.selection?.more && ['model_unverified', 'model_mismatch', 'document_changed'].includes(error.error)
+    || kimiDraftState.submitted
     && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified'].includes(error.error)
     || error?.error === 'document_changed' && (kimiDraftState.initialReadComplete || kimiDraftState.model
       || kimiDraftState.selection || kimiDraftState.prepared || kimiDraftState.inserted)))

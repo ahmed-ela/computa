@@ -10,6 +10,7 @@ enum KimiFixturePage {
       .kimi-menu-positioner { position:fixed; top:70px; left:20px; width:300px; padding:10px; background:#eee; z-index:20; }
       .kimi-menu-positioner button,.kimi-menu-item { display:block; width:100%; box-sizing:border-box; padding:12px; cursor:pointer; }
       #fixture-delete-menu { left:350px; width:200px; }
+      #fixture-more-menu { left:350px; top:200px; width:200px; }
       #fixture-messages { overflow:auto; flex:1; min-height:200px; }
       .user-content__text { display:block; white-space:pre-wrap; max-height:160px; overflow:auto; }
       .chat-editor-input-wrap { min-height:90px; }
@@ -38,6 +39,15 @@ enum KimiFixturePage {
         <button type="button" data-testid="model-option" role="menuitemradio" data-model-family="agent" data-moon-key="k28-agent-preview" aria-checked="false"><span class="model-name"><span class="name">K2.8 Preview</span></span></button>
         <button type="button" data-testid="model-option" role="menuitemradio" data-model-family="plain-chat" data-moon-key="k28-instant" aria-checked="true"><span class="model-name"><span class="name">Instant</span></span></button>
       </div>
+      <button type="button" data-testid="model-more-trigger" aria-label="More models" role="menuitem"
+        data-close-on-select="false" aria-haspopup="menu" aria-expanded="false" id="fixture-more-trigger" aria-controls="fixture-more-menu">
+        More models <span class="more-models-current"></span>
+      </button>
+    </div>
+    <div class="kimi-menu-positioner" role="menu" id="fixture-more-menu" aria-labelledby="fixture-more-trigger" hidden>
+      <div data-testid="model-more-option" data-model-id="k3-agent" role="menuitemradio" aria-checked="false" data-close-on-select="inherit">
+        <span class="kimi-menu-item__label">K3</span>
+      </div>
     </div>
     <main id="fixture-messages"></main>
     <div class="chat-editor-content"><div class="chat-editor-input-wrap"><div class="chat-input"><div class="chat-input-editor-container">
@@ -47,6 +57,8 @@ enum KimiFixturePage {
     <script>
     (() => {
       const model = document.getElementById('fixture-model-trigger'), menu = document.getElementById('fixture-model-menu');
+      const more = document.getElementById('fixture-more-trigger'), moreMenu = document.getElementById('fixture-more-menu');
+      const moreCurrent = more.querySelector('.more-models-current'), moreOption = moreMenu.querySelector('[data-testid="model-more-option"]');
       const editor = document.querySelector('.chat-input-editor'), send = document.querySelector('.send-button-container');
       const header = document.getElementById('fixture-header-trigger'), messages = document.getElementById('fixture-messages');
       const canonical = '/chat/11111111-abcd-4333-8444-555555555555';
@@ -56,19 +68,27 @@ enum KimiFixturePage {
         lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
       const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
-        modelOpens: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
+        modelOpens: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0,
+        headerOpens: 0, deleteSelections: 0, confirmations: 0 };
       let outbound = null, user = null, answer = null, historyLink = null;
       let nativeInput = null, pendingCommit = null, lexicalSettled = false;
       const inputEvents = []; let firstEventData = null;
       window.fixturePrompts = [];
-      function hideModel() { menu.hidden = true; model.setAttribute('aria-expanded', 'false'); }
+      function hideMore() { moreMenu.hidden = true; more.setAttribute('aria-expanded', 'false'); }
+      function hideModel() { menu.hidden = true; model.setAttribute('aria-expanded', 'false'); hideMore(); }
       model.addEventListener('click', () => {
         if (!menu.hidden) hideModel();
         else { counters.modelOpens++; menu.hidden = false; model.setAttribute('aria-expanded', 'true'); }
       });
+      more.addEventListener('click', () => {
+        if (!moreMenu.hidden) { counters.moreCloses++; hideMore(); }
+        else { counters.moreOpens++; moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }
+      });
+      moreOption.addEventListener('click', () => { counters.moreSelections++; });
       for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.addEventListener('click', () => {
         counters.modelSelections++;
         for (const other of menu.querySelectorAll('[data-testid="model-option"]')) other.setAttribute('aria-checked', String(other === row));
+        moreOption.setAttribute('aria-checked', 'false'); moreCurrent.textContent = '';
         model.querySelector('.name').textContent = row.querySelector('.name').textContent; hideModel();
       });
       // Model the observed controlled-editor boundary using actual browser
@@ -192,6 +212,11 @@ enum KimiFixturePage {
       }
       header.addEventListener('click', () => { counters.headerOpens++; setTimeout(showDeleteMenu, options.menuDelayMs); });
       window.kimiFixture = { options, counters, inputEvents, appendUser, completeResponse,
+        selectNestedInitially: () => {
+          for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.setAttribute('aria-checked', 'false');
+          moreOption.setAttribute('aria-checked', 'true'); moreCurrent.textContent = 'K3';
+          model.querySelector('.name').textContent = 'K3';
+        },
         settleInput: () => { const commit = pendingCommit; pendingCommit = null; commit?.(); },
         canonicalize: () => history.replaceState({}, '', canonical),
         resumeStreaming: () => answer?.querySelector('.segment-assistant-actions')?.remove() };

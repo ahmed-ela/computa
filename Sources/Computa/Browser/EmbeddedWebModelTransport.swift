@@ -1687,7 +1687,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let errors = ["document_changed", "conversation_changed", "model_unverified", "model_mismatch", "model_unavailable",
             "composer_unavailable", "prompt_not_inserted", "send_unavailable", "unsupported_response_format", "not_fresh"]
         let details = ["composer", "send_control", "model_trigger", "model_label", "structure_limit", "owner_token",
-            "document_url", "unexpected_exception"]
+            "document_url", "unexpected_exception", "picker_binding", "picker_label", "picker_menu_binding",
+            "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
+            "more_binding", "more_row_shape", "more_checked_count", "more_selected_label"]
+            + ["picker_open", "picker_close", "model_option", "more_open", "more_close"].flatMap { stage in
+                ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
+            }
         let detail = observed["detail"] as? String
         return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")"
     }

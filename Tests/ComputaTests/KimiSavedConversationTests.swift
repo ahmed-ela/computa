@@ -161,6 +161,14 @@ final class KimiSavedConversationTests: XCTestCase {
         XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
             ["error": "document_changed"], action: "inspect"),
             "action=inspect error=document_changed detail=absent")
+        for detail in ["more_checked_count", "picker_menu_replaced", "more_selected_label", "picker_close_occluded"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+                ["error": "model_unverified", "detail": detail], action: "discoverModels"),
+                "action=discoverModels error=model_unverified detail=\(detail)")
+        }
+        XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+            ["error": "model_unverified", "detail": "picker_close_PRIVATE_PAGE_CANARY"], action: "discoverModels"),
+            "action=discoverModels error=model_unverified detail=other")
         XCTAssertNil(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(["pending": true], action: "inspect"))
     }
 
@@ -176,6 +184,7 @@ final class KimiSavedConversationTests: XCTestCase {
         XCTAssertEqual(WebsiteModelCatalog.option(for: choice).available, true)
         XCTAssertEqual(WebsiteModelCatalog.option(for: choice, available: false).available, false)
         for rejected in [WebsiteModelChoice(provider: "kimi", key: "k3d1-agent", label: "K3.1 Pro"),
+                         WebsiteModelChoice(provider: "kimi", key: "k3-agent", label: "K3"),
                          WebsiteModelChoice(provider: "kimi", key: "k28-agent-preview", label: "K2.8 Preview"),
                          WebsiteModelChoice(provider: "kimi", key: "unobserved-key", label: "Instant"),
                          WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Different")] {

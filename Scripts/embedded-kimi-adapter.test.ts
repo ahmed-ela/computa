@@ -144,6 +144,105 @@ describe('Kimi saved-conversation adapter', () => {
     expect(mismatch.error).toBe('model_mismatch');
   });
 
+  async function discover(f: ReturnType<typeof adapterFixture>) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const result = await f.run('discoverModels', { expectedModelChoice: undefined });
+      if (result.error || result.selected) return result;
+    }
+    throw new Error('Bounded nested discovery did not settle');
+  }
+
+  test('nested current K3 is verified without being exposed or aliased to a top-level model', async () => {
+    const f = adapterFixture({ nestedSelected: true });
+    const result = await discover(f);
+    expect(result.modelChoices).toEqual([instant]);
+    expect(result.modelEvidence.selected).toEqual({ key: 'k3-agent', label: 'K3' });
+    expect(f.trigger.clicks).toBe(2); expect(f.more.clicks).toBe(2);
+    expect(f.options.reduce((sum, row) => sum + row.clicks, 0)).toBe(0);
+    expect(f.moreOption.clicks).toBe(0);
+    expect(f.menu.getAttribute('hidden')).not.toBeNull(); expect(f.moreMenu.getAttribute('hidden')).not.toBeNull();
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  });
+
+  test('switching from verified nested K3 to Instant selects once and reopens to prove the exact target', async () => {
+    const f = adapterFixture({ nestedSelected: true });
+    const result = await f.select();
+    expect(result.modelEvidence.selected).toEqual(instant); expect(result.modelChoices).toEqual([instant]);
+    expect(f.trigger.clicks).toBe(3); expect(f.more.clicks).toBe(2);
+    expect(f.options[2].clicks).toBe(1); expect(f.moreOption.clicks).toBe(0);
+    expect(f.moreOption.getAttribute('aria-checked')).toBe('false');
+    expect((await f.run('verifyModel')).modelEvidence.selected).toEqual(instant);
+    const forbidden = adapterFixture({ nestedSelected: true });
+    expect((await forbidden.select({ key: 'k3-agent', label: 'K3' })).error).toBe('model_mismatch');
+    expect(forbidden.options.reduce((sum, row) => sum + row.clicks, 0) + forbidden.moreOption.clicks).toBe(0);
+    expect(forbidden.counts().sends).toBe(0);
+  });
+
+  test('zero top-level checks require a verified nested selection, never an inferred current model', async () => {
+    const f = adapterFixture(); f.options.forEach(row => row.setAttribute('aria-checked', 'false'));
+    const result = await discover(f);
+    expect(result).toMatchObject({ error: 'model_unverified', detail: 'more_binding' });
+    expect(f.more.clicks).toBe(0); expect(f.counts().sends).toBe(0);
+  });
+
+  test('nested discovery rejects malformed links, rows and ambiguous checked state before any model change', async () => {
+    const mutations = [
+      (f: ReturnType<typeof adapterFixture>) => f.moreMenu.setAttribute('aria-labelledby', 'foreign-trigger'),
+      (f: ReturnType<typeof adapterFixture>) => f.moreOption.setAttribute('aria-checked', 'false'),
+      (f: ReturnType<typeof adapterFixture>) => f.moreOption.setAttribute('aria-checked', 'unknown'),
+      (f: ReturnType<typeof adapterFixture>) => f.moreOption.setAttribute('data-model-id', 'k3d1-agent'),
+      (f: ReturnType<typeof adapterFixture>) => f.moreMenu.append(f.moreOption.cloneNode(true)),
+      (f: ReturnType<typeof adapterFixture>) => { f.options[0].setAttribute('aria-checked', 'true'); },
+      (f: ReturnType<typeof adapterFixture>) => { f.moreCurrent.text = 'K3.1 Pro'; },
+      (f: ReturnType<typeof adapterFixture>) => { const old = f.more; f.remove(old); f.menu.append(old.cloneNode(true)); },
+    ];
+    for (const mutate of mutations) {
+      const f = adapterFixture({ nestedSelected: true });
+      expect((await f.run('discoverModels', { expectedModelChoice: undefined })).pending).toBe(true);
+      expect((await f.run('discoverModels', { expectedModelChoice: undefined })).pending).toBe(true);
+      mutate(f);
+      const result = await discover(f);
+      expect(['model_unverified', 'model_mismatch']).toContain(result.error);
+      const clicks = f.trigger.clicks + f.more.clicks;
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.trigger.clicks + f.more.clicks).toBe(clicks);
+      expect(f.options.reduce((sum, row) => sum + row.clicks, 0) + f.moreOption.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('nested menu mounting may lag its single open click without replaying it', async () => {
+    const f = adapterFixture({ nestedSelected: true });
+    f.more.onClick = () => {
+      if (f.more.getAttribute('aria-expanded') === 'true') {
+        f.more.setAttribute('aria-expanded', 'false'); f.moreMenu.setAttribute('hidden', '');
+      } else f.more.setAttribute('aria-expanded', 'true');
+    };
+    await f.run('discoverModels', { expectedModelChoice: undefined });
+    await f.run('discoverModels', { expectedModelChoice: undefined });
+    for (let read = 0; read < 3; read++) expect((await f.run('discoverModels', { expectedModelChoice: undefined })).pending).toBe(true);
+    expect(f.more.clicks).toBe(1);
+    f.moreMenu.removeAttribute('hidden');
+    expect((await discover(f)).modelChoices).toEqual([instant]);
+    expect(f.more.clicks).toBe(2); expect(f.trigger.clicks).toBe(2);
+  });
+
+  test('replacement after nested checked-row proof and lost submenu click replies never gain authority or replay', async () => {
+    const changed = adapterFixture({ nestedSelected: true });
+    const click = changed.more.onClick!;
+    changed.more.onClick = () => { if (changed.more.getAttribute('aria-expanded') !== 'true') click(); };
+    for (let step = 0; step < 3; step++) await changed.run('discoverModels', { expectedModelChoice: undefined });
+    const old = changed.moreOption; changed.remove(old); changed.moreMenu.append(old.cloneNode(true));
+    expect((await discover(changed)).detail).toBe('more_selected_label');
+    expect(changed.more.clicks).toBe(2);
+    expect((await discover(changed)).detail).toBe('terminal_operation');
+    const thrown = adapterFixture({ nestedSelected: true }), original = thrown.more.onClick!;
+    thrown.more.onClick = () => { original(); throw new Error('Synthetic lost click callback'); };
+    expect((await discover(thrown)).detail).toBe('unexpected_exception');
+    expect((await discover(thrown)).detail).toBe('terminal_operation');
+    expect(thrown.more.clicks).toBe(1); expect(thrown.counts().sends).toBe(0);
+  });
+
   test('unknown, duplicated or obscured model choices fail without insertion or Send', async () => {
     const unknown = adapterFixture(); expect((await unknown.select({ key: 'invented', label: 'Invented' })).error).toBe('model_mismatch');
     const agent = adapterFixture(); expect((await agent.select({ key: 'k3d1-agent', label: 'K3.1 Pro' })).error).toBe('model_mismatch');

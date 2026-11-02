@@ -18,6 +18,66 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testDiscoveryFromNestedK3VerifiesItsCheckedRowWithoutSelectingItOrExposingIt() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        let choices = try await fixture.transport.discoverModels(provider: "kimi")
+        XCTAssertEqual(choices, [choice])
+        let state = try await evaluate(fixture.view, """
+            return {label:document.querySelector('.current-model .name').textContent,
+                checked:document.querySelector('[data-testid="model-more-option"]').getAttribute('aria-checked'),
+                opens:kimiFixture.counters.moreOpens, closes:kimiFixture.counters.moreCloses,
+                nestedSelections:kimiFixture.counters.moreSelections, selections:kimiFixture.counters.modelSelections};
+            """) as? [String: Any]
+        XCTAssertEqual(state?["label"] as? String, "K3")
+        XCTAssertEqual(state?["checked"] as? String, "true")
+        XCTAssertEqual(state?["opens"] as? Int, 1); XCTAssertEqual(state?["closes"] as? Int, 1)
+        XCTAssertEqual(state?["nestedSelections"] as? Int, 0); XCTAssertEqual(state?["selections"] as? Int, 0)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testInstantSelectionFromNestedK3ReopensForProofThenSendsAndDeletesOnce() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        let selected = try await evaluate(fixture.view, """
+            return {label:document.querySelector('.current-model .name').textContent,
+                instant:document.querySelector('[data-moon-key="k28-instant"]').getAttribute('aria-checked'),
+                nested:document.querySelector('[data-testid="model-more-option"]').getAttribute('aria-checked'),
+                moreOpens:kimiFixture.counters.moreOpens, moreCloses:kimiFixture.counters.moreCloses,
+                modelOpens:kimiFixture.counters.modelOpens, selections:kimiFixture.counters.modelSelections,
+                nestedSelections:kimiFixture.counters.moreSelections};
+            """) as? [String: Any]
+        XCTAssertEqual(selected?["label"] as? String, "Instant")
+        XCTAssertEqual(selected?["instant"] as? String, "true"); XCTAssertEqual(selected?["nested"] as? String, "false")
+        XCTAssertEqual(selected?["moreOpens"] as? Int, 1); XCTAssertEqual(selected?["moreCloses"] as? Int, 1)
+        XCTAssertEqual(selected?["modelOpens"] as? Int, 2)
+        XCTAssertEqual(selected?["selections"] as? Int, 1); XCTAssertEqual(selected?["nestedSelections"] as? Int, 0)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic Instant task after nested model selection")
+        _ = try await wait(fixture, token, state: "complete")
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+    }
+
+    func testNestedDiscoveryRejectsForeignSubmenuBindingWithoutModelChangeOrSend() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var changed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !changed {
+                changed = true
+                _ = try? await self.evaluate(fixture.view,
+                    "document.getElementById('fixture-more-menu').setAttribute('aria-labelledby', 'foreign-trigger'); return true;")
+            }
+        }
+        do { _ = try await fixture.transport.discoverModels(provider: "kimi"); XCTFail("A foreign submenu cannot supply model evidence") } catch { }
+        XCTAssertTrue(changed)
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelSelections,kimiFixture.counters.moreSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(actions, [0, 0, 0, 0])
+    }
+
     func testDiscoveryWaitsForInitialControlsWithoutBindingOrDispatchingEarly() async throws {
         let fixture = try Fixture(initialControlsPending: true); defer { fixture.shutdown() }
         var sawUnhydratedRead = false
@@ -609,7 +669,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         var createdID: UUID?
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false) throws {
+        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false) throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -642,7 +702,8 @@ final class KimiWebModelTransportTests: XCTestCase {
                       }};
                     })();</script>
                     """
-                let setup = initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : ""
+                let nestedSetup = initialNestedModel ? "<script>kimiFixture.selectNestedInitially();</script>" : ""
+                let setup = nestedSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
                 let html = KimiFixturePage.html.replacingOccurrences(of: "</body>", with: setup + "</body>")
                 view.loadHTMLString(html, baseURL: url)
                 return id

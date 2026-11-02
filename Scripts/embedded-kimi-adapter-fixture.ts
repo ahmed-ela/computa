@@ -36,7 +36,14 @@ function kimiFixture() {
     list.append(option); return option;
   });
   const more = new Node('BUTTON', { 'data-testid': 'model-more-trigger', 'aria-label': 'More models', role: 'menuitem',
+    id: 'fixture-more-trigger', 'aria-controls': 'fixture-more-menu',
     'data-close-on-select': 'false', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, 'More models'); menu.append(more);
+  const moreCurrent = new Node('SPAN', { class: 'more-models-current' }); more.append(moreCurrent);
+  const moreMenu = new Node('DIV', { class: 'kimi-menu-positioner', role: 'menu', id: 'fixture-more-menu',
+    'aria-labelledby': 'fixture-more-trigger', hidden: '' });
+  const moreOption = new Node('DIV', { 'data-testid': 'model-more-option', 'data-model-id': 'k3-agent',
+    role: 'menuitemradio', 'aria-checked': 'false', 'data-close-on-select': 'inherit' });
+  moreOption.append(new Node('SPAN', { class: 'kimi-menu-item__label' }, 'K3')); moreMenu.append(moreOption);
   const scope = new Node('DIV', { class: 'chat-editor-input-wrap' });
   const editor = new Node('DIV', { class: 'chat-input-editor', contenteditable: 'true', role: 'textbox', 'data-lexical-editor': 'true' });
   const empty = new Node('P'); empty.append(new Node('BR')); editor.append(empty); scope.append(editor);
@@ -49,7 +56,7 @@ function kimiFixture() {
       ? editor.children[0].textContent + '\n' : editor.children.length
         ? editor.children.map(paragraph => paragraph.children.length === 1 && paragraph.children[0].tagName === 'BR'
           ? '' : paragraph.textContent).join('\n\n') + '\n\n' : '' });
-  body.append(trigger, menu, scope);
+  body.append(trigger, menu, moreMenu, scope);
   const world: Record<string, any> = {}, location = { origin: 'https://www.kimi.ai' };
   const window: any = { innerWidth: 1000, innerHeight: 800 }; window.top = window;
   const installResponseMarkup = () => {
@@ -90,7 +97,8 @@ function kimiFixture() {
     bottom.append(cancel, confirm); dialog.append(heading, message, bottom); mask.append(dialog); body.append(mask);
     return { mask, dialog, title, message, bottom, cancel, confirm };
   };
-  return { document, window, location, world, body, Node, trigger, triggerName, effort, menu, list, options, more, scope, editor,
+  return { document, window, location, world, body, Node, trigger, triggerName, effort, menu, list, options, more,
+    moreCurrent, moreMenu, moreOption, scope, editor,
     installResponseMarkup, installHeader, installTranscript, installConfirmation,
     draftText,
     setDraft: (text: string) => {
@@ -120,7 +128,7 @@ export const submissionFingerprint = createHash('sha256').update(prompt.replace(
 
 export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean;
   insertionFails?: boolean; insertionThrows?: boolean; delayedInsertion?: boolean; paragraphInsertion?: boolean;
-  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string } = {}) {
+  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean } = {}) {
   const f = kimiFixture(), { Node, document, body, window } = f;
   const fixturePrompt = options.outbound ?? prompt;
   const fixtureFingerprint = createHash('sha256').update(fixturePrompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
@@ -134,14 +142,24 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     node.connected = false; node.parentElement = null;
   };
   const move = (node: any, parent: any) => { remove(node); node.connected = true; parent.append(node); };
-  const hide = () => { f.menu.setAttribute('hidden', ''); f.trigger.setAttribute('aria-expanded', 'false'); };
+  const hideMore = () => { f.moreMenu.setAttribute('hidden', ''); f.more.setAttribute('aria-expanded', 'false'); };
+  const hide = () => { f.menu.setAttribute('hidden', ''); f.trigger.setAttribute('aria-expanded', 'false'); hideMore(); };
   const show = () => { f.menu.removeAttribute('hidden'); f.trigger.setAttribute('aria-expanded', 'true'); };
   hide();
   f.trigger.onClick = () => f.trigger.getAttribute('aria-expanded') === 'true' ? hide() : show();
+  f.more.onClick = () => {
+    if (f.more.getAttribute('aria-expanded') === 'true') hideMore();
+    else { f.moreMenu.removeAttribute('hidden'); f.more.setAttribute('aria-expanded', 'true'); }
+  };
   for (const row of f.options) row.onClick = () => {
     f.options.forEach(other => other.setAttribute('aria-checked', other === row ? 'true' : 'false'));
+    f.moreOption.setAttribute('aria-checked', 'false'); f.moreCurrent.text = '';
     f.triggerName.text = row.querySelector('.name')!.textContent; hide();
   };
+  if (options.nestedSelected) {
+    f.options.forEach(row => row.setAttribute('aria-checked', 'false'));
+    f.moreOption.setAttribute('aria-checked', 'true'); f.moreCurrent.text = 'K3'; f.triggerName.text = 'K3';
+  }
   const send = new Node('DIV', { class: 'send-button-container disabled' });
   const sendIcon = new Node('SVG', { class: 'iconify send-icon', name: 'Send', role: 'img' });
   send.append(sendIcon); body.append(send);

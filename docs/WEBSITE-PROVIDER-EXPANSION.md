@@ -1,10 +1,12 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build384 preparation, 2026-11-02 UTC. Installed 0.8.0 (383),
-source `bc9173ff7c6566b1d3dd074dfcf3801be7b895a7`, failed Kimi's startup model
-discovery before any prompt. Kimi Instant therefore did not appear in the
-selector. Candidate384 addresses a reproduced initial-render failure path;
-installed recovery and tool-use qualification remain pending. Qwen and DeepSeek
+Status: candidate build385 preparation, 2026-11-02 UTC. Installed 0.8.0 (384),
+source `2a42e0459d2a3568b07a50abdb400018356dff94`, passed Kimi's initial page
+binding but failed model-picker discovery before any prompt. Kimi Instant
+therefore did not appear in the selector. The normal page's selected K3 lives
+under More models; the adapter assumed a checked top-level row. Candidate385
+addresses that nested selection. Installed recovery and tool-use qualification
+remain pending. Qwen and DeepSeek
 have no enabled native website adapter yet. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
@@ -146,6 +148,40 @@ only the existing editor's `contenteditable` attribute and completes discovery
 without input or Send. These overlapping fixture runs do not establish a live
 fix, successful installed discovery, a response or tool-use qualification.
 
+### Build384 installed discovery and nested selection
+
+The signed build384 was installed and its running process and main binary were
+verified. Its fixed diagnostic reported `action=discoverModels
+error=model_unverified detail=absent generationBound=true sequence=0`.
+Settings showed the model-verification failure, and no Kimi choice or prompt
+was created. This reached a later stage than build383's initial document error;
+it did not establish a completed discovery or response.
+
+The normal Kimi page showed K3 High. Its top menu offered K3.1 Pro, K2.8 Preview
+and Instant, with K3 shown beside More models. Hovering that submenu revealed
+the checked K3 row. No model was changed, prompt sent or Inspector enabled.
+The retained DOM separately identifies K3 as a nested `data-model-id=k3-agent`
+row, outside the top-level list. An inert reproduction with K3 selected and no
+checked top-level row produces the exact installed error, after one menu open
+and zero model changes or inputs. The live diagnostic did not capture the
+specific failing assertion, so that causal boundary remains explicit.
+
+Candidate385 must verify the selected nested row through its actual menu
+relationships and preserve exact selection before exporting Instant. It must
+not alias K3 to a top-level model or expose that agent product as a qualified
+inference option. Live evidence is retained in
+`work/new-website-providers-20261102/build384/kimi-nested-selection-observation.json`.
+
+The implementation now opens and closes only the bound More models submenu,
+checks its single selected row against the closed picker label, and pins the
+parent/submenu controls across each stage. It exports only top-level plain-chat
+choices; the catalog continues to admit only Instant. Unknown, duplicate,
+replaced or contradictory selections remain failures, and uncertain actions
+cannot be repeated. The JavaScript gate passed 53 tests with 594 assertions.
+The native gate passed 50 tests, including real-WebKit discovery from K3,
+switching to Instant followed by one Send and verified deletion, and rejection
+of a foreign submenu binding. Installed qualification is still pending.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
@@ -193,10 +229,10 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Build and install candidate384 after its passing native gate, then verify Kimi Instant
+1. Validate candidate385's nested-selection handling, then verify installed Kimi Instant
    discovery, fresh replies and exact saved-conversation deletion before
    qualifying browser, terminal and file tasks. The provider catalog also
-   drives automatic startup discovery; build383's discovery attempt failed.
+   drives automatic startup discovery; builds383 and384 failed at distinct stages.
 2. Finish Qwen's fixed adapter and native ownership/cleanup integration from
    the observed website controls; keep it outside public discovery meanwhile.
 3. Integrate DeepSeek's observed mode controls and scoped deletion chain, then
